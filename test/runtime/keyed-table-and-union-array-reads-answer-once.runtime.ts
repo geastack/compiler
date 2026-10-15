@@ -44,8 +44,7 @@ function arraysEqual(a: number[], b: number[] | Float32Array): boolean {
 const cache = [1, 2, 3]
 const typed = new Float32Array([1, 2, 3])
 console.log(
-  'equal=' +
-    [arraysEqual(cache, [1, 2, 3]), arraysEqual(cache, [1, 2, 4]), arraysEqual(cache, [1, 2]), arraysEqual(cache, typed)].join(',')
+  'equal=' + [arraysEqual(cache, [1, 2, 3]), arraysEqual(cache, [1, 2, 4]), arraysEqual(cache, [1, 2]), arraysEqual(cache, typed)].join(',')
 )
 
 function readAt(values: number[] | Float32Array, index: number): string {

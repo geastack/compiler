@@ -41,7 +41,18 @@ class RenderTarget {
    * @param {RenderTarget~Options} [options]
    */
   constructor(width = 1, height = 1, options = {}) {
-    options = Object.assign({ generateMipmaps: false, internalFormat: null, minFilter: LinearFilter, magFilter: LinearFilter, type: UnsignedByteType, depthBuffer: true, count: 1 }, options)
+    options = Object.assign(
+      {
+        generateMipmaps: false,
+        internalFormat: null,
+        minFilter: LinearFilter,
+        magFilter: LinearFilter,
+        type: UnsignedByteType,
+        depthBuffer: true,
+        count: 1
+      },
+      options
+    )
     this.width = width
     this.height = height
     /** @type {Array<Texture>} */
@@ -110,7 +121,16 @@ console.log('cube=' + describe(new CubeRenderTarget(1)))
 /** @param {Array<number>} sizes */
 const bake = (sizes) =>
   sizes
-    .map((size) => new CubeRenderTarget(size, { type: HalfFloatType, generateMipmaps: false, minFilter: LinearFilter, magFilter: LinearFilter, depthBuffer: false }))
+    .map(
+      (size) =>
+        new CubeRenderTarget(size, {
+          type: HalfFloatType,
+          generateMipmaps: false,
+          minFilter: LinearFilter,
+          magFilter: LinearFilter,
+          depthBuffer: false
+        })
+    )
     .map(describe)
     .join(';')
 console.log('probes=' + bake([8, 16]))

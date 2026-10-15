@@ -1038,7 +1038,12 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
               : mode === 'frame-argument'
                 ? FRAME_ARGUMENT_UNION_MATERIALIZER
                 : ASSERTED_UNION_MATERIALIZER,
-          domain: mode === 'copy' ? 'static:asserted-union-copy' : mode === 'frame-argument' ? 'static:frame-argument-union' : 'static:asserted-union',
+          domain:
+            mode === 'copy'
+              ? 'static:asserted-union-copy'
+              : mode === 'frame-argument'
+                ? 'static:frame-argument-union'
+                : 'static:asserted-union',
           allocates: copyAllowed,
           ...(native ? { nativeFieldProtocol: 'unused' as const } : {})
         }

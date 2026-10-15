@@ -55,7 +55,11 @@ class CubeTargetLike extends RenderTargetLike {
 }
 
 const show = (target) =>
-  (target.texture.mapping < 0 ? '-' : target.texture.mapping) + ',' + target.depth + ',' + (target.texture.wrapS < 0 ? '-' : target.texture.wrapS)
+  (target.texture.mapping < 0 ? '-' : target.texture.mapping) +
+  ',' +
+  target.depth +
+  ',' +
+  (target.texture.wrapS < 0 ? '-' : target.texture.wrapS)
 const cube = new CubeTargetLike(128, { mapping: 300 })
 console.log('cube=' + show(cube))
 console.log('plain=' + show(new RenderTargetLike(1, 1, { mapping: 301, depth: 2 })))

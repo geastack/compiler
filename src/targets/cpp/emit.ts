@@ -2909,7 +2909,8 @@ export const emitBody = (
     if (![...pinnedConversions].some((value) => dyingArguments.has(value))) return dyingArguments
     const kept = new DyingArgumentSet()
     for (const value of dyingArguments) if (!pinnedConversions.has(value)) kept.add(value)
-    if (dyingArguments instanceof DyingArgumentSet) for (const [value, store] of dyingArguments.sunkStores) kept.sunkStores.set(value, store)
+    if (dyingArguments instanceof DyingArgumentSet)
+      for (const [value, store] of dyingArguments.sunkStores) kept.sunkStores.set(value, store)
     return kept
   })()
   // A read has to know what the REST of the body does to the cell it reads.
@@ -2937,7 +2938,9 @@ export const emitBody = (
     ? { layout: owningClass, derived: constructedBaseOf(owningClass) !== null || owningClass.nativeBase !== null, callsSuper }
     : null
   const formalInputs = ownedFormalInputsOf(body)
-  const ownedDyingValues = new Set<IrValueId>(pinnedOut([...ownedDyingValuesOf(body), ...ownedDyingMergeInputsOf(body), ...formalInputs.arguments]))
+  const ownedDyingValues = new Set<IrValueId>(
+    pinnedOut([...ownedDyingValuesOf(body), ...ownedDyingMergeInputsOf(body), ...formalInputs.arguments])
+  )
   const transferDyingValues = new Set<IrValueId>(pinnedOut([...ownedDyingValues, ...dyingTransferUsesOf(body)]))
   const layoutKeys = new Map<string, readonly string[] | null>()
   const origins = bodyValueOriginsOf(body, (representation) => {

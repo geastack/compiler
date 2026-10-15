@@ -19,7 +19,20 @@ function build(order: readonly string[]): Record<string, Uniform> {
   return table
 }
 
-const keys = ['diffuse', 'opacity', 'map', 'mapTransform', 'alphaMap', 'alphaTest', 'specularMap', 'envMap', 'flipEnvMap', 'reflectivity', 'ior', 'refractionRatio']
+const keys = [
+  'diffuse',
+  'opacity',
+  'map',
+  'mapTransform',
+  'alphaMap',
+  'alphaTest',
+  'specularMap',
+  'envMap',
+  'flipEnvMap',
+  'reflectivity',
+  'ior',
+  'refractionRatio'
+]
 const first = build(keys)
 const second = build([...keys].reverse())
 

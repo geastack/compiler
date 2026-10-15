@@ -973,11 +973,15 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     coreGlobalSingletons,
     standardLibraryExternals: frontend.standardLibraryBindings,
     hostNamespaces: hosts.namespaces,
-    hostNamespaceRootsByDeclaration: hostDeclarationFileTable(plugins.flatMap((plugin) => [...plugin.capabilities.hostNamespaceRootsByDeclaration])),
+    hostNamespaceRootsByDeclaration: hostDeclarationFileTable(
+      plugins.flatMap((plugin) => [...plugin.capabilities.hostNamespaceRootsByDeclaration])
+    ),
     hostNamespaceBindings: frontend.hostNamespaceBindings,
     exactHostNamespaceNames: new Set(hostNamespaceRootDeclarations.map((row) => row.declarationName)),
     hostSingletons: hosts.singletons,
-    hostSingletonsByDeclaration: hostDeclarationFileTable(plugins.flatMap((plugin) => [...plugin.capabilities.hostSingletonsByDeclaration])),
+    hostSingletonsByDeclaration: hostDeclarationFileTable(
+      plugins.flatMap((plugin) => [...plugin.capabilities.hostSingletonsByDeclaration])
+    ),
     hostSingletonBindings: frontend.hostSingletonBindings
   })
   stage('diagnostics+abi')

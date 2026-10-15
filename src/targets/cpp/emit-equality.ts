@@ -615,7 +615,8 @@ export const strictEqualityText = (
       if (isAbsentArm(arm.value) && carriesNativeUndefined(other.representation)) {
         const absent = absenceComparisonText('===', { text: `${unionText}.get<${nestedIndex}>()`, representation: arm.value }, other)
         if (absent === null) return null
-        if (absent !== 'false') nested.push(absent === 'true' ? `${unionText}.is<${nestedIndex}>()` : `(${unionText}.is<${nestedIndex}>() && ${absent})`)
+        if (absent !== 'false')
+          nested.push(absent === 'true' ? `${unionText}.is<${nestedIndex}>()` : `(${unionText}.is<${nestedIndex}>() && ${absent})`)
         continue
       }
       if (index < 0 && sameNumericType(arm.value, other.representation)) {

@@ -93,4 +93,11 @@ function mixed(input: Attribute, flag: boolean): string {
   out.push(attribute.array.length)
   return out.join(',')
 }
-console.log('mixed=' + mixed(new BufferAttribute([4], 0), true).split(',')[0] + ',' + mixed(new BufferAttribute([4], 1), true).split(',')[1] + ',' + mixed(new BufferAttribute([4], 2), false).split(',')[0])
+console.log(
+  'mixed=' +
+    mixed(new BufferAttribute([4], 0), true).split(',')[0] +
+    ',' +
+    mixed(new BufferAttribute([4], 1), true).split(',')[1] +
+    ',' +
+    mixed(new BufferAttribute([4], 2), false).split(',')[0]
+)

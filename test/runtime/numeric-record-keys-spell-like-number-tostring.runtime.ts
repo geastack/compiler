@@ -14,4 +14,4 @@ keys.forEach((key, index) => {
 })
 console.log(`keys=${Object.keys(table).join(',')}`)
 console.log(`reads=${keys.map((key) => table[key] ?? '-').join(',')}`)
-console.log(`negzero=${table[-0] ?? '-'},${-0 in table}`)
+console.log(`negzero=${table[-0] ?? '-'},${(-0) in table}`)

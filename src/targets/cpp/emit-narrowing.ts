@@ -3123,12 +3123,7 @@ export const assertedUnionText = (
         if (representationKey(arm.value) === targetKey) return slot
         // A frame argument's boxed arm: the class check first, so a value that
         // is no instance is a catchable TypeError rather than the unbox's abort.
-        if (
-          frameArgument &&
-          arm.value.kind === 'dynamic' &&
-          target.kind === 'class-ref' &&
-          target.ownership === 'shared-refcount'
-        )
+        if (frameArgument && arm.value.kind === 'dynamic' && target.kind === 'class-ref' && target.ownership === 'shared-refcount')
           return `gea::host::frameArgumentClassRef<${cppClassName(target.declaration)}>(${slot})`
         return (
           tryCandidateText(() => convertedValueText(arm.value, target, slot) ?? narrowedLoadText(arm.value, target, slot)) ??

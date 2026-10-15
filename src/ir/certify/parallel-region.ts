@@ -390,8 +390,7 @@ class PointsTo implements PointsToSolver {
       if (this.subscribed[into] && !this.subscribed[from]) this.deliverHub(watcher, hubSnapshot)
     }
     // Likewise `into`'s watchers owe the hub when only `from` was subscribed.
-    if (this.subscribed[from] && !this.subscribed[into])
-      for (const watcher of this.watchers[into]!) this.deliverHub(watcher, hubSnapshot)
+    if (this.subscribed[from] && !this.subscribed[into]) for (const watcher of this.watchers[into]!) this.deliverHub(watcher, hubSnapshot)
     const subscribed = this.subscribed[from]! || this.subscribed[into]!
     // `from`'s targets have `from`'s objects; they owe `into`'s too.
     for (const raw of this.edges[from]!) {
@@ -632,7 +631,9 @@ interface Program {
    * arguments the new object is a view OF rather than a copy of
    * (`new Float32Array(buffer)`): a write through the view writes them.
    */
-  readonly hostConstructionOf: (operation: Extract<IrOperation, { kind: 'construct' }>) => { readonly aliasing: readonly IrValueId[] } | null
+  readonly hostConstructionOf: (
+    operation: Extract<IrOperation, { kind: 'construct' }>
+  ) => { readonly aliasing: readonly IrValueId[] } | null
   /**
    * The prototype method a constant-key `get` on a class instance reads when
    * the instance has no own property of that key, for a get the IR's own
@@ -921,7 +922,11 @@ const programOf = (input: ParallelRegionInput): Program => {
     if (known) return known
     const chainOf = (start: DeclarationId): DeclarationId[] => {
       const chain: DeclarationId[] = []
-      for (let current: DeclarationId | null = start; current !== null && !chain.includes(current); current = input.classes.get(current)?.base ?? null)
+      for (
+        let current: DeclarationId | null = start;
+        current !== null && !chain.includes(current);
+        current = input.classes.get(current)?.base ?? null
+      )
         chain.push(current)
       return chain
     }
@@ -947,7 +952,9 @@ const programOf = (input: ParallelRegionInput): Program => {
     const writes: { classes: ReadonlySet<DeclarationId>; key: string | null; callable: boolean }[] = []
     const constantKey = (key: IrOperand): string | null => {
       const definition = definitions.get(key.value)
-      return definition?.kind === 'constant' && (definition.literal === 'string' || definition.literal === 'number') ? definition.text : null
+      return definition?.kind === 'constant' && (definition.literal === 'string' || definition.literal === 'number')
+        ? definition.text
+        : null
     }
     for (const body of input.bodies.values())
       for (const operation of operationsOf(body)) {
@@ -995,12 +1002,16 @@ const programOf = (input: ParallelRegionInput): Program => {
       if (classPrototypeMethodFamilyMutableOf(input.classes, receiver.declaration, key.text)) return null
       const related = relativesOf(receiver.declaration)
       for (const declaration of input.classes.keys())
-        if (related.has(genericRootOf(declaration)) && (input.classes.get(declaration)?.prototypeUnsupportedUses?.length ?? 0) > 0) return null
+        if (related.has(genericRootOf(declaration)) && (input.classes.get(declaration)?.prototypeUnsupportedUses?.length ?? 0) > 0)
+          return null
       // Complete when no own property of this key on any related instance can
       // be a function: then calling the read can only run the method (or
       // throw on a non-callable shadow, which runs nothing).
       const complete = !ownWritesOf().some(
-        (write) => write.callable && (write.key === null || write.key === key.text) && [...write.classes].some((declaration) => related.has(declaration))
+        (write) =>
+          write.callable &&
+          (write.key === null || write.key === key.text) &&
+          [...write.classes].some((declaration) => related.has(declaration))
       )
       return { functions: [site.method.callable.replace(/@[^|]*$/, '') as FunctionId], complete }
     })()
@@ -1976,7 +1987,12 @@ export const parallelRegionRefusalsOf = (input: ParallelRegionInput): readonly P
  * that changes nothing is the answer. A run that never settles falls back to
  * the pessimistic one.
  */
-const certifyRegion = (input: ParallelRegionInput, program: Program, global: PointsToSolver, entry: IrBody): readonly ParallelRegionRefusal[] => {
+const certifyRegion = (
+  input: ParallelRegionInput,
+  program: Program,
+  global: PointsToSolver,
+  entry: IrBody
+): readonly ParallelRegionRefusal[] => {
   const pessimistic = runRegion(input, program, global, entry, new Map())
   let assumption = new Map<FunctionId, ReadonlySet<DeclarationId>>()
   let run = pessimistic

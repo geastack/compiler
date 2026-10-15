@@ -18,9 +18,7 @@ console.log(
 console.log(
   `exec ${show(/^a|b/.exec('x\nab'))} ${show(/a$|b/.exec('a\nb'))} ${show(/a[\s\S]*?$/.exec('a\nb'))} ${show(
     /x?^(a)\1/.exec('x\naa')
-  )} ${show(/x?^(a)\1/.exec('aa'))} ${show(/(?:^a\n)+b/.exec('a\na\nb'))} ${show(/(?:x|^)y/.exec('q\nxy'))} ${show(
-    /x(?=$)/.exec('x\n')
-  )}`
+  )} ${show(/x?^(a)\1/.exec('aa'))} ${show(/(?:^a\n)+b/.exec('a\na\nb'))} ${show(/(?:x|^)y/.exec('q\nxy'))} ${show(/x(?=$)/.exec('x\n'))}`
 )
 
 // A `^` reachable after consuming takes the rewrite's extra capture group; the

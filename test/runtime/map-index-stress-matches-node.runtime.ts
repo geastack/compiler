@@ -10,7 +10,7 @@ const next = (n: number): number => {
   seed = (seed * 1103515245 + 12345) % 2147483648
   return seed % n
 }
-const mix = (h: number, v: number): number => (Math.imul(h ^ v, 16777619) >>> 0)
+const mix = (h: number, v: number): number => Math.imul(h ^ v, 16777619) >>> 0
 const textHash = (s: string): number => {
   let h = 2166136261
   for (let i = 0; i < s.length; i++) h = mix(h, s.charCodeAt(i))

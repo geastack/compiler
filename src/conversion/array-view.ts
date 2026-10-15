@@ -88,7 +88,10 @@ const arrayStorageViewPlanOf = (
   // an element the program stored and never tested, so it is no view of that
   // array; the pair refuses instead. A dynamic element stays checked: there
   // the program's own type is the only statement of what the value is.
-  if (source.element.kind !== 'dynamic' && [...recipeClosureOf([read], resolve).values()].some((child) => conversionRequiresSourceGuard(child.capability, resolve)))
+  if (
+    source.element.kind !== 'dynamic' &&
+    [...recipeClosureOf([read], resolve).values()].some((child) => conversionRequiresSourceGuard(child.capability, resolve))
+  )
     return null
   if (source.element.kind === 'dynamic') {
     const write = nativeEntryWriterOf(target.element, source.element, accepted, resolve)

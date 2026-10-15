@@ -1568,13 +1568,12 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
     operation.arguments
       .map((argument) => argument.value)
       .filter(
-        (value) =>
-          ctx.stableBorrowActuals.has(value) ||
-          (ctx.ownedValues.has(storageOf(value)) && !isDeferredValue(ctx, storageOf(value)))
+        (value) => ctx.stableBorrowActuals.has(value) || (ctx.ownedValues.has(storageOf(value)) && !isDeferredValue(ctx, storageOf(value)))
       )
   )
   const stableEntry =
-    stableCandidate !== undefined && stableBorrowEntryAccepts(stableCandidate, operation.arguments, stableActuals, potentiallyMovingArguments)
+    stableCandidate !== undefined &&
+    stableBorrowEntryAccepts(stableCandidate, operation.arguments, stableActuals, potentiallyMovingArguments)
       ? stableCandidate
       : undefined
   // A candidate's borrowed entry for this call, when it has one: the stable

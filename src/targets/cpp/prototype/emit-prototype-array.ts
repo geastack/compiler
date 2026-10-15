@@ -441,7 +441,10 @@ const sortText: ArrayCallRenderer = (ctx, receiverText, element, args) => {
           parameter.value,
           `__gea_element_${position}`
         )
-        return converted ?? refuse(`its parameter ${position} carries "${representationKey(parameter.value)}", and no installed conversion reconciles them`)
+        return (
+          converted ??
+          refuse(`its parameter ${position} carries "${representationKey(parameter.value)}", and no installed conversion reconciles them`)
+        )
       })
       const formals = [0, 1].map((position) => `const ${cppTypeOf(element)}& __gea_element_${position}`)
       const fn = direct !== undefined ? `gea::DirectCallable<&${cppThunkName(direct)}>{}` : operandText(ctx, comparator)

@@ -5,11 +5,27 @@
 // the union whose only reader was the test. The test reads the object's own
 // tags in place now, and the selection is gone; the answers stay the language's.
 
-class V3 { x = 0 }
-class Col { r = 1 }
-class DirLight { direction = new V3(); color = new Col() }
-class SpotLight { position = new V3(); direction = new V3(); color = new Col(); distance = 3 }
-class PointLight { position = new V3(); color = new Col(); distance = 4 }
+class V3 {
+  x = 0
+}
+class Col {
+  r = 1
+}
+class DirLight {
+  direction = new V3()
+  color = new Col()
+}
+class SpotLight {
+  position = new V3()
+  direction = new V3()
+  color = new Col()
+  distance = 3
+}
+class PointLight {
+  position = new V3()
+  color = new Col()
+  distance = 4
+}
 
 type U = number | boolean | number[] | V3 | Col | DirLight | SpotLight | PointLight | DirLight[] | Float32Array | null | undefined
 
@@ -17,21 +33,30 @@ function member(value: U, code: number): U {
   if (Array.isArray(value)) return value[code]
   if (value instanceof DirLight) {
     switch (code) {
-      case -1: return value.direction
-      case -2: return value.color
+      case -1:
+        return value.direction
+      case -2:
+        return value.color
     }
   } else if (value instanceof SpotLight) {
     switch (code) {
-      case -3: return value.position
-      case -1: return value.direction
-      case -2: return value.color
-      case -4: return value.distance
+      case -3:
+        return value.position
+      case -1:
+        return value.direction
+      case -2:
+        return value.color
+      case -4:
+        return value.distance
     }
   } else if (value instanceof PointLight) {
     switch (code) {
-      case -3: return value.position
-      case -2: return value.color
-      case -4: return value.distance
+      case -3:
+        return value.position
+      case -2:
+        return value.color
+      case -4:
+        return value.distance
     }
   }
   return undefined
@@ -43,5 +68,13 @@ for (const v of values) for (const c of [-1, -2, -3, -4, 0]) if (member(v, c) !=
 console.log('n=' + n)
 
 const kind = (value: U): string =>
-  Array.isArray(value) ? 'array' : value instanceof DirLight ? 'dir' : value instanceof SpotLight ? 'spot' : value instanceof PointLight ? 'point' : 'other'
+  Array.isArray(value)
+    ? 'array'
+    : value instanceof DirLight
+      ? 'dir'
+      : value instanceof SpotLight
+        ? 'spot'
+        : value instanceof PointLight
+          ? 'point'
+          : 'other'
 console.log('kinds=' + values.map(kind).join(','))

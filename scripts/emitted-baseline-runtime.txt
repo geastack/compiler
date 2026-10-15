@@ -699,7 +699,7 @@ loop-move-single-use.ts.cpp 41dd5fe2d235
 map-callback-any-tuple-rebuilt-into-a-stated-position.runtime.ts.cpp af4dd76c9b6c
 map-entries-into-iterable-iterator-frame-field.runtime.ts.cpp 8905b7c4fdf4
 map-get-or-install-list-keeps-the-install-branch.runtime.ts.cpp 89c3edae71ca
-map-index-stress-matches-node.runtime.ts.cpp 1d8ba72beb83
+map-index-stress-matches-node.runtime.ts.cpp bec214aff54c
 map-into-open-record-or-string-parameter.runtime.ts.cpp 1e4bdbeb54ee
 map-into-readonly-map-arm-at-a-wider-value-keeps-identity.runtime.ts.cpp 91fb0251477e
 map-into-readonly-map-is-a-widening-view.runtime.ts.cpp 54302c37858d

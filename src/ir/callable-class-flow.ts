@@ -2685,7 +2685,9 @@ const computeNativeCallableFlow = (
         for (const heap of plain) {
           const slot = heap.fields.get(key)
           const entry: NativeFieldStorageDomain =
-            slot === undefined ? { read: { kind: 'undefined' }, write: null, originalAbsent: true } : { read: slot.representation, write: slot.representation }
+            slot === undefined
+              ? { read: { kind: 'undefined' }, write: null, originalAbsent: true }
+              : { read: slot.representation, write: slot.representation }
           entries.set(`${representationKey(entry.read)}:${entry.originalAbsent === true}`, entry)
         }
         domains.set(key, [...entries.values()])

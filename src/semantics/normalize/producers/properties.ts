@@ -897,9 +897,7 @@ const buildOperations = (
   const unsharedFreshTableStore = (): boolean => {
     const parent = outermostErasureOf(node).parent
     return (
-      ts.isBinaryExpression(parent) &&
-      parent.left === outermostErasureOf(node) &&
-      isUnsharedFreshTableStore(context.checker, parent.right)
+      ts.isBinaryExpression(parent) && parent.left === outermostErasureOf(node) && isUnsharedFreshTableStore(context.checker, parent.right)
     )
   }
 

@@ -265,8 +265,7 @@ const sameOperands = (a: FlowInvocationOperands, b: FlowInvocationOperands): boo
   sameDispatch(a.dispatch, b.dispatch)
 
 const sameIterationOrigin = (a: IterationOrigin | undefined, b: IterationOrigin | undefined): boolean =>
-  a === b ||
-  (a !== undefined && b !== undefined && a.source === b.source && a.mode === b.mode && a.asynchronous === b.asynchronous)
+  a === b || (a !== undefined && b !== undefined && a.source === b.source && a.mode === b.mode && a.asynchronous === b.asynchronous)
 
 const sameWrite = (a: ValueWrite, b: ValueWrite): boolean =>
   a.edge === b.edge &&
