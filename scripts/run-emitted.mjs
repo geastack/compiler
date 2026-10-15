@@ -43,6 +43,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { buildNative, nativeProgramName } from './native-build-cache.mjs'
+import { nativePch } from './native-optimization.mjs'
 import { lockNativeOutput } from './native-output-lock.mjs'
 
 const argv = process.argv.slice(2)
@@ -168,7 +169,8 @@ try {
     pchExcludedUnits,
     compileOnly,
     cache: !argv.includes('--no-native-cache'),
-    pch: !argv.includes('--no-pch'),
+    // --no-pch turns it off; otherwise the host's default (off on Windows).
+    pch: !argv.includes('--no-pch') && nativePch(),
     ...(runtime ? { runtime } : {})
   })
   if (argv.includes('--timings')) console.error(`NATIVE BUILD ${JSON.stringify(timing)}`)

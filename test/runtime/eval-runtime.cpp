@@ -1,7 +1,7 @@
 #include <iostream>
 
 #include "gea_runtime.h"
-int main(int argc, char** argv) {
+static int run(int argc, char** argv) {
   try {
     gea::Eval evaluator;
     if (argc > 2 && std::string(argv[2]) == "params-factory") {
@@ -25,4 +25,30 @@ int main(int argc, char** argv) {
     else
       std::cout << "throw-value:" << gea::host::detail::typeOf(error) << ':' << gea::eval_detail::text(error) << '\n';
   }
+  return 0;
 }
+
+#if defined(_WIN32)
+// Windows hands `main` its arguments in the ANSI code page, which has no
+// emoji; the source under test arrives as UTF-16 here and is passed on as the
+// UTF-8 the evaluator reads, as `main` receives it on every other host.
+#include <string>
+#include <vector>
+extern "C" __declspec(dllimport) int __stdcall WideCharToMultiByte(unsigned int, unsigned long, const wchar_t*, int, char*, int,
+                                                                  const char*, int*);
+int wmain(int argc, wchar_t** wide) {
+  std::vector<std::string> arguments;
+  for (int index = 0; index < argc; ++index) {
+    const int bytes = WideCharToMultiByte(65001, 0, wide[index], -1, nullptr, 0, nullptr, nullptr);
+    std::string text(static_cast<std::size_t>(bytes > 0 ? bytes - 1 : 0), '\0');
+    if (bytes > 1) WideCharToMultiByte(65001, 0, wide[index], -1, text.data(), bytes, nullptr, nullptr);
+    arguments.push_back(std::move(text));
+  }
+  std::vector<char*> argv;
+  for (auto& argument : arguments) argv.push_back(argument.data());
+  argv.push_back(nullptr);
+  return run(argc, argv.data());
+}
+#else
+int main(int argc, char** argv) { return run(argc, argv); }
+#endif

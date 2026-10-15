@@ -47,12 +47,26 @@ export const nativeOptimization = (purpose) => {
  * benchmarks, devices and the release gate need -- the optimizer inlines the
  * runtime into the program only when it can see both. `GEA_NATIVE_RUNTIME`
  * overrides it.
+ *
+ * Windows always builds `single`: `prebuilt` needs the shared PCH below, which
+ * Windows does not use.
  */
-export const nativeRuntimeLayout = () => process.env.GEA_NATIVE_RUNTIME ?? (nativeRelease ? 'single' : 'prebuilt')
+export const nativeRuntimeLayout = () =>
+  process.env.GEA_NATIVE_RUNTIME ?? (nativeRelease || process.platform === 'win32' ? 'single' : 'prebuilt')
 
 /**
  * Whether correctness builds share one precompiled runtime header. On unless
  * `GEA_NATIVE_PCH=0`, which with `GEA_NATIVE_RUNTIME=single` measures what the
  * shared artifacts save.
+ *
+ * Off by default on Windows. clang's Microsoft C++ ABI does not mangle a
+ * requires-clause, so the runtime's conditionally trivial members (Optional's
+ * two copy and two move assignments) collide: the `prebuilt` object fails to
+ * compile ("definition with same mangled name"). A program built against the
+ * PCH in `single` layout compiles, but await-of-user-thenable-held-as-unknown
+ * then corrupts the heap at its first await (NTSTATUS 0xC0000374) -- with or
+ * without -fpch-instantiate-templates -- and passes, at -O0 and -O2, with ASan
+ * clean, without the PCH. `GEA_NATIVE_PCH=1` turns it back on.
  */
-export const nativePch = () => process.env.GEA_NATIVE_PCH !== '0'
+export const nativePch = () =>
+  process.env.GEA_NATIVE_PCH === undefined ? process.platform !== 'win32' : process.env.GEA_NATIVE_PCH !== '0'

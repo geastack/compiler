@@ -74,6 +74,10 @@ inline void gea_profile_print_backtrace(void* const* frames, int count) { ::back
 #include <cstring>
 #include <tuple>
 #include "gea_pcm.h"
+#if defined(_WIN32)
+#include <fcntl.h> // _O_BINARY
+#include <io.h>    // _setmode, _fileno
+#endif
 #if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
 #include <thread>
 #if defined(__linux__)
@@ -293,6 +297,26 @@ T& realmSlot() { return realmSlot<Tag, T, Lifetime>([] { return new T{}; }); }
 #define GEA_REALM_IMMORTAL_LOCAL(Type, Name, ...) GEA_REALM_LOCAL(Type, Name, __VA_ARGS__)
 #else
 #define GEA_REALM_IMMORTAL_LOCAL(Type, Name, ...) static Type& Name = *new Type __VA_ARGS__
+#endif
+
+#if defined(_WIN32)
+/**
+ * The standard streams in binary mode on Windows, before main.
+ *
+ * The Windows CRT opens stdout and stderr in TEXT mode, which writes every
+ * `\n` as `\r\n`. Node writes `console.log`'s newline as the one byte on every
+ * platform, so a program compiled from JavaScript printed something other than
+ * the program it was compiled from -- every output comparison against Node
+ * failed on Windows alone. A process without a console (a GUI-subsystem app)
+ * has no stream descriptors to switch, and is left alone.
+ */
+inline const bool standardStreamsBinary = [] {
+  for (std::FILE* stream : {stdout, stderr}) {
+    const int descriptor = _fileno(stream);
+    if (descriptor >= 0) _setmode(descriptor, _O_BINARY);
+  }
+  return true;
+}();
 #endif
 
 /**
