@@ -1,4 +1,5 @@
 // Compile a compiler-owned fixture; no demo build or generated demo artifact is required.
+import '../scripts/host-toolchain.mjs'
 import fs from 'node:fs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'

@@ -1,3 +1,4 @@
+import '../scripts/host-toolchain.mjs'
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import { mkdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'

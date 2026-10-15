@@ -67,6 +67,7 @@
  * requires its own existing --out-dir; the runtime PCH and object are shared
  * by every worker and suite run through one content-keyed cache.
  */
+import './host-toolchain.mjs'
 import { spawn } from 'node:child_process'
 import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, resolve, dirname } from 'node:path'

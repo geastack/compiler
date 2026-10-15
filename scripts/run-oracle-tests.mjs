@@ -43,6 +43,7 @@
  * the cloud sweep: the manifest selects with the first and every task runs the
  * second, so a laptop slice and a cloud task are produced by one program.
  */
+import './host-toolchain.mjs'
 import { spawnSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, existsSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve, dirname, relative, sep, isAbsolute } from 'node:path'

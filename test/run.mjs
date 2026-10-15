@@ -1,3 +1,4 @@
+import '../scripts/host-toolchain.mjs'
 import { spawn } from 'node:child_process'
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { availableParallelism, freemem } from 'node:os'

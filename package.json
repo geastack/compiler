@@ -60,7 +60,7 @@
     "test:declared-integers": "node --test dist/conversion/native-selection.test.js && node test/declared-integer-contracts.mjs",
     "test:dynamic-value-metadata": "node test/dynamic-value-metadata.mjs",
     "test:native-field-descriptors": "node test/native-field-descriptors.mjs",
-    "test:declaration-overlays": "node --test dist/semantics/declaration-overlay-transform.test.js",
+    "test:declaration-overlays": "node --import ./scripts/host-toolchain.mjs --test dist/semantics/declaration-overlay-transform.test.js",
     "test:recursive-native-carriers": "node test/recursive-native-carriers.mjs",
     "test:hot-path-shapes": "node test/hot-path-shapes.mjs",
     "build": "npm run architecture && tsc -p tsconfig.json && node scripts/mark-bins-executable.mjs && node scripts/build-checks.mjs",
