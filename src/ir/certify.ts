@@ -1571,9 +1571,15 @@ const nativeFieldViewDemandsOf = (operation: IrOperation, ctx: CertifyContext): 
     return []
   if (nativeObjectDataSlotMatches(ctx.nativeObjectDataSlots?.get(operation), operation.nativeObjectDataSlot)) return []
   const receipt = operation.kind === 'get' ? operation.nativeFieldViewRead : operation.nativeFieldViewWrite
-  const required = nativeFieldViewOperationNeedsReceipt(operation, ctx.nativeFieldViewTargets ?? new Set(), ctx.authenticatedHosts)
-  if (!required && receipt === undefined) return []
   const key = constantKeyTextOf(operation, ctx)
+  const required = nativeFieldViewOperationNeedsReceipt(
+    operation,
+    ctx.nativeFieldViewTargets ?? new Set(),
+    ctx.authenticatedHosts,
+    key,
+    ctx.deriver
+  )
+  if (!required && receipt === undefined) return []
   const semantic = ctx.semanticOperationOf(operation.lineage)
   if (
     required &&

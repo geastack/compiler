@@ -110,7 +110,7 @@ export const publishNativeFieldViewFacts = (input: PublishNativeFieldViewFactsIn
         }
         if (
           (operation.kind !== 'get' && operation.kind !== 'set') ||
-          !nativeFieldViewOperationNeedsReceipt(operation, targets, body.hostNamespaceCensus)
+          !nativeFieldViewOperationNeedsReceipt(operation, targets, body.hostNamespaceCensus, keys.get(operation.key.value), input.deriver)
         )
           return output
         const key = keys.get(operation.key.value)

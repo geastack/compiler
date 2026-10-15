@@ -1,7 +1,7 @@
 import type { ConversionCensus } from '../conversion/nodes.js'
 import { recipeClosureOf, recipeIsMaterializableWithoutPriorSourceGuard } from '../conversion/recipe-closure.js'
 import type { ConversionNodeId, ConversionNode } from '../conversion/algebra.js'
-import type { IrValueId } from '../identity/ids.js'
+import type { IrValueId, StructuralTypeId } from '../identity/ids.js'
 import { abiOfCallee } from '../projection/callee.js'
 import { representationKey, type Representation } from '../representation/model.js'
 import type { NativeCallableFlow } from './callable-class-flow.js'
@@ -10,6 +10,7 @@ import { nativeFieldViewDynamicValueIsNative, nativeFieldViewPlansOf, type Nativ
 import { nativeFieldViewForwardedWriteKey, type NativeFieldStorageDomain } from './native-field-view-domains.js'
 import type { ProgramConversionRecipe } from './program-conversions.js'
 import type { HostNamespaceCensus } from './host-namespace-reads.js'
+import type { RepresentationDeriver } from '../representation/derive.js'
 import { nativeCallableDataCarrierHasStorageIdentity } from '../representation/native-callable-data-storage.js'
 
 export interface NativeFieldViewRead {
@@ -198,10 +199,48 @@ export const nativeFieldViewOpenDocumentRead = (
 export const nativeFieldViewOperationNeedsReceipt = (
   operation: GetOperation | SetOperation,
   targets: ReadonlySet<string>,
-  hostNamespaces: HostNamespaceCensus | undefined
+  hostNamespaces: HostNamespaceCensus | undefined,
+  /** The read's constant key, when it has one. */
+  key?: string | null,
+  layoutOf?: Pick<RepresentationDeriver, 'layoutOf'> | null
 ): boolean =>
   !(hostNamespaces?.reads.has(operation.receiver.value) || hostNamespaces?.values.has(operation.receiver.value)) &&
-  nativeFieldViewCarrierNeedsReceipt(operation.receiver.representation, targets)
+  (operation.kind === 'get' && key !== null && key !== undefined && operation.receiver.representation.kind === 'tagged-union'
+    ? unionReadNeedsReceipt(operation.receiver.representation, key, targets, layoutOf)
+    : nativeFieldViewCarrierNeedsReceipt(operation.receiver.representation, targets))
+
+/**
+ * A constant-key read off a union is the per-arm dispatch of
+ * `emit-union-properties.ts`, and only an arm read through its own C++ member
+ * can meet a live view's placeholder slot. A record arm whose layout declares
+ * no such key is read through `gea::nativeDynamicGet`, whose native [[Get]]
+ * asks a live view's original allocation -- its Document entry or its
+ * source's expando -- before anything else, so that arm needs no receipt.
+ * node-compat's `Request` reads `init.body.type` after a call that may write
+ * `init.body`, so the read is off the whole `BodyInit` union, and its
+ * Document-viewed `ArrayBufferView` arm declares no `type`.
+ */
+const unionReadNeedsReceipt = (
+  value: Representation,
+  key: string,
+  targets: ReadonlySet<string>,
+  layoutOf: Pick<RepresentationDeriver, 'layoutOf'> | null | undefined
+): boolean => {
+  if (value.kind === 'optional') return unionReadNeedsReceipt(value.payload, key, targets, layoutOf)
+  if (value.kind === 'tagged-union') return value.arms.some((arm) => unionReadNeedsReceipt(arm.value, key, targets, layoutOf))
+  if (!nativeFieldViewCarrierNeedsReceipt(value, targets)) return false
+  const layout =
+    value.kind === 'record'
+      ? value
+      : value.kind === 'native-record-ref' && value.native === null
+        ? layoutOf?.layoutOf(value.shapeId as StructuralTypeId)
+        : null
+  return (
+    layout?.kind !== 'record' ||
+    layout.fields.some((field) => field.key === key) ||
+    layout.accessors.some((accessor) => accessor.key === key)
+  )
+}
 
 export const nativeFieldViewCarrierNeedsReceipt = (value: Representation, targets: ReadonlySet<string>): boolean => {
   if (value.kind === 'optional' || value.kind === 'borrowed-ref')

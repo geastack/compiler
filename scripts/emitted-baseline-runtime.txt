@@ -286,7 +286,7 @@ dead-helper-obligations.runtime.js.cpp 2cb43ef9a086
 dead-values.ts.cpp b1670b33a17d
 declared-integer-bindings-hold-their-width.runtime.ts.cpp 913ab0adb521
 decorate-decrypted-document-symbol-keys.runtime.ts.cpp ef72258d1a44
-defaulted-empty-literal-parameter-reads-caller-keys.runtime.js.cpp 6104cffdba94
+defaulted-empty-literal-parameter-reads-caller-keys.runtime.js.cpp 123b6dd05e1f
 define-aspects-over-constructor-family-union.runtime.ts.cpp 5ef073939c06
 define-property-accessor-on-object-and-class-instance.runtime.ts.cpp d203f84d1446
 define-property-of-an-undeclared-key-keeps-the-class-native.runtime.js.cpp 649e14f66919
@@ -314,7 +314,7 @@ dictionary-logical-receiver-with-dynamic-this.runtime.ts.cpp 8c663c3602de
 dictionary-named-absence.ts.cpp 546cb5651edd
 dictionary-or-any-union-computed-read.runtime.ts.cpp 62e493190bba
 direct-interface-method-receiver.ts.cpp a9aebf8aea43
-dispatch-event-target-created-on-viewed-literal.runtime.ts.cpp acc0e0517db5
+dispatch-event-target-created-on-viewed-literal.runtime.ts.cpp a166773997e6
 dispatched-getter-read-enters-optional-chain-result.runtime.ts.cpp ba1a46dd6dea
 document-literal-define-and-spread-copy-keep-order.runtime.ts.cpp eb4d12404411
 document-narrowed-to-bytes-by-guard.runtime.ts.cpp f296d8fa01bb
@@ -400,7 +400,7 @@ filter-under-a-type-guard-narrows-its-element.ts.cpp 56fe38064a9b
 find-with-document-callback-over-typed-statements.runtime.ts.cpp 6e3357f7a0d2
 finite-key-read-off-a-dynamic-receiver-roots-only-its-keys.runtime.ts.cpp 1592b664ceb4
 fixed-data-definition.js.cpp 1bc62dfe90af
-fixed-field-assignment-widening.runtime.js.cpp 9e56115a7091
+fixed-field-assignment-widening.runtime.js.cpp 053728698a12
 fixed-field-define-property-widening.runtime.js.cpp 76628322ebaa
 fixed-field-define-property.runtime.js.cpp cdb870706f4f
 flat-over-tuples-and-from-entries-of-entries.ts.cpp 53c5832de06e
@@ -589,7 +589,7 @@ instanceof-a-generic-class.ts.cpp 7a02b4b10e53
 instanceof-arm-of-unconstructed-class-into-interface-view.runtime.ts.cpp a02b825d227d
 instanceof-chain-tests-the-unnarrowed-value.runtime.ts.cpp d26a3ebd69be
 instanceof-class-record-string-union.ts.cpp a049d39729ff
-instanceof-class-union-through-nested-record-views.runtime.ts.cpp 951b90aeff21
+instanceof-class-union-through-nested-record-views.runtime.ts.cpp a8940d27799a
 instanceof-date-over-a-union-of-native-carriers.runtime.ts.cpp 6543d6b77454
 instanceof-derived-class.ts.cpp 526f685a24d1
 instanceof-else-arm-narrowed-to-never-is-not-converted.runtime.ts.cpp e79cb3d903d8
@@ -958,7 +958,7 @@ optional-union-argument-into-nullable-wider-union-parameter.runtime.ts.cpp 5c535
 optional-union-narrowed-to-record-beside-class-arm.runtime.ts.cpp e1934d64eccf
 optional-void-call-abi.ts.cpp 58bbc6cee319
 options-record-nested-interface-field-written-by-string-key.runtime.ts.cpp 232b0e4ba79c
-options-view-reads-an-absent-union-field-as-undefined.runtime.js.cpp a9f2098ddd1c
+options-view-reads-an-absent-union-field-as-undefined.runtime.js.cpp 85d2f201d8e3
 or-chain-over-object-create-null-bag.runtime.ts.cpp 36d3de339144
 overload-any-implementation-returns-null.runtime.ts.cpp 8e30ed03c95d
 overload-omitted-argument-of-required-implementation-parameter.runtime.ts.cpp 67fef0fec26a
@@ -989,12 +989,13 @@ pending-promise-payload-narrowed-at-call.ts.cpp 65fe0402f0aa
 physical-class-ancestry-declared.ts.cpp 80d59c41a1ba
 physical-class-ancestry-live.ts.cpp 120535a6ceb2
 physical-class-ancestry-optional.ts.cpp fd2bc129d10a
+plain-allocation-of-a-view-target-reads-its-forwarded-slots.runtime.ts.cpp fd9739cc6a39
 plain-function-returns-generator.runtime.js.cpp 8d260bf5a2de
 plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp ba66f3c8919a
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 1529f347bb00
-printer-drift.txt dc5f10a4c315
+printer-drift.txt cbfa0c44b10b
 private-names-are-not-own-properties.ts.cpp 5d0e90d41f28
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp 5422d4fff656
@@ -1134,12 +1135,12 @@ split-cursor-to-array-into-declared-element.runtime.ts.cpp 5d7d5cb32049
 split-generic-class-iterator-method-through-for-of.runtime.ts.cpp 8c0b982109aa
 spread-and-assign-into-bare-record-keep-order-as-positions.runtime.ts.cpp dea4057a3ca8
 spread-call-immediately-invoked.runtime.js.cpp 692978cab105
-spread-class-event-record-into-union-with-class-arm-refused.ts.cpp 664b6991061a
+spread-class-event-record-into-union-with-class-arm-refused.ts.cpp 47493c8a0d53
 spread-copy-not-elided-when-source-written-or-copy-escapes.runtime.ts.cpp a99b0f9899fa
 spread-excess-keys-into-narrower-record-keep-source-order.runtime.ts.cpp 51bd71b922f2
 spread-index-signature-document-return.ts.cpp 4b74a70fc6d0
 spread-narrowed-unknown-into-literal-in-option-table.runtime.ts.cpp 5a906a6dad2d
-spread-narrowed-unknown-record-cast-any-into-options.runtime.ts.cpp 09f8f6685bc3
+spread-narrowed-unknown-record-cast-any-into-options.runtime.ts.cpp ecb330a6102e
 spread-of-null-class-reference-copies-nothing.runtime.ts.cpp 9223b6b9d2d2
 spread-of-unreflected-record-keeps-creation-order.runtime.ts.cpp 25833b37b1bf
 spread-open-document-into-closed-options.ts.cpp c17d8d8557b2
@@ -1152,6 +1153,7 @@ spread-wide-record-skips-absent-runs-by-presence-word.runtime.ts.cpp fa9d28ea112
 stable-binding-identity.ts.cpp c516a25c5859
 stable-cell-read-aliases-across-writes.runtime.ts.cpp f9bc52c2366b
 stable-string-read.ts.cpp 737fb1c6f402
+stale-narrowed-union-read-beside-a-document-view-arm.runtime.ts.cpp c3efa812c57c
 stated-iterable-field-narrowed-to-writer-array.runtime.ts.cpp ea6cdf2a1983
 stated-map-field-keyed-by-an-any-expression-keeps-its-stated-key.runtime.ts.cpp 2d1f382f463f
 stated-open-union-preserves-closed-arms.ts.cpp c293510d112b
@@ -1205,7 +1207,7 @@ symbol-keyed-class-field-declarations.ts.cpp 17a558062aca
 symbol-keyed-method-deletes-symbol-expando.ts.cpp 4ecf6df297bb
 symbol-keyed-this-writes-get-an-absent-native-slot.runtime.ts.cpp d9bb7a0f86cb
 tail-conversion-never-allocated.ts.cpp 42a0331af439
-target-surface-options-from-a-partial-bag.runtime.js.cpp c59d1c50da37
+target-surface-options-from-a-partial-bag.runtime.js.cpp ce04f2f1d74a
 template-strings-array-identity.ts.cpp b721e23b4e0f
 template-strings-array-structural.ts.cpp a145132fbf60
 template-strings-readonly-array.ts.cpp d2ab1ac3a7f3

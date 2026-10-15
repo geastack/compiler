@@ -233,9 +233,10 @@ export const nativeFieldViewDomainsOf = (
       if (!ordinaryArm && !objectArms.some((arm) => domainsOf(arm.value) !== null)) return null
       const arms = objectArms.map((arm) => domainsOf(arm.value, true))
       if (!arms.length || arms.some((arm) => arm === null)) return null
-      // A per-arm union, not an intersection: `(message as LogConvertible).toLog`
-      // over `StartedEvent | LoggableSucceeded | LogConvertible` names a key only
-      // one arm stores. Every other arm contributes the certified absence of
+      // A per-arm union, not an intersection: a key only one arm stores (a
+      // computed read, or a constant key some view-target arm declares --
+      // `unionReadNeedsReceipt` sends any other constant-key read to the
+      // ordinary per-arm dispatch). Every other arm contributes the certified absence of
       // its ordinary allocation -- a `get` answers its expando entry or
       // `undefined` -- and only where that absence is provable (`keyAbsentIn`);
       // one unprovable arm drops the key, exactly as the intersection did.
@@ -377,10 +378,12 @@ export const nativeFieldViewDomainsOf = (
       cache.set(identity, null)
       return null
     }
-    const forwarded = new Set(
-      (installed ?? []).flatMap((plan) => plan.fields.flatMap((field) => (field.descriptorForward ? [field.key] : [])))
-    )
-    for (const field of ordinary.fields) if (!forwarded.has(field.key)) add(field.key, { read: field.value, write: field.value })
+    // Every declared slot, a key a view forwards included: a plain allocation
+    // of this carrier holds it in its own C++ member whatever its views do.
+    // `createServer()`'s `options = {}` default and a caller's literal reach
+    // the same parameter as a `{}` viewed through it, and a receiver no heap
+    // proof covers reads with these routes alone.
+    for (const field of ordinary.fields) add(field.key, { read: field.value, write: field.value })
     for (const accessor of ordinary.kind === 'record' ? ordinary.accessors : []) {
       const getter = accessor.getter === null ? null : abiOf(accessor.getter)
       const setter = accessor.setter === null ? null : abiOf(accessor.setter)
