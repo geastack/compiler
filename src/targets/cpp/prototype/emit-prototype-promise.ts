@@ -224,12 +224,12 @@ export const coroutineAwaitStatements = (
   into: string | null
 ): readonly string[] => {
   const cell = into === null || target === null || target.kind === 'void' ? null : { name: into, carrier: target }
-  // The top level keeps the plain assignment `awaitedText` makes: the result
-  // cell holds the payload carrier the plan published for this `await`.
-  if (carrier.kind === 'promise') {
-    if (carrier.value.kind === 'void') return settleInto(ctx, site, `${text}`, carrier.value, cell)
-    return cell === null ? [`co_await ${text};`] : [`${cell.name} = co_await ${text};`]
-  }
+  // The result cell holds the payload carrier the plan published for this
+  // `await` -- except where the operand is narrower than the checker's type:
+  // `await value` over an `unknown` parameter every caller passes a
+  // `Promise<number>` settles a `double` into the `gea::Value` cell `unknown`
+  // keeps, and only the conversion census can enter one into the other.
+  if (carrier.kind === 'promise') return settleInto(ctx, site, text, carrier.value, cell)
   const nativePromise = nativePromiseCoroutineText(carrier, text)
   if (nativePromise !== null) return settleInto(ctx, site, nativePromise.text, nativePromise.payload, cell)
   // A box may hold a promise, which is adopted; anything else settles to

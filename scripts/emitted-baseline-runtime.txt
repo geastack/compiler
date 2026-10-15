@@ -90,6 +90,7 @@ await-deadlock-shape-timer-started-loop-does-not-block-main.runtime.ts.cpp c2b6a
 await-deep-chain-does-not-grow-the-native-stack.runtime.ts.cpp 0792090628c0
 await-inside-try-catch-finally.runtime.ts.cpp d753c1835042
 await-microtask-queue-ordering.runtime.ts.cpp 866866789c58
+await-of-an-unknown-parameter-specialised-to-a-promise.runtime.ts.cpp 00a5f1ad3799
 await-of-settled-value-still-yields-to-the-caller.runtime.ts.cpp 36296fd027a1
 await-of-user-thenable-held-as-unknown.runtime.ts.cpp 3147f626b451
 await-over-an-optional-thenable.ts.cpp dd0d218e7e69
@@ -995,7 +996,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp ba66f3c8919a
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 1529f347bb00
-printer-drift.txt cbfa0c44b10b
+printer-drift.txt 225bb772bf80
 private-names-are-not-own-properties.ts.cpp 5d0e90d41f28
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp 5422d4fff656
