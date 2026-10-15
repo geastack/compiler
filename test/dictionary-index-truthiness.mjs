@@ -13,7 +13,9 @@ test('a dictionary lookup carried through a local preserves missing-key absence 
   assert.deepEqual(result.loweringBlockers, [])
   assert.deepEqual(result.emissionRefusals, [])
   assert.ok(result.source)
-  assert.match(result.source, /(?:\.|->)has\(/)
+  // The optional read asks the table for presence: one `readIfPresent` lookup,
+  // or its own `has` and `read`.
+  assert.match(result.source, /gea::dictionary::readIfPresent(?:Hinted)?<|(?:\.|->)has\(/)
 
   const binary = resolve(root, `measurements/dictionary-index-truthiness${executableSuffix}`)
   execFileSync(
