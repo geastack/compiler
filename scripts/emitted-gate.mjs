@@ -272,8 +272,10 @@ for (const set of sets) {
   }
   if (!existsSync(set.baseline)) throw new Error(`${set.name}: no baseline at ${set.baseline} -- take one with --write and TRACK it`)
   const before = new Map(
+    // A Windows checkout holds the tracked baseline with CRLF line ends; split
+    // on either, or every hash carries a `\r` and every program reads as moved.
     readFileSync(set.baseline, 'utf8')
-      .split('\n')
+      .split(/\r?\n/)
       .filter((line) => line.trim() !== '')
       .map((line) => [line.slice(0, line.lastIndexOf(' ')), line.slice(line.lastIndexOf(' ') + 1)])
   )

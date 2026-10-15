@@ -1,0 +1,8 @@
+# The emitted-set gate (scripts/emitted-gate.mjs) compiles these programs and
+# compares the C++ with baselines tracked once for every host. A program's text
+# is part of what it compiles to -- Function.prototype.toString hands back a
+# function's source, line ends included -- so a CRLF checkout of them is a
+# different program, and the gate read 71 runtime programs as moved on Windows.
+# They are checked out with LF line ends everywhere.
+test/runtime/** text=auto eol=lf
+test/fixtures/** text=auto eol=lf
