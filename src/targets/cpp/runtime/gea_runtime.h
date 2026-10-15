@@ -7086,19 +7086,34 @@ namespace host {
  */
 template <auto Thunk>
 struct DirectCallable {
-  // A function declaring fewer parameters than it is called with ignores the
-  // rest, as a JS call does: `sort(() => 0)` hands the thunk no arguments.
-  template <typename... Arguments>
-  decltype(auto) operator()(Arguments&&... arguments) const {
-    return callPrefix<sizeof...(Arguments)>(std::forward_as_tuple(std::forward<Arguments>(arguments)...));
-  }
-
  private:
   template <std::size_t Count, typename Tuple, std::size_t... Index>
   static constexpr bool takes(std::index_sequence<Index...>) {
     return std::is_invocable_v<decltype(Thunk), std::nullptr_t, std::tuple_element_t<Index, Tuple>...>;
   }
 
+  template <std::size_t Count, typename Tuple>
+  static constexpr bool takesAPrefix() {
+    if constexpr (takes<Count, Tuple>(std::make_index_sequence<Count>{})) return true;
+    else if constexpr (Count == 0) return false;
+    else return takesAPrefix<Count - 1, Tuple>();
+  }
+
+ public:
+  // A function declaring fewer parameters than it is called with ignores the
+  // rest, as a JS call does: `sort(() => 0)` hands the thunk no arguments.
+  //
+  // Constrained, because a host algorithm asks `std::is_invocable` how to hand
+  // over its elements -- `array::sort` boxes them for a comparator whose
+  // parameters are `any` -- and an unconstrained body answers that question
+  // with a hard error instead of `false`.
+  template <typename... Arguments>
+    requires(takesAPrefix<sizeof...(Arguments), std::tuple<Arguments&&...>>())
+  decltype(auto) operator()(Arguments&&... arguments) const {
+    return callPrefix<sizeof...(Arguments)>(std::forward_as_tuple(std::forward<Arguments>(arguments)...));
+  }
+
+ private:
   template <std::size_t Count, typename Tuple>
   static decltype(auto) callPrefix(Tuple&& arguments) {
     if constexpr (Count == 0 || takes<Count, std::remove_reference_t<Tuple>>(std::make_index_sequence<Count>{})) {

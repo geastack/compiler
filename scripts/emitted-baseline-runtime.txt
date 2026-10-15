@@ -54,6 +54,7 @@ array-read-compared-with-undefined-before-fill.runtime.js.cpp 0c67b35a9dba
 array-read-keyed-by-a-dynamic-index.ts.cpp b89cbb210a34
 array-rest-target-reassigned-dynamic.runtime.js.cpp e5b010b616e5
 array-sort-comparator-with-dynamic-parameters-over-class-elements.runtime.js.cpp 9a63febab2b8
+array-sort-direct-comparator-boxes-any-parameters.runtime.ts.cpp 60a75b186ea2
 array-sort-merges-runs-stably.runtime.ts.cpp 95a445dcec4b
 array-spread-into-fixed-formals.runtime.ts.cpp c3864c163aa4
 arrow-contextual-this.runtime.ts.cpp a843e0084f3f
