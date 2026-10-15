@@ -3,6 +3,7 @@ export { arrayBulkAppendMethodName, arrayPrototypeMethods } from '../../../repre
 import type { CallOperation, IrOperand, IrResult } from '../../../ir/model.js'
 import { operationConversionText } from '../emit-certified-conversion.js'
 import type { Representation } from '../../../representation/model.js'
+import { storedCarrier } from '../../../representation/primitives.js'
 import { representationKey } from '../../../representation/model.js'
 import { createCppEmitBlockedError, cppThunkName, operandText, type EmitContext } from '../emit-context.js'
 import { alignedValueText, type ConversionSite } from '../emit-narrowing.js'
@@ -205,13 +206,15 @@ const bulkInsertText =
  * missing feature.
  *
  * The result's element type is the callback's own return type, deduced in the
- * runtime template rather than spelled here: the emitter would have to
- * re-derive it from the plan's carrier for the call's result, which is a
- * second authority for a fact the C++ type system already holds exactly.
+ * runtime template rather than spelled here. That equals the plan's element
+ * only while the callback's carrier is the checker's `U`. A JavaScript closure
+ * over a parameter narrowed from its call sites returns a narrower carrier
+ * than the `any` the checker gave `U`, so `map` converts each result through
+ * its certified `prototype-result` recipe (`elementAdaptedCallbackText`).
  */
 const callbackMethodText =
   (member: string, clause: string): ArrayCallRenderer =>
-  (ctx, receiverText, _element, args): string => {
+  (ctx, receiverText, _element, args, result, operation): string => {
     const callback = args[0]
     if (args.length !== 1 || !callback) {
       throw createCppEmitBlockedError(
@@ -220,7 +223,7 @@ const callbackMethodText =
           (args.length > 1 ? `, and ECMA-262 ${clause}'s second parameter is a thisArg a CallableObject has nothing to bind` : '')
       )
     }
-    return `gea::runtime::array::${member}(${receiverText}, ${elementAdaptedCallbackText(ctx, member, clause, _element, callback)})`
+    return `gea::runtime::array::${member}(${receiverText}, ${elementAdaptedCallbackText(ctx, member, clause, _element, callback, result, operation)})`
   }
 
 /**
@@ -265,14 +268,19 @@ const elementAdaptedCallbackText = (
   member: string,
   clause: string,
   element: Representation,
-  callback: IrOperand
+  callback: IrOperand,
+  result?: IrResult | null,
+  operation?: CallOperation
 ): string => {
   const text = operandText(ctx, callback)
   const carrier = callback.representation
   if (carrier.kind !== 'function-value-dispatch' || carrier.abi.receiver !== null) return text
   const [first, index, array, ...beyond] = carrier.abi.parameters
   const adaptsElement = first !== undefined && representationKey(first.value) !== representationKey(element)
-  const adaptsResult = predicateMembers.has(member) && representationKey(carrier.abi.result) !== 'scalar(boolean)'
+  const produced = storedCarrier(carrier.abi.result)
+  const minted = member === 'map' && result?.representation.kind === 'array-object' ? result.representation.element : null
+  const mapped = minted !== null && representationKey(minted) !== representationKey(produced) ? minted : null
+  const adaptsResult = (predicateMembers.has(member) && representationKey(carrier.abi.result) !== 'scalar(boolean)') || mapped !== null
   if (!adaptsElement && !adaptsResult) return text
   const refuse = (detail: string): never => {
     throw createCppEmitBlockedError(
@@ -309,6 +317,17 @@ const elementAdaptedCallbackText = (
   }
   const call = `__gea_fn(${actuals.join(', ')})`
   if (!adaptsResult) return `[__gea_fn = ${text}](${formals.join(', ')}) { return ${call}; }`
+  if (mapped !== null) {
+    const stored = carrier.abi.result.kind === 'void' ? `(${call}, gea::Undefined{})` : call
+    const converted = operation ? operationConversionText(ctx, operation, 'prototype-result', produced, mapped, '__gea_mapped') : null
+    if (converted === null)
+      throw createCppEmitBlockedError(
+        `runtime-helper:callback:${member}:${elementKey(element)}`,
+        `"Array.prototype.${member}" (ECMA-262 ${clause}) stores its callback's "${representationKey(produced)}" into an array of ` +
+          `"${representationKey(mapped)}", and the call cites no conversion between them`
+      )
+    return `[__gea_fn = ${text}](${formals.join(', ')}) -> ${cppTypeOf(mapped)} { auto __gea_mapped = ${stored}; return ${converted}; }`
+  }
   // A predicate member's step "If ToBoolean(testResult) is true" (23.1.3.8
   // step 5.c.iii and its siblings): the callback may return anything --
   // `names.filter(m => m.match(re))` returns a match or `null`

@@ -685,6 +685,7 @@ map-entries-into-iterable-iterator-frame-field.runtime.ts.cpp 7ac79c24e0f9
 map-into-open-record-or-string-parameter.runtime.ts.cpp 1e4bdbeb54ee
 map-into-readonly-map-arm-at-a-wider-value-keeps-identity.runtime.ts.cpp 91fb0251477e
 map-into-readonly-map-is-a-widening-view.runtime.ts.cpp d90206deff30
+map-narrowed-callback-result-into-any-array.runtime.js.cpp 1ae1137f1a98
 map-recovered-from-dynamic-value-by-brand.runtime.ts.cpp f9b430facf9a
 map-seeded-from-literal-pairs-with-union-values.runtime.ts.cpp d90843873102
 map-seeded-from-pair-array.runtime.ts.cpp a439833c5057
