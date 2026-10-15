@@ -1,6 +1,12 @@
 // The release suite: every test this compiler ships against, not only its own.
 //
-//   node scripts/release-suite.mjs [--only compiler,core,examples,parallel,node-compat]
+//   node scripts/release-suite.mjs [--only=compiler,core,examples,parallel,node-compat]
+//
+// Every sibling must be a checkout with its packages installed. One command
+// prepares a fresh workspace -- clones what is missing, installs every locked
+// package and builds what the lanes import:
+//
+//   node scripts/release-setup.mjs
 //
 // A compiler release is consumed by the framework (core), every example app and
 // the packages built with it (parallel, node-compat). Each of those has its own
@@ -17,6 +23,8 @@
 //
 // Every command runs in a pool, one line per finished command with exact
 // counts, and measurements/release-status.txt is rewritten on every change.
+import './host-toolchain.mjs'
+import { posixShell } from './host-shell.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import {
   existsSync,
@@ -31,7 +39,6 @@ import {
   unlinkSync,
   writeFileSync
 } from 'node:fs'
-import { createServer, connect } from 'node:net'
 import { availableParallelism } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -39,16 +46,20 @@ const compiler = resolve(import.meta.dirname, '..')
 const output = join(compiler, 'measurements')
 mkdirSync(output, { recursive: true })
 const workspace = process.env.GEASTACK_ROOT ? resolve(process.env.GEASTACK_ROOT) : ''
-const only = process.argv
-  .find((argument) => argument.startsWith('--only='))
-  ?.slice(7)
-  .split(',')
+// The siblings' npm scripts are POSIX shell, which npm runs in cmd.exe on
+// Windows unless told otherwise.
+if (process.platform === 'win32') process.env.npm_config_script_shell = posixShell
+const onlyAt = process.argv.findIndex((argument) => argument === '--only' || argument.startsWith('--only='))
+const only = onlyAt < 0 ? undefined : (process.argv[onlyAt].slice(7) || process.argv[onlyAt + 1] || '').split(',')
 const wanted = (lane) => !only || only.includes(lane)
 
 const checkout = (name, marker) => {
   const directory = join(workspace, name)
   if (!workspace || !existsSync(join(directory, marker)))
-    throw new Error(`release suite needs GEASTACK_ROOT set to the directory holding ${name}/ (missing ${join(directory, marker)})`)
+    throw new Error(
+      `release suite needs GEASTACK_ROOT set to the directory holding ${name}/ (missing ${join(directory, marker)}); ` +
+        '`node scripts/release-setup.mjs` prepares one'
+    )
   return directory
 }
 
@@ -168,7 +179,11 @@ if (wanted('parallel')) {
   add('parallel', 'build', parallel, ['npm', 'run', 'build'])
   add('parallel', 'test', parallel, ['npm', 'test'])
   add('parallel', 'refusals', parallel, ['npm', 'run', 'test:refusals'])
-  add('parallel', 'native', parallel, ['node', 'test/run-native.mjs', ...(process.platform === 'linux' ? ['--host=local'] : [])])
+  // Linux and Windows build and run the fixtures on this host; elsewhere the
+  // runner ships them to its Linux build machine.
+  add('parallel', 'native', parallel, ['node', 'test/run-native.mjs', ...(process.platform !== 'darwin' ? ['--host=local'] : [])])
+  if (process.platform === 'win32')
+    hostOnly.push('parallel: the ThreadSanitizer builds of test/run-native.mjs (clang has no ThreadSanitizer on Windows)')
 }
 
 // The packages released beside the compiler and core: each runs its own
@@ -215,25 +230,8 @@ const unitTests = (lane, path, notHere = {}) => {
   // list it, so only a listed skip is one nobody declared.
   commands.at(-1).declaredSkips = true
 }
-// WSL's mirrored networking accepts a connection to a closed loopback port and
-// then resets it, so a test expecting the refusal a board gives cannot see one.
-const loopbackRefuses = await new Promise((done) => {
-  const server = createServer().listen(0, '127.0.0.1', () => {
-    const { port } = server.address()
-    server.close(() => {
-      const socket = connect(port, '127.0.0.1')
-      socket.on('connect', () => {
-        socket.destroy()
-        done(false)
-      })
-      socket.on('error', (error) => done(error.code === 'ECONNREFUSED'))
-    })
-  })
-})
 unitTests('cli', 'cli', {
   'runExternal resolves commands that exist only as a PATH shim': process.platform !== 'win32' && 'win32 only',
-  'the WiFi transport streams channel-1 diagnostics frames and detects a missing server':
-    !loopbackRefuses && 'this host accepts connections to closed loopback ports',
   'macOS enables LLDB symbols by default and accepts an explicit source debugging option': process.platform !== 'darwin' && 'macOS only'
 })
 unitTests('debugger', 'debugger', {
@@ -242,33 +240,47 @@ unitTests('debugger', 'debugger', {
 })
 // apple's own test script: every tracked test file, one command each so one
 // failure does not hide the rest. A test that links a macOS framework or drives
-// the Xcode toolchain, or skips itself off macOS, runs only on macOS and is
-// named when it cannot run.
+// the Xcode toolchain, or refuses to run off macOS, runs only on macOS; one
+// that refuses to run on Windows (POSIX signals, a BSD-style ps) runs
+// everywhere else. Each is named when this host cannot run it.
 if (wanted('apple')) {
   const apple = checkout('apple', 'packages/geastack-apple')
   const tracked = execFileSync('git', ['ls-files'], { cwd: apple, encoding: 'utf8' }).split('\n')
   for (const file of tracked.filter((file) => /(^|\/)(test[-_][^/]*|[^/]*\.test)\.mjs$/.test(file)).sort()) {
-    if (
-      process.platform !== 'darwin' &&
-      /-framework|xcrun|swiftc|xcodebuild|process\.platform !== 'darwin'/.test(readFileSync(join(apple, file), 'utf8'))
-    )
+    const text = readFileSync(join(apple, file), 'utf8')
+    if (process.platform !== 'darwin' && /-framework|xcrun|swiftc|xcodebuild|process\.platform !== 'darwin'/.test(text))
       hostOnly.push(`apple: ${file} (needs macOS)`)
+    else if (process.platform === 'win32' && /process\.platform === 'win32'\) \{\s*throw/.test(text))
+      hostOnly.push(`apple: ${file} (needs a POSIX host)`)
     else add('apple', file, apple, ['node', file])
   }
 }
 
 if (wanted('node-compat')) {
   const nodeCompat = checkout('node-compat', 'scripts/test-package.mjs')
-  add('node-compat', 'test:package', nodeCompat, ['npm', 'run', 'test:package'])
+  // node-compat's scripts resolve the compiler from GEA_COMPILER_DIR before
+  // node_modules, so this names the candidate even where no link is made.
+  const env = { GEA_COMPILER_DIR: compiler }
+  add('node-compat', 'test:package', nodeCompat, ['npm', 'run', 'test:package'], env)
   // The full Hono app, compiled from source and served: `test:package` checks
   // only the package's shape, so the 1.0.29 compiler released with hono-hello
   // failing to certify and nothing here noticed. The build must emit a binary
   // and every route must answer exactly.
+  const dist = join(nodeCompat, 'apps/hono-hello/dist')
+  const binary = join(dist, process.platform === 'win32' ? 'server.exe' : 'server')
+  const step = (argv) => `if (spawnSync(process.execPath, ${JSON.stringify(argv)}, { stdio: 'inherit', env }).status !== 0) process.exit(1)`
   add('node-compat', 'hono-hello build + routes', nodeCompat, [
-    'bash',
-    '-c',
-    'rm -rf apps/hono-hello/dist && node scripts/build.mjs apps/hono-hello/server.ts --out apps/hono-hello/dist && ' +
-      'test -x apps/hono-hello/dist/server && node scripts/test-hono.mjs'
+    'node',
+    '-e',
+    [
+      `const { rmSync, existsSync } = require('node:fs')`,
+      `const { spawnSync } = require('node:child_process')`,
+      `const env = { ...process.env, GEA_COMPILER_DIR: ${JSON.stringify(compiler)} }`,
+      `rmSync(${JSON.stringify(dist)}, { recursive: true, force: true })`,
+      step(['scripts/build.mjs', 'apps/hono-hello/server.ts', '--out', 'apps/hono-hello/dist']),
+      `if (!existsSync(${JSON.stringify(binary)})) { console.error('the build emitted no server binary'); process.exit(1) }`,
+      step(['scripts/test-hono.mjs'])
+    ].join('\n')
   ])
 }
 
@@ -301,10 +313,15 @@ const run = (command) =>
     const since = Date.now()
     running.set(label, since)
     writeStatus()
-    const child = spawn(command.argv[0], command.argv.slice(1), {
+    const [program, ...args] = command.argv
+    // npm is a .cmd on Windows, which only a shell can start; its arguments
+    // here are script names, so joining them loses nothing.
+    const viaShell = process.platform === 'win32' && program === 'npm'
+    const child = spawn(viaShell ? ['npm', ...args].join(' ') : program === 'bash' ? posixShell : program, viaShell ? [] : args, {
       cwd: command.cwd,
       env: { ...process.env, ...command.env },
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: viaShell
     })
     let text = ''
     let pending = ''
@@ -365,17 +382,32 @@ const candidates = new Map([
     ['simulator', 'simulator'],
     ['debugger', 'debugger'],
     ['apple', 'apple/packages/geastack-apple'],
+    ['windows', 'windows/packages/geastack-windows'],
     ['geatsc-plugin-windows-native', 'windows/packages/geatsc-plugin-windows-native']
   ].map(([name, path]) => [name, join(workspace, path)])
 ])
+// Creating a symbolic link on Windows takes a privilege an ordinary account
+// does not hold (EPERM); a junction is a directory link anyone may create, and
+// Node reads one back as a symbolic link.
+const linkType = process.platform === 'win32' ? 'junction' : 'dir'
+// Each entry is recorded BEFORE the installed copy is moved, so a run that
+// dies at any point -- a failed link, an exception, a signal -- puts back
+// exactly what it touched.
 const linked = []
 const restoreCandidates = () => {
   for (const { target, saved, link } of linked.splice(0).reverse()) {
-    unlinkIfPresent(target)
-    if (saved) renameSync(saved, target)
-    else if (link) symlinkSync(link, target, 'dir')
+    try {
+      const current = lstatOrNull(target)
+      if (current?.isSymbolicLink()) unlinkSync(target)
+      if (saved && lstatOrNull(saved)) renameSync(saved, target)
+      else if (link && !lstatOrNull(target)) symlinkSync(link, target, linkType)
+    } catch (error) {
+      console.error(`release suite: could not restore ${target}: ${error.message}`)
+      process.exitCode = 1
+    }
   }
 }
+process.on('exit', restoreCandidates)
 // rmSync refuses a link to a directory on some Node versions; unlink never follows one.
 const unlinkIfPresent = (path) => lstatOrNull(path) && unlinkSync(path)
 const lstatOrNull = (path) => {
@@ -386,35 +418,41 @@ const lstatOrNull = (path) => {
   }
 }
 // Examples get every candidate. Each other tested package gets the candidates
-// it already installs: the link replaces a dependency, never adds one.
+// it already installs: the link replaces a dependency, never adds one -- except
+// the compiler for parallel, which declares it only as an optional peer and
+// cannot build or run a fixture without one.
 const consumers = []
-if (wanted('core') || wanted('examples')) consumers.push([join(workspace, 'examples'), true])
-for (const [lane, path] of packageLanes) if (wanted(lane)) consumers.push([join(workspace, path), false])
-if (wanted('apple')) consumers.push([join(workspace, 'apple'), false])
-for (const [consumer, everything] of consumers) {
-  const modules = join(consumer, 'node_modules/@geastack')
-  for (const [name, source] of candidates) {
-    if (!existsSync(source) || resolve(source) === resolve(consumer)) continue
-    const target = join(modules, name)
-    const saved = join(modules, `.${name}.installed`)
-    // An interrupted run left its link and the installed copy beside it.
-    if (lstatOrNull(saved)) {
-      const left = lstatOrNull(target)
-      if (left && !left.isSymbolicLink()) rmSync(saved, { recursive: true, force: true })
-      else {
-        unlinkIfPresent(target)
-        renameSync(saved, target)
+if (wanted('core') || wanted('examples')) consumers.push([join(workspace, 'examples'), 'all'])
+for (const [lane, path] of packageLanes) if (wanted(lane)) consumers.push([join(workspace, path), []])
+if (wanted('apple')) consumers.push([join(workspace, 'apple'), []])
+if (wanted('node-compat')) consumers.push([join(workspace, 'node-compat'), []])
+if (wanted('parallel')) consumers.push([join(workspace, 'parallel'), ['compiler']])
+const linkCandidates = () => {
+  for (const [consumer, added] of consumers) {
+    const modules = join(consumer, 'node_modules/@geastack')
+    for (const [name, source] of candidates) {
+      if (!existsSync(source) || resolve(source) === resolve(consumer)) continue
+      const target = join(modules, name)
+      const saved = join(modules, `.${name}.installed`)
+      // An interrupted run left its link and the installed copy beside it.
+      if (lstatOrNull(saved)) {
+        const left = lstatOrNull(target)
+        if (left && !left.isSymbolicLink()) rmSync(saved, { recursive: true, force: true })
+        else {
+          unlinkIfPresent(target)
+          renameSync(saved, target)
+        }
       }
+      const installed = lstatOrNull(target)
+      if (!installed && added !== 'all' && !added.includes(name)) continue
+      const link = installed?.isSymbolicLink() ? readlinkSync(target) : undefined
+      linked.push({ target, saved: installed && !link ? saved : undefined, link })
+      if (installed && !link) renameSync(target, saved)
+      else unlinkIfPresent(target)
+      mkdirSync(modules, { recursive: true })
+      symlinkSync(source, target, linkType)
+      console.log(`candidate: ${consumer}: @geastack/${name} -> ${source}`)
     }
-    const installed = lstatOrNull(target)
-    if (!installed && !everything) continue
-    const link = installed?.isSymbolicLink() ? readlinkSync(target) : undefined
-    if (installed && !link) renameSync(target, saved)
-    else unlinkIfPresent(target)
-    mkdirSync(modules, { recursive: true })
-    symlinkSync(source, target, 'dir')
-    linked.push({ target, saved: lstatOrNull(saved) ? saved : undefined, link })
-    console.log(`candidate: ${consumer}: @geastack/${name} -> ${source}`)
   }
 }
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'])
@@ -428,6 +466,7 @@ const others = async () => {
   await Promise.all(Array.from({ length: width }, worker))
 }
 try {
+  linkCandidates()
   await Promise.all([
     (async () => {
       for (const command of heavy) await run(command)
