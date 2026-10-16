@@ -164,6 +164,7 @@ captured-slot-alias.runtime.ts.cpp 59e5e4dae0a4
 caught-non-instance-into-class-parameter-propagates.runtime.ts.cpp 9ee7a43158ec
 census-typed-maps-into-document-parameter-stay-native.runtime.ts.cpp d18e3dee80eb
 census-union-parameter-into-narrower-census-union-parameter.runtime.ts.cpp 2aa1f80d305c
+census-union-parameter-stored-into-optional-record-field.runtime.ts.cpp f567c88a05a1
 circular-list-head-null-placeholder-literal.runtime.ts.cpp 997c36d65b44
 class-accessors-viewed-as-record.ts.cpp 909400942336
 class-alias-cast-to-constructor-type-holds-the-class.runtime.ts.cpp 9bbeed4cf503
