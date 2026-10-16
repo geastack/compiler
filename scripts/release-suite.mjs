@@ -26,7 +26,6 @@
 import './host-toolchain.mjs'
 import { posixShell } from './host-shell.mjs'
 import { assertLfCheckout } from './checkout-line-ends.mjs'
-import { msvcOptimizedMiscompilePending } from './pending-ports.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import {
   existsSync,
@@ -81,9 +80,6 @@ if (wanted('compiler')) {
     GEA_APPS_ROOT: examples,
     GEA_NODE_COMPAT_ROOT: nodeCompat
   })
-  // TODO(LLVM MSVC-EH miscompile): scripts/pending-ports.mjs.
-  for (const program of msvcOptimizedMiscompilePending?.programs ?? [])
-    hostOnly.push(`compiler: test/runtime/${program} (${msvcOptimizedMiscompilePending.reason})`)
 }
 
 if (wanted('mosaico')) {
