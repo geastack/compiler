@@ -1,6 +1,6 @@
 // The release suite: every test this compiler ships against, not only its own.
 //
-//   node scripts/release-suite.mjs [--only=compiler,core,examples,parallel,node-compat]
+//   node scripts/release-suite.mjs [--only=compiler,core,examples,parallel,node-compat,perf]
 //
 // Every sibling must be a checkout with its packages installed. One command
 // prepares a fresh workspace -- clones what is missing, installs every locked
@@ -71,6 +71,10 @@ const hostOnly = []
 const prerequisites = []
 const add = (lane, name, cwd, argv, env = {}) => commands.push({ lane, name, cwd, argv, env })
 const first = (lane, name, cwd, argv, env = {}) => prerequisites.push({ lane, name, cwd, argv, env })
+// A measurement runs after every other command has finished, alone: a benchmark
+// beside a clang build measures the build.
+const alone = []
+const last = (lane, name, cwd, argv, env = {}) => alone.push({ lane, name, cwd, argv, env })
 
 if (wanted('compiler')) {
   const examples = checkout('examples', 'apps')
@@ -345,12 +349,27 @@ if (wanted('node-compat')) {
   ])
 }
 
+if (wanted('perf')) {
+  // The HTTP servers (GeaStack raw and Hono against Node, Rust and C++) and the
+  // @geastack/parallel workloads (against Rayon and a C++ pool), compared with
+  // the baseline benchmarks/ records for this machine. A machine without one
+  // fails: an unmeasured release has not passed this lane.
+  const benchmarks = checkout('benchmarks', 'node/release-gate/perf-gate.mjs')
+  if (process.platform === 'linux' && process.arch === 'x64')
+    last('perf', 'HTTP and parallel performance gate', benchmarks, ['node', 'node/release-gate/perf-gate.mjs', '--fix-loopback'], {
+      GEA_COMPILER_DIR: compiler,
+      GEA_NODE_COMPAT_DIR: join(workspace, 'node-compat'),
+      PARALLEL_ROOT: join(workspace, 'parallel')
+    })
+  else hostOnly.push('perf: the HTTP and parallel performance gate (needs Linux on x86-64)')
+}
+
 // A skip is a test that did not run. node:test reports one as `ℹ skipped N`,
 // core's shell tests as a `SKIP` line.
 const skipOf = (text) => text.match(/^ℹ skipped [1-9]\d*$|^.*\bSKIP\b.*$/m)?.[0]
 const listedSkipOf = (text) => text.match(/^.*# SKIP$/m)?.[0]
 
-const total = () => commands.length + prerequisites.length
+const total = () => commands.length + prerequisites.length + alone.length
 const statusFile = join(output, 'release-status.txt')
 const started = Date.now()
 const elapsed = () => `${Math.round((Date.now() - started) / 1000)}s`
@@ -540,6 +559,7 @@ try {
     })(),
     others()
   ])
+  for (const command of alone) await run(command)
 } finally {
   restoreCandidates()
 }

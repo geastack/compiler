@@ -1172,18 +1172,41 @@ namespace detail {
 }
 // Reserve alone does not make the spare bytes writable string elements. Let
 // the library own that transition and the final length/terminator, rather than
-// writing through its object layout. libstdc++ exposes the C++23 operation in
-// C++20 too; older libraries use resize, with the same bounded writer contract.
+// writing through its object layout. Older libc++ exposes the C++23 operation
+// in C++20 as `__resize_and_overwrite`; libstdc++ and current libc++ before
+// C++23 have neither, so there `resize` makes the elements, zero-filling them
+// first, a measurable share of string building at -std=c++20.
+// The writer is a lambda handed to a library template, which the inliner left
+// out of line; then every literal piece was re-measured with a runtime strlen.
+// Force both calls inline where the compiler allows it.
+#if defined(__clang__)
+#define GEA_INLINE_CALLS [[clang::always_inline]]
+#else
+#define GEA_INLINE_CALLS
+#endif
 template <typename String, typename Writer>
 [[gnu::always_inline]] inline void overwriteString(String& out, std::size_t size, Writer&& writer) {
   if constexpr (requires { out.resize_and_overwrite(size, writer); }) {
-    out.resize_and_overwrite(size, writer);
+    GEA_INLINE_CALLS out.resize_and_overwrite(size, writer);
   } else if constexpr (requires { out.__resize_and_overwrite(size, writer); }) {
-    out.__resize_and_overwrite(size, writer);
+    GEA_INLINE_CALLS out.__resize_and_overwrite(size, writer);
   } else {
     out.resize(size);
-    out.resize(writer(out.data(), size));
+    const std::size_t used = writer(out.data(), size);
+    if (used != size) out.resize(used);
   }
+}
+template <typename String>
+inline constexpr bool overwritesInPlace =
+    requires(String& out) { out.resize_and_overwrite(0, [](char*, std::size_t) { return std::size_t{0}; }); } ||
+    requires(String& out) { out.__resize_and_overwrite(0, [](char*, std::size_t) { return std::size_t{0}; }); };
+// How many bytes to hand `overwriteString` for `used` bytes of content. Where
+// the library overwrites in place, the whole capacity, so a formatted number's
+// 8-byte store may run past `used`; where `resize` zero-fills, only `used`.
+template <typename String>
+[[gnu::always_inline]] inline std::size_t overwriteWindow(const String& out, std::size_t used) {
+  if constexpr (overwritesInPlace<String>) return out.capacity();
+  else return used;
 }
 [[gnu::always_inline]] inline void fillPieces(char* buffer, std::initializer_list<std::string_view> pieces) {
   for (auto piece : pieces) {
@@ -1218,7 +1241,7 @@ template <typename String, typename Writer>
     out.reserve(total + std::min<std::size_t>(16, out.max_size() - total));
   }
 #if defined(__GLIBCXX__) && defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI
-  detail::overwriteString(out, total, [&](char* buffer, std::size_t) {
+  detail::overwriteString(out, total, [&](char* buffer, std::size_t) __attribute__((always_inline)) {
     detail::fillPieces(buffer, pieces);
     return total;
   });
@@ -1303,7 +1326,7 @@ template <typename... Pieces> requires(sizeof...(Pieces) > 0)
     out.clear();
     out.reserve(total + std::min<std::size_t>(16, out.max_size() - total));
   }
-  detail::overwriteString(out, out.capacity(), [&](char* buffer, std::size_t count) {
+  detail::overwriteString(out, detail::overwriteWindow(out, total), [&](char* buffer, std::size_t count) __attribute__((always_inline)) {
     detail::fillTypedPieces(buffer, buffer + count, pieces...);
     return total;
   });
@@ -1333,7 +1356,7 @@ template <typename... Pieces> requires(sizeof...(Pieces) > 0)
   if (added > target.max_size() - size) [[unlikely]] detail::stringLengthExceeded();
   if (target.capacity() - size < added) [[unlikely]] target.reserve(size + added);
 #if defined(__GLIBCXX__) && defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI
-  detail::overwriteString(target, size + added, [&](char* buffer, std::size_t count) {
+  detail::overwriteString(target, size + added, [&](char* buffer, std::size_t count) __attribute__((always_inline)) {
     detail::fillPieces(buffer + size, pieces);
     return count;
   });
@@ -1355,7 +1378,7 @@ template <typename... Pieces> requires(sizeof...(Pieces) > 0)
   std::size_t added = 0;
   (detail::addStringLength(added, detail::pieceSize(pieces), target.max_size() - size), ...);
   if (target.capacity() - size < added) [[unlikely]] target.reserve(size + added);
-  detail::overwriteString(target, target.capacity(), [&](char* buffer, std::size_t count) {
+  detail::overwriteString(target, detail::overwriteWindow(target, size + added), [&](char* buffer, std::size_t count) __attribute__((always_inline)) {
     detail::fillTypedPieces(buffer + size, buffer + count, pieces...);
     return size + added;
   });
@@ -2004,11 +2027,26 @@ class RegionGranules {
 
   /**
    * An empty span of `span` granules, its header reset and untagged by this
-   * call (the taker tags it). A single granule comes from the pool, which is
-   * refilled `regionChunkBytes` at a time; a larger span is its own allocation,
+   * call (the taker tags it). A single granule comes from the taking thread's
+   * own run first, then from the pool; a larger span is its own allocation,
    * and joins the pool granule by granule once it empties.
+   *
+   * A refill of `regionChunkBytes` stays with the thread that made it, which
+   * bumps through it in address order. Pushing the rest of the refill onto the
+   * shared pool handed each of twenty threads every twentieth granule,
+   * highest address first, and a thread building a tree walked memory no
+   * prefetcher could follow. A thread holds at most one refill unused.
    */
   RegionGranule* take(std::size_t span) {
+    if (span == 1) {
+      ThreadRun& run = threadRun();
+      if (run.left != 0) {
+        auto* granule = reinterpret_cast<RegionGranule*>(run.next);
+        run.next += granuleBytes;
+        --run.left;
+        return reset(granule, 1);
+      }
+    }
     if (span == 1) {
       std::lock_guard lock(mutex_);
       if (RegionGranule* granule = free_) {
@@ -2028,8 +2066,9 @@ class RegionGranules {
 #endif
     auto* first = static_cast<RegionGranule*>(memory);
     if (span == 1) {
-      std::lock_guard lock(mutex_);
-      for (std::size_t offset = granuleBytes; offset < bytes; offset += granuleBytes) push(reinterpret_cast<RegionGranule*>(static_cast<unsigned char*>(memory) + offset));
+      ThreadRun& run = threadRun();
+      run.next = static_cast<unsigned char*>(memory) + granuleBytes;
+      run.left = bytes / granuleBytes - 1;
     }
     return reset(first, static_cast<std::uint32_t>(span));
   }
@@ -2042,6 +2081,16 @@ class RegionGranules {
   }
 
  private:
+  /** The untaken rest of this thread's latest refill. */
+  struct ThreadRun {
+    unsigned char* next = nullptr;
+    std::size_t left = 0;
+  };
+  static ThreadRun& threadRun() {
+    static thread_local ThreadRun run;
+    return run;
+  }
+
   static RegionGranule* reset(RegionGranule* granule, std::uint32_t span) {
     granule->next = nullptr;
     granule->live = 0;
@@ -2099,11 +2148,27 @@ struct Donation {
   void* tail;
 };
 
-struct ThreadRegion {
+// One cache line at least per thread: the threads' regions sit side by side in
+// `RegionPool::regions_`, and each one's hot words (`chunk`, `limit`, `bump`,
+// `ownedGranule`) are written by its thread while its neighbour's thread reads
+// its own -- sharing a line made the owned-granule cache below a slowdown.
+struct alignas(64) ThreadRegion {
   std::uint64_t tag = 0;
   unsigned char* chunk = nullptr;
   unsigned char* bump = nullptr;
   unsigned char* limit = nullptr;
+  /**
+   * The last granule the ownership map named this region's, by index. Every
+   * retain and release inside a region asks `owns`, and `[chunk, limit)`
+   * covers only the granule being bumped: a binary tree of a few megabytes
+   * spans dozens of granules, and each lookup outside it was two dependent
+   * loads into the map on the hot retain/release path.
+   * Remembering one granule is exact: a granule tagged with this region's tag
+   * was tagged when this region took it or retagged it whole (`begin`,
+   * `takeGranule`), and nothing pools it before this thread's `finish`. It
+   * is forgotten in `begin`, where the tag changes.
+   */
+  mutable std::uintptr_t ownedGranule = ~std::uintptr_t{0};
   /** The granule `bump` points into. Kept from region to region, so a short region does not start a granule of its own. */
   RegionGranule* current = nullptr;
   /**
@@ -2130,8 +2195,12 @@ struct ThreadRegion {
   [[gnu::always_inline]] bool owns(const void* address) const {
     const auto* bytes = static_cast<const unsigned char*>(address);
     if (bytes >= chunk && bytes < limit) return true;
+    const auto granule = reinterpret_cast<std::uintptr_t>(address) >> granuleShift;
+    if (granule == ownedGranule) [[likely]] return true;
     if (bytes >= head && bytes < headEnd) [[unlikely]] return true;
-    return ownerOf(address) == tag;
+    if (ownerOf(address) != tag) return false;
+    ownedGranule = granule;
+    return true;
   }
 
   /**
@@ -2144,6 +2213,7 @@ struct ThreadRegion {
    */
   void begin(std::uint64_t regionTag) {
     tag = regionTag;
+    ownedGranule = ~std::uintptr_t{0};
     head = headEnd = nullptr;
     if (current == nullptr) {
       chunk = bump = limit = nullptr;
@@ -2186,12 +2256,12 @@ struct ThreadRegion {
       reusable = true;
       return true;
     }
-    if (bytes >= head && bytes < headEnd) {
+    if (owns(cell)) {
       reusable = true;
     } else {
       const std::uint64_t owner = ownerOf(cell);
       if (owner == 0) return false;
-      reusable = owner == tag;
+      reusable = false;
     }
     RegionGranule* granule = granuleOf(cell);
     if (--granule->live == 0 && granule->state == granuleRetired) noteSpent(granule);

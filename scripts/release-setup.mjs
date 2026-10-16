@@ -48,7 +48,8 @@ const siblings = [
   'native-webgl-angle',
   'windows',
   'debugger',
-  'apple'
+  'apple',
+  'benchmarks'
 ]
 
 const step = (cwd, argv) => {
