@@ -173,6 +173,8 @@ const WIDENED = process.env['GEA_FLOW_WIDE'] === '1'
 
 const isAnyType = (type: ts.Type): boolean => (type.flags & ts.TypeFlags.Any) !== 0
 
+const isNullish = (type: ts.Type): boolean => (type.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0
+
 /** Duplicated from `parameter-bindings.ts` (not exported there): `any`/`void`/`never` say nothing about storage. */
 const isUnusableEvidence = (type: ts.Type): boolean => (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0
 
@@ -1193,7 +1195,11 @@ export const censusFieldBindings = (
     // a vector class's `x`/`y`/`z` carry dozens of writes each, all typed
     // `number` but one (`this.x = e[ 12 ]`, `e` unannotated) silent -- every
     // read boxed by a veto that read no fact.
-    else if (silent > 0 && (!lenientPhase || types.length === 0)) attribute(symbol, 'write-unresolved')
+    // Writes that speak only of ABSENCE do not count: `this.shaku = null` in a
+    // constructor, filled later by one silent `this.shaku = index.shakuhachi`,
+    // joined to `null` alone, and that silent write -- the only one carrying
+    // what the field holds -- then aborted in its checked unbox.
+    else if (silent > 0 && (!lenientPhase || types.every(isNullish))) attribute(symbol, 'write-unresolved')
     else {
       // A FRESH `{}` written into the field contributes a value with no keys,
       // never a layout: joined with record `R` the field holds either that
