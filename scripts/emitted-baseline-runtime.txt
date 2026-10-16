@@ -49,6 +49,7 @@ array-narrowed-box-method-call-keeps-receiver.runtime.ts.cpp 0e5a99e05b2b
 array-object-call-argument-aliasing.ts.cpp 9a259adbe71f
 array-pattern-defaults-keep-positions.ts.cpp 0da593c10faf
 array-pattern-elision-over-generator.ts.cpp b3406c787733
+array-pattern-over-conditional-array-or-tuple-literal.runtime.ts.cpp 9e1b8ff0a106
 array-pattern-over-generator.ts.cpp bfbcdb77d96f
 array-pattern-over-regexp-exec.ts.cpp 330ab75992af
 array-read-compared-with-undefined-before-fill.runtime.js.cpp 0c67b35a9dba

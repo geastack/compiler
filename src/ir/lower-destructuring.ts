@@ -1,5 +1,5 @@
 import { operationOfResult, type SemanticResultId } from '../identity/ids.js'
-import { carriesUndefined, representationKey, type Representation } from '../representation/model.js'
+import { carriesUndefined, isArrayPatternCapable, representationKey, type Representation } from '../representation/model.js'
 import { operandOf, type SemanticOperand } from '../semantics/model/operands.js'
 import { IrLoweringBlockedError } from './lower-graph.js'
 import type { FlowController } from './lower-flow.js'
@@ -272,8 +272,28 @@ const lowerArrayPatternSource = (ctx: LoweringContext, block: IrBlockId, operati
           `"${representationKey(declared)}" iterator-record shape`
       )
     }
-    const value = ctx.builder.compute(block, lineage, 'require-tagged-union-arm', String(armIndex), [source], declared)
-    source = { value, representation: declared }
+    // The guard below is ECMA-262 7.4.2's TypeError for an arm GetIterator
+    // rejects (`number` beside `number[]`). An arm the pattern can read
+    // positionally is no such value: `cond ? split(...) : [ids, []]` holds a
+    // tuple record beside the declared array, and refusing it at run time
+    // aborted on a valid program. Every arm then enters the declared carrier
+    // through its own conversion, dispatched on the live tag.
+    const arms = source.representation.arms
+    if (arms.some((arm, index) => index !== armIndex && isArrayPatternCapable(arm.value))) {
+      const unconverted = arms.find((arm) => ctx.program.conversions.nodeFor(arm.value, declared).capability.kind === 'never')
+      if (unconverted !== undefined) {
+        throw new IrLoweringBlockedError(
+          `an array binding pattern reads "${representationKey(declared)}" from a tagged union whose arm ` +
+            `"${representationKey(unconverted.value)}" has no conversion into it`
+        )
+      }
+      const live = arms.map((_, index) => index)
+      const value = ctx.builder.mergeLiveArmRebuild(block, lineage, source, declared, live, false, ctx.program.conversions)
+      source = { value, representation: declared }
+    } else {
+      const value = ctx.builder.compute(block, lineage, 'require-tagged-union-arm', String(armIndex), [source], declared)
+      source = { value, representation: declared }
+    }
   }
   if (isSnapshotSource(source.representation.kind) && declared.kind === 'array-object') {
     registerResult(ctx, operation, ctx.builder.allocateArrayObject(block, lineage, [{ kind: 'spread', value: source, from: 0 }], declared))
