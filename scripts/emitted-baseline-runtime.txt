@@ -103,6 +103,7 @@ await-union-of-value-or-promise-settles-same-tick.runtime.ts.cpp 216fe68d93d8
 await-void-promise-settles-to-undefined.runtime.ts.cpp b6196cf1ab99
 base-typed-derived-dynamic-dictionary.ts.cpp fadd155aba36
 base-typed-derived-dynamic-fields.ts.cpp fe949e7b629b
+base-typed-read-of-a-field-a-subclass-redeclares-as-an-accessor.runtime.js.cpp 96f0ad809cbf
 bigint-of-number-bigint-or-class-union.ts.cpp f24c07c2ed4f
 binary-view-arm-beside-a-live-record-view.runtime.ts.cpp 8203f54c58b6
 bind-guarded-when-a-boxed-instance-can-shadow-it.runtime.ts.cpp d1e3d3fce7ad
@@ -976,7 +977,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp ba66f3c8919a
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 1529f347bb00
-printer-drift.txt 9d36269ae90e
+printer-drift.txt 243511f6803a
 private-names-are-not-own-properties.ts.cpp 5d0e90d41f28
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp 0998df9c0cd5

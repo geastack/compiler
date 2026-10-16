@@ -8,7 +8,7 @@ import { nativeObjectDataGetText, nativeObjectDataSetText } from './emit-native-
 import { nativeDocumentEntryText } from './emit-native-document-entry.js'
 import { nativeCallableOptionalDataReadText } from './emit-native-callable-data.js'
 import type { DefineOwnPropertyOperation, GetOperation, IrOperand, SetOperation } from '../../ir/model.js'
-import type { FunctionId, IrValueId } from '../../identity/ids.js'
+import type { DeclarationId, FunctionId, IrValueId } from '../../identity/ids.js'
 import {
   cppDenseFlagName,
   cppDensePointerName,
@@ -41,6 +41,7 @@ import {
 import {
   cppArrayExtensionStructName,
   cppBodyName,
+  cppClassName,
   cppRecordAccessorEnvironmentName,
   cppRecordFieldAttributesName,
   cppRecordFieldName,
@@ -65,6 +66,7 @@ import {
 } from './records.js'
 import { tracksKeyOrder } from './key-order-tracking.js'
 import { recordLayoutOfShapeId } from '../../projection/fields.js'
+import { classFieldAccessorArmsOf } from '../../projection/dispatch.js'
 import { nativeErrorMemberText } from './prototype/emit-prototype-error.js'
 import { structuralRecordViewText } from './emit-record-view.js'
 import {
@@ -1144,7 +1146,7 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
     lines.push(`${defineValue(ctx, operation.result)} = ${rendering};`)
     return
   }
-  const read = fixedFieldReadText(ctx, operation, fieldName)
+  const read = accessorShadowedFieldReadText(ctx, operation, fieldName) ?? fixedFieldReadText(ctx, operation, fieldName)
   // A construction-only field of this body's own receiver holds one value
   // from the read to every use (`ctx.stableFieldReads`), so the read names
   // the member. Only the plain member load qualifies: a presence test or a
@@ -1348,6 +1350,118 @@ const fixedFieldReadText = (ctx: EmitContext, operation: GetOperation, fieldName
     fieldReadText(ctx, operation.receiver.representation, fieldName, `${receiver}${accessor}`),
     presence
   )
+}
+
+/**
+ * The bodies one half of a descendant accessor that shadows a base field
+ * (`classFieldAccessorArmsOf`) selects, each with the allocation test that
+ * selects it -- or an empty list where no arm applies. A by-value carrier
+ * holds exactly its own class, and `super.x` binds statically, so neither
+ * selects.
+ */
+const shadowingAccessorHalvesOf = (
+  ctx: EmitContext,
+  receiver: IrOperand,
+  fieldName: string,
+  half: 'getter' | 'setter',
+  receiverText: string
+): readonly { readonly body: FunctionId | null; readonly owner: DeclarationId; readonly test: string }[] => {
+  const representation = receiver.representation
+  if (representation.kind !== 'class-ref' || representation.ownership !== 'shared-refcount' || dispatchesStatically(ctx, receiver))
+    return []
+  const halves = new Map<FunctionId | null, { readonly owner: DeclarationId; readonly allocations: DeclarationId[] }>()
+  for (const { allocation, owner, accessor } of classFieldAccessorArmsOf(ctx.classes, representation.declaration, fieldName)) {
+    const entry = halves.get(accessor[half]) ?? { owner, allocations: [] }
+    entry.allocations.push(allocation)
+    halves.set(accessor[half], entry)
+  }
+  return [...halves].map(([body, { owner, allocations }]) => ({
+    body,
+    owner,
+    test: `gea::host::hasNativeClassLayoutRef<${allocations.map((allocation) => cppClassName(allocation)).join(', ')}>(${receiverText})`
+  }))
+}
+
+/**
+ * A base-typed field read whose key a descendant redeclares as an accessor:
+ * those allocations answer from the getter, selected by the allocation header
+ * as an overridden method value is, and the rest from the field. A spread
+ * snapshot copies own properties only, so it never selects.
+ */
+const accessorShadowedFieldReadText = (ctx: EmitContext, operation: GetOperation, fieldName: string): string | null => {
+  const receiver = operation.receiver.representation
+  const getters =
+    operation.spreadSnapshot === true
+      ? []
+      : shadowingAccessorHalvesOf(ctx, operation.receiver, fieldName, 'getter', 'gea_shadowed_receiver')
+  if (getters.length === 0) return null
+  const published = operation.result.representation
+  const refused = (reason: string): Error =>
+    createCppEmitBlockedError(`property-access:${representationKey(receiver)}:get:false`, `field "${fieldName}" ${reason}`)
+  const branches = getters.map(({ body: getter, owner, test }) => {
+    if (getter === null) {
+      // A setter-only accessor still shadows the field; reading it is undefined.
+      const absent = cppUndefinedIn(published)
+      if (absent === null) throw refused(`is redeclared by ${owner} without a getter, and this read's carrier holds no undefined`)
+      return `if (${test}) return ${absent};`
+    }
+    const abi = ctx.abiOfCallable(getter)
+    const instance = ctx.classes.get(owner)?.instance
+    if (abi === null || abi.receiver === null || !instance || representationKey(abi.receiver) !== representationKey(instance))
+      throw refused(`is redeclared as an accessor by ${owner}, whose getter takes no native ${owner} receiver`)
+    const call = `${cppBodyName(getter)}(gea::host::downcastClassRef<${cppClassName(owner)}>(gea_shadowed_receiver))`
+    const value = operationConversionText(ctx, operation, 'field-read', abi.result, published, call)
+    if (value === null) throw refused(`is redeclared as an accessor by ${owner}, whose getter result this read cannot carry`)
+    return `if (${test}) return ${value};`
+  })
+  const bound = `${operation.receiver.value}:shadowed` as IrValueId
+  ctx.valueNames.set(bound, 'gea_shadowed_receiver')
+  const field = fixedFieldReadText(ctx, { ...operation, receiver: { value: bound, representation: receiver } }, fieldName)
+  return (
+    `([&]() -> ${cppTypeOf(published)} { const auto& gea_shadowed_receiver = ${operandText(ctx, operation.receiver)}; ` +
+    `${branches.join(' ')} return ${field}; })()`
+  )
+}
+
+/**
+ * `accessorShadowedFieldReadText`'s write half: OrdinarySet finds the
+ * descendant's accessor before it would create the own data property, so those
+ * allocations call the setter. A definition creates the own property instead.
+ */
+const accessorShadowedFieldWriteText = (
+  ctx: EmitContext,
+  operation: SetOperation | DefineOwnPropertyOperation,
+  fieldName: string,
+  receiverText: string,
+  valueText: string
+): string | null => {
+  const setters = operation.kind === 'set' ? shadowingAccessorHalvesOf(ctx, operation.receiver, fieldName, 'setter', receiverText) : []
+  if (setters.length === 0) return null
+  const receiver = operation.receiver.representation
+  const branches = setters.map(({ body: setter, owner, test }) => {
+    if (setter === null)
+      return `if (${test}) { ${operation.kind === 'set' && operation.strict ? 'gea::host::throwRuntimeError("TypeError", "Cannot set a property that has only a getter");' : ''} }`
+    const abi = ctx.abiOfCallable(setter)
+    const instance = ctx.classes.get(owner)?.instance
+    const parameter = abi?.parameters.length === 1 && abi.restFrom === null ? abi.parameters[0]!.value : null
+    const argument =
+      parameter === null
+        ? null
+        : alignedValueText(ctx, 'emit-properties.ts:shadowed-setter', operation.value.representation, parameter, valueText)
+    if (
+      abi === null ||
+      abi.receiver === null ||
+      !instance ||
+      representationKey(abi.receiver) !== representationKey(instance) ||
+      argument === null
+    )
+      throw createCppEmitBlockedError(
+        `property-access:${representationKey(receiver)}:set:false`,
+        `field "${fieldName}" is redeclared as an accessor by ${owner}, whose setter has no native entry for this write`
+      )
+    return `if (${test}) { ${cppBodyName(setter)}(gea::host::downcastClassRef<${cppClassName(owner)}>(${receiverText}), ${argument}); }`
+  })
+  return branches.join(' else ')
 }
 
 /** The independent own-property bit for every fixed field on generated storage. */
@@ -2255,10 +2369,14 @@ const emitFieldStoreLines = (
           ? `(${present} ? (${fieldWritable} && gea::nativeOwnFieldsWritable(${receiverText})) : gea::nativeIsExtensible(${receiverText}))`
           : fieldWritable
     const store = stores.join(' ')
-    if (writable === 'true') lines.push(store)
-    else if (operation.kind === 'set' && operation.strict) {
-      lines.push(`if (!${writable}) gea::host::throwRuntimeError("TypeError", "Cannot assign to read only property"); else { ${store} }`)
-    } else lines.push(`if (${writable}) { ${store} }`)
+    const statement =
+      writable === 'true'
+        ? store
+        : operation.kind === 'set' && operation.strict
+          ? `if (!${writable}) gea::host::throwRuntimeError("TypeError", "Cannot assign to read only property"); else { ${store} }`
+          : `if (${writable}) { ${store} }`
+    const shadowed = accessorShadowedFieldWriteText(ctx, operation, fieldName, receiverText, rawValueText)
+    lines.push(shadowed === null ? statement : `${shadowed} else { ${statement} }`)
   }
   if (!operation.result) return
   // A store's result is the receiver threaded onward, not the success boolean
