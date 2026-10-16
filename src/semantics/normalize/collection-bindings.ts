@@ -1,6 +1,6 @@
 import ts from '#typescript'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
-import { disjointUnionTypeOf, isStandardInterfaceType, joinOfWrites, widestOf } from './derived-expression-type.js'
+import { disjointUnionTypeOf, isStandardInterfaceType, joinOfWrites, literalMemberNameOf, widestOf } from './derived-expression-type.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import type { ValueFlowIndex, ValueWrite } from './flow/model.js'
 import { closedArrayStoredValuesOf } from './flow/callable-reach.js'
@@ -175,6 +175,13 @@ export interface CollectionBindingCensus {
   /** Why this particular empty array literal was not bound, or `null` if it was, or if it was never a candidate (including: `settleEvolving`'s territory, not this module's). */
   readonly arrayRefusalOf: (node: ts.ArrayLiteralExpression) => string | null
   /**
+   * Whether this empty literal's array is filled with values the census could
+   * not join to one element: an untyped write, disagreeing writes, or a
+   * computed read that hands the array out untyped. Its `never[]` then states
+   * nothing about what it holds.
+   */
+  readonly arrayHoldsUnjoinedWrites: (node: ts.ArrayLiteralExpression) => boolean
+  /**
    * The element type for a READ of a cell this census bound an array for --
    * `state.probe` and `this.children`, not just the `[]` that filled them.
    *
@@ -271,6 +278,7 @@ export const emptyCollectionBindingCensus: CollectionBindingCensus = {
   refusalOf: () => null,
   arrayElementAt: () => null,
   arrayRefusalOf: () => null,
+  arrayHoldsUnjoinedWrites: () => false,
   arrayElementForRead: () => null,
   arrayElementForOwner: () => null,
   arrayRefusalForOwner: () => null,
@@ -961,6 +969,7 @@ export const censusCollectionBindings = (
   const arraysByOwner = new Map<ts.Node, ts.ArrayLiteralExpression[]>()
   const arrayNodeOwner = new Map<ts.ArrayLiteralExpression, ts.Node>()
   const arrayNodeRefusal = new Map<ts.ArrayLiteralExpression, string>()
+  const computedReads: ts.ElementAccessExpression[] = []
 
   const collectArrayLiterals = (node: ts.Node): void => {
     // See the identical guard in `collectConstructions` above: this walk and
@@ -989,9 +998,27 @@ export const censusCollectionBindings = (
       // (rather than bound to a name) is invisible to the census above
       // rather than counted as a refusal.
     }
+    if (ts.isElementAccessExpression(node) && literalMemberNameOf(node) === null) computedReads.push(node)
     ts.forEachChild(node, collectArrayLiterals)
   }
   for (const file of files) forEachReachableStatement(reachable, file, collectArrayLiterals)
+
+  // An object literal's `[]` member reaches code no edge names once a computed
+  // read hands it out as `any`: under `noImplicitAny: false`,
+  // `this.koto[k.layer].push(k)` is invisible to the checker and to `flow`, so
+  // the member is filled with values nothing typed.
+  const untypedMemberReads = new Map<ts.Node, ts.ElementAccessExpression>()
+  for (const read of computedReads) {
+    if ((checker.getTypeAtLocation(read).flags & ts.TypeFlags.Any) === 0) continue
+    const receiver = checker.getNonNullableType(checker.getTypeAtLocation(read.expression))
+    for (const arm of receiver.isUnion() ? receiver.types : [receiver]) {
+      for (const property of checker.getPropertiesOfType(arm)) {
+        const declaration = property.declarations?.[0]
+        if (declaration && ts.isPropertyAssignment(declaration) && arraysByOwner.has(declaration) && !untypedMemberReads.has(declaration))
+          untypedMemberReads.set(declaration, read)
+      }
+    }
+  }
 
   // Pass 4: every `.push`/`.unshift`/`.fill` call and every genuine INDEX
   // (non-literal-key) assignment reaching one of the tracked array literals
@@ -1047,6 +1074,21 @@ export const censusCollectionBindings = (
     return true
   }
   for (const [owner, aliases] of arrayComponents) {
+    const untypedRead = [...aliases].map((alias) => untypedMemberReads.get(alias)).find((read) => read !== undefined)
+    if (untypedRead) {
+      for (const alias of aliases) ownerArrayRefusal.set(alias, 'array:element-unresolved')
+      const site = untypedRead.getSourceFile()
+      censusRefusals.push(
+        censusRefusal(
+          'collection',
+          'array-element-unresolved',
+          `the computed read \`${untypedRead.getText(site)}\` (${site.fileName}:${site.getLineAndCharacterOfPosition(untypedRead.getStart(site)).line + 1}) ` +
+            'hands this array out untyped, so no write through it can be typed',
+          describeOwner(owner)
+        )
+      )
+      continue
+    }
     const evidence: ts.Expression[] = []
     for (const decl of aliases) {
       for (const write of flow.writesToDeclaration(decl)) {
@@ -1245,6 +1287,10 @@ export const censusCollectionBindings = (
       return boundElement.get(owner) ?? null
     },
     arrayRefusalOf: (node) => arrayNodeRefusal.get(node) ?? null,
+    arrayHoldsUnjoinedWrites: (node) => {
+      const reason = arrayNodeRefusal.get(node)
+      return reason === 'array:element-unresolved' || reason === 'array:elements-disagree'
+    },
     arrayElementForRead: (expression) => {
       const owner = ownerDeclOfExpr(expression)
       return owner ? (boundElement.get(owner) ?? null) : null
