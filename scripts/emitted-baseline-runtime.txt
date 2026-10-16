@@ -48,6 +48,7 @@ array-narrowed-box-method-call-keeps-receiver.runtime.ts.cpp 0e5a99e05b2b
 array-object-call-argument-aliasing.ts.cpp 9a259adbe71f
 array-pattern-defaults-keep-positions.ts.cpp 391bf9a5b286
 array-pattern-elision-over-generator.ts.cpp 3264f12241f2
+array-pattern-over-conditional-array-or-tuple-literal.runtime.ts.cpp 9e1b8ff0a106
 array-pattern-over-generator.ts.cpp b134f2eb4907
 array-pattern-over-regexp-exec.ts.cpp 330ab75992af
 array-read-keyed-by-a-dynamic-index.ts.cpp b89cbb210a34
