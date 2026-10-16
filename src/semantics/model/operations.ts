@@ -1,3 +1,4 @@
+import type { NativeIterableReceipt } from './native-iterable.js'
 import type { DeclarationId, FunctionId, OperationId, RegionId, SemanticResultId, StructuralTypeId } from '../../identity/ids.js'
 import type { SemanticOperationBase } from './operands.js'
 import type { InvocationResultDivergence, SelectedSignature } from './selected-signature.js'
@@ -529,6 +530,8 @@ export interface AllocationOperation extends SemanticOperationBase {
   readonly classDeclaration?: DeclarationId
   /** The class whose written constructor body this function allocation implements. */
   readonly classConstructorBodyOf?: DeclarationId
+  /** Definition retained, but no reachable evaluation constructs this class. */
+  readonly classConstructionDeferred?: boolean
 }
 
 /** The one role target an operation published, if this producer owns one. */
@@ -594,6 +597,8 @@ export interface ClassLifecycleOperation extends SemanticOperationBase {
   readonly syntheticSubclassMemberOverlay?: boolean
   /** A layout demand, not evaluation or allocation of this class's constructor. */
   readonly classLayoutOnly?: boolean
+  /** Definition effects remain; constructor/instance initializer execution is absent. */
+  readonly classConstructionDeferred?: boolean
 }
 
 /** A property descriptor as the language defines it. */
@@ -683,6 +688,8 @@ export interface ControlOperation extends SemanticOperationBase {
  * needs both: the source to walk and the receiver to write into.
  */
 export interface ProtocolOperation extends SemanticOperationBase {
+  /** Present only with independently retained source iteration authority. */
+  readonly nativeIterable?: NativeIterableReceipt
   readonly family: 'protocol'
   readonly protocol: 'iterator' | 'async-iterator' | 'spread' | 'enumerate' | 'dispose' | 'async-dispose'
   readonly step: 'get-method' | 'get-iterator' | 'next' | 'close' | 'return' | 'throw'

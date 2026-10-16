@@ -25,7 +25,7 @@ import {
 } from '../../model/operands.js'
 import type { BindingOperation, ReferenceOperation } from '../../model/operations.js'
 import type { CensusCandidate } from '../census.js'
-import { familyOf } from '../census.js'
+import { familyOf, isClassElementNameEvaluation } from '../census.js'
 import type { NamespacePathCensus } from '../namespace-paths.js'
 import type { ArgumentsObjectCensus } from '../arguments-objects.js'
 import type { IdentityTable } from '../identities.js'
@@ -871,6 +871,7 @@ const thisCanThrow = (node: ts.Node): boolean => {
  */
 const nearestOwningScopeIsArrow = (node: ts.Node): boolean => {
   for (let current: ts.Node | undefined = node.parent; current; current = current.parent) {
+    if (isClassElementNameEvaluation(node, current)) continue
     if (ts.isArrowFunction(current)) return true
     if (
       ts.isFunctionDeclaration(current) ||
@@ -888,9 +889,10 @@ const nearestOwningScopeIsArrow = (node: ts.Node): boolean => {
   return false
 }
 
-/** The class whose constructor object a static `this` denotes, plus whether the nearest owner is a non-callable static block. */
+/** The class whose constructor object a static `this` denotes, plus whether the nearest source owner is a static block. */
 const staticThisOwner = (node: ts.Node): { readonly classNode: ts.ClassLikeDeclaration; readonly block: boolean } | null => {
   for (let current: ts.Node | undefined = node.parent; current; current = current.parent) {
+    if (isClassElementNameEvaluation(node, current)) continue
     if (ts.isArrowFunction(current)) continue
     if (ts.isClassStaticBlockDeclaration(current)) {
       return ts.isClassLike(current.parent) ? { classNode: current.parent, block: true } : null
@@ -904,7 +906,7 @@ const staticThisOwner = (node: ts.Node): { readonly classNode: ts.ClassLikeDecla
       const isStatic = (ts.getCombinedModifierFlags(current) & ts.ModifierFlags.Static) !== 0
       return isStatic && ts.isClassLike(current.parent) ? { classNode: current.parent, block: false } : null
     }
-    if (ts.isFunctionLike(current) || ts.isClassLike(current)) return null
+    if (ts.isFunctionLike(current)) return null
   }
   return null
 }
@@ -975,7 +977,7 @@ const buildThisReference = (candidate: CensusCandidate, node: ts.Node, context: 
     // evaluates it, and an operand that claimed to would order an evaluation
     // the language does not perform.
     operands: [
-      operand(staticOwner?.block ? 'static-class-receiver' : captured ? 'captured-receiver' : 'receiver', 0, { kind: 'receiver' }, type, {
+      operand(captured ? 'captured-receiver' : staticOwner?.block ? 'static-class-receiver' : 'receiver', 0, { kind: 'receiver' }, type, {
         kind: 'provenance'
       })
     ],

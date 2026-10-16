@@ -128,3 +128,30 @@ test('a shared record and differently shaped native view compare their certified
     null
   )
 })
+
+const hostHandle = (native: string, referenceIdentity = true): Representation => ({
+  kind: 'native-handle', protocol: 'TestHost', version: 1, native, referenceIdentity, bases: [], call: null, construct: null
+})
+
+test('explicit native owner identity compares wrappers without boxing and rejects unstated contracts', () => {
+  const left = { text: 'left', representation: hostHandle('OwnedHandle') }
+  const right = { text: 'right', representation: hostHandle('OwnedHandle') }
+  const identity = 'gea::weakCollectionIdentity(left) == gea::weakCollectionIdentity(right)'
+  assert.equal(strictEqualityText('===', left, right), identity)
+  assert.equal(strictEqualityText('!==', left, right), `!(${identity})`)
+  assert.equal(strictEqualityText('===', left, { ...right, representation: hostHandle('OwnedHandle', false) }), null)
+  assert.equal(strictEqualityText('===', left, { ...right, representation: hostHandle('OtherHandle') }), null)
+  assert.equal(strictEqualityText('==', left, right), null)
+})
+
+test('optional and union native owners keep identity checks inside presence and tag tests', () => {
+  const value = hostHandle('OwnedHandle')
+  const optional: Representation = { kind: 'optional', payload: value, absence: 'null' }
+  const right = { text: 'right', representation: value }
+  const maybe = strictEqualityText('===', { text: 'maybe', representation: optional }, right)
+  assert.ok(maybe?.includes('(maybe).has_value()'))
+  assert.ok(maybe?.includes('gea::weakCollectionIdentity((*maybe))'))
+  const choice = strictEqualityText('===', { text: 'choice', representation: sum([value, number]) }, right)
+  assert.ok(choice?.includes('choice.is<0>()'))
+  assert.ok(choice?.includes('gea::weakCollectionIdentity(choice.get<0>())'))
+})

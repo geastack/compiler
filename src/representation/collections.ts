@@ -40,6 +40,8 @@ import type { KeyedCollectionFamily, OwnershipPolicy } from './policies.js'
 export const hasReferenceIdentity = (representation: Representation): boolean => {
   if (representation.kind === 'tagged-union') return representation.arms.every((arm) => hasReferenceIdentity(arm.value))
   switch (representation.kind) {
+    case 'native-handle':
+      return representation.native !== null && representation.referenceIdentity === true
     case 'class-ref':
     case 'record':
     case 'record-with-index':

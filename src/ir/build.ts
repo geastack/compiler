@@ -1,3 +1,4 @@
+import type { NativeIterableReceipt } from '../semantics/model/native-iterable.js'
 import type { DeclarationId, FunctionId, IrValueId, PhysicalBodyId, RegionId, SemanticResultId } from '../identity/ids.js'
 import { irValueId } from '../identity/ids.js'
 import type { CallableAbi, Representation } from '../representation/model.js'
@@ -362,7 +363,8 @@ export interface IrBodyBuilder {
     declaration: DeclarationId,
     captures: readonly IrOperand[],
     representation: Representation,
-    heritage?: IrOperand
+    heritage?: IrOperand,
+    constructionDeferred?: true
   ) => IrValueId
   readonly allocateProxy: (
     block: IrBlockId,
@@ -457,7 +459,8 @@ export interface IrBodyBuilder {
     protocol: GetIteratorOperation['protocol'],
     receiver: IrOperand,
     method: IrOperand | null,
-    representation: Representation
+    representation: Representation,
+    nativeIterable?: NativeIterableReceipt
   ) => IrValueId
   readonly iteratorNext: (
     block: IrBlockId,
@@ -978,9 +981,25 @@ export const createIrBodyBuilder = (
     return result.id
   }
 
-  const allocateConstructor: IrBodyBuilder['allocateConstructor'] = (block, lineage, declaration, captures, representation, heritage) => {
+  const allocateConstructor: IrBodyBuilder['allocateConstructor'] = (
+    block,
+    lineage,
+    declaration,
+    captures,
+    representation,
+    heritage,
+    constructionDeferred
+  ) => {
     const result = mintResult(representation)
-    append(block, { kind: 'allocate-constructor', lineage, declaration, captures, ...(heritage ? { heritage } : {}), result })
+    append(block, {
+      kind: 'allocate-constructor',
+      lineage,
+      declaration,
+      captures,
+      ...(heritage ? { heritage } : {}),
+      ...(constructionDeferred ? { constructionDeferred } : {}),
+      result
+    })
     return result.id
   }
 
@@ -1105,9 +1124,9 @@ export const createIrBodyBuilder = (
     return result.id
   }
 
-  const getIterator: IrBodyBuilder['getIterator'] = (block, lineage, protocol, receiver, method, representation) => {
+  const getIterator: IrBodyBuilder['getIterator'] = (block, lineage, protocol, receiver, method, representation, nativeIterable) => {
     const result = mintResult(representation)
-    append(block, { kind: 'get-iterator', lineage, protocol, receiver, method, result })
+    append(block, { kind: 'get-iterator', lineage, protocol, receiver, method, result, ...(nativeIterable ? { nativeIterable } : {}) })
     return result.id
   }
 

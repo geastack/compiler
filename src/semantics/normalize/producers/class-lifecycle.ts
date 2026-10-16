@@ -280,6 +280,7 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
       ...(allocated === 'class-constructor-object' && ts.isClassLike(node)
         ? {
             classDeclaration: context.identities.declarationIdOf(node),
+            ...(candidate.classConstructionDeferred ? { classConstructionDeferred: true } : {}),
             functionName: staticClassNameOf(node),
             functionLength: staticClassLengthOf(node)
           }
@@ -448,7 +449,8 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
               callsUserCode: false
             }
       ),
-      ...(candidate.classLayoutOnly ? { classLayoutOnly: true } : {})
+      ...(candidate.classLayoutOnly ? { classLayoutOnly: true } : {}),
+      ...(candidate.classConstructionDeferred ? { classConstructionDeferred: true } : {})
     }
     operations.push(bindOperation)
     if (heritageOperation) edges.push({ kind: 'evaluation', from: heritageOperation.id, to: bindOperation.id })
@@ -495,7 +497,8 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
     }
 
     const written = writtenConstructorOf(node)
-    const writtenConstructor = candidate.classLayoutOnly ? null : writtenConstructorAllocationOf(candidate, node)
+    const writtenConstructor =
+      candidate.classLayoutOnly || candidate.classConstructionDeferred ? null : writtenConstructorAllocationOf(candidate, node)
     if (writtenConstructor) operations.push(writtenConstructor)
 
     // A parameter property is two declarations written as one:
@@ -965,7 +968,12 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
       (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer)) &&
       context.specializations.isGeneric(node.initializer) &&
       context.specializations.specializationsOf(context.identities.genericSubjectOf(node.initializer)).length === 0
-    if (node.initializer && !candidate.classLayoutOnly && !uninstantiatedGenericInitializer) {
+    if (
+      node.initializer &&
+      !candidate.classLayoutOnly &&
+      (isStatic || !candidate.classConstructionDeferred) &&
+      !uninstantiatedGenericInitializer
+    ) {
       // An instance field initializer runs with the new instance as `this`;
       // a static field initializer runs during class evaluation with the
       // constructor object as `this`. These are different physical carriers,
@@ -1093,6 +1101,30 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
     const source = candidate.id
     const declaration = context.identities.declarationIdOf(node)
     const classId = context.identities.declarationIdOf(classNode)
+    // Like a static field initializer, a block is invoked once with this
+    // exact evaluated class value. Giving its body a real receiver ABI also
+    // keeps each factory evaluation's constructor identity intact.
+    const receiver = context.types.valueTypeAt(classNode)
+    const shape = context.table.intern({
+      kind: 'signature',
+      call: [{ parameters: [], minimumArity: 0, thisParameter: receiver, implicitReceiver: true, result: voidType }],
+      construct: []
+    })
+    const allocationId = mintOperationId(context.ordinals, source, 'allocation')
+    const allocation: AllocationOperation = {
+      id: allocationId,
+      family: 'allocation',
+      allocated: 'function-object',
+      shape,
+      callable: context.identities.functionIdOf(node),
+      caller: candidate.caller,
+      operands: [],
+      results: [mintResult(allocationId, 'value', shape)],
+      completion: normalCompletion,
+      effects: { ...pureEffects, allocates: true },
+      evaluationOrdinal: candidate.evaluationOrdinal
+    }
+    const initializer = resultOf(allocation, 'value')!
     const id = mintOperationId(context.ordinals, source, 'class-lifecycle')
     const operation = buildOperation(
       id,
@@ -1103,16 +1135,17 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
       classId,
       null,
       null,
-      [],
+      [operand('initializer', 0, { kind: 'result', result: initializer.id }, shape)],
       // The block body can throw and can read/write arbitrary state; its own
-      // statements are separately normalized under the `static-block` region
-      // census already creates, so this operation is the block's entry point.
+      // statements are normalized under this callable's owner.
       throwingCompletion,
       { readsMutableState: true, writesMutableState: true, allocates: false, callsUserCode: true }
     )
-    const edges: SemanticEdge[] = []
-    edges.push({ kind: 'evaluation', from: ready, to: operation.id })
-    return { kind: 'operations', operations: [operation], edges }
+    const edges: SemanticEdge[] = [
+      { kind: 'evaluation', from: ready, to: operation.id },
+      { kind: 'value', result: initializer.id, to: operation.id, role: 'initializer', ordinal: 0 }
+    ]
+    return { kind: 'operations', operations: [allocation, operation], edges }
   }
 
   /**

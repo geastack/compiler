@@ -375,7 +375,19 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
         representation.kind === 'constructor-family' && representation.members[0] !== undefined
           ? representation.members[0]
           : shape.declaration
-      registerResult(ctx, operation, ctx.builder.allocateConstructor(block, lineage, constructed, captures, representation, heritage))
+      registerResult(
+        ctx,
+        operation,
+        ctx.builder.allocateConstructor(
+          block,
+          lineage,
+          constructed,
+          captures,
+          representation,
+          heritage,
+          operation.classConstructionDeferred ? true : undefined
+        )
+      )
       return
     }
     case 'function-object': {

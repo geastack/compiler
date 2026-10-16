@@ -58,6 +58,7 @@ interface CallerCandidate {
 type ObjectRoot = ts.CallExpression | ts.NewExpression | ts.ObjectLiteralExpression | ts.ArrayLiteralExpression | SourceCallableObject
 type Query =
   | { readonly kind: 'value'; readonly node: ts.Expression }
+  | { readonly kind: 'proxy-result' | 'proxy-target' | 'proxy-handler'; readonly node: ts.NewExpression }
   | { readonly kind: 'parameter'; readonly node: ts.ParameterDeclaration }
   | { readonly kind: 'binding-element'; readonly node: ts.BindingElement }
   | { readonly kind: 'receiver'; readonly node: ts.Node }
@@ -65,7 +66,7 @@ type Query =
   | { readonly kind: 'completion'; readonly node: ts.CallExpression | ts.NewExpression }
   | { readonly kind: 'construct-targets'; readonly node: ts.CallExpression | ts.NewExpression }
   | {
-      readonly kind: 'frame-receiver' | 'frame-argument' | 'frame-parameter' | 'frame-value' | 'frame-completion'
+      readonly kind: 'frame-receiver' | 'frame-argument' | 'frame-parameter' | 'frame-value' | 'frame-completion' | 'constructor-value' | 'constructor-parameter' | 'constructor-completion'
       readonly node: ts.CallExpression | ts.NewExpression
       readonly body: ts.SignatureDeclaration
       readonly subject: ts.Expression | ts.ParameterDeclaration | null
@@ -99,6 +100,9 @@ const refusalDebug = process.env['GEA_SESSION_REFUSALS'] !== undefined
 /** The query kinds whose facts are values and therefore need a grounding witness. */
 const VALUE_CARRYING_KINDS: ReadonlySet<Query['kind']> = new Set<Query['kind']>([
   'value',
+  'proxy-result',
+  'proxy-target',
+  'proxy-handler',
   'slot',
   'stored-slot',
   'parameter',
@@ -110,7 +114,10 @@ const VALUE_CARRYING_KINDS: ReadonlySet<Query['kind']> = new Set<Query['kind']>(
   'frame-argument',
   'frame-parameter',
   'frame-value',
-  'frame-completion'
+  'frame-completion',
+  'constructor-value',
+  'constructor-parameter',
+  'constructor-completion'
 ])
 const VALUE_ORIGIN = 'source-value-origin'
 // Read once at load, not per value transfer: `process.env` is a native interceptor.
@@ -158,6 +165,28 @@ const bindingElementKey = (element: ts.BindingElement): string | null => {
   return ts.isIdentifier(element.name) ? element.name.text : null
 }
 
+/** Operand identities of an authenticated native Proxy allocation. This is
+ * not a closure, trap-effect, member-lookup or construction-result proof. */
+export interface SourceProxyResultIdentity {
+  readonly result: ts.NewExpression
+  readonly targets: readonly Value[]
+  readonly handlers: readonly Value[]
+}
+
+/** A normal completion from one direct BASE-class construction. ASTs name
+ * source allocation-origin families, not equality of repeated executions.
+ * No member lookup, effects, prototype integrity or closed consumer proof. */
+export interface SourceConstructorProxyResultIdentity {
+  readonly construction: ts.NewExpression
+  readonly constructor: ts.ConstructorDeclaration
+  readonly result: ts.NewExpression
+  readonly targets: readonly (
+    | { readonly kind: 'base-constructor-allocation'; readonly construction: ts.NewExpression; readonly constructor: ts.ConstructorDeclaration }
+    | { readonly kind: 'source-object'; readonly value: Value }
+  )[]
+  readonly handlers: readonly Value[]
+}
+
 /** Source values, their storage, invocations and escape obligations share one
  * graph. No transfer calls a recursive origin/receiver/callable proof. The
  * construction and declared-descriptor queries below are independent leaves.
@@ -174,6 +203,8 @@ export interface SourceValueSession {
   readonly ordinaryOwnCallableOperandsOf: (call: ts.CallExpression) => FlowInvocationOperands | null
   /** One fully closed installed body, including an immutable detached read. */
   readonly ordinaryOwnCallableSourceOf: (call: ts.CallExpression) => SourceCallableObject | null
+  readonly proxyResultIdentityOf: (expression: ts.NewExpression) => SourceProxyResultIdentity | null
+  readonly constructorProxyResultIdentitiesOf: (construction: ts.NewExpression) => readonly SourceConstructorProxyResultIdentity[] | null
   readonly valuesOf: (expression: ts.Expression) => readonly Value[] | null
   /** The same value family after every actual consumer of each root is accounted for. */
   readonly closedValuesOf: (expression: ts.Expression) => readonly Value[] | null
@@ -277,6 +308,8 @@ export const sourceValueSessionOf = (checker: ts.TypeChecker, flow: ValueFlowInd
     candidateOrdinaryOwnCallableOperandsOf: (call) => live().candidateOrdinaryOwnCallableOperandsOf(call),
     ordinaryOwnCallableOperandsOf: (call) => live().ordinaryOwnCallableOperandsOf(call),
     ordinaryOwnCallableSourceOf: (call) => live().ordinaryOwnCallableSourceOf(call),
+    proxyResultIdentityOf: (expression) => live().proxyResultIdentityOf(expression),
+    constructorProxyResultIdentitiesOf: (construction) => live().constructorProxyResultIdentitiesOf(construction),
     valuesOf: (expression) => live().valuesOf(expression),
     closedValuesOf: (expression) => live().closedValuesOf(expression),
     memberValuesOf: (expression, key) => live().memberValuesOf(expression, key),
@@ -362,6 +395,18 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     return census.usesByOwner.get(body)
   }
   const undefinedValue = ts.factory.createVoidZero()
+  const conditionTruthOf = (root: Value): boolean | null => {
+    if (root === undefinedValue || ts.isVoidExpression(root) || root.kind === ts.SyntaxKind.NullKeyword ||
+        root.kind === ts.SyntaxKind.FalseKeyword) return false
+    if (root.kind === ts.SyntaxKind.TrueKeyword || isObjectRoot(root) || isBody(root)) return true
+    if (ts.isStringLiteralLike(root)) return root.text.length !== 0
+    if (ts.isNumericLiteral(root)) {
+      const value = Number(root.text)
+      return Number.isNaN(value) ? null : value !== 0
+    }
+    return null
+  }
+
   const arrayLengths = new Map<ts.ArrayLiteralExpression, ts.NumericLiteral>()
   const keyValues = new Map<ObjectRoot, Map<string, ts.StringLiteral>>()
   const keyValue = (root: ObjectRoot, key: string): ts.StringLiteral => {
@@ -448,6 +493,9 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   const nodeQuery = <
     K extends
       | 'value'
+      | 'proxy-result'
+      | 'proxy-target'
+      | 'proxy-handler'
       | 'parameter'
       | 'binding-element'
       | 'receiver'
@@ -471,7 +519,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   }
   const value = (expression: ts.Expression): Query => nodeQuery('value', unwrapErasedExpression(expression))
   const frameQuery = (
-    kind: 'frame-receiver' | 'frame-argument' | 'frame-parameter' | 'frame-value' | 'frame-completion',
+    kind: 'frame-receiver' | 'frame-argument' | 'frame-parameter' | 'frame-value' | 'frame-completion' | 'constructor-value' | 'constructor-parameter' | 'constructor-completion',
     call: ts.CallExpression | ts.NewExpression,
     body: ts.SignatureDeclaration,
     subject: ts.Expression | ts.ParameterDeclaration | null = null
@@ -975,6 +1023,35 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     )
   }
   const construction = (root: ts.NewExpression): SourceConstructionFact | null => exactSourceConstructionOf(checker, flow, root)
+  // A specific direct base construction enters this body even if that body
+  // returns a replacement object. This says nothing about any OTHER entry.
+  // Derived super lookup needs live constructor/prototype integrity and is
+  // deliberately not inferred from the declared heritage chain here.
+  const directBaseConstructorOf = (call: ts.NewExpression): ts.ConstructorDeclaration | null => {
+    if (!sites.has(call)) return null
+    const selections = sourceConstructorSelectionsOf(checker, flow, call.expression)
+    const owner = selections?.length === 1 ? selections[0] : null
+    if (!owner || (!ts.isClassDeclaration(owner) && !ts.isClassExpression(owner)) ||
+        owner.heritageClauses?.some((one) => one.token === ts.SyntaxKind.ExtendsKeyword)) return null
+    const constructors = owner.members.filter(ts.isConstructorDeclaration)
+    return constructors.find((one) => one.body !== undefined) ?? null
+  }
+  const proxyOperandsOf = (node: ts.NewExpression): readonly [ts.Expression, ts.Expression] | null => {
+    if (node.arguments?.length !== 2) return null
+    const [target, handler] = node.arguments
+    if (!target || !handler || ts.isSpreadElement(target) || ts.isSpreadElement(handler)) return null
+    const callee = unwrapErasedExpression(node.expression)
+    const symbol = checker.getSymbolAtLocation(callee)
+    const declaration = checker.getResolvedSignature(node)?.getDeclaration()
+    const owner = declaration?.parent
+    if (!ts.isIdentifier(callee) || callee.text !== 'Proxy' ||
+        !symbol?.valueDeclaration?.getSourceFile().hasNoDefaultLib ||
+        !owner || !ts.isInterfaceDeclaration(owner) || owner.name.text !== 'ProxyConstructor' ||
+        !owner.getSourceFile().hasNoDefaultLib ||
+        deferredIntrinsicProtocolLedgerOf(flow)?.requireStandardGlobalBinding('Proxy', node) !== true) return null
+    return [target, handler]
+  }
+
   /**
    * What a key names on this construction: its data member, or the method the
    * call through it dispatches to.
@@ -2958,6 +3035,28 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           } else fail('unmodelled-value-origin')
           break
         }
+        case 'proxy-result': {
+          if (proxyOperandsOf(query.node) === null) { fail('unproven-proxy-construction'); break }
+          read(nodeQuery('proxy-target', query.node))
+          read(nodeQuery('proxy-handler', query.node))
+          // This identity domain is deliberately separate from generic value
+          // roots: existing class-field consumers interpret NewExpression
+          // origins as physical data, which is not a Proxy get-trap proof.
+          facts.add(query.node)
+          seeded = true
+          break
+        }
+        case 'proxy-target':
+        case 'proxy-handler': {
+          const operands = proxyOperandsOf(query.node)
+          if (operands === null) { fail('unproven-proxy-construction'); break }
+          const operand = operands[query.kind === 'proxy-target' ? 0 : 1]
+          for (const root of carry(value(operand))) {
+            if (!isObjectRoot(root)) fail('non-object-proxy-operand', operand)
+            else facts.add(root)
+          }
+          break
+        }
         case 'slot':
         case 'stored-slot': {
           const root = query.node
@@ -3252,6 +3351,85 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             else add(carry(frameQuery('frame-completion', query.node, body)))
           }
           if (ts.isCallExpression(query.node) && lookupThrows(query.node)) seeded = true
+          break
+        }
+        case 'constructor-value':
+        case 'constructor-parameter':
+        case 'constructor-completion': {
+          if (!ts.isNewExpression(query.node) || !ts.isConstructorDeclaration(query.body) ||
+              directBaseConstructorOf(query.node) !== query.body) {
+            fail('unproven-base-constructor-context', query.node)
+            break
+          }
+          const contextual = (expression: ts.Expression): Query =>
+            frameQuery('constructor-value', query.node, query.body, unwrapErasedExpression(expression))
+          if (query.kind === 'constructor-completion') {
+            const summary = callableCompletionSummaryOf(flow, query.body)
+            if (!summary || summary.execution !== 'sync' || summary.mayCompleteUndefined || summary.values.length === 0)
+              fail('incomplete-constructor-object-completion', query.body)
+            else for (const returned of summary.values) add(carry(contextual(returned)))
+            break
+          }
+          const subject = query.subject
+          if (!subject) { fail('unindexed-constructor-context'); break }
+          if (query.kind === 'constructor-parameter') {
+            if (!ts.isParameter(subject) || subject.parent !== query.body || subject.dotDotDotToken ||
+                flow.writesToDeclaration(subject).some((write) => write.slot === 'whole' &&
+                  !['call-argument', 'super-argument', 'default-parameter'].includes(write.edge))) {
+              fail('unmodelled-constructor-parameter', subject)
+              break
+            }
+            const layout = sourceInvocationFrameLayoutOf(flow, query.node, query.body)
+            const slot = layout?.arguments.kind === 'positional'
+              ? layout.arguments.slots.find((one) => one.parameter === subject) : null
+            if (!slot || slot.kind !== 'single') { fail('unindexed-constructor-parameter', subject); break }
+            if (!slot.actual) {
+              if (slot.defaultValue) add(carry(contextual(slot.defaultValue)))
+              else { facts.add(undefinedValue); seeded = true }
+            } else for (const candidate of carry(value(slot.actual))) {
+              if (ts.isVoidExpression(candidate) && slot.defaultValue) add(carry(contextual(slot.defaultValue)))
+              else facts.add(candidate)
+            }
+            break
+          }
+          if (ts.isParameter(subject)) { fail('unindexed-constructor-value', subject); break }
+          const expression = unwrapErasedExpression(subject)
+          const declaration = ts.isIdentifier(expression) ? flow.targetOf(expression)?.declaration : null
+          if (declaration && ts.isParameter(declaration) && declaration.parent === query.body)
+            add(carry(frameQuery('constructor-parameter', query.node, query.body, declaration)))
+          else if (declaration && ts.isVariableDeclaration(declaration) &&
+                   ts.findAncestor(declaration, ts.isFunctionLike) === query.body) {
+            const incoming = sourceBindingValuesOf(checker, flow, declaration, iterationValuesAt)
+            if (incoming === null) fail('unaccounted-constructor-binding', declaration)
+            else for (const entry of incoming) add(carry(contextual(entry)))
+            if (incoming !== null && bindingReadMayPrecedeFirstWrite(declaration, expression)) {
+              facts.add(undefinedValue); seeded = true
+            }
+          } else if (expression.kind === ts.SyntaxKind.ThisKeyword && flow.receiverOwnerOf(expression) === query.body) {
+            // This token belongs ONLY to the explicit allocation domain. It
+            // never passes through value(new C()) or class-field inference.
+            facts.add(query.node); seeded = true
+          } else if (ts.isNewExpression(expression) && proxyOperandsOf(expression) !== null) {
+            const operands = proxyOperandsOf(expression)!
+            for (const operand of operands) {
+              const roots = carry(contextual(operand))
+              if (sealing && roots.size === 0) fail('unresolved-constructor-proxy-operand', operand)
+              for (const root of roots) if (!isObjectRoot(root) ||
+                (ts.isNewExpression(root) && root !== query.node && proxyOperandsOf(root) !== null))
+                fail('unsupported-constructor-proxy-operand', operand)
+            }
+            facts.add(expression); seeded = true
+          } else if (ts.isConditionalExpression(expression)) {
+            // Require the complete condition family, not its first discovered
+            // value or checker nullability. New facts can only add branch
+            // dependencies. An unknown-truth root keeps both arms; an opaque
+            // condition refuses this context rather than dropping that path.
+            for (const condition of read(contextual(expression.condition))) {
+              const truth = conditionTruthOf(condition)
+              if (truth !== false) add(carry(contextual(expression.whenTrue)))
+              if (truth !== true) add(carry(contextual(expression.whenFalse)))
+            }
+          } else add(carry(value(expression)))
           break
         }
         case 'frame-receiver':
@@ -4179,6 +4357,34 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       return false
     },
     invocationTargetsOf,
+    proxyResultIdentityOf: (expression) => {
+      if (proxyOperandsOf(expression) === null) return null
+      const result = admitted(nodeQuery('proxy-result', expression))
+      const targets = admitted(nodeQuery('proxy-target', expression))
+      const handlers = admitted(nodeQuery('proxy-handler', expression))
+      return result?.length === 1 && result[0] === expression && targets?.length && handlers?.length
+        ? { result: expression, targets, handlers } : null
+    },
+    constructorProxyResultIdentitiesOf: (construction) => {
+      const body = directBaseConstructorOf(construction)
+      if (body === null) return null
+      const results = admitted(frameQuery('constructor-completion', construction, body))
+      if (!results?.length) return null
+      const answer: SourceConstructorProxyResultIdentity[] = []
+      for (const result of results) {
+        if (!ts.isNewExpression(result)) return null
+        const operands = proxyOperandsOf(result)
+        if (operands === null) return null
+        const targets = admitted(frameQuery('constructor-value', construction, body, operands[0]))
+        const handlers = admitted(frameQuery('constructor-value', construction, body, operands[1]))
+        if (!targets?.length || !handlers?.length) return null
+        answer.push({ construction, constructor: body, result, handlers,
+          targets: targets.map((target) => target === construction
+            ? { kind: 'base-constructor-allocation', construction, constructor: body }
+            : { kind: 'source-object', value: target }) })
+      }
+      return answer
+    },
     valuesOf: (expression) => admitted(value(expression)),
     closedValuesOf: (expression) => {
       const roots = admitted(value(expression))

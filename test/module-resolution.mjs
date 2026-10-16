@@ -495,3 +495,17 @@ for (const [specifier, entry, expected] of installed.filter(([specifier]) => ['f
     }
   )
 }
+
+for (const [runtime, types] of [['module.js','module.d.ts'],['module.mjs','module.d.mts'],['module.cjs','module.d.cts']]) {
+  test(`unpackaged sibling ${types} remains the type contract for ${runtime}`, () => {
+    // An app's local modules need no package.json. No system package metadata
+    // is visible to this host, so the existing compiler package cannot mask it.
+    const prefix='/unpackaged-source';
+    const contents=new Map([[`${prefix}/${runtime}`,'export const value = 1'],[`${prefix}/${types}`,'export interface Contract { value: number }; export const value: number']]);
+    const host={fileExists:file=>contents.has(file),readFile:file=>contents.get(file),directoryExists:dir=>dir==='/'||dir===prefix,getCurrentDirectory:()=>prefix,realpath:file=>file};
+    const result=createModuleResolver(host,{...options,moduleResolution:ts.ModuleResolutionKind.Bundler}).resolve(`./${runtime}`,`${prefix}/entry.ts`,ts.ModuleKind.ESNext);
+    assert.equal(result.implementation?.resolvedFileName,`${prefix}/${runtime}`);
+    assert.equal(result.typeDeclaration?.resolvedFileName,`${prefix}/${types}`);
+    assert.equal(result.declaration?.resolvedFileName,`${prefix}/${types}`);
+  });
+}

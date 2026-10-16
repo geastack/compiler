@@ -1058,6 +1058,9 @@ const constructionsOf = (
   const constructions: ClassConstruction[] = []
 
   for (const layout of ordered) {
+    // Definition effects and static storage remain live independently of any
+    // source construction. An absent recipe without this fact still refuses.
+    if (layout.constructionDeferred) continue
     const abi = layout.construct
     const instance = layout.instance
     if (!abi || !instance || instance.kind !== 'class-ref') {
@@ -2435,9 +2438,10 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   const classStaticFields = censusClassStaticFieldStorage(input.bodies, input.classes, input.realmStorage)
   publishClassStaticFieldStorage(input.classes, classStaticFields.storage)
   publishConstructorViewShapes(input.classes, input.bodies)
-  const classStatics = classStaticFieldStorageRows(classStaticFields.storage).map((row) =>
-    storageSpelling(row.type, row.storageName, input.realmStorage)
-  )
+  const classStatics = classStaticFieldStorageRows(classStaticFields.storage).map((row) => ({
+    declaration: `struct ${row.viewStruct} final { ${row.type} value{}; bool present = false; };`,
+    definition: `struct ${row.viewStruct} final { ${row.type} value{}; bool present = false; };`
+  }))
 
   // The reactive plan, completed with the two answers only this stage has.
   //
@@ -3182,7 +3186,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     // host's name is never inside the program's namespace.
     for (const definition of absent) program.append(plain(definition.text))
     if (isolate) program.append(plain(namespaceOpen))
-    for (const spelling of classStatics) program.append(plain(spelling.definition))
+    // Static own-property view structs are declared once in the shared header.
     for (const spelling of globals) program.append(plain(spelling.definition))
     for (const helper of selectionHelpers?.values() ?? []) program.append(plain(helper.definition))
     for (const definition of virtuals.definitions) program.append(plain(definition))

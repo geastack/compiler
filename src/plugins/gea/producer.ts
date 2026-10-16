@@ -4,7 +4,7 @@ import type { CensusCandidate } from '../../semantics/normalize/census.js'
 import type { CandidateContribution, FamilyProducer } from '../../semantics/normalize/contribution.js'
 import type { ProducerContext } from '../../semantics/normalize/producer-context.js'
 import { createElementProducer } from '../../semantics/normalize/producers/jsx.js'
-import { elementFactsOf, type GeaElementFacts } from './contract.js'
+import { elementFactsOf, type GeaElementFacts, type GeaProviderAuthority } from './contract.js'
 
 /**
  * gea's element producer.
@@ -32,7 +32,11 @@ const tagNameOf = (node: ts.Node): ts.JsxTagNameExpression | null => {
   return null
 }
 
-export const createGeaElementProducer = (context: ProducerContext, facts: Map<OperationId, GeaElementFacts>): FamilyProducer => {
+export const createGeaElementProducer = (
+  context: ProducerContext,
+  facts: Map<OperationId, GeaElementFacts>,
+  rawAuthority?: GeaProviderAuthority
+): FamilyProducer => {
   const core = createElementProducer(context)
   return {
     family: core.family,
@@ -43,7 +47,7 @@ export const createGeaElementProducer = (context: ProducerContext, facts: Map<Op
       if (!tagName) return contribution
       for (const operation of contribution.operations) {
         if (operation.family !== 'element' || operation.form !== 'value') continue
-        const resolved = elementFactsOf(context.checker, tagName)
+        const resolved = elementFactsOf(context.checker, tagName, rawAuthority)
         if (resolved) facts.set(operation.id, resolved)
       }
       return contribution

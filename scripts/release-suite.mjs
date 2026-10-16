@@ -83,6 +83,7 @@ if (wanted('compiler')) {
 }
 
 if (wanted('mosaico')) {
+  add('mosaico', 'RISC-V GCC optimized string concatenation', compiler, ['node', 'test/string-concatenation.mjs', '--riscv'])
   const demos = checkout('demos', 'apps/axel/package.json')
   const cli = checkout('cli', 'bin/gea.mjs')
   // Build a real camera/worker app with ESP-IDF's GCC, not the desktop Clang

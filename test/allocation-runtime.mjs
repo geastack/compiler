@@ -42,6 +42,7 @@ const units = [
   'cycle-self-loop-reclaim',
   'cycle-dead-candidate-forgotten',
   'cycle-dip-cache',
+  'proxy-reference-cycles',
   'cycle-graph-chunk-refusal',
   'cycle-trace-leaf-record',
   'cycle-trace-leaf-class',
@@ -75,8 +76,12 @@ const check = async (name) => {
     ],
     { maxBuffer: 64 * 1024 * 1024 }
   )
-  const ran = await run(binary, { maxBuffer: 64 * 1024 * 1024 })
-  process.stdout.write(built.stdout + built.stderr + ran.stdout + ran.stderr)
+  const cases = name === 'proxy-reference-cycles' ? [['target'], ['handler'], ['both']] : [[]]
+  process.stdout.write(built.stdout + built.stderr)
+  for (const args of cases) {
+    const ran = await run(binary, args, { maxBuffer: 64 * 1024 * 1024 })
+    process.stdout.write(ran.stdout + ran.stderr)
+  }
   if (name === 'host-array-snapshot' || name === 'host-numeric-argument') {
     const sparse = spawnSync(binary, ['hole'], { encoding: 'utf8' })
     assert.notEqual(sparse.status, 0)

@@ -1,5 +1,6 @@
 import type { Representation } from '../../representation/model.js'
 import { carriesNativeUndefined, representationKey } from '../../representation/model.js'
+import { hasReferenceIdentity } from '../../representation/collections.js'
 import { absenceComparisonText } from './emit-presence.js'
 import { emptyArraySentinelText } from './emit-narrowing.js'
 import { typeofAnswersFor, typeofTextFor } from './emit-typeof.js'
@@ -77,6 +78,23 @@ const callableIdentityCarrier = (representation: Representation): boolean =>
 const negate = (operator: string, text: string): string =>
   operator === '!==' ? (text === 'true' ? 'false' : text === 'false' ? 'true' : `!(${text})`) : text
 
+/** Only a host-declared owner identity permits comparison of native wrappers.
+ * Two views must also name the same native carrier; no host protocol names or
+ * C++ wrapper layout are inferred here. The runtime identity hook is the same
+ * one used by native weak keys, and does not box or copy either operand.
+ */
+const nativeHandleIdentityText = (
+  left: { readonly text: string; readonly representation: Representation },
+  right: { readonly text: string; readonly representation: Representation }
+): string | null => {
+  const a = left.representation
+  const b = right.representation
+  return a.kind === 'native-handle' && b.kind === 'native-handle' &&
+    a.native === b.native && hasReferenceIdentity(a) && hasReferenceIdentity(b)
+    ? `gea::weakCollectionIdentity(${left.text}) == gea::weakCollectionIdentity(${right.text})`
+    : null
+}
+
 /** One arm's comparison against a same-carrier value, or `null` when this backend cannot state it. */
 /**
  * The answer for two carriers that are not the same key, when neither is a sum
@@ -115,6 +133,8 @@ const foldedCarrierMismatchText = (left: Representation, right: Representation):
 
 const armEqualityText = (arm: Representation, leftText: string, rightText: string, convert?: EqualityConversionRenderer): string | null => {
   if (isAbsentArm(arm)) return 'true'
+  const native = nativeHandleIdentityText({ text: leftText, representation: arm }, { text: rightText, representation: arm })
+  if (native !== null) return native
   const callable = callableIdentityEqualityText('===', { text: leftText, representation: arm }, { text: rightText, representation: arm })
   if (callable !== null) return callable
   // A sum nested in a sum (`undefined | null | (string | number | boolean)`,
@@ -379,6 +399,8 @@ export const strictEqualityText = (
   if (operator !== '===' && operator !== '!==') return null
   const absent = absenceComparisonText(operator, left, right)
   if (absent !== null) return absent
+  const native = nativeHandleIdentityText(left, right)
+  if (native !== null) return negate(operator, native)
 
   // The box on either side. Answered before the sums below because a
   // `dynamic` operand settles the comparison whatever the other side is: the

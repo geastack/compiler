@@ -4381,11 +4381,12 @@ export const classStaticFieldDefinitions = (
  */
 export const classStaticFieldStorageRows = (
   storage: ReadonlyMap<DeclarationId, ReadonlyMap<string, ClassStaticFieldStorage>>
-): readonly { readonly type: string; readonly name: string; readonly storageName: string }[] => {
+): readonly { readonly type: string; readonly name: string; readonly storageName: string; readonly viewStruct: string }[] => {
   const rows: ClassStaticFieldStorage[] = []
   for (const perClass of storage.values()) rows.push(...perClass.values())
-  return rows
+  const uniqueViews = new Map(rows.map((entry) => [entry.viewStruct, entry]))
+  return [...uniqueViews.values()]
     .filter((entry) => entry.representation.kind !== 'unresolved' && entry.representation.kind !== 'void')
     .sort((left, right) => left.name.localeCompare(right.name))
-    .map((entry) => ({ type: cppTypeOf(entry.representation), name: entry.name, storageName: entry.storageName ?? entry.name }))
+    .map((entry) => ({ type: cppTypeOf(entry.representation), name: entry.name, storageName: entry.storageName ?? entry.name, viewStruct: entry.viewStruct }))
 }

@@ -1,3 +1,4 @@
+import { mergeNativeIterableProviders } from './plugins/native-iterable-providers.js'
 import type { NativeDebugInfo } from './targets/cpp/native-debug-source.js'
 import { nodeOfOperation, operationOfResult } from './identity/ids.js'
 import { readFileSync } from 'fs'
@@ -510,6 +511,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     producers: installedProducers((context) => plugins.flatMap((plugin) => plugin.producers(context))),
     hostTypedArrayDeclarations: plugins.flatMap((plugin) => plugin.capabilities.typedArrayDeclarations ?? []),
     nativeTypes,
+    nativeIterableProviders: mergeNativeIterableProviders(plugins.map((plugin) => plugin.capabilities.nativeIterableProviders)),
     nativeTypesByDeclaration,
     hostSingletonDeclarations: new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.hostSingletonDeclarations ?? new Map())])),
     standardClasses: new Set(coreNativeTypes.keys()),
@@ -584,6 +586,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // done once, here, so the carrier states the transitive answer and nobody
   // downstream has to walk anything (see `Representation`'s `native-handle`).
   const hostBases = new Map(plugins.flatMap((plugin) => [...plugin.capabilities.nativeBases]))
+  const hostReferenceIdentities = new Set(plugins.flatMap((plugin) => [...(plugin.capabilities.nativeReferenceIdentities ?? [])]))
   const hostViews = new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.nativeViews ?? [])]))
   const hostBaseChain = (native: string | null): readonly string[] => {
     const chain: string[] = []
@@ -618,6 +621,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     {
       forDeclaration: (declaration) => frontend.hostProtocols.get(declaration) ?? null,
       basesOf: (native) => hostBaseChain(native),
+      referenceIdentityOf: (native) => native !== null && hostReferenceIdentities.has(native),
       viewsInto: (native) => (native === null ? new Map() : (hostViews.get(native) ?? new Map()))
     },
     {

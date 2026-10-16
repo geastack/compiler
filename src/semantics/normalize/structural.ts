@@ -3842,6 +3842,19 @@ const buildMapper = (
       if ((shape.kind === 'declared' || shape.kind === 'class-instance') && shape.body !== null)
         return valueIdOfShape(table.get(shape.body).shape)
       if (shape.kind === 'object' && !shape.membersDropped) {
+        // A declared-any string dictionary may own an accessor installed under
+        // a runtime key. Its index value is not proof that every own property
+        // is a data descriptor. Retain the ambient descriptor's real optional
+        // callable halves rather than minting a record that erases get/set.
+        const soleIndex = shape.index.length === 1 ? shape.index[0] : undefined
+        const indexedValue = soleIndex === undefined ? null : table.get(soleIndex.value).shape
+        if (
+          shape.members.length === 0 &&
+          soleIndex?.key === 'string' &&
+          indexedValue?.kind === 'primitive' &&
+          indexedValue.primitive === 'any'
+        )
+          return null
         // An accessor member's descriptor is an ACCESSOR descriptor: `get` and
         // `set`, no `value`. The data-descriptor record minted below has no
         // field for either, so a shape that may answer with one keeps the

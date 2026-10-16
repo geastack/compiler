@@ -30,6 +30,7 @@ import {
   valueEdgesInto
 } from './shared.js'
 import { citeExpressionResult } from './references.js'
+import { keyOf } from './properties.js'
 import { memberTypeOf } from '../derived-expression-type.js'
 import { bindingKindOf } from './binding-kind.js'
 import { iteratorYieldStructuralType, iteratorYieldTypesOf } from './iteration-yield.js'
@@ -1302,12 +1303,10 @@ export const createDestructuringProducer = (context: ProducerContext): FamilyPro
       const access = node as ts.PropertyAccessExpression | ts.ElementAccessExpression
       const receiver = citeExpressionResult(access.expression, context)
       if (receiver.kind === 'unmodelled') return refuse(receiver.reason)
-      const targetKey = ts.isPropertyAccessExpression(access)
-        ? access.name.text
-        : ts.isStringLiteralLike(access.argumentExpression) || ts.isNumericLiteral(access.argumentExpression)
-          ? access.argumentExpression.text
-          : null
-      if (targetKey === null) return refuse('computed array assignment target keys are not yet modelled')
+      // Destructuring stores use the same typed property-key authority as
+      // ordinary indexed stores; the cited key remains a real SSA operand.
+      const key = keyOf(access, context)
+      if (key.kind === 'blocked') return refuse(key.reason)
       const id = mintOperationId(context.ordinals, candidate.id, 'property')
       const receiverType = context.types.typeAt(access.expression)
       write = {
@@ -1315,13 +1314,13 @@ export const createDestructuringProducer = (context: ProducerContext): FamilyPro
         family: 'property',
         internalMethod: 'set',
         strict: isStrictContext(access, context.buildIsStrict),
-        keyIsComputed: false,
+        keyIsComputed: key.computed,
         descriptor: null,
         caller: candidate.caller,
         evaluationOrdinal: candidate.evaluationOrdinal,
         operands: [
           operand('receiver', 0, receiver.source, receiverType, { kind: 'provenance' }),
-          operand('key', 0, { kind: 'constant', text: targetKey, literal: 'string' }, stringType),
+          operand('key', 0, key.source, key.type),
           operand('value', 0, value, boundType)
         ],
         results: [mintResult(id, 'value', receiverType)],

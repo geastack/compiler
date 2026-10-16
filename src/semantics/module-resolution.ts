@@ -39,8 +39,8 @@ const packageRootOf = (file: string, host: ts.ModuleResolutionHost): string | un
 }
 
 /**
- * A declaration may describe an implementation only when the same package
- * ships both. In particular, a DefinitelyTyped `@types/<pkg>` is a third party package
+ * A declaration may describe its exact sibling JavaScript implementation, or
+ * another implementation shipped by the same package. In particular, a DefinitelyTyped `@types/<pkg>` is a third party package
  * and must not replace `<pkg>`'s real JavaScript source, including for
  * type-only imports.
  */
@@ -50,6 +50,13 @@ const ownedDeclaration = (
   host: ts.ModuleResolutionHost
 ): ts.ResolvedModuleFull | undefined => {
   if (!declaration || !implementation) return declaration
+  // Local application modules have no obligation to sit inside a package.
+  // TypeScript's matching .d.ts/.d.mts/.d.cts sibling is the explicit file
+  // contract, unlike an unrelated @types package. Keep the match exact: two
+  // files merely lacking package metadata do not establish ownership.
+  const declaredFile = resolve(declaration.resolvedFileName)
+  const sibling = declaredFile.replace(/\.d\.ts$/, '.js').replace(/\.d\.mts$/, '.mjs').replace(/\.d\.cts$/, '.cjs')
+  if (sibling !== declaredFile && sibling === resolve(implementation.resolvedFileName)) return declaration
   const declaredPackage = packageRootOf(declaration.resolvedFileName, host)
   const implementedPackage = packageRootOf(implementation.resolvedFileName, host)
   return declaredPackage !== undefined && declaredPackage === implementedPackage ? declaration : undefined

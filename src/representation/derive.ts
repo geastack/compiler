@@ -2900,6 +2900,7 @@ export const createRepresentationDeriver = (
             protocol: bound.protocol,
             version: bound.version,
             native: bound.native,
+            referenceIdentity: binding.referenceIdentityOf?.(bound.native) === true,
             bases: binding.basesOf(bound.native),
             viewsFrom: binding.viewsInto?.(bound.native) ?? new Map(),
             call,

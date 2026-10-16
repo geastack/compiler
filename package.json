@@ -45,8 +45,9 @@
   },
   "scripts": {
     "test:cli-plugins": "node --test test/cli-plugins.mjs",
-    "test:gea-host-namespace-members": "node --test test/gea-host-namespace-members.mjs",
+    "test:gea-host-namespace-members": "node --test test/gea-host-namespace-members.mjs test/host-member-namespace-receiver.mjs",
     "test:allocation-runtime": "node test/allocation-runtime.mjs",
+    "test:native-microtask-lifetime": "node test/native-microtask-lifetime.mjs",
     "test:compact-runtime": "node test/compact-runtime.mjs",
     "test:stored-listener-native-flow": "node test/stored-listener-native-flow.mjs",
     "test:native-typed-field-read": "node test/native-typed-field-read.mjs",

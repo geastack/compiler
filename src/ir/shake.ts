@@ -293,12 +293,10 @@ interface BodySlice {
  *   proof normalization already authenticated. A written constructor is a
  *   `FunctionId`; a class that relies on the implicit one has no source
  *   function to name, so the proof carries the declaration instead.
- * - `evaluated` is the class OBJECT surviving as a value. `allocate-constructor`
- *   renders a carrier holding `&gea_construct_<C>_thunk`
- *   (`emit-callable.ts`'s `emitAllocateConstructor`), so a live class evaluation
- *   demands the construction whether or not any site in this unit calls it --
- *   the value can be `new`ed through the carrier, and the thunk must have a
- *   definition regardless.
+ * - `evaluated` is a class object with a reachable construct entry. A
+ *   definition-only allocation carries the semantic construction deferral
+ *   through IR certification; it retains static state and evaluation identity
+ *   without demanding a constructor body or thunk.
  *
  * `open` is the fail-open arm: a `new` whose target proof is open reaches
  * whatever the callee turns out to hold, so every constructor in the program
@@ -452,7 +450,7 @@ const sliceBody = (
       if (copy !== undefined) readCells.add(copy)
     }
     if (operation.kind === 'allocate-callable') citedFunctions.add(operation.functionId)
-    if (operation.kind === 'allocate-constructor') evaluatedClasses.add(operation.declaration)
+    if (operation.kind === 'allocate-constructor' && !operation.constructionDeferred) evaluatedClasses.add(operation.declaration)
     if (operation.kind === 'construct') {
       const targets =
         operation.target.kind === 'exact'

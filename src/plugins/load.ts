@@ -1,3 +1,4 @@
+import { readNativeIterableProviders } from './native-iterable-providers.js'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
@@ -83,6 +84,8 @@ const optionalCapabilities = new Set([
   'commonJsBuiltinModules',
   'commonJsBuiltinModuleSources',
   'nativeTypesByDeclaration',
+  'nativeReferenceIdentities',
+  'nativeIterableProviders',
   'hostSingletonDeclarations',
   'hostInvocations',
   'hostInstanceTests',
@@ -124,13 +127,26 @@ const validateInstance = (value: unknown): PluginInstance => {
   for (const key of ['hostMethodBindings']) {
     if (capabilities[key] !== undefined) checkShape(capabilities[key], new Map(), `capabilities.${key}`)
   }
-  for (const key of ['declarationModules', 'hostArraySnapshotFunctions', 'hostNativeArrayFunctions', 'parallelRegionEntries']) {
+  for (const key of [
+    'declarationModules',
+    'hostArraySnapshotFunctions',
+    'hostNativeArrayFunctions',
+    'parallelRegionEntries',
+    'nativeReferenceIdentities'
+  ]) {
     if (capabilities[key] !== undefined) checkShape(capabilities[key], new Set(), `capabilities.${key}`)
   }
   for (const key of ['hostFunctions', 'nativeTypes', 'nativeConstants', 'hostNamespaceRootTypes']) {
     for (const [name, spelling] of capabilities[key] as Map<unknown, unknown>) {
       if (typeof name !== 'string' || typeof spelling !== 'string')
         throw new Error(`invalid PluginInstance: capabilities.${key} must map strings to strings`)
+    }
+  }
+  if (capabilities['nativeIterableProviders'] !== undefined) readNativeIterableProviders(capabilities['nativeIterableProviders'])
+  if (capabilities['nativeReferenceIdentities'] !== undefined) {
+    for (const native of capabilities['nativeReferenceIdentities'] as Set<unknown>) {
+      if (typeof native !== 'string' || native.length === 0)
+        throw new Error('invalid PluginInstance: nativeReferenceIdentities must contain nonempty strings')
     }
   }
   for (const [name, lines] of capabilities['hostPreambles'] as Map<unknown, unknown>) {

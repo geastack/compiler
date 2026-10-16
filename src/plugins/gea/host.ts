@@ -1,3 +1,4 @@
+import { readNativeIterableProviders, type NativeIterableProvider } from '../native-iterable-providers.js'
 import { createHostPackageLoader } from '../host-package.js'
 import { dirname, resolve } from 'node:path'
 import type { CommonJsWrapperDeclaration, NativeHostFunctionDeclaration, PluginOptions } from '../model.js'
@@ -40,6 +41,8 @@ export interface GeaMemberBinding {
 interface GeaHostShimSlice {
   readonly commonJsGlobals?: Readonly<Record<string, CommonJsWrapperDeclaration>>
   readonly nativeTypes: Readonly<Record<string, string>>
+  readonly nativeReferenceIdentities?: readonly string[]
+  readonly nativeIterableProviders?: Readonly<Record<string, NativeIterableProvider>>
   readonly nativeViews?: Readonly<Record<string, Readonly<Record<string, string>>>>
   /**
    * `new <AmbientConstructor>(...)` spellings, keyed by the ambient
@@ -500,13 +503,19 @@ export const geaHostNamespacePropertySetters = (): ReadonlyMap<string, string> =
 /** The host's free functions, by the name the program writes. */
 export const geaHostFunctions = (): ReadonlyMap<string, string> => flatTable(geaShims()?.embeddedHostFunctions)
 
+/** The declaration authority already selected for this host's native signatures. */
+export const geaCoreDeclarationFileName = (options?: PluginOptions): string =>
+  resolve(
+    options?.get('gea.native-signature-core-root') ??
+      process.env.GEA_CORE_DIR ??
+      dirname(packageLoader.resolve('@geastack/core/package.json')),
+    'index.d.ts'
+  )
+
 export const geaNativeFunctionDeclarations = (options: PluginOptions): readonly NativeHostFunctionDeclaration[] => {
   const sources = geaShims()?.nativeFunctionSignatureSources ?? {}
   if (Object.keys(sources).length === 0) return []
-  const coreRoot =
-    options.get('gea.native-signature-core-root') ??
-    process.env.GEA_CORE_DIR ??
-    dirname(packageLoader.resolve('@geastack/core/package.json'))
+  const coreRoot = dirname(geaCoreDeclarationFileName(options))
   const functions = geaHostFunctions()
   return Object.entries(sources).map(([name, source]) => {
     const cppFunction = functions.get(name)
@@ -988,4 +997,21 @@ export const geaElementTextLeafTags = (): readonly string[] => {
     if (typeof tag === 'string' && tag.length > 0) tags.add(tag.toLowerCase())
   }
   return [...tags]
+}
+
+/** Identity is declared by the native package, never guessed from handle spelling. */
+export const geaNativeReferenceIdentities = (): ReadonlySet<string> => {
+  const values = geaShims()?.nativeReferenceIdentities
+  if (values === undefined) return new Set()
+  if (!Array.isArray(values) || !values.every((value) => typeof value === 'string' && value.length > 0)) {
+    throw new Error('gea nativeReferenceIdentities must be a string array')
+  }
+  return new Set(values)
+}
+
+/** Provider metadata is installed by the owning host package, never inferred from a collection name. */
+export const geaNativeIterableProviders = (): ReadonlyMap<string, NativeIterableProvider> => {
+  const values = geaShims()?.nativeIterableProviders
+  if (values === undefined) return new Map()
+  return readNativeIterableProviders(new Map(Object.entries(values)))
 }

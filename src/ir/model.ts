@@ -1,3 +1,4 @@
+import type { NativeIterableReceipt } from '../semantics/model/native-iterable.js'
 import type { DeclarationId, FunctionId, IrValueId, OperationId, PhysicalBodyId, RegionId, SemanticResultId } from '../identity/ids.js'
 import type { CallableAbi, Representation } from '../representation/model.js'
 import type { ConstantLiteral } from '../semantics/model/operands.js'
@@ -1092,6 +1093,8 @@ export interface BindCallableOperation extends IrOperationBase {
 export interface AllocateConstructorOperation extends IrOperationBase {
   readonly kind: 'allocate-constructor'
   readonly declaration: DeclarationId
+  /** Exact semantic proof: this evaluation needs identity/static state but no construct entry. */
+  readonly constructionDeferred?: true
   /** Same status as `AllocateCallableOperation.captures` -- see its comment. */
   readonly captures: readonly IrOperand[]
   /** The evaluated superclass object, whose prototype belongs to that evaluation rather than its declaration. */
@@ -1364,6 +1367,7 @@ export interface MergeLiveArmRebuildOperation extends IrOperationBase {
  * `array-object` receiver this shape is reached with.
  */
 export interface GetIteratorOperation extends IrOperationBase {
+  readonly nativeIterable?: NativeIterableReceipt
   readonly kind: 'get-iterator'
   /** GetIterator captures next once on the returned iterator, before the first step. */
   readonly nativeNextMethodRead?: import('./native-iterator-field-views.js').NativeIteratorFieldRead
@@ -1887,6 +1891,8 @@ export interface IrIteratorCloseRegion {
   readonly dismissTargets: readonly IrBlockId[]
   /** Finite patterns close only if no step has already observed exhaustion. */
   readonly onlyIfOpen: boolean
+  /** Certified finite pattern: IteratorStepValue abrupt completion marks record done. */
+  readonly completeOnStepAbrupt?: true
   /**
    * Where the loop BODY starts, or `null` for a finite pattern.
    *

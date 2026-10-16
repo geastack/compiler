@@ -7,7 +7,13 @@ import type { CandidateContribution, FamilyProducer } from '../../semantics/norm
 import type { ProducerContext } from '../../semantics/normalize/producer-context.js'
 import { createClassLifecycleProducer } from '../../semantics/normalize/producers/class-lifecycle.js'
 import { mintOperationId, mintResult, operand } from '../../semantics/normalize/producers/mint.js'
-import { derivesFromGeaComponent, derivesFromGeaReactiveBase, geaMountedElementMemberName, geaRenderMemberName } from './contract.js'
+import {
+  derivesFromGeaComponent,
+  derivesFromGeaReactiveBase,
+  geaMountedElementMemberName,
+  geaRenderMemberName,
+  type GeaProviderAuthority
+} from './contract.js'
 
 /**
  * Which classes are gea's, by declaration -- not by the shape of one element
@@ -138,7 +144,8 @@ const mountedElementField = (
 export const createGeaComponentClassProducer = (
   context: ProducerContext,
   componentClasses: Set<DeclarationId>,
-  reactiveFields: GeaReactiveFields
+  reactiveFields: GeaReactiveFields,
+  rawAuthority?: GeaProviderAuthority
 ): FamilyProducer => {
   const core = createClassLifecycleProducer(context)
   return {
@@ -161,7 +168,8 @@ export const createGeaComponentClassProducer = (
         const key = node.name.text
         for (const operation of contribution.operations) {
           if (operation.family !== 'class-lifecycle' || operation.event !== 'define-field') continue
-          if (!enclosingClassDerives(context, node, derivesFromGeaReactiveBase)) continue
+          if (!enclosingClassDerives(context, node, (checker, instance) => derivesFromGeaReactiveBase(checker, instance, rawAuthority)))
+            continue
           const owned = reactiveFields.get(operation.classDeclaration) ?? new Set<string>()
           owned.add(key)
           reactiveFields.set(operation.classDeclaration, owned)
@@ -189,7 +197,7 @@ export const createGeaComponentClassProducer = (
         if (!classNode.name) continue
         const symbol = context.checker.getSymbolAtLocation(classNode.name)
         const instance = symbol && context.checker.getDeclaredTypeOfSymbol(symbol)
-        if (instance && derivesFromGeaComponent(context.checker, instance)) {
+        if (instance && derivesFromGeaComponent(context.checker, instance, rawAuthority)) {
           componentClasses.add(operation.classDeclaration)
           const mounted = mountedElementField(context, candidate, operation.classDeclaration, classNode.name, instance)
           if (mounted) published.push(mounted)

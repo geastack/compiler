@@ -1,3 +1,4 @@
+import type { NativeIterableProvider } from './native-iterable-providers.js'
 import type { SlotHook } from '../projection/slots.js'
 import type { DeclarationId, SemanticResultId } from '../identity/ids.js'
 import type { FamilyProducer } from '../semantics/normalize/contribution.js'
@@ -192,6 +193,10 @@ export interface PluginCapabilities {
    * matching a name by guesswork.
    */
   readonly nativeTypes: ReadonlyMap<string, string>
+  /** Native carriers with a stable identity() token retained by carrier copies. */
+  readonly nativeReferenceIdentities?: ReadonlySet<string>
+  /** Installed factory metadata; source integrity and IR certification are separate requirements. */
+  readonly nativeIterableProviders?: ReadonlyMap<string, NativeIterableProvider>
   /**
    * Host singleton values authenticated by exact declaration identity.
    *

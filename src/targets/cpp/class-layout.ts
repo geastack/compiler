@@ -1,3 +1,4 @@
+import { samePhysicalCarrier } from '../../representation/physical-carrier.js'
 import type { DeclarationId, FunctionId, IrValueId, RegionId } from '../../identity/ids.js'
 import type { CallOperation, GetOperation, IrBody, IrOperand } from '../../ir/model.js'
 import { allOperationsOf } from '../../ir/model.js'
@@ -667,6 +668,8 @@ export function* reachableClassMethodsOf(
  * `translation-unit.ts`).
  */
 export interface ClassStaticFieldStorage {
+  /** Typed own-property view, instantiated per evaluated constructor state. */
+  readonly viewStruct: string
   readonly name: string
   readonly storageName?: string
   readonly representation: Representation
@@ -770,7 +773,7 @@ export const censusClassStaticFieldStorage = (
   readonly conflicts: readonly string[]
 } => {
   const census = censusClassStaticFieldSlots(bodies, classes)
-  const storage = new Map<DeclarationId, ReadonlyMap<string, ClassStaticFieldStorage>>()
+  const storage = new Map<DeclarationId, Map<string, ClassStaticFieldStorage>>()
   for (const [declaration, slots] of census.slots)
     storage.set(
       declaration,
@@ -779,13 +782,46 @@ export const censusClassStaticFieldStorage = (
           key,
           {
             name: cppClassStaticFieldName(declaration, key) + (realm ? '()' : ''),
+            viewStruct: `${cppClassStaticFieldName(declaration, key)}_view`,
             storageName: cppClassStaticFieldName(declaration, key),
             representation
           }
         ])
       )
     )
-  return { storage, conflicts: census.conflicts }
+  // A typed own-property view is shared along one inheritance/property
+  // family, while each evaluated constructor owns a separate runtime record.
+  // Otherwise an inherited read would search Base with Derived's unrelated
+  // type tag and miss the base property before the first own write.
+  const conflicts = [...census.conflicts]
+  for (const [declaration, slots] of storage) {
+    for (const [key, slot] of slots) {
+      let viewStruct = slot.viewStruct
+      const seen = new Set<DeclarationId>([declaration])
+      let ancestor = classes.get(declaration)?.base ?? null
+      while (ancestor !== null && !seen.has(ancestor)) {
+        seen.add(ancestor)
+        const inheritedLayout = classes.get(ancestor)
+        if (inheritedLayout?.staticAccessors.some((member) => member.key === key) ||
+            inheritedLayout?.staticMethods.some((member) => member.key === key)) {
+          conflicts.push(`${declaration}.${key}: inherited static method/accessor barrier needs property dispatch`)
+          break
+        }
+        const inherited = storage.get(staticStorageOwnerOf(classes, ancestor))?.get(key)
+        if (inherited) {
+          if (representationKey(inherited.representation) !== representationKey(slot.representation) ||
+              !samePhysicalCarrier(inherited.representation, slot.representation)) {
+            conflicts.push(`${declaration}.${key}: inherited static property carriers disagree`)
+            break
+          }
+          viewStruct = inherited.viewStruct
+        }
+        ancestor = classes.get(ancestor)?.base ?? null
+      }
+      slots.set(key, { ...slot, viewStruct })
+    }
+  }
+  return { storage, conflicts }
 }
 
 // `classFamilyOverridesOf` moved to `projection/dispatch.ts`: it is a pure

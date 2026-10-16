@@ -139,7 +139,7 @@ type KeyResolution =
   | { readonly kind: 'key'; readonly computed: boolean; readonly source: OperandSource; readonly type: StructuralTypeId }
   | { readonly kind: 'blocked'; readonly reason: string; readonly missingPrimitive: PrimitiveFamily | null }
 
-const keyOf = (node: AccessNode, context: ProducerContext): KeyResolution => {
+export const keyOf = (node: AccessNode, context: ProducerContext): KeyResolution => {
   // A static key is a String, whatever the property it names holds. Asking the
   // checker for the type at the name node answers a different question -- it
   // gives the *property's* type -- and taking that answer spells the key with

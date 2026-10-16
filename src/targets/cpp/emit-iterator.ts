@@ -1720,10 +1720,26 @@ export const renderIteratorCloseRegion = (
     }
     if (id !== region.entry) lines.push(`${rendering.labelOf(rendering.labels, id)}:`)
     if (closingFlag !== null && id === splitEntry) lines.push(`${closingFlag} = true;`)
-    for (const operation of block.operations)
+    for (const operation of block.operations) {
+      const completesOnAbrupt = region.completeOnStepAbrupt === true && operation.kind === 'iterator-next' &&
+        operation.iterator.value === region.iterator.value
+      if (completesOnAbrupt) lines.push('try {')
       rendering.emitOperation(ctx, lines, operation, (targetLines, terminator) =>
         scopedRendering.emitTerminator(ctx, targetLines, rendering.labels, rendering.isSingleBlock, terminator)
       )
+      if (completesOnAbrupt) {
+        const iterator = region.iterator
+        const done = iterator.representation.kind === 'dynamic' ? ctx.dynamicIteratorDoneStates.get(iterator.value) : null
+        if (iterator.representation.kind === 'dynamic' && !done)
+          throw createCppEmitBlockedError('call-abi:finite-iterator-close-state', 'has no dynamic iterator exhaustion state')
+        if (iterator.representation.kind !== 'dynamic' && iterator.representation.kind !== 'iterator')
+          throw createCppEmitBlockedError('call-abi:finite-iterator-close-state', 'has no mutable typed iterator exhaustion state')
+        lines.push('} catch (const gea::Value&) {')
+        lines.push(done ? `${done} = true;` : `${operandText(ctx, iterator)}.setDone(true);`)
+        lines.push('throw;')
+        lines.push('}')
+      }
+    }
     for (const write of rendering.mergeWrites.get(id) ?? []) lines.push(`${write.name} = ${operandText(ctx, write.value)};`)
     scopedRendering.emitTerminator(ctx, lines, rendering.labels, rendering.isSingleBlock, block.terminator)
   }

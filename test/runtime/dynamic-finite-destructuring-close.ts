@@ -1,7 +1,7 @@
 //! expect: first:1:first-close
 //! expect: empty:empty-close
 //! expect: exhausted:1,undefined:open
-//! expect: abrupt:abrupt-close:step-failure
+//! expect: abrupt:open:step-failure
 //! expect: rest:1,2,3:open
 //! emitted-has: gea::runtime::iterator::CompletionGuard
 //! emitted-has: gea::runtime::iterator::close

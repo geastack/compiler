@@ -197,6 +197,7 @@ export const operandsOfIrOperation = (operation: IrOperation): readonly IrOperan
     case 'constant':
       return []
     case 'binding-read':
+      return []
     case 'binding-renew':
       return []
     case 'parameter':

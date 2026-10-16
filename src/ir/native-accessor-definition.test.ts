@@ -9,7 +9,7 @@ import { recipeClosureOf } from '../conversion/recipe-closure.js'
 import { declarationId, functionId, type IrValueId } from '../identity/ids.js'
 import { abiOfCallee } from '../projection/callee.js'
 import { recordFieldsOfShape } from '../projection/fields.js'
-import { abiKey, passingOf, representationKey, type CallableAbi, type Representation } from '../representation/model.js'
+import { abiKey, passingOf, representationKey, type CallableAbi, type RecordField, type Representation } from '../representation/model.js'
 import { createCppConversionRegistry } from '../targets/cpp/conversions.js'
 import { allOperationsOf, type CallOperation, type IrNonTerminatorOperation, type IrOperand } from './model.js'
 import { resultOfIrOperation } from './queries.js'
@@ -396,4 +396,170 @@ test('reinstallation refuses changed descriptor fields and unrelated snapshot so
     ),
     false
   )
+})
+
+const dictionaryKeySource = `
+const target: Record<string, any> = {};
+let current = 1;
+function install(owner: Record<string, any>, key: string, offset: number) {
+  Object.defineProperty(owner, key, {
+    enumerable: true,
+    configurable: true,
+    get: () => current + offset
+  });
+}
+install(target, 'first', 10);
+install(target, 'second', 20);
+console.log(String(target.first));
+current = 2;
+console.log(String(target.second));
+const reflected = Object.getOwnPropertyDescriptor(target, 'first');
+console.log(String(reflected?.get?.()));
+const retained = reflected?.get;
+console.log(String(reflected?.enumerable));
+console.log(String(reflected?.configurable));
+install(target, 'first', 100);
+current = 3;
+console.log(String(target.first));
+console.log(String(target.second));
+console.log(String(retained?.()));
+console.log(String(Object.getOwnPropertyDescriptor(target, 'missing')));
+`
+
+test('SSA string dictionary keys retain exact native Functions and dynamic entry frames', () => {
+  const result = compileSource(dictionaryKeySource)
+  assert.equal(result.diagnostics.clean, true, JSON.stringify(result.diagnostics.diagnostics))
+  assert.notEqual(result.source, null, JSON.stringify({ lowering: result.loweringBlockers, refusals: result.refusals }))
+  assert.match(result.source!, /gea::detail::nativeDocumentDefine\(/)
+  assert.match(result.source!, /gea::detail::nativeDocumentDescriptor\(/)
+  const context = receiptContext(result)
+  const definitions = context.operations.filter(
+    (operation): operation is CallOperation => operation.kind === 'call' && operation.nativeAccessorDefinition?.keyText === null
+  )
+  assert.ok(definitions.length > 0)
+  for (const definition of definitions) {
+    const recipe = definition.nativeAccessorDefinition!
+    assert.equal(definition.arguments[0]?.representation.kind, 'dictionary')
+    assert.equal(recipe.key, definition.arguments[1]?.value)
+    assert.equal(recipe.keyText, null)
+    assert.ok(recipe.halves.every((half) => half.source.kind !== 'dynamic' && half.observe !== null))
+    assert.equal(definition.objectValueConversions?.some((conversion) => conversion.field === 'get') ?? false, false)
+    assert.equal(
+      nativeAccessorDefinitionMatches(
+        nativeAccessorDefinitionOf(definition, context.semanticOf(definition), context.input, context.definitionOf),
+        recipe
+      ),
+      true
+    )
+    assert.equal(nativeAccessorDefinitionMatches(recipe, { ...recipe, keyText: 'first' }), false)
+  }
+  // A runtime dictionary query must retain get/set in its actual result
+  // carrier. Emitting a correct descriptor cannot recover erased fields.
+  const queries = context.operations.filter(
+    (operation): operation is CallOperation => operation.kind === 'call' && operation.intrinsicReflection === 'getOwnPropertyDescriptor'
+  )
+  assert.equal(queries.length, 2, 'both authored descriptor queries must retain their actual intrinsic classification')
+  for (const query of queries) {
+    const queryRepresentation = query.result?.representation
+    const descriptor = queryRepresentation?.kind === 'optional' ? queryRepresentation.payload : queryRepresentation
+    assert.ok(descriptor)
+    const fields: readonly RecordField[] | null =
+      descriptor.kind === 'native-record-ref'
+        ? recordFieldsOfShape(result.representations.deriver, descriptor.shapeId)
+        : descriptor.kind === 'record' || descriptor.kind === 'record-with-index'
+          ? descriptor.fields
+          : null
+    assert.ok(fields, JSON.stringify(descriptor))
+    for (const key of ['get', 'set'] as const) {
+      const field: RecordField | undefined = fields.find((candidate) => candidate.key === key)
+      assert.ok(field, `missing ${key} in the actual descriptor layout`)
+      assert.equal(field.required, false)
+      assert.equal(field.value.kind, 'optional')
+      const carried = field.value.kind === 'optional' ? field.value.payload : field.value
+      const abi = abiOfCallee(carried)
+      assert.ok(abi, `${key} must retain an actual callable convention`)
+      assert.equal(abi.receiver, null)
+      assert.equal(abi.restFrom, null)
+      assert.deepEqual(
+        abi.parameters.map((parameter) => parameter.value),
+        key === 'get' ? [] : [{ kind: 'dynamic', reason: 'declared-any-never-narrowed' }]
+      )
+      assert.deepEqual(abi.result, key === 'get' ? { kind: 'dynamic', reason: 'declared-any-never-narrowed' } : { kind: 'void' })
+    }
+  }
+  // A later literal query cannot claim which iteration installed that key.
+  for (const query of queries)
+    assert.equal(nativeAccessorObservationOf(query, context.semanticOf(query), context.input, context.definitionOf), null)
+})
+
+test('SSA-key accessor receipts reject substituted arguments and unsupported receiver storage', () => {
+  const result = compileSource(dictionaryKeySource)
+  const context = receiptContext(result)
+  const definition = context.operations.find(
+    (operation): operation is CallOperation => operation.kind === 'call' && operation.nativeAccessorDefinition?.keyText === null
+  )
+  assert.ok(definition)
+  const semantic = context.semanticOf(definition)
+  const altered = (index: number, argument: IrOperand): CallOperation => ({
+    ...definition,
+    arguments: definition.arguments.map((existing, ordinal) => (ordinal === index ? argument : existing))
+  })
+  const key = definition.arguments[1]!
+  assert.equal(
+    nativeAccessorDefinitionOf(altered(1, { ...key, value: 'foreign-key' as IrValueId }), semantic, context.input, context.definitionOf),
+    null
+  )
+  assert.equal(
+    nativeAccessorDefinitionOf(
+      altered(0, { ...definition.arguments[0]!, value: 'foreign-owner' as IrValueId }),
+      semantic,
+      context.input,
+      context.definitionOf
+    ),
+    null
+  )
+  const unsupported: Representation[] = [
+    receiver,
+    { kind: 'record', shapeId: 'not-a-dictionary', fields: [], accessors: [], ownership: 'shared-refcount' },
+    { kind: 'native-handle', protocol: 'opaque', version: 1, native: null, bases: [], call: null, construct: null },
+    { kind: 'dynamic', reason: 'declared-any-never-narrowed' },
+    { kind: 'dictionary', key: 'number', value: { kind: 'dynamic', reason: 'declared-any-never-narrowed' }, ownership: 'shared-refcount' },
+    { kind: 'dictionary', key: 'symbol', value: { kind: 'dynamic', reason: 'declared-any-never-narrowed' }, ownership: 'shared-refcount' },
+    { kind: 'dictionary', key: 'string', value: number, ownership: 'shared-refcount' }
+  ]
+  for (const representation of unsupported)
+    assert.equal(
+      nativeAccessorDefinitionOf(
+        altered(0, { ...definition.arguments[0]!, representation }),
+        semantic,
+        context.input,
+        context.definitionOf
+      ),
+      null
+    )
+  assert.equal(
+    nativeAccessorDefinitionOf(altered(1, { ...key, representation: number }), semantic, context.input, context.definitionOf),
+    null
+  )
+})
+
+test('typed data descriptor specialization does not borrow arbitrary dictionary callable halves', () => {
+  const result = compileSource(
+    "const owner = { score: 42 }; const descriptor = Object.getOwnPropertyDescriptor(owner, 'score'); console.log(String(descriptor?.value));"
+  )
+  assert.ok(result.certificate, JSON.stringify(result.refusals))
+  const context = receiptContext(result)
+  const query = context.operations.find(
+    (operation): operation is CallOperation => operation.kind === 'call' && operation.intrinsicReflection === 'getOwnPropertyDescriptor'
+  )
+  assert.ok(query)
+  const representation = query.result?.representation
+  const descriptor = representation?.kind === 'optional' ? representation.payload : representation
+  assert.ok(descriptor?.kind === 'record')
+  assert.equal(
+    descriptor.fields.some((field) => field.key === 'get' || field.key === 'set'),
+    false
+  )
+  const value = descriptor.fields.find((field) => field.key === 'value')?.value
+  assert.deepEqual(value, { kind: 'scalar', domain: 'number' })
 })

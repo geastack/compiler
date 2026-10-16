@@ -559,7 +559,15 @@ export const hostMemberReadsOf = (
     receiver.representation.kind === 'optional'
       ? { value: `${receiver.value}:present` as IrValueId, representation: receiver.representation.payload }
       : receiver
-  const receiverOf = (receiver: IrOperand): IrOperand | null => (hostClassReads.has(receiver.value) ? null : presentView(receiver))
+  const receiverOf = (receiver: IrOperand): IrOperand | null => {
+    // A certified, present namespace is a host path, not a runtime receiver.
+    // Preserve the census's identity instead of asking operandText to invent
+    // an object for it when the deferred method is finally called. A row
+    // requiring {receiver} still fails closed against this null spelling.
+    const namespaces = body.hostNamespaceCensus
+    const namespacePath = namespaces?.reads.has(receiver.value) && namespaces.definitelyPresent.has(receiver.value)
+    return hostClassReads.has(receiver.value) || namespacePath ? null : presentView(receiver)
+  }
   for (const block of body.blocks.values()) {
     for (const operation of allOperationsOf(block)) {
       if (operation.kind === 'get') {

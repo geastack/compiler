@@ -113,6 +113,8 @@ export interface ClassAccessor {
 export interface ClassLayout {
   /** Proven layout demand with no reachable class evaluation/construction. */
   readonly layoutOnly?: boolean
+  /** Class definition runs, but the source construction inventory is empty. */
+  readonly constructionDeferred?: boolean
   readonly nativeStorage?: NativeClassStorage
   /** Typed own-property shadows, initially absent; prototype methods remain methods. */
   readonly methodOverrides?: readonly RecordField[]
@@ -585,6 +587,7 @@ const collapseSpecializations = (
     merged.set(root, {
       declaration: root,
       ...(group.every((layout) => layout.layoutOnly) ? { layoutOnly: true } : {}),
+      ...(group.every((layout) => layout.constructionDeferred) ? { constructionDeferred: true } : {}),
       base: group.find((layout) => layout.base !== null)?.base ?? null,
       ...(group.find((layout) => layout.base !== null)?.prototypeBase ? { prototypeBase: true as const } : {}),
       ...(group.every((layout) => layout.uninstantiable) ? { uninstantiable: true as const } : {}),
@@ -747,6 +750,7 @@ export const projectClasses = (input: ClassProjectionInput): ReadonlyMap<Declara
   const instances = new Map<DeclarationId, Representation | null>()
   const constructors = new Map<DeclarationId, FunctionId | null>()
   const layoutOnly = new Set<DeclarationId>()
+  const constructionDeferred = new Set<DeclarationId>()
   const bases = new Map<DeclarationId, DeclarationId>()
   // The copy id a heritage expression's binding read names, per class id.
   const baseCopies = new Map<DeclarationId, DeclarationId>()
@@ -876,9 +880,10 @@ export const projectClasses = (input: ClassProjectionInput): ReadonlyMap<Declara
       const allocated = operation.classDeclaration === undefined ? null : genericRootOf(operation.classDeclaration)
       const members = carrier?.kind === 'constructor-family' ? carrier.members : []
       for (const member of members.filter((one) => allocated === null || members.length === 1 || genericRootOf(one) === allocated)) {
-        constructs.set(member, abi)
+        if (operation.classConstructionDeferred) constructionDeferred.add(member)
+        constructs.set(member, operation.classConstructionDeferred ? null : abi)
         instances.set(member, abi?.result ?? null)
-        constructors.set(member, constructorBodies.get(member) ?? constructorBodyOfCopy(operation) ?? constructorBodyOfRoot(member))
+        constructors.set(member, operation.classConstructionDeferred ? null : constructorBodies.get(member) ?? constructorBodyOfCopy(operation) ?? constructorBodyOfRoot(member))
       }
       if (operation.classDeclaration !== undefined && operation.functionName !== undefined)
         names.set(operation.classDeclaration, operation.functionName)
@@ -1038,6 +1043,7 @@ export const projectClasses = (input: ClassProjectionInput): ReadonlyMap<Declara
     layouts.set(declaration, {
       declaration,
       ...(layoutOnly.has(declaration) ? { layoutOnly: true } : {}),
+      ...(constructionDeferred.has(declaration) ? { constructionDeferred: true } : {}),
       base: bases.get(declaration) ?? null,
       ...(prototypeBases.has(declaration) && bases.has(declaration) ? { prototypeBase: true as const } : {}),
       ...(input.uninstantiable?.has(declaration) ? { uninstantiable: true as const } : {}),

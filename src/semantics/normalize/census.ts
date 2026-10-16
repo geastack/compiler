@@ -40,6 +40,7 @@ export interface CensusCandidate {
   readonly caller: SemanticCaller
   /** Reachability requires this class's shape but no runtime definition. */
   readonly classLayoutOnly?: boolean
+  readonly classConstructionDeferred?: boolean
   /**
    * Which monomorphized copy of its enclosing generic this candidate belongs
    * to; empty when it is not inside one.
@@ -509,7 +510,7 @@ export const familiesOf = (node: ts.Node, paths: NamespacePathCensus): readonly 
   // stated convention (`class-lifecycle.ts`'s `writtenConstructorAllocationOf`).
   if (
     ts.isClassExpression(node) &&
-    (node.heritageClauses?.some((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword) ||
+    (node.name !== undefined || node.heritageClauses?.some((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword) ||
       node.members.some((member) => ts.isConstructorDeclaration(member) && member.body !== undefined))
   ) {
     return primary ? [primary, 'class-lifecycle'] : ['class-lifecycle']
@@ -523,6 +524,15 @@ export const familiesOf = (node: ts.Node, paths: NamespacePathCensus): readonly 
   return primary ? [primary, 'control'] : ['control']
 }
 
+/** Computed element names execute in the enclosing class-definition context. */
+export const isClassElementNameEvaluation = (node: ts.Node, owner: ts.Node): boolean =>
+  (ts.isMethodDeclaration(owner) ||
+    ts.isGetAccessorDeclaration(owner) ||
+    ts.isSetAccessorDeclaration(owner) ||
+    ts.isPropertyDeclaration(owner)) &&
+  ts.isComputedPropertyName(owner.name) &&
+  isWithin(node, owner.name)
+
 /** The nearest enclosing function or region that executes this node. */
 const callerOf = (
   node: ts.Node,
@@ -532,7 +542,13 @@ const callerOf = (
 ): SemanticCaller => {
   let current: ts.Node | undefined = node.parent
   while (current) {
+    // A computed name does not enter the member's callable this/scope.
+    if (isClassElementNameEvaluation(node, current)) {
+      current = current.parent
+      continue
+    }
     if (
+      ts.isClassStaticBlockDeclaration(current) ||
       ts.isFunctionDeclaration(current) ||
       ts.isFunctionExpression(current) ||
       ts.isArrowFunction(current) ||
@@ -565,16 +581,6 @@ const callerOf = (
       }
       current = current.parent
       continue
-    }
-    // A static block executes in its own context too, and collapsing it into
-    // the class body or the module body would lose the order in which class
-    // evaluation runs it.
-    if (ts.isClassStaticBlockDeclaration(current)) {
-      const id = regionId(identities.declarationIdOf(current, path), 'static-block')
-      if (!regions.has(id)) {
-        regions.set(id, { id, role: 'static-block', bodyNode: identities.nodeIdOf(current, path), caller: null })
-      }
-      return { kind: 'region', regionId: id }
     }
     current = current.parent
   }
@@ -625,6 +631,7 @@ export const censusProgram = (
           family,
           caller,
           ...(owner && reachable.classIsLayoutOnly(owner) ? { classLayoutOnly: true } : {}),
+          ...(owner && reachable.classConstructionIsReachable?.(owner) === false ? { classConstructionDeferred: true } : {}),
           evaluationOrdinal: nextOrdinal(caller),
           specialization: path
         })

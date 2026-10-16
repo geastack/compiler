@@ -1,3 +1,6 @@
+import { finiteIteratorCloseRegionMatches } from './finite-iterator-close.js'
+import { nativeIterableReceiptMatches, type NativeIterableCertificationInput } from './native-iterable.js'
+import { classConstructionStatusMatches } from './class-construction-status.js'
 import {
   nativeCallableReadonlySetsOf,
   nativeCallableReadonlySetMatches,
@@ -185,6 +188,8 @@ export interface CapabilityDemand {
 }
 
 export interface CertifyInput {
+  readonly nativeIterableAuthorities?: NativeIterableCertificationInput['nativeIterableAuthorities']
+  readonly nativeIterableProviders?: NativeIterableCertificationInput['nativeIterableProviders']
   readonly programConversionRecipes?: readonly ProgramConversionRecipe[]
   readonly representations?: readonly Representation[]
   readonly hosts?: HostSpellings
@@ -997,6 +1002,8 @@ const ownDemandsOf = (operation: IrOperation, ctx: CertifyContext): CapabilityDe
     case 'get-iterator':
     case 'iterator-next':
     case 'iterator-close': {
+      if (operation.kind === 'get-iterator' && !nativeIterableReceiptMatches(operation, ctx.semanticOperationOf(operation.lineage), ctx))
+        return [{ key: 'call-abi:native-iterable-source-proof', verdict: 'missing', detail: 'native iterator receipt lacks exact independent source, provider and typed cursor authority' }]
       const sourceIgnores = (functionId: FunctionId): boolean => {
         const variants = [...ctx.bodies.values()].filter((body) => body.sourceOwner === functionId)
         return variants.length > 0 && variants.every(nativeBodyIgnoresLogicalReceiver)
@@ -1036,10 +1043,22 @@ const ownDemandsOf = (operation: IrOperation, ctx: CertifyContext): CapabilityDe
           : [])
       ]
     }
-    case 'allocate-constructor':
+    case 'allocate-constructor': {
       // Each captured slot crosses a body boundary in its own ownership; the
       // capture path transports the ownerships the manifest lists and no other.
-      return operation.captures.map((capture) => ({ key: `capture:${captureCapabilityOf(capture.representation)}` }))
+      return [
+        ...operation.captures.map((capture) => ({ key: `capture:${captureCapabilityOf(capture.representation)}` as CapabilityKey })),
+        ...(!classConstructionStatusMatches(operation, ctx.semanticOperationOf(operation.lineage), ctx)
+          ? [
+              {
+                key: 'call-abi:class-construction-status' as CapabilityKey,
+                verdict: 'missing' as const,
+                detail: 'class construct-entry status does not match its exact semantic allocation'
+              }
+            ]
+          : [])
+      ]
+    }
     case 'binding-read':
       return ctx.externalBindings.has(operation.declaration) ? [{ key: 'native-boundary:external-binding' }] : []
     case 'get': {
@@ -2165,8 +2184,11 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
       if (boundary) decide(owner, boundary, ctx)
       for (const demand of embeddedNativeBoundaryDemands(representation)) decide(owner, demand, ctx)
     }
-    for (const region of body.iteratorCloseRegions ?? [])
+    for (const region of body.iteratorCloseRegions ?? []) {
+      if (!finiteIteratorCloseRegionMatches(region, ctx.semanticOperationOf(region.lineage), ctx.definitionOf))
+        decide(owner, { key: 'call-abi:finite-iterator-close-state', verdict: 'missing', detail: 'finite iterator step completion lacks exact source close and iterator lineage authority' }, ctx)
       for (const demand of nativeIteratorFieldDemandsOf(region.iterator, 'return', region.nativeMethodRead, ctx)) decide(owner, demand, ctx)
+    }
     for (const blockId of body.blockOrder) {
       const block = body.blocks.get(blockId)
       if (!block) continue

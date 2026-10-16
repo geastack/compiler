@@ -35,7 +35,7 @@
  *       itself is a fact worth learning.
  *
  *   node scripts/run-oracle-tests.mjs [--dist <dir>] [--only <substring>]
- *        [--files <comma-separated relative paths>] [--list-json]
+ *        [--files <comma-separated relative paths>] [--runtime-files <paths/list-file>] [--list-json]
  *        [--out <json>] [--workers N] [--label <name>]
  *
  * `--list-json` prints the selection instead of running it and `--files` runs
@@ -59,13 +59,15 @@ const flag = (name, fallback) => {
 }
 const dist = resolve(flag('--dist', join(here, 'dist')))
 const only = flag('--only', null)
-const filesList = flag('--files', null)
+const runtimeFiles = flag('--runtime-files', null)
+const filesList = runtimeFiles ?? flag('--files', null)
+if (runtimeFiles && argv.includes('--files')) throw new Error('--runtime-files and --files are mutually exclusive')
 const listJson = argv.includes('--list-json')
 const outPath = flag('--out', null)
 const workers = Math.max(1, Number(flag('--workers', '1')))
 const label = flag('--label', `oracle-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')}`)
 
-const root = join(here, 'test', 'oracle')
+const root = join(here, 'test', runtimeFiles === null ? 'oracle' : 'runtime')
 if (!existsSync(root)) {
   console.error(`no test/oracle directory at ${root}`)
   process.exit(2)
@@ -90,7 +92,7 @@ const walk = (dir) =>
   readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = join(dir, entry.name)
     if (entry.isDirectory()) return walk(path)
-    return entry.isFile() && /\.tsx?$/.test(entry.name) && !entry.name.endsWith('.d.ts') ? [path] : []
+    return entry.isFile() && (runtimeFiles === null ? /\.tsx?$/ : /\.[cm]?[jt]sx?$/).test(entry.name) && !entry.name.endsWith('.d.ts') ? [path] : []
   })
 
 const moduleSpecifier = (node) =>
@@ -128,7 +130,7 @@ const selected = filesList ? namedFiles() : programs.filter((name) => (only ? na
 
 for (const name of selected) {
   if (!programs.includes(name)) {
-    console.error(`not an oracle program: ${name}`)
+    console.error(`not a ${runtimeFiles === null ? 'oracle' : 'runtime'} program: ${name}`)
     process.exit(2)
   }
 }
@@ -233,12 +235,28 @@ const runOnNode = (entry) =>
     for (const file of files) {
       const rel = relative(base, file)
       if (rel.startsWith('..') || isAbsolute(rel)) throw new Error(`module graph escaped its root: ${file}`)
-      const dest = join(dir, rel).replace(/\.tsx?$/, '.js')
+      const dest = join(dir, rel).replace(/\.[cm]?[jt]sx?$/, '.js')
       mkdirSync(dirname(dest), { recursive: true })
-      const js = transpile(readFileSync(file, 'utf8'))
+      let js = transpile(readFileSync(file, 'utf8'))
+      // Runtime sources often omit relative extensions. Resolve the actual
+      // source dependency, then spell its existing transpiled sibling.
+      if (runtimeFiles !== null) {
+        const parsed = ts.createSourceFile(file, js, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS)
+        const replacements = []
+        parsed.forEachChild((node) => {
+          const spec = moduleSpecifier(node)
+          if (!spec?.startsWith('.')) return
+          const resolved = ts.resolveModuleName(spec, file, compilerOptions, host).resolvedModule
+          if (!resolved || resolved.isExternalLibraryImport) throw new Error(`unsupported runtime Node dependency ${spec} from ${file}`)
+          let target = relative(dirname(file), resolved.resolvedFileName).replace(/\.[cm]?[jt]sx?$/, '.js').split(sep).join('/')
+          if (!target.startsWith('.')) target = './' + target
+          replacements.push({ start: node.moduleSpecifier.getStart(parsed), end: node.moduleSpecifier.end, text: JSON.stringify(target) })
+        })
+        for (const replacement of replacements.reverse()) js = js.slice(0, replacement.start) + replacement.text + js.slice(replacement.end)
+      }
       writeFileSync(dest, js)
     }
-    const ran = spawnSync(process.execPath, [join(dir, relative(base, resolve(entry)).replace(/\.tsx?$/, '.js'))], {
+    const ran = spawnSync(process.execPath, [join(dir, relative(base, resolve(entry)).replace(/\.[cm]?[jt]sx?$/, '.js'))], {
       encoding: 'utf8',
       timeout: 60_000
     })
@@ -256,7 +274,7 @@ const runOnNode = (entry) =>
 // 58 it makes a dozen v1-era programs type-invalid TypeScript, which is not a
 // compiler defect either.
 const projectFor = (entry) => {
-  const own = entry.replace(/\.tsx?$/, '.tsconfig.json')
+  const own = entry.replace(/\.[cm]?[jt]sx?$/, '.tsconfig.json')
   return existsSync(own) ? own : project
 }
 

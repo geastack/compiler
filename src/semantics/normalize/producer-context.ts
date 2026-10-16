@@ -1,3 +1,4 @@
+import type { SourceNativeIterable } from './source-native-iterable.js'
 import type { AbsentGlobalCensus } from './absent-globals.js'
 import type { DeadMethodCopies } from './dead-method-copies.js'
 import type { ArgumentsObjectCensus } from './arguments-objects.js'
@@ -52,6 +53,7 @@ import type { SourceCallableReadonlySet } from './flow/source-callable-readonly-
  * them into one.
  */
 export interface ProducerContext {
+  readonly nativeIterableAt?: (source: ts.Expression, consumer: ts.CallExpression | null) => SourceNativeIterable | null
   readonly readonlyCallableSetAt?: (access: ts.PropertyAccessExpression | ts.ElementAccessExpression) => SourceCallableReadonlySet | null
   /** Exact source slots after shared Object.assign and prototype obligations are discharged. `describedKeysOf` is the
    * caller's representation key authority for a source no closed family describes (see `SourceValueSession.ownAssignmentOf`). */
@@ -242,6 +244,9 @@ export interface ProducerContext {
   readonly absentRequirePackageOf: (specifier: string, containingFile: string) => boolean
   /** The Program's canonical source-file object for that resolver's target path. */
   readonly sourceFileOf: (fileName: string) => ts.SourceFile | null
+  /** Actual project-selected automatic JSX runtime, through the same frontend
+   * resolver. Absent/ambiguous per-file overrides carry no provider witness. */
+  readonly jsxRuntimeModuleOf?: (containingFile: string) => ts.SourceFile | null
   /**
    * Which ambient globals an installed host declares it does NOT provide.
    *

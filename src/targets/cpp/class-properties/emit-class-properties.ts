@@ -1042,7 +1042,10 @@ export const classConstructorStaticMemberTextFor = (
   }
   const censused = classConstructorStaticFieldStorage(ctx, receiver, key)
   if (censused !== null) {
-    const converted = alignedValueText(ctx, 'class-properties/emit-class-properties.ts:713', censused.representation, result, censused.name)
+    const state = constructorStateText(receiver, receiverText())
+    if (state === null) throw createCppEmitBlockedError('property-access:constructor-static-state', 'has no evaluated constructor identity')
+    const read = `gea::constructorStaticViewHolder(gea::constructorStaticView<${censused.viewStruct}>(${state}), &${censused.viewStruct}::present)->value`
+    const converted = alignedValueText(ctx, 'class-properties/emit-class-properties.ts:713', censused.representation, result, read)
     if (converted !== null) return converted
     throw createCppEmitBlockedError(
       `conversion:${representationKey(censused.representation)}->${representationKey(result)}`,

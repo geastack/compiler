@@ -68,9 +68,11 @@ import { namespaceMembersUnderClosedKeyOf } from './flow/targets.js'
  *
  * ## The second granularity: a class member
  *
- * A live class is live whole as a DEFINITION -- its layout, its fields, its
- * constructor -- but a method body runs only when a dispatch names it, and a
- * dispatch has to name it. `C.m` resolves to one declaration, so a static
+ * A live class retains its definition effects and layout. Constructor bodies
+ * and instance initializers run only for construction-live classes; unknown
+ * construction and escaped/exported constructor values retain them conservatively.
+ * A method body runs only when a dispatch names it, and a dispatch has to name
+ * it. `C.m` resolves to one declaration, so a static
  * member is opened by symbol. An instance member cannot be: a structurally
  * typed parameter, a base-class reference and an interface-typed call all land
  * on a member the receiver's static type does not identify, and an override is
@@ -135,6 +137,7 @@ export interface ProgramReachability {
    */
   readonly memberIsPruned: (node: ts.Node) => boolean
   readonly classIsLayoutOnly: (node: ts.ClassDeclaration) => boolean
+  readonly classConstructionIsReachable?: (node: ts.ClassDeclaration) => boolean
 }
 
 /**
@@ -219,6 +222,11 @@ export interface ReachabilityInput {
    * `import {} from 'x'` and does. `typeOnlyModuleUse` is the one answer.
    */
   readonly verbatimModuleSyntax?: boolean
+  /** Canonical runtime export binding; only proven absence may drop an export. */
+  readonly runtimeExportOf?: (file: ts.SourceFile, name: string) =>
+    { readonly kind: 'binding'; readonly symbol: ts.Symbol } | { readonly kind: 'missing' | 'refused' }
+  /** Closed source construction selections; null retains conservative type-compatible alternatives. */
+  readonly constructorTargetsOf?: (expression: ts.Expression) => readonly ts.ClassDeclaration[] | null
 }
 
 /**
@@ -863,6 +871,8 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
   // A receiver's static type requires layout, not evaluation of its module or
   // constructor. A later value reference can promote the same class to runtime.
   const layoutClasses = new Set<ts.ClassDeclaration>()
+  const constructedClasses = new Set<ts.ClassDeclaration>()
+  const exposedNamespaceFiles = new Set<ts.SourceFile>()
   // Every deferrable member the walk has SEEN, and the subset something has
   // NAMED. A member in the first and not the second is dead: the class it
   // belongs to is live, so the walk reached its declaration, and nothing in
@@ -928,6 +938,13 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
     const whole = entries.has(file) && ts.isExternalModule(file)
     for (const statement of file.statements) if (whole || !isPrunableDeclaration(input.checker, statement)) openStatement(statement)
     for (const target of moduleTargetsOf(input.checker, file, { verbatim: input.verbatimModuleSyntax === true })) fileQueue.push(target)
+    if (entries.has(file) && ts.isExternalModule(file)) {
+      const module = input.checker.getSymbolAtLocation(file)
+      for (const exported of module ? input.checker.getExportsOfModule(module) : []) {
+        const value = input.runtimeExportOf?.(file, exported.getName())
+        if (value?.kind !== 'missing') markSymbol(value?.kind === 'binding' ? value.symbol : exported)
+      }
+    }
   }
 
   const spellKey = (text: string): void => {
@@ -1003,7 +1020,42 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
     for (const member of opened) openMember(member)
   }
 
-  const markSymbol = (symbol: ts.Symbol | undefined): void => {
+  const markConstructed = (owner: ts.ClassDeclaration): void => {
+    if (constructedClasses.has(owner)) return
+    constructedClasses.add(owner)
+    if (liveStatements.has(owner)) statementQueue.push(owner)
+    for (const clause of owner.heritageClauses ?? []) {
+      if (clause.token !== ts.SyntaxKind.ExtendsKeyword) continue
+      for (const base of clause.types) markConstruction(base.expression)
+    }
+  }
+  const markConstruction = (expression: ts.Expression): void => {
+    const selected = input.constructorTargetsOf?.(expression)
+    if (selected) { for (const owner of selected) markConstructed(owner); return }
+    const signatures = input.checker.getTypeAtLocation(expression).getConstructSignatures()
+    const results = signatures.flatMap(signature => {
+      const result = input.checker.getReturnTypeOfSignature(signature)
+      return result.isUnion() ? result.types : [result]
+    })
+    for (const file of input.files) for (const statement of file.statements) {
+      if (!ts.isClassDeclaration(statement) || !statement.name) continue
+      const symbol = input.checker.getSymbolAtLocation(statement.name)
+      if (!symbol) continue
+      const instance = input.checker.getDeclaredTypeOfSymbol(symbol)
+      if (results.length === 0 || results.some(result => input.checker.isTypeAssignableTo(instance,result))) markConstructed(statement)
+    }
+  }
+  const exposeNamespace = (file: ts.SourceFile): void => {
+    if (!compiled.has(file) || exposedNamespaceFiles.has(file)) return
+    exposedNamespaceFiles.add(file)
+    fileQueue.push(file)
+    const module = input.checker.getSymbolAtLocation(file)
+    for (const exported of module ? input.checker.getExportsOfModule(module) : []) {
+        const value = input.runtimeExportOf?.(file, exported.getName())
+        if (value?.kind !== 'missing') markSymbol(value?.kind === 'binding' ? value.symbol : exported)
+      }
+  }
+  const markSymbol = (symbol: ts.Symbol | undefined, constructionUse = true): void => {
     if (!symbol) return
     for (const declaration of declarationsOf(input.checker, symbol)) {
       if (ts.isImportSpecifier(declaration) || ts.isImportClause(declaration) || ts.isNamespaceImport(declaration)) {
@@ -1011,7 +1063,10 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
         while (imported && !ts.isSourceFile(imported) && !ts.isImportDeclaration(imported)) imported = imported.parent
         if (imported && ts.isImportDeclaration(imported)) {
           const module = input.checker.getSymbolAtLocation(imported.moduleSpecifier)
-          for (const target of module?.declarations ?? []) if (ts.isSourceFile(target)) fileQueue.push(target)
+          for (const target of module?.declarations ?? []) if (ts.isSourceFile(target)) {
+            fileQueue.push(target)
+            if (constructionUse && ts.isNamespaceImport(declaration)) exposeNamespace(target)
+          }
         }
         // Reading an imported binding needs the imported module. The alias's
         // declaration does not execute every statement in its containing file.
@@ -1024,12 +1079,19 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
       while (owner && !ts.isSourceFile(owner) && !ts.isInterfaceDeclaration(owner) && !ts.isTypeAliasDeclaration(owner))
         owner = owner.parent
       if (owner && (ts.isInterfaceDeclaration(owner) || ts.isTypeAliasDeclaration(owner))) continue
+      if (ts.isNamespaceExport(declaration) && ts.isExportDeclaration(declaration.parent) && declaration.parent.moduleSpecifier) {
+        const module = input.checker.getSymbolAtLocation(declaration.parent.moduleSpecifier)
+        for (const target of module?.declarations ?? []) if (ts.isSourceFile(target)) exposeNamespace(target)
+        continue
+      }
       if (ts.isSourceFile(declaration)) {
         fileQueue.push(declaration)
+        if (constructionUse) exposeNamespace(declaration)
         continue
       }
       const file = declaration.getSourceFile()
       if (!compiled.has(file)) continue
+      if (constructionUse && ts.isClassDeclaration(declaration)) markConstructed(declaration)
       let memberOwner: ts.Node | undefined = declaration.parent
       while (memberOwner && !ts.isSourceFile(memberOwner) && !ts.isClassDeclaration(memberOwner)) memberOwner = memberOwner.parent
       if (memberOwner && ts.isClassDeclaration(memberOwner) && !liveFiles.has(file)) {
@@ -1051,7 +1113,12 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
     }
   }
 
-  const markReference = (reference: ts.Identifier | ts.PrivateIdentifier): void => markSymbol(input.checker.getSymbolAtLocation(reference))
+  const markReference = (reference: ts.Identifier | ts.PrivateIdentifier): void => {
+    const parent = reference.parent
+    const declarationName = ts.isClassDeclaration(parent) && parent.name === reference
+    const simpleHeritage = ts.isExpressionWithTypeArguments(parent) && parent.expression === reference && ts.isHeritageClause(parent.parent)
+    markSymbol(input.checker.getSymbolAtLocation(reference), !declarationName && !simpleHeritage)
+  }
 
   /**
    * A member READ on a receiver typed as a class keeps that class's
@@ -1216,6 +1283,16 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
       }
       return
     }
+    // Class expressions retain their existing conservative constructor bodies
+    // and construct recipes. Their implicit or explicit super frame therefore
+    // still requires the base construction convention, even though evaluating
+    // a named class declaration alone does not construct its base.
+    if (ts.isClassExpression(node)) for (const clause of node.heritageClauses ?? []) {
+      if (clause.token === ts.SyntaxKind.ExtendsKeyword) for (const base of clause.types) markConstruction(base.expression)
+    }
+    if (ts.isConstructorDeclaration(node) && ts.isClassDeclaration(node.parent) && !constructedClasses.has(node.parent)) return
+    if (ts.isPropertyDeclaration(node.parent) && node.parent.initializer === node && ts.isClassDeclaration(node.parent.parent) &&
+        !memberIsStatic(node.parent) && !constructedClasses.has(node.parent.parent)) return
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node) || ts.isImportEqualsDeclaration(node)) return
     if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) return
     if (ts.isTypeNode(node)) {
@@ -1235,6 +1312,7 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
     }
     if (ts.isPropertyAccessExpression(node)) openClassOfReceiver(node)
     if (ts.isNewExpression(node)) {
+      markConstruction(node.expression)
       for (const signature of input.checker.getTypeAtLocation(node.expression).getConstructSignatures()) {
         const result = input.checker.getReturnTypeOfSignature(signature)
         for (const arm of result.isUnion() ? result.types : [result]) {
@@ -1379,18 +1457,19 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
   const reached = new Map<ts.SourceFile, readonly ts.Statement[]>()
   return {
     classIsLayoutOnly: (node) => layoutClasses.has(node),
+    classConstructionIsReachable: (node) => constructedClasses.has(node),
     memberIsPruned: (node) => {
       if (deferredMembers.has(node) && !liveMembers.has(node)) return true
       const parent = node.parent
       if (!parent) return false
       if (ts.isHeritageClause(node) && ts.isClassDeclaration(parent) && layoutClasses.has(parent)) return true
-      if ((ts.isConstructorDeclaration(node) || ts.isClassStaticBlockDeclaration(node)) && ts.isClassDeclaration(parent))
-        return layoutClasses.has(parent)
+      if (ts.isConstructorDeclaration(node) && ts.isClassDeclaration(parent)) return layoutClasses.has(parent) || !constructedClasses.has(parent)
+      if (ts.isClassStaticBlockDeclaration(node) && ts.isClassDeclaration(parent)) return layoutClasses.has(parent)
       return (
         ts.isPropertyDeclaration(parent) &&
         parent.initializer === node &&
         ts.isClassDeclaration(parent.parent) &&
-        layoutClasses.has(parent.parent)
+        (layoutClasses.has(parent.parent) || (!memberIsStatic(parent) && !constructedClasses.has(parent.parent)))
       )
     },
     statementsOf: (file) => {

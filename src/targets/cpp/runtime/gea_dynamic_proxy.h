@@ -215,13 +215,23 @@ inline Value dynamicAdd(const Value& left, const Value& right) {
 
 inline bool dynamicArrayPrototypeHas(const PropertyKey& key) {
   if (key.isSymbol()) return false;
-  for (const char* name : {"push", "pop", "join", "toString", "map", "filter", "forEach", "slice"})
+  std::size_t index = 0;
+  if (detail::arrayIndexOfKey(key, index)) return arrayPrototypeObject()->present(index);
+  for (const char* name : {"push", "pop", "join", "toString", "map", "filter", "forEach", "slice", "some"})
     if (key.text() == name) return true;
   return false;
 }
 
-inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
+inline Value dynamicArrayPrototypeGet(const PropertyKey& key, const Value& receiver) {
   if (key.isSymbol()) return Value();
+  std::size_t index = 0;
+  if (detail::arrayIndexOfKey(key, index)) {
+    const auto prototype = arrayPrototypeObject();
+    if (!prototype->present(index)) return Value();
+    if (prototype->indexedDescriptors && arrayIndexedDescriptorContains(prototype->indexedDescriptors, index))
+      return prototype->indexedDescriptors->getWithNativeReceiver(key, NativeCallReceiver::fromValue(receiver));
+    return prototype->readElement(index);
+  }
   using Args = gea::Ref<ArrayObject<Value>>;
   using Method = CallableObject<Value(Value, Args)>;
   if (key.text() == "push") {
@@ -230,6 +240,31 @@ inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
       for (std::size_t i = 0; i < args->size(); ++i) receiver.setProperty(PropertyKey::string(std::to_string(static_cast<std::size_t>(length++))), args->readElement(i));
       receiver.setProperty(PropertyKey::string("length"), Value::box(Value::Tag::Number, length));
       return Value::box(Value::Tag::Number, length);
+    }, nullptr));
+    return method;
+  }
+  if (key.text() == "some") {
+    static const Value method = Value::boxMethod<1>(Method(+[](void*, Value receiver, Args args) -> Value {
+      if (receiver.tag() == Value::Tag::Null || receiver.tag() == Value::Tag::Undefined)
+        host::throwRuntimeError("TypeError", "Array.prototype.some called on null or undefined");
+      if (receiver.tag() != Value::Tag::Object && receiver.tag() != Value::Tag::Function)
+        host::throwRuntimeError("TypeError", "Native Array.prototype.some does not support primitive wrappers");
+      const double rawLength = dynamicToNumber(receiver.getProperty(PropertyKey::string("length")));
+      const std::uint64_t length = rawLength > 0
+          ? static_cast<std::uint64_t>(std::min(std::floor(rawLength), 9007199254740991.0)) : 0;
+      const Value callback = args->size() ? args->readElement(0) : Value();
+      if (callback.tag() != Value::Tag::Function)
+        host::throwRuntimeError("TypeError", "Array callback must be callable");
+      const Value thisArg = args->size() > 1 ? args->readElement(1) : Value();
+      for (std::uint64_t i = 0; i < length; ++i) {
+        const auto index = PropertyKey::string(std::to_string(i));
+        if (!receiver.hasProperty(index)) continue;
+        const Value item = receiver.getProperty(index);
+        if (host::detail::toBoolean(callback.callWithReceiver(thisArg,
+            {item, Value::box(Value::Tag::Number, static_cast<double>(i)), receiver})))
+          return Value::box(Value::Tag::Boolean, true);
+      }
+      return Value::box(Value::Tag::Boolean, false);
     }, nullptr));
     return method;
   }
@@ -306,6 +341,10 @@ inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
   return Value();
 }
 
+inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
+  return dynamicArrayPrototypeGet(key, Value());
+}
+
 /**
  * `String.prototype`'s methods read off a string the program declared `any`
  * (`name.toLowerCase()` after `name = \`${name}\``). Each is the native
@@ -365,7 +404,7 @@ inline Value dynamicStringPrototypeGet(const PropertyKey& key) {
 inline Ref<ArrayObject<Value>> arrayPrototypeObject() {
   static const Ref<ArrayObject<Value>> prototype = [] {
     auto object = makeRef<ArrayObject<Value>>();
-    for (const char* name : {"push", "pop", "join", "toString", "map", "filter", "forEach", "slice"}) {
+    for (const char* name : {"push", "pop", "join", "toString", "map", "filter", "forEach", "slice", "some"}) {
       const auto key = PropertyKey::string(name);
       auto descriptor = PropertyDescriptor::assignment(dynamicArrayPrototypeGet(key));
       descriptor.enumerable = false;

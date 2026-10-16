@@ -1,4 +1,7 @@
 import ts from 'typescript'
+import { resolve } from 'node:path'
+import { geaCoreDeclarationFileName } from './host.js'
+import type { ProducerContext } from '../../semantics/normalize/producer-context.js'
 import { declaredBaseTypesOf } from '../../semantics/ambient.js'
 
 /**
@@ -150,40 +153,56 @@ export interface GeaElementFacts {
  * spelling means a program that renames the import on the way in
  * (`import { Component as Base }`) is recognized, while a program that declares
  * its own unrelated `Component` is not.
+ * @semanticCategory framework-protocol
  */
-const derivesFromGeaBase = (checker: ts.TypeChecker, instance: ts.Type, baseName: string): boolean => {
+export interface GeaProviderAuthority {
+  readonly nativeDeclarationFileName: string
+  readonly modulesOf: (containingFile: string) => readonly ts.SourceFile[]
+}
+
+/** The frontend, not package spelling or a class name, selects the Gea provider.
+ * This is the Gea class protocol witness, not generic source identity admission.
+ * @semanticCategory framework-protocol
+ */
+export const createGeaProviderAuthority = (
+  context: Pick<ProducerContext, 'runtimeModuleTargetOf' | 'sourceFileOf' | 'jsxRuntimeModuleOf'>,
+  nativeDeclarationFileName: string
+): GeaProviderAuthority => ({
+  nativeDeclarationFileName,
+  modulesOf: (containingFile) => {
+    const selected = new Set<ts.SourceFile>()
+    const raw = context.runtimeModuleTargetOf('@geastack/core', containingFile, 'import')
+    const implementation = raw === null ? null : context.sourceFileOf(raw)
+    if (implementation !== null) selected.add(implementation)
+    const jsx = context.jsxRuntimeModuleOf?.(containingFile)
+    if (jsx) selected.add(jsx)
+    return [...selected]
+  }
+})
+
+const nativeProviderOnly = (): GeaProviderAuthority => ({ nativeDeclarationFileName: geaCoreDeclarationFileName(), modulesOf: () => [] })
+
+const derivesFromGeaBase = (checker: ts.TypeChecker, instance: ts.Type, baseName: string, authority: GeaProviderAuthority): boolean => {
   const chain = declaredBaseTypesOf(checker, instance)
   const targetOf = (symbol: ts.Symbol): ts.Symbol =>
     (symbol.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(symbol) : symbol
-
-  // The base is resolved from every scope in the chain, not only the leaf's.
-  //
-  // Resolving it once, where the *derived* class is declared, silently assumed
-  // that a gea component names gea's base in its own file. That holds for
-  // `class App extends Component`, and fails for every class that reaches the
-  // base through another one: the library exports `ReactiveComponent extends
-  // Component`, and an app writing `import { ReactiveComponent }` never has
-  // `Component` in scope at all -- so the lookup returned nothing and the whole
-  // claim was abandoned before the chain that plainly contains gea's base was
-  // ever compared. The class went unclaimed, and the element refused to lower.
-  //
-  // Each link's own declaration site is a scope where the name it extends *is*
-  // visible, which is what makes walking them the right question rather than a
-  // wider one: this still compares the resolved *symbol* the library exported,
-  // never the spelling, so a renamed import is recognized and an unrelated
-  // class merely spelled `Component` in some other file is not. What it does
-  // not distinguish -- and did not before either -- is a program that declares
-  // its own `Component` and genuinely extends it; such a class has gea's
-  // linkage name as its real base, and telling the two apart needs a module
-  // identity this library does not state anywhere.
   const bases = new Set<ts.Symbol>()
+  const providers = new Set<ts.SourceFile>()
   for (const type of [instance, ...chain]) {
-    const declaration = type.getSymbol()?.declarations?.[0]
-    if (!declaration) continue
-    const inScope = checker.resolveName(baseName, declaration, ts.SymbolFlags.Value, false)
-    if (inScope) bases.add(targetOf(inScope))
+    for (const declaration of type.getSymbol()?.declarations ?? []) {
+      const file = declaration.getSourceFile()
+      for (const provider of authority.modulesOf(file.fileName)) providers.add(provider)
+      // A native-only module has no executable runtime target. Its installed
+      // host declaration remains an exact owned witness, never ambient names.
+      if (file.isDeclarationFile && resolve(file.fileName) === resolve(authority.nativeDeclarationFileName)) providers.add(file)
+    }
   }
-  if (bases.size === 0) return false
+  for (const provider of providers) {
+    const module = checker.getSymbolAtLocation(provider)
+    if (module === undefined) continue
+    const exported = checker.getExportsOfModule(module).find((symbol) => symbol.getName() === baseName)
+    if (exported !== undefined) bases.add(targetOf(exported))
+  }
   return chain.some((candidate) => {
     const symbol = candidate.getSymbol()
     return symbol !== undefined && bases.has(targetOf(symbol))
@@ -191,8 +210,11 @@ const derivesFromGeaBase = (checker: ts.TypeChecker, instance: ts.Type, baseName
 }
 
 /** Whether this class is one of gea's components -- `derivesFromGeaBase` asked about gea's component base. */
-export const derivesFromGeaComponent = (checker: ts.TypeChecker, instance: ts.Type): boolean =>
-  derivesFromGeaBase(checker, instance, geaComponentBaseName)
+export const derivesFromGeaComponent = (
+  checker: ts.TypeChecker,
+  instance: ts.Type,
+  authority: GeaProviderAuthority = nativeProviderOnly()
+): boolean => derivesFromGeaBase(checker, instance, geaComponentBaseName, authority)
 
 /**
  * Whether this class holds reactive state -- the same walk, asked about either
@@ -203,8 +225,11 @@ export const derivesFromGeaComponent = (checker: ts.TypeChecker, instance: ts.Ty
  * both. Asking twice is what keeps a `Store` recognised in a program that never
  * imports `ReactiveComponent` at all, and vice versa.
  */
-export const derivesFromGeaReactiveBase = (checker: ts.TypeChecker, instance: ts.Type): boolean =>
-  geaReactiveBaseNames.some((baseName) => derivesFromGeaBase(checker, instance, baseName))
+export const derivesFromGeaReactiveBase = (
+  checker: ts.TypeChecker,
+  instance: ts.Type,
+  authority: GeaProviderAuthority = nativeProviderOnly()
+): boolean => geaReactiveBaseNames.some((baseName) => derivesFromGeaBase(checker, instance, baseName, authority))
 
 /**
  * What this element's tag resolves to, or `null` when it resolves neither.
@@ -213,12 +238,16 @@ export const derivesFromGeaReactiveBase = (checker: ts.TypeChecker, instance: ts
  * JSX before it is called, and a type carrying both is a class expression whose
  * call half JSX never selects.
  */
-export const elementFactsOf = (checker: ts.TypeChecker, tagName: ts.JsxTagNameExpression): GeaElementFacts | null => {
+export const elementFactsOf = (
+  checker: ts.TypeChecker,
+  tagName: ts.JsxTagNameExpression,
+  authority: GeaProviderAuthority = nativeProviderOnly()
+): GeaElementFacts | null => {
   const type = checker.getTypeAtLocation(tagName)
   const constructs = type.getConstructSignatures()
   if (constructs.length > 0) {
     const instance = constructs[0]?.getReturnType()
-    const claimed = instance !== undefined && derivesFromGeaComponent(checker, instance)
+    const claimed = instance !== undefined && derivesFromGeaComponent(checker, instance, authority)
     return { invocation: 'construct', renderMember: claimed ? geaRenderMemberName : null }
   }
   return type.getCallSignatures().length > 0 ? { invocation: 'call', renderMember: null } : null

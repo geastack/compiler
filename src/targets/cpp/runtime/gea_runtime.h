@@ -1163,17 +1163,33 @@ namespace detail {
   target += concatStrings(pieces);
 }
 [[gnu::noinline, noreturn]] inline void stringLengthExceeded() { throw std::length_error("string concatenation exceeds max_size"); }
-// Pieces copied end to end from `buffer`, the terminator after them, and the
-// length stored: one pass rather than an `_M_append` per piece rechecking the
-// capacity. The length is the word after the data pointer, as
-// `GEA_FAST_SMALL_STRING_COPY` below relies on too (defined after this point).
-[[gnu::always_inline]] inline void fillPieces(std::string& out, char* buffer, std::initializer_list<std::string_view> pieces, std::size_t length) {
+// Check each addition before it can wrap, including on 32-bit targets. A check
+// of the final sum alone can admit a small result for oversized pieces and
+// then copy them into the string's inline buffer.
+[[gnu::always_inline]] inline void addStringLength(std::size_t& total, std::size_t length, std::size_t maximum) {
+  if (length > maximum - total) [[unlikely]] stringLengthExceeded();
+  total += length;
+}
+// Reserve alone does not make the spare bytes writable string elements. Let
+// the library own that transition and the final length/terminator, rather than
+// writing through its object layout. libstdc++ exposes the C++23 operation in
+// C++20 too; older libraries use resize, with the same bounded writer contract.
+template <typename String, typename Writer>
+[[gnu::always_inline]] inline void overwriteString(String& out, std::size_t size, Writer&& writer) {
+  if constexpr (requires { out.resize_and_overwrite(size, writer); }) {
+    out.resize_and_overwrite(size, writer);
+  } else if constexpr (requires { out.__resize_and_overwrite(size, writer); }) {
+    out.__resize_and_overwrite(size, writer);
+  } else {
+    out.resize(size);
+    out.resize(writer(out.data(), size));
+  }
+}
+[[gnu::always_inline]] inline void fillPieces(char* buffer, std::initializer_list<std::string_view> pieces) {
   for (auto piece : pieces) {
     copyPieceBytes(buffer, piece.data(), piece.size());
     buffer += piece.size();
   }
-  *buffer = '\0';
-  std::memcpy(reinterpret_cast<char*>(&out) + sizeof(void*), &length, sizeof(length));
 }
 }  // namespace detail
 
@@ -1187,7 +1203,7 @@ namespace detail {
   for (auto piece : pieces) {
     const auto at = reinterpret_cast<std::uintptr_t>(piece.data());
     aliases = aliases || (piece.size() != 0 && at >= begin && at < end);
-    total += piece.size();
+    detail::addStringLength(total, piece.size(), out.max_size());
   }
   if (aliases) [[unlikely]] {
     detail::concatStringsAliased(out, pieces);
@@ -1199,10 +1215,13 @@ namespace detail {
   // reallocating. A buffer that already holds `total` is kept as it is.
   if (out.capacity() < total) [[unlikely]] {
     out.clear();
-    out.reserve(total + 16);
+    out.reserve(total + std::min<std::size_t>(16, out.max_size() - total));
   }
 #if defined(__GLIBCXX__) && defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI
-  detail::fillPieces(out, out.data(), pieces, total);
+  detail::overwriteString(out, total, [&](char* buffer, std::size_t) {
+    detail::fillPieces(buffer, pieces);
+    return total;
+  });
 #else
   out.clear();
   for (auto piece : pieces) out.append(piece.data(), piece.size());
@@ -1246,7 +1265,7 @@ template <typename Piece>
 [[gnu::always_inline]] inline char* writePiece(char* to, const char* limit, const Piece& piece) {
   if constexpr (DigitWordPiece<Piece>) {
     const std::uint64_t word = piece.digitWord();
-    if (word != 0 && to + 8 <= limit) {
+    if (word != 0 && static_cast<std::size_t>(limit - to) >= 8) {
       std::memcpy(to, &word, 8);
       return to + piece.digitCount();
     }
@@ -1256,11 +1275,8 @@ template <typename Piece>
   return to + view.size();
 }
 template <typename... Pieces>
-[[gnu::always_inline]] inline void fillTypedPieces(std::string& out, char* buffer, std::size_t length, const Pieces&... pieces) {
-  const char* const limit = out.data() + out.capacity() + 1;
+[[gnu::always_inline]] inline void fillTypedPieces(char* buffer, const char* limit, const Pieces&... pieces) {
   ((buffer = writePiece(buffer, limit, pieces)), ...);
-  *buffer = '\0';
-  std::memcpy(reinterpret_cast<char*>(&out) + sizeof(void*), &length, sizeof(length));
 }
 }  // namespace detail
 
@@ -1276,13 +1292,16 @@ template <typename... Pieces> requires(sizeof...(Pieces) > 0)
     detail::concatStringsAliased(out, {detail::pieceView(pieces)...});
     return;
   }
-  const std::size_t total = (detail::pieceSize(pieces) + ...);
-  if (total > out.max_size()) [[unlikely]] detail::stringLengthExceeded();
+  std::size_t total = 0;
+  (detail::addStringLength(total, detail::pieceSize(pieces), out.max_size()), ...);
   if (out.capacity() < total) [[unlikely]] {
     out.clear();
-    out.reserve(total + 16);
+    out.reserve(total + std::min<std::size_t>(16, out.max_size() - total));
   }
-  detail::fillTypedPieces(out, out.data(), total, pieces...);
+  detail::overwriteString(out, out.capacity(), [&](char* buffer, std::size_t count) {
+    detail::fillTypedPieces(buffer, buffer + count, pieces...);
+    return total;
+  });
 #else
   concatStringsInto(out, {std::string_view(pieces)...});
 #endif
@@ -1298,7 +1317,7 @@ template <typename... Pieces> requires(sizeof...(Pieces) > 0)
   std::size_t added = 0;
   bool aliases = false;
   for (auto piece : pieces) {
-    added += piece.size();
+    detail::addStringLength(added, piece.size(), target.max_size() - size);
     const auto data = reinterpret_cast<std::uintptr_t>(piece.data());
     aliases = aliases || (data >= begin && data <= end);
   }
@@ -1309,7 +1328,10 @@ template <typename... Pieces> requires(sizeof...(Pieces) > 0)
   if (added > target.max_size() - size) [[unlikely]] detail::stringLengthExceeded();
   if (target.capacity() - size < added) [[unlikely]] target.reserve(size + added);
 #if defined(__GLIBCXX__) && defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI
-  detail::fillPieces(target, target.data() + size, pieces, size + added);
+  detail::overwriteString(target, size + added, [&](char* buffer, std::size_t count) {
+    detail::fillPieces(buffer + size, pieces);
+    return count;
+  });
 #else
   for (auto piece : pieces) target.append(piece.data(), piece.size());
 #endif
@@ -1325,10 +1347,13 @@ template <typename... Pieces> requires(sizeof...(Pieces) > 0)
     detail::appendStringsAliased(target, {detail::pieceView(pieces)...});
     return;
   }
-  const std::size_t added = (detail::pieceSize(pieces) + ...);
-  if (added > target.max_size() - size) [[unlikely]] detail::stringLengthExceeded();
+  std::size_t added = 0;
+  (detail::addStringLength(added, detail::pieceSize(pieces), target.max_size() - size), ...);
   if (target.capacity() - size < added) [[unlikely]] target.reserve(size + added);
-  detail::fillTypedPieces(target, target.data() + size, size + added, pieces...);
+  detail::overwriteString(target, target.capacity(), [&](char* buffer, std::size_t count) {
+    detail::fillTypedPieces(buffer + size, buffer + count, pieces...);
+    return size + added;
+  });
 #else
   appendStrings(target, {std::string_view(pieces)...});
 #endif
@@ -12604,7 +12629,12 @@ class Optional {
   Optional(U&& value) : state_(State::Present) { new (static_cast<void*>(&value_)) T(T(std::forward<U>(value))); }
 
   Optional& operator=(const Optional&) requires std::is_trivially_copy_assignable_v<T> = default;
-  Optional& operator=(const Optional& other) requires (!std::is_trivially_copy_assignable_v<T>) {
+  // Keep the trivial special member, but give the nontrivial implementation
+  // a distinct template identity: prebuilt Clang PCH codegen may emit both
+  // constrained non-template definitions with the same ABI name.
+  template <typename Payload = T>
+    requires (std::is_same_v<Payload, T> && !std::is_trivially_copy_assignable_v<T>)
+  Optional& operator=(const Optional& other) {
     if (this == &other) return *this;
     if (other.constructed()) {
       if (constructed()) detail::assignCopy<T>(value_, other.value_);
@@ -12614,9 +12644,9 @@ class Optional {
     return *this;
   }
   Optional& operator=(Optional&&) requires std::is_trivially_move_assignable_v<T> = default;
-  Optional& operator=(Optional&& other) noexcept(std::is_nothrow_move_constructible_v<T> && std::is_nothrow_move_assignable_v<T>)
-    requires (!std::is_trivially_move_assignable_v<T>)
-  {
+  template <typename Payload = T>
+    requires (std::is_same_v<Payload, T> && !std::is_trivially_move_assignable_v<T>)
+  Optional& operator=(Optional&& other) noexcept(std::is_nothrow_move_constructible_v<T> && std::is_nothrow_move_assignable_v<T>) {
     if (this == &other) return *this;
     if (other.constructed()) {
       if (constructed()) value_ = std::move(other.value_);
@@ -15546,7 +15576,7 @@ inline bool weakKeySame(const K& left, const K& right) {
  * One weak-collection key after its static object view is erased.
  *
  * The pointer is the ECMAScript object identity used for comparison. The
- * shared holder keeps a typed copy of the original carrier alive, preserving
+ * shared holder keeps a typed copy of ordinary carriers alive, preserving
  * this runtime's documented strong-key behavior without casting one generated
  * struct type to another. This is intentionally independent of WeakMap's K:
  * TypeScript may pass a class instance through a structurally compatible
@@ -15577,12 +15607,30 @@ const void* weakCollectionIdentity(const TaggedUnion<Arms...>& key) {
 struct WeakCollectionKey {
   const void* identity = nullptr;
   std::shared_ptr<const void> owner;
+  std::weak_ptr<const void> nativeOwner;
+  bool nativeWeak = false;
 
   WeakCollectionKey() = default;
 
   template <typename Key>
-  explicit WeakCollectionKey(const Key& key)
-      : identity(weakCollectionIdentity(key)), owner(std::make_shared<Key>(key)) {}
+  explicit WeakCollectionKey(const Key& key) : identity(weakCollectionIdentity(key)) {
+    // An explicit native carrier contract: the carrier owns its occurrence /
+    // allocation token, while this key observes it without retaining events.
+    // Generic compiler object carriers keep their existing retention policy.
+    if constexpr (requires { std::weak_ptr<const void>(key.weakIdentityOwner()); }) {
+      nativeOwner = key.weakIdentityOwner();
+      nativeWeak = true;
+    } else owner = std::make_shared<Key>(key);
+  }
+
+  template <typename... Arms>
+  explicit WeakCollectionKey(const TaggedUnion<Arms...>& key) {
+    [&]<std::size_t... Indices>(std::index_sequence<Indices...>) {
+      ((key.template is<Indices>() ? (*this = WeakCollectionKey(key.template get<Indices>()), 0) : 0), ...);
+    }(std::index_sequence_for<Arms...>{});
+  }
+
+  bool expired() const { return nativeWeak && nativeOwner.expired(); }
 };
 
 template <typename K, typename V>
@@ -15600,6 +15648,7 @@ class WeakMap {
   virtual void gea_ref_address_anchor() {}
   template <typename Key>
   void set(const Key& key, V value) {
+    pruneExpired();
     const void* identity = weakCollectionIdentity(key);
     const auto found = entries_.find(identity);
     if (found != entries_.end()) {
@@ -15608,23 +15657,34 @@ class WeakMap {
     }
     // The identity index owns the same key holder as before. Updates and
     // lookups neither allocate a holder nor scan unrelated live entries.
-    entries_.emplace(identity, std::make_pair(WeakCollectionKey(key), std::move(value)));
+    WeakCollectionKey stored(key);
+    nativeKeys_ = nativeKeys_ || stored.nativeWeak;
+    entries_.emplace(identity, std::make_pair(std::move(stored), std::move(value)));
   }
 
   template <typename Key>
   Optional<V> get(const Key& key) const {
+    pruneExpired();
     const auto found = entries_.find(weakCollectionIdentity(key));
     return found == entries_.end() ? Optional<V>() : Optional<V>(found->second.second);
   }
 
   template <typename Key>
-  bool has(const Key& key) const { return entries_.find(weakCollectionIdentity(key)) != entries_.end(); }
+  bool has(const Key& key) const { pruneExpired(); return entries_.find(weakCollectionIdentity(key)) != entries_.end(); }
 
   template <typename Key>
-  bool remove(const Key& key) { return entries_.erase(weakCollectionIdentity(key)) != 0; }
+  bool remove(const Key& key) { pruneExpired(); return entries_.erase(weakCollectionIdentity(key)) != 0; }
 
  private:
-  std::unordered_map<const void*, std::pair<WeakCollectionKey, V>> entries_;
+  bool nativeKeys_ = false;
+  void pruneExpired() const {
+    if (!nativeKeys_) return;
+    for (auto i = entries_.begin(); i != entries_.end();) {
+      if (i->second.first.expired()) i = entries_.erase(i);
+      else ++i;
+    }
+  }
+  mutable std::unordered_map<const void*, std::pair<WeakCollectionKey, V>> entries_;
 };
 
 /** `WeakSet<K>` -- ECMA-262 24.4. The value-less sibling of `WeakMap`; see that class's comment for what the "weak" here does and does not mean. */
@@ -15643,15 +15703,18 @@ class WeakSet {
   virtual void gea_ref_address_anchor() {}
   template <typename Key>
   void add(const Key& key) {
+    pruneExpired();
     const void* identity = weakCollectionIdentity(key);
     for (const WeakCollectionKey& item : items_) {
       if (item.identity == identity) return;
     }
     items_.emplace_back(key);
+    nativeKeys_ = nativeKeys_ || items_.back().nativeWeak;
   }
 
   template <typename Key>
   bool has(const Key& key) const {
+    pruneExpired();
     const void* identity = weakCollectionIdentity(key);
     for (const WeakCollectionKey& item : items_) {
       if (item.identity == identity) return true;
@@ -15661,6 +15724,7 @@ class WeakSet {
 
   template <typename Key>
   bool remove(const Key& key) {
+    pruneExpired();
     const void* identity = weakCollectionIdentity(key);
     for (std::size_t index = 0; index < items_.size(); ++index) {
       if (items_[index].identity != identity) continue;
@@ -15671,7 +15735,13 @@ class WeakSet {
   }
 
  private:
-  std::vector<WeakCollectionKey> items_;
+  bool nativeKeys_ = false;
+  void pruneExpired() const {
+    if (!nativeKeys_) return;
+    items_.erase(std::remove_if(items_.begin(), items_.end(),
+      [](const WeakCollectionKey& key) { return key.expired(); }), items_.end());
+  }
+  mutable std::vector<WeakCollectionKey> items_;
 };
 
 // The weak halves of `mapSet`/`setAdd` above, placed here because a template
@@ -16950,8 +17020,15 @@ inline void setPromiseJobSink(PromiseJobSink sink) { promiseJobSink() = sink; }
 // By rvalue reference: a by-value parameter relocated every job once more (an
 // indirect call and a 32-byte copy) between the awaiter that built it and the
 // host queue that stores it.
+// Native app retirement may destroy owners whose destructors enqueue work.
+// Reject that work until both outgoing queues have released their owners.
+inline bool& microtaskRetirementInProgress() {
+  GEA_REALM_LOCAL(bool, retiring, (false));
+  return retiring;
+}
+
 inline void queuePromiseJob(PromiseJob&& job) {
-  if (!job) return;
+  if (!job || microtaskRetirementInProgress()) return;
   if (PromiseJobSink sink = promiseJobSink()) sink(std::move(job));
   else promiseJobs().push_back(std::move(job));
 }
@@ -18934,6 +19011,16 @@ class ProxyObject {
   const Handler& handler() const { return handler_; }
   bool revoked() const { return revoked_; }
   void revoke() { revoked_ = true; }
+
+  // These fields still own their references after revocation. Omitting either
+  // edge hides cycles through a native Proxy from the existing collector.
+  template <typename Self>
+  friend void geaTraceRefs(const Self& traced, detail::RefVisitor& visitor)
+    requires (std::derived_from<Self, ProxyObject> && (detail::TraceEdges<Target>::supported || detail::TraceEdges<Handler>::supported)) {
+    const auto& value = static_cast<const ProxyObject&>(traced);
+    detail::traceRefs(value.target_, visitor);
+    detail::traceRefs(value.handler_, visitor);
+  }
 
  private:
   Target target_{};
@@ -21690,6 +21777,8 @@ class NativeHandle<gea_native_protocol_PropertyDescriptor_v1> : public PropertyD
 };
 
 inline Value dynamicArrayPrototypeGet(const PropertyKey&);
+inline Value dynamicArrayPrototypeGet(const PropertyKey&, const Value&);
+inline Ref<ArrayObject<Value>> arrayPrototypeObject();
 inline bool dynamicArrayPrototypeHas(const PropertyKey&);
 inline Value dynamicStringPrototypeGet(const PropertyKey&);
 inline Value dynamicFunctionPrototypeGet(const PropertyKey&);
@@ -32800,10 +32889,8 @@ inline Value Value::getProperty(const PropertyKey& key, const Value& receiver) c
     std::size_t index = 0;
     if (detail::arrayIndexOfKey(key, index)) {
       Value answer;
-      // A hole and an index past the end both read `undefined`, which is what
-      // the default-constructed `answer` already is.
-      metadata_->elements->element(payload(), index, answer);
-      return answer;
+      if (metadata_->elements->element(payload(), index, answer)) return answer;
+      return dynamicArrayPrototypeGet(key, receiver);
     }
     const auto expando = detail::expandoFor(expandoAnchor(), false);
     if (expando && expando->hasProperty(key)) return expando->get(key, receiver);
@@ -33130,9 +33217,13 @@ inline bool Value::hasProperty(const PropertyKey& key) const {
     // `in` DOES tell a hole from a value, which is why this asks `element`
     // rather than comparing the index against `length`.
     if (detail::arrayIndexOfKey(key, index)) {
-      if (metadata_->elements->has != nullptr) return metadata_->elements->has(payload(), index);
-      Value probe;
-      return metadata_->elements->element(payload(), index, probe);
+      if (metadata_->elements->has != nullptr) {
+        if (metadata_->elements->has(payload(), index)) return true;
+      } else {
+        Value probe;
+        if (metadata_->elements->element(payload(), index, probe)) return true;
+      }
+      return dynamicArrayPrototypeHas(key);
     }
     const auto expando = detail::expandoFor(expandoAnchor(), false);
     return (expando && expando->hasProperty(key)) || dynamicArrayPrototypeGet(key).tag() != Tag::Undefined;
@@ -45296,32 +45387,24 @@ decltype(auto) eventFields(Event& event) {
 // Event handler attributes accept null to remove the callback. Do not create a
 // new callback-table entry when an already closed socket is being cleaned up.
 inline void setWebSocketOnOpen(const gea::host::WebSocket& socket, std::nullptr_t) {
-  auto& callbacks = gea::host::websocket::callbackTable();
-  auto found = callbacks.find(socket.nativeHandle);
-  if (found != callbacks.end()) found->second.on_open = nullptr;
+  gea::host::websocket::set_open_callback(socket.nativeHandle, {});
 }
 
 inline void setWebSocketOnMessage(const gea::host::WebSocket& socket, std::nullptr_t) {
-  auto& callbacks = gea::host::websocket::callbackTable();
-  auto found = callbacks.find(socket.nativeHandle);
-  if (found != callbacks.end()) found->second.on_message = nullptr;
+  gea::host::websocket::set_message_callback(socket.nativeHandle, {});
 }
 
 inline void setWebSocketOnClose(const gea::host::WebSocket& socket, std::nullptr_t) {
-  auto& callbacks = gea::host::websocket::callbackTable();
-  auto found = callbacks.find(socket.nativeHandle);
-  if (found != callbacks.end()) found->second.on_close = nullptr;
+  gea::host::websocket::set_close_callback(socket.nativeHandle, {});
 }
 
 inline void setWebSocketOnError(const gea::host::WebSocket& socket, std::nullptr_t) {
-  auto& callbacks = gea::host::websocket::callbackTable();
-  auto found = callbacks.find(socket.nativeHandle);
-  if (found != callbacks.end()) found->second.on_error = nullptr;
+  gea::host::websocket::set_error_callback(socket.nativeHandle, {});
 }
 
 template <typename Result>
 void setWebSocketOnOpen(const gea::host::WebSocket& socket, const gea::CallableObject<Result()>& handler) {
-  gea::host::websocket::callbackTable()[socket.nativeHandle].on_open = [handler]() { handler.call(); };
+  gea::host::websocket::set_open_callback(socket.nativeHandle, [handler]() { handler.call(); });
 }
 
 /**
@@ -45343,31 +45426,31 @@ void setWebSocketOnOpen(const gea::host::WebSocket& socket, const gea::CallableO
  */
 template <typename Result>
 void setWebSocketOnMessage(const gea::host::WebSocket& socket, const gea::CallableObject<Result()>& handler) {
-  gea::host::websocket::callbackTable()[socket.nativeHandle].on_message = [handler](const std::string&) { handler.call(); };
+  gea::host::websocket::set_message_callback(socket.nativeHandle, [handler](const std::string&) { handler.call(); });
 }
 
 template <typename Result>
 void setWebSocketOnClose(const gea::host::WebSocket& socket, const gea::CallableObject<Result()>& handler) {
-  gea::host::websocket::callbackTable()[socket.nativeHandle].on_close = [handler](int, const std::string&) { handler.call(); };
+  gea::host::websocket::set_close_callback(socket.nativeHandle, [handler](int, const std::string&) { handler.call(); });
 }
 
 template <typename Result>
 void setWebSocketOnError(const gea::host::WebSocket& socket, const gea::CallableObject<Result()>& handler) {
-  gea::host::websocket::callbackTable()[socket.nativeHandle].on_error = [handler](const std::string&) { handler.call(); };
+  gea::host::websocket::set_error_callback(socket.nativeHandle, [handler](const std::string&) { handler.call(); });
 }
 
 template <typename Result, typename Event>
 void setWebSocketOnMessage(const gea::host::WebSocket& socket, const gea::CallableObject<Result(Event)>& handler) {
-  gea::host::websocket::callbackTable()[socket.nativeHandle].on_message = [handler](const std::string& data) {
+  gea::host::websocket::set_message_callback(socket.nativeHandle, [handler](const std::string& data) {
     Event event = makeEvent<Event>();
     assign(eventFields(event).data, data);
     handler.call(event);
-  };
+  });
 }
 
 template <typename Result, typename Event>
 void setWebSocketOnClose(const gea::host::WebSocket& socket, const gea::CallableObject<Result(Event)>& handler) {
-  gea::host::websocket::callbackTable()[socket.nativeHandle].on_close = [handler](int code, const std::string& reason) {
+  gea::host::websocket::set_close_callback(socket.nativeHandle, [handler](int code, const std::string& reason) {
     Event event = makeEvent<Event>();
     assign(eventFields(event).code, static_cast<double>(code));
     assign(eventFields(event).reason, reason);
@@ -45377,16 +45460,16 @@ void setWebSocketOnClose(const gea::host::WebSocket& socket, const gea::Callable
     // error.
     assign(eventFields(event).wasClean, true);
     handler.call(event);
-  };
+  });
 }
 
 template <typename Result, typename Event>
 void setWebSocketOnError(const gea::host::WebSocket& socket, const gea::CallableObject<Result(Event)>& handler) {
-  gea::host::websocket::callbackTable()[socket.nativeHandle].on_error = [handler](const std::string& message) {
+  gea::host::websocket::set_error_callback(socket.nativeHandle, [handler](const std::string& message) {
     Event event = makeEvent<Event>();
     assign(eventFields(event).message, message);
     handler.call(event);
-  };
+  });
 }
 
 /**
@@ -46273,6 +46356,16 @@ void setNodeAttribute(Node& node, const std::string& name, const std::string& va
 }
 
 template <typename Node>
+void setBooleanNodeAttribute(Node& node, const std::string& name, bool value) {
+  if (name == "disabled") {
+    if (value) node.setAttribute(name, "");
+    else node.removeAttribute(name);
+    return;
+  }
+  setNodeAttribute(node, name, value ? "true" : "false");
+}
+
+template <typename Node>
 void setNodeStyle(Node& node, const std::string& property, const std::string& value) {
   node.style().setProperty(property, value);
 }
@@ -46295,65 +46388,47 @@ inline void recordNodeSubscription(int nodeId, std::function<void()> release);
 template <typename Node>
 gea::Ref<bool> nodeLiveToken(const Node& node);
 
-/**
- * Whether the engine dispatches `name` off-tree. `rotary` (the encoder dial)
- * always: it has no element target, the runtime hands each detent to the one
- * document-level listener chain (`dispatchDocumentRotary`), and
- * `Tree::setEventListener` drops "rotary" as a type it never walks the tree
- * for -- so an `onRotary` delegated to the body was registered nowhere and the
- * dial did nothing, silently. `keydown` and `keyup` are off-tree on anything but an
- * `<input>`: the runtime hands a key to the focused input's own listener (which
- * bubbles to the body) and then to the document-level chain. The same rule the
- * gea plugin's `cpp-mounted-lowering.ts` applies to its direct-root listeners.
- */
+/** Rotary remains an off-tree compatibility notification; keys use the native root's node path. */
 template <typename Node>
-bool isDocumentLevelEvent(const Node& node, const std::string& name) {
-  if (name == "rotary") return true;
-  if (name != "keydown" && name != "keyup") return false;
-  const char* tag = node.tagName();
-  if (!tag) return true;
-  std::string lowered(tag);
-  for (char& character : lowered) character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
-  return lowered != "input";
+bool isDocumentLevelEvent(const Node&, const std::string& name) {
+  return name == "rotary";
 }
 
-/**
- * Register `invoke` for `name` on behalf of `node`: the one place both engine
- * `addNodeListener` overloads bind through.
- *
- * A document-level event goes straight to `Document::addEventListener`, which
- * chains it onto the off-tree singleton: no `containsNode` gate, since there is
- * no target to contain. The chain has no per-listener removal, so the handler
- * is gated on the node's live token instead -- a rebuilt subtree leaves an
- * inert closure behind rather than a second generation of the handler.
- *
- * Everything else is delegated to the BODY and gated by `containsNode`; see
- * the no-argument `addNodeListener` for why, and `recordNodeSubscription` for
- * how it is released with the node.
- */
+/** Bind native node handlers to their allocation and retain the compiler's early-disposal fence. */
 template <typename Node, typename Invoke>
 void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
   const auto target = node;
-  auto run = [target, invoke](gea::framework::events::PointerEvent& event) mutable {
-    const auto previousTarget = event.currentTarget;
-    const auto previousTargetId = event.currentTargetId;
-    const auto previousPhase = event.eventPhase;
+  auto alive = nodeLiveToken(node);
+  auto run = gea::framework::events::explicitEventCallback([](auto& target, auto& alive, auto& invoke, gea::framework::events::PointerEvent& event) {
+    if (!*alive || !target.valid() || !target.isConnected()) return;
+    struct Restore {
+      gea::framework::events::PointerEvent& event;
+      gea::framework::events::EventTarget target;
+      int targetId;
+      gea::framework::events::EventPhase phase;
+      ~Restore() {
+        event.currentTarget = target;
+        event.currentTargetId = targetId;
+        event.eventPhase = phase;
+      }
+    } restore{event, event.currentTarget, event.currentTargetId, event.eventPhase};
     event.currentTarget = gea::framework::events::EventTarget(target.id());
     event.currentTargetId = target.id();
     event.eventPhase = event.targetId == target.id() ? gea::framework::events::EventPhase::AtTarget
                                                      : gea::framework::events::EventPhase::Bubbling;
     invoke(event);
-    event.currentTarget = previousTarget;
-    event.currentTargetId = previousTargetId;
-    event.eventPhase = previousPhase;
-  };
+  }, target, alive, std::move(invoke));
   if (isDocumentLevelEvent(node, name)) {
-    auto alive = nodeLiveToken(node);
-    gea::embedded::ui::Document::instance().addEventListener(
-      name.c_str(), [alive, run](gea::framework::events::PointerEvent& event) mutable {
-        if (!*alive) return;
-        run(event);
-      });
+    gea::embedded::ui::Document::instance().addEventListener(name.c_str(), std::move(run));
+    return;
+  }
+  if (name == "keydown" || name == "keyup") {
+    // The native root dispatcher now walks the real allocation-bound node
+    // path. Document delegation bypassed that path and outlived raw removal.
+    const auto listenerId = target.addEventListener(name.c_str(), std::move(run));
+    recordNodeSubscription(target.id(), [target, name, listenerId]() {
+      target.removeEventListener(name.c_str(), listenerId);
+    });
     return;
   }
 #if defined(GEA_JSX_NODE_LISTENER_HOOK)
@@ -46363,10 +46438,10 @@ void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
   GEA_JSX_NODE_LISTENER_HOOK(target.id(), name.c_str());
 #endif
   const auto listenerId = gea::embedded::ui::Document::instance().body().addEventListener(
-    name.c_str(), [target, run](gea::framework::events::PointerEvent& event) mutable {
+    name.c_str(), gea::framework::events::explicitEventCallback([](auto& target, auto& run, gea::framework::events::PointerEvent& event) {
       if (!gea::embedded::ui::Tree::instance().containsNode(target.id(), event.targetId)) return;
       run(event);
-    });
+    }, target, std::move(run)));
   recordNodeSubscription(target.id(), [name, listenerId]() {
     gea::embedded::ui::Document::instance().body().removeEventListener(name.c_str(), listenerId);
   });
@@ -46387,72 +46462,34 @@ void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
 
 template <typename Node, typename Result>
 void addNodeListener(Node& node, const std::string& type, const gea::CallableObject<Result()>& handler) {
-  // Registered on the BODY, not on `node`, and gated by `containsNode`.
-  //
-  // The engine dispatches a pointer event to the node the hit test named and
-  // to nothing else -- it does not walk ancestors. So `onClick` on a `<div>`
-  // whose only child is a `<span>` never ran: the hit landed on the span, the
-  // listener sat on the div, and the app rendered perfectly and did nothing.
-  //
-  // Bubbling is the caller's job, and v1 does it exactly this way -- see any
-  // `mount_*` in the gea plugin's mounted-renderer output (all 12 of a JSX
-  // todo list's click listeners are on the body, none on a node): an early
-  // return unless `Tree::containsNode(root, event.targetId)`, then
-  // `currentTarget`/`currentTargetId`/`eventPhase` set for the duration of the
-  // handler and restored after, so a nested handler sees its own target and
-  // the outer one is not left holding the inner one's.
-  //
-  // OWNED BY `node`, and released when `node` is taken down -- see
-  // `recordNodeSubscription` below. The listener lives on the body, but the body
-  // is never removed, so nothing else would ever take it off: a conditional
-  // branch or a list row that is rebuilt leaves its handler on the body forever,
-  // and `Tree::createNode` hands the freed node ids straight back to the
-  // subtree that replaces it. Every generation's handler then matches the same
-  // `containsNode` gate and they ALL run on one click. An idempotent handler
-  // (`setActive(id)`, `managing = 1`) survives that; a TOGGLE does not -- a
-  // toggle button ran `toggle()` once per generation, so after one rebuild a click
-  // flipped the state twice and the whole UI stayed where it was, with nothing
-  // logged and every node still rendering correctly.
+  // Keys are owned by the real node and follow the native root's ancestor
+  // path. Pointer handlers retain the existing body-delegation compatibility
+  // path, gated by containment. Both record early JSX disposal; native node
+  // removal additionally releases the node-owned keyboard listener itself.
   const gea::CallableObject<Result()> held = handler;
-  bindNodeListener(node, eventTypeOf(type), [held](gea::framework::events::PointerEvent&) mutable { held.call(); });
+  bindNodeListener(node, eventTypeOf(type), gea::framework::events::explicitEventCallback([](auto& held, gea::framework::events::PointerEvent&) { held.call(); }, held));
 }
 
 /**
- * A handler that DOES declare the event -- `onTouchMove={e => pan(e.clientX,
- * e.clientY)}`.
- *
- * Delegated to the BODY and gated by `containsNode`, for the same reason and by
- * the same rule as the no-argument overload above: the engine dispatches to the
- * node the hit test named and does not walk ancestors, so a listener sitting on
- * the node it was written on never fires when the hit lands on a child. This
- * overload previously registered on the node -- which is why a `<div>` wrapping
- * the whole app received nothing at all, and the refusal it was supposed to
- * print never even ran. A drag that does nothing, silently.
- *
- * The event is passed through as the engine's own `PointerEvent` whenever the
- * declared parameter has a carrier for it (the gea plugin package maps
- * `PointerEvent`/`TouchEvent`/`RotaryEvent` onto `gea::framework::events::
- * PointerEvent` in `nativeTypes`, so `e.clientX` is a native member read, not a
- * boxed property). `currentTarget`/`currentTargetId`/`eventPhase` are set for
- * the duration of the call and restored after, so the handler observes the node
- * it was written on rather than the descendant that was hit.
- *
- * A parameter type with no such carrier still refuses at the moment it fires,
- * rather than being handed a value-initialized event whose every field reads
- * zero -- naming it is the honest answer, and a silent 0 would be a miscompile.
+ * A declared event parameter uses the engine's own native PointerEvent carrier.
+ * Keyboard handlers bind to the allocation-owned node; pointer compatibility
+ * handlers remain delegated to the body. bindNodeListener scopes currentTarget
+ * and eventPhase for either route, including exceptional and nested callbacks.
+ * A parameter with no native carrier refuses when invoked rather than receiving
+ * a fabricated default event.
  */
 template <typename Node, typename Result, typename Argument>
 void addNodeListener(Node& node, const std::string& type, const gea::CallableObject<Result(Argument)>& handler) {
   const gea::CallableObject<Result(Argument)> held = handler;
   const std::string name = eventTypeOf(type);
-  bindNodeListener(node, name, [held, name](gea::framework::events::PointerEvent& event) mutable {
+  bindNodeListener(node, name, gea::framework::events::explicitEventCallback([](auto& held, auto& name, gea::framework::events::PointerEvent& event) {
     if constexpr (std::is_constructible_v<std::decay_t<Argument>, const gea::framework::events::PointerEvent&>) {
       held.call(static_cast<std::decay_t<Argument>>(event));
     } else {
       std::fprintf(stderr, "gea: the handler for \"%s\" declares an event parameter, which no host table states a carrier for\n", name.c_str());
       gea::detail::abortAfterFlush();
     }
-  });
+  }, held, name));
 }
 
 template <typename Node, typename Result, typename... Arguments, typename = std::enable_if_t<(sizeof...(Arguments) > 1)>>
@@ -46487,6 +46524,16 @@ void appendNode(Node& parent, const Child& child) {
 template <typename Node>
 void setNodeAttribute(Node& node, const std::string& name, const std::string& value) {
   JsxDocument::instance().setAttribute(node.id(), name, value);
+}
+
+template <typename Node>
+void setBooleanNodeAttribute(Node& node, const std::string& name, bool value) {
+  if (name == "disabled") {
+    if (value) JsxDocument::instance().setAttribute(node.id(), name, "");
+    else JsxDocument::instance().removeAttribute(node.id(), name);
+    return;
+  }
+  setNodeAttribute(node, name, value ? "true" : "false");
 }
 
 template <typename Node>
@@ -46619,7 +46666,7 @@ void prop(Node& node, const std::string& name, const V& value) {
     node.style().imageId(value.id);
 #endif
   } else if constexpr (std::is_same_v<V, bool>) {
-    detail::setNodeAttribute(node, name, value ? "true" : "false");
+    detail::setBooleanNodeAttribute(node, name, value);
   } else if constexpr (std::is_convertible_v<V, std::string>) {
     detail::setNodeAttribute(node, name, static_cast<std::string>(value));
   } else if constexpr (std::is_arithmetic_v<V>) {
@@ -47256,6 +47303,7 @@ inline void recordNodeSubscription(int nodeId, std::function<void()> release) {
 /** Run and forget every release `nodeId` owns, in the order they were recorded. */
 inline void releaseNodeSubscriptions(int nodeId) {
   auto& owned = nodeSubscriptions();
+  std::exception_ptr failure;
 #if defined(GEA_RUNTIME_COMPACT_CODE) && GEA_RUNTIME_COMPACT_CODE
   // Unlinked before any runs: a release may record another node's
   // subscription, which appends to the list under the walk.
@@ -47280,16 +47328,33 @@ inline void releaseNodeSubscriptions(int nodeId) {
     NodeSubscription* entry = releasing;
     releasing = entry->next;
     if (entry->alive) *entry->alive = false;
-    if (entry->release) entry->release();
+    try {
+      if (entry->release) entry->release();
+    } catch (...) {
+      if (!failure) failure = std::current_exception();
+    }
     delete entry;
   }
 #else
   const auto found = owned.find(nodeId);
   if (found != owned.end()) {
-    for (auto& release : found->second) release();
+    std::vector<std::function<void()>> releasing;
+    releasing.swap(found->second);
     owned.erase(found);
+    // No map/vector iterator survives user cleanup or capture destruction.
+    // Reentrant registration for the same node owns a fresh list.
+    for (auto& release : releasing) {
+      try {
+        release();
+      } catch (...) {
+        if (!failure) failure = std::current_exception();
+      }
+    }
   }
 #endif
+  // Both retired batches and their captures are gone before the first error
+  // escapes. Reentrant registrations belong to the fresh table, not this batch.
+  if (failure) std::rethrow_exception(failure);
 }
 
 /**
@@ -47394,12 +47459,22 @@ inline void drainMicrotasks() {
 }
 
 inline void queueMicrotask(std::function<void()> task) {
-  if (!task) return;
+  if (!task || gea::detail::microtaskRetirementInProgress()) return;
   microtaskQueue().push_back(std::move(task));
 }
 
 inline void clearMicrotasks() {
-  microtaskQueue().clear();
+  struct RetirementScope {
+    bool previous = gea::detail::microtaskRetirementInProgress();
+    RetirementScope() { gea::detail::microtaskRetirementInProgress() = true; }
+    ~RetirementScope() { gea::detail::microtaskRetirementInProgress() = previous; }
+  } scope;
+  // Swap before destruction: releasing native captures can reenter scheduling
+  // or retirement. Neither queue may be mutated while its owners are released.
+  std::vector<std::function<void()>> retiredReactive;
+  retiredReactive.swap(microtaskQueue());
+  std::deque<gea::detail::PromiseJob> retiredPromises;
+  retiredPromises.swap(gea::detail::promiseJobs());
 }
 
 /**
@@ -47933,6 +48008,15 @@ namespace gea::runtime::host {
 template <typename Node>
 inline void domSetAttribute(const Node& node, const std::string& name, const std::string& value) {
   node.setAttribute(name, value);
+}
+
+// Emitted string literals are const char arrays. Without this exact string
+// boundary C++ prefers their standard pointer-to-bool conversion over the
+// std::string constructor, silently storing "true" for an id/class/value.
+template <typename Node>
+inline void domSetAttribute(const Node& node, const std::string& name, const char* value) {
+  if (!value) throw std::invalid_argument("domSetAttribute requires a non-null native string");
+  node.setAttribute(name, std::string(value));
 }
 
 template <typename Node>

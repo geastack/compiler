@@ -427,6 +427,7 @@ export const sourceConstructorReturnValuesOf = (
  * round. Without this the same class was re-walked, base chain and every
  * member reference included, once per proof that touched it. */
 const keptInstances = new WeakMap<ValueFlowIndex, Map<ts.Type, boolean>>()
+const closedConstructorBindings = new WeakMap<ValueFlowIndex, Map<ts.Type, boolean>>()
 /** Origin answers belong to one complete proof context and one flow round. */
 interface AllocationOriginAnswer {
   readonly answer: ExactClassAllocationOrigins | null
@@ -449,7 +450,30 @@ export const classConstructorKeepsInstanceOf = (checker: ts.TypeChecker, flow: V
   return answer
 }
 
-const classConstructorKeepsInstanceUncached = (checker: ts.TypeChecker, flow: ValueFlowIndex, instance: ts.InterfaceType): boolean => {
+/** Closed constructor-binding consumers, without claiming that `new`
+ * returns its initial receiver. In particular, a returned Proxy remains a
+ * distinct value. Instance/result closure is a separate obligation: a result
+ * can expose its constructor without another reference to this binding.
+ * Consumers also owe allocation position/prototype effects; this is not an
+ * instanceof proof or a complete constructor-entry inventory by itself.
+ * @semanticCategory generic-primitive
+ */
+export const classConstructorBindingUsesAreClosed = (checker: ts.TypeChecker, flow: ValueFlowIndex, instance: ts.InterfaceType): boolean => {
+  let held = closedConstructorBindings.get(flow)
+  if (!held) closedConstructorBindings.set(flow, (held = new Map()))
+  const known = held.get(instance)
+  if (known !== undefined) return known
+  const answer = classConstructorKeepsInstanceUncached(checker, flow, instance, 'binding-uses')
+  held.set(instance, answer)
+  return answer
+}
+
+const classConstructorKeepsInstanceUncached = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  instance: ts.InterfaceType,
+  role: 'result' | 'binding-uses' = 'result'
+): boolean => {
   const seen = new Set<ts.Type>()
   /**
    * The class binding reached a call argument. A call is not an escape when it
@@ -626,6 +650,11 @@ const classConstructorKeepsInstanceUncached = (checker: ts.TypeChecker, flow: Va
       !sourceBindingIsUnwritten(flow, owner)
     )
       return false
+    if (
+      role === 'binding-uses' &&
+      isModuleExportedDeclaration(checker, owner, null) &&
+      inProgramImportReferencesOf(checker, flow, owner) === null
+    ) return false
     if (!referenceUsesAreClosed(owner, owner.name, type)) return false
     // The member walk below asks two questions of CLASS syntax: does a static
     // block or static field leak the constructor through `this`, and does a
@@ -651,8 +680,10 @@ const classConstructorKeepsInstanceUncached = (checker: ts.TypeChecker, flow: Va
       )
         return false
     }
-    const completions = sourceConstructorReturnValuesOf(checker, flow, owner)
-    if (completions === null || completions.some((value) => unwrapErasedExpression(value).kind !== ts.SyntaxKind.ThisKeyword)) return false
+    if (role === 'result') {
+      const completions = sourceConstructorReturnValuesOf(checker, flow, owner)
+      if (completions === null || completions.some((value) => unwrapErasedExpression(value).kind !== ts.SyntaxKind.ThisKeyword)) return false
+    }
     return (checker.getBaseTypes(type) ?? []).every((base) => {
       const declared = heritageClassOrInterfaceOf(base)
       return declared !== null && visit(declared)

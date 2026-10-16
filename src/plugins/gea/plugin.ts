@@ -1,11 +1,12 @@
 import type { DeclarationId, OperationId } from '../../identity/ids.js'
 import type { CompilerPlugin, PluginInstance, PluginOptions } from '../model.js'
 import type { GeaElementFacts } from './contract.js'
-import { geaAfterRenderMemberName, geaRenderBridgeMemberName, geaRenderMemberName } from './contract.js'
+import { createGeaProviderAuthority, geaAfterRenderMemberName, geaRenderBridgeMemberName, geaRenderMemberName } from './contract.js'
 import { createGeaComponentClassProducer, type GeaReactiveFields } from './component-classes.js'
 import { geaHostConstructors } from './constructors.js'
 import {
   geaCommonJsGlobals,
+  geaCoreDeclarationFileName,
   geaElementFragment,
   geaElementTextLeafTags,
   geaHostConstants,
@@ -21,7 +22,9 @@ import {
   geaNativeViews,
   geaHostSingletons,
   geaEmbeddedIncludeGuard,
-  geaProtocolCarriers
+  geaProtocolCarriers,
+  geaNativeReferenceIdentities,
+  geaNativeIterableProviders
 } from './host.js'
 import { geaHostMemberVoidResults, geaHostMembers } from './members.js'
 import { lowerGeaElement } from './lower.js'
@@ -56,14 +59,18 @@ import { geaReactiveSlotTransform } from './reactive-slots.js'
 export const geaPlugin: CompilerPlugin = {
   name: 'gea',
   instantiate: (options: PluginOptions): PluginInstance => {
+    const rawDeclarationFileName = geaCoreDeclarationFileName(options)
     const facts = new Map<OperationId, GeaElementFacts>()
     const componentClasses = new Set<DeclarationId>()
     const reactiveFields: GeaReactiveFields = new Map()
     return {
-      producers: (context) => [
-        createGeaElementProducer(context, facts),
-        createGeaComponentClassProducer(context, componentClasses, reactiveFields)
-      ],
+      producers: (context) => {
+        const rawAuthority = createGeaProviderAuthority(context, rawDeclarationFileName)
+        return [
+          createGeaElementProducer(context, facts, rawAuthority),
+          createGeaComponentClassProducer(context, componentClasses, reactiveFields, rawAuthority)
+        ]
+      },
       // Two rewrites, in this order, and the order is the point.
       //
       // A component invocation whose props only ever write PROPERTIES becomes
@@ -114,6 +121,8 @@ export const geaPlugin: CompilerPlugin = {
         // declares), so its row is read off the package's own `Element`
         // spelling -- see `geaProtocolCarriers`.
         nativeTypes: geaProtocolCarriers(),
+        nativeReferenceIdentities: geaNativeReferenceIdentities(),
+        nativeIterableProviders: geaNativeIterableProviders(),
         // gea's own host types are, like Apple's, ambient declarations with
         // no OTHER, structurally-unrelated ambient name standing in for them
         // -- see `plugins/model.ts`'s `ambientTypeRealizations` and

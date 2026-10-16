@@ -91,6 +91,14 @@ export const indexedAccessMemberTypes = (checker: ts.TypeChecker, objectType: ts
     const numberIndex = checker.getIndexInfosOfType(objectType).find((info) => (info.keyType.flags & ts.TypeFlags.Number) !== 0)
     if (numberIndex) return [numberIndex.type]
   }
+  // An index-only dictionary has no named keys to enumerate. Its declared
+  // string index is the answer to a broad string read, just as the number
+  // index above answers a broad number read. Match that domain explicitly;
+  // a numeric or patterned index does not authorize arbitrary string keys.
+  if ((indexType.flags & ts.TypeFlags.String) !== 0) {
+    const stringIndex = checker.getIndexInfosOfType(objectType).find((info) => (info.keyType.flags & ts.TypeFlags.String) !== 0)
+    if (stringIndex) return [stringIndex.type]
+  }
   const keys = keysOf(checker, objectType, indexType)
   if (keys === null) return null
   const members: ts.Type[] = []

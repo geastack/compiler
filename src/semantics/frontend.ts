@@ -1,3 +1,6 @@
+import { sourceNativeIterableOf } from './normalize/source-native-iterable.js'
+import type { NativeIterableProvider } from '../plugins/native-iterable-providers.js'
+import { sourceConstructorSelectionsOf } from './normalize/flow/member-call-forwarding.js'
 import type { PackageSource } from './package-sources.js'
 import { withSharedArrayStorage } from './normalize/shared-array-storage.js'
 import { deadEventCallsOf } from './normalize/dead-event-emissions.js'
@@ -92,12 +95,14 @@ import { settleBindingCensus, type RoundCensus } from './normalize/binding-fixpo
 import { withJsDocTypeNames } from './normalize/jsdoc-type-names.js'
 import {
   censusReachability,
+  wholeProgram,
   fileEvaluates,
   moduleEvaluationOrder,
   nodeIsReachable,
   type ProgramReachability
 } from './normalize/reachability.js'
 import { createProgram, defaultCompilerOptions } from './program.js'
+import { createJsxRuntimeModuleResolver } from './jsx-runtime-provider.js'
 import { createFrontendTiming } from './frontend-timing.js'
 import type { DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
 // The ambient host-protocol census -- what this program's own declarations
@@ -177,6 +182,7 @@ export interface FrontendInput {
    * this file behaves exactly as it did.
    */
   readonly nativeTypes?: ReadonlyMap<string, string>
+  readonly nativeIterableProviders?: ReadonlyMap<string, NativeIterableProvider>
   /** Exact host-owned native type declarations; see `PluginCapabilities.nativeTypesByDeclaration`. */
   readonly nativeTypesByDeclaration?: ReadonlyMap<string, HostNativeTypeDeclaration>
   /** Exact host-owned singleton declarations; see `PluginCapabilities.hostSingletonDeclarations`. */
@@ -905,9 +911,16 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // walked the file set compiled a different program than the one that runs.
   // See `reachability.ts` for what it refuses to prune and why; nothing here
   // changes what a type *means*, only which declarations are censused.
+  let constructionFlow: ReturnType<typeof indexValueFlow> | undefined
   const reachable = censusReachability({
     checker: compiled.checker,
     files: compiled.sourceFiles,
+    runtimeExportOf: (file, name) => compiled.runtimeExportOf(file.fileName, name),
+    constructorTargetsOf: (expression) => {
+      constructionFlow ??= indexValueFlow(compiled.checker, compiled.sourceFiles, wholeProgram)
+      const selected = sourceConstructorSelectionsOf(compiled.checker, constructionFlow, expression)
+      return selected?.every(ts.isClassDeclaration) ? selected : null
+    },
     // A CommonJS module is not an ESM entry: it runs only from its record's
     // `require`, so it must not join `moduleEvaluationOrder`.  Its body still
     // has to be censused and lowered for that record to invoke, which is why
@@ -1711,6 +1724,10 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     if (parameters.implicitArgumentsTupleAt?.(owner)) for (const site of sites) actualArgumentSites.add(site)
   const settledArgumentsObjects = { ...argumentsObjects, actualFrameOf: (node: ts.Node) => actualArgumentSites.has(node) }
   const context: ProducerContext = {
+    nativeIterableAt: (source, consumer) => {
+      if (!hostMutationFactsSealed) return null
+      return sourceNativeIterableOf(context, valueFlow, input.nativeIterableProviders ?? new Map(), source, consumer)
+    },
     installedGlobalPropertyBindingAt: (node) =>
       ts.isPropertyAccessExpression(node) ? (installedGlobalProperties.get(node) ?? null) : null,
     ownsInstalledGlobalProperty: (declaration) => ownedGlobalProperties.has(declaration),
@@ -1816,6 +1833,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     runtimeModuleTargetOf: compiled.runtimeModuleTargetOf,
     absentRequirePackageOf: compiled.absentRequirePackageOf,
     sourceFileOf: compiled.sourceFileOf,
+    jsxRuntimeModuleOf: createJsxRuntimeModuleResolver(compiled),
     absentGlobals: absent,
     argumentsObjects: settledArgumentsObjects,
     unresolvableNames,

@@ -3154,5 +3154,9 @@ export const emitAllocateConstructor = (ctx: EmitContext, lines: string[], opera
         ? `gea::exactNativeClassHeritage<${cppClassName(exactBase)}>(${operandText(ctx, heritageOperand)}.environment)`
         : `gea::nativeClassMethodStateFromEnvironment(${operandText(ctx, heritageOperand)}.environment)`
   const environment = `gea::allocateNativeClassMethodEnvironment<${cppClassName(operation.declaration)}>(${parent})`
-  lines.push(`${name} = ${cppTypeOf(operation.result.representation)}{&${cppConstructThunkName(operation.declaration)}, ${environment}};`)
+  // Certification authenticates this definition-only status against the
+  // semantic allocation. Its static receiver still owns this evaluation,
+  // but no source construction can consume a construct entry.
+  const construct = operation.constructionDeferred ? 'nullptr' : `&${cppConstructThunkName(operation.declaration)}`
+  lines.push(`${name} = ${cppTypeOf(operation.result.representation)}{${construct}, ${environment}};`)
 }

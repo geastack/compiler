@@ -3916,7 +3916,13 @@ export const censusGlobalHostMutations = (
     const declaration = bindingOf(current)
     if (declaration === null) return
     const currentType = checker.getTypeAtLocation(current)
-    if ((currentType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 && writesOf(declaration).length === 0) {
+    if (
+      (currentType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 &&
+      !writesOf(declaration).some((write) => write.slot === 'whole')
+    ) {
+      // A mutation THROUGH an ambient cell (including Object.assign) does
+      // not supply that cell's original identity. Only a whole binding write
+      // can replace its externally supplied, otherwise unknown origin.
       // No body write is not "no evidence" for a PARAMETER: its value comes
       // from its callers, never from a write this function's own body makes.
       // `enumeratedParameterValuesOf` is the closed-caller proof for exactly
@@ -4772,6 +4778,13 @@ export const censusGlobalHostMutations = (
     if (!facts.opaque || publishedRepresentationOf(expression) !== null) return false
     return globalObjectEscapesIntoData() && globalObjectMayInhabit(expression)
   }
+  // A reflective writer can receive an intrinsic/global object from an
+  // external producer even when this program never spelled that object as a
+  // data value. An unplaced target therefore needs the existing per-key
+  // surface stamp, not only the source-global escape test above. A published
+  // carrier remains a per-expression proof that excludes this surface.
+  const mayMutateReflectedSurface = (expression: ts.Expression): boolean =>
+    mayAliasGlobal(expression) || (aliasFacts(expression).opaque && publishedRepresentationOf(expression) === null)
   /**
    * Whether the global object can be REACHED from a value of this type --
    * `globalObjectMayInhabit`'s question asked transitively, because
@@ -5116,9 +5129,10 @@ export const censusGlobalHostMutations = (
     // already refuse to trust `facts.opaque` alone for exactly that reason --
     // they ask `publishedRepresentationOf(expression)`, the per-EXPRESSION
     // proof that requires every write reaching this value to agree on one
-    // representation, not just this component's coarse term union. Every
-    // caller of this function already gates entry on `mayAliasGlobal`, but
-    // that gate is `facts.global || (facts.opaque && published === null)`:
+    // representation, not just this component's coarse term union. Ordinary
+    // writes enter through `mayAliasGlobal`; reflected writers additionally
+    // admit an externally supplied opaque surface without a source-global
+    // data escape. In either case a published nonalias proof must survive:
     // when `facts.global` is ALSO true for this component (a genuinely
     // separate, unrelated merge), the gate passes on that disjunct alone and
     // the surface taint below used to fire from `facts.opaque` unconditionally,
@@ -6267,9 +6281,9 @@ export const censusGlobalHostMutations = (
       if (
         (mutator === 'Object.setPrototypeOf' || mutator === 'Reflect.setPrototypeOf') &&
         node.arguments[0] &&
-        mayAliasGlobal(node.arguments[0])
+        mayMutateReflectedSurface(node.arguments[0])
       ) {
-        markWildcard(node, 'global prototype replacement')
+        markWildcard(node, 'global or unproven reflected prototype replacement')
       }
       if (
         mutator === 'Object.defineProperty' ||
@@ -6285,7 +6299,7 @@ export const censusGlobalHostMutations = (
         // kind of writer and nothing to taint.
         const storesScriptVar = mutator === 'Object.defineProperty' && scriptGlobalValueRedefinitionOf(checker, names, node) !== null
         for (const receiver of receivers) {
-          if (receiver && !storesScriptVar && mayAliasGlobal(receiver)) taintMutationKeys(receiver, keyReader.keysOfKeyExpression(key))
+          if (receiver && !storesScriptVar && mayMutateReflectedSurface(receiver)) taintMutationKeys(receiver, keyReader.keysOfKeyExpression(key))
         }
       } else if ((mutator === 'Object.assign' || mutator === 'Object.defineProperties') && node.arguments[0]) {
         const target = node.arguments[0]!
@@ -6293,7 +6307,7 @@ export const censusGlobalHostMutations = (
         // key set is unknown keys; on a target that may be the global object
         // or an intrinsic, that is the wildcard. (A target that cannot alias
         // one is not a surface: its keys are the alias graph's business.)
-        if (mayAliasGlobal(target)) {
+        if (mayMutateReflectedSurface(target)) {
           const keys = mutatorTargetKeys(node, mutator)
           if (keys.some((key) => key.kind === 'every')) markWildcard(node, 'unknown bulk-mutator keys')
           else taintMutationKeys(target, keys)

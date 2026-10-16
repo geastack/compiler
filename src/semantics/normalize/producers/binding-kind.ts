@@ -31,6 +31,8 @@ export interface BindingKind {
  */
 export const bindingKindOf = (declaration: ts.Node): BindingKind => {
   if (ts.isFunctionExpression(declaration) && declaration.name) return { mutable: false, temporalDeadZone: false }
+  if (ts.isClassDeclaration(declaration) || (ts.isClassExpression(declaration) && declaration.name))
+    return { mutable: ts.isClassDeclaration(declaration), temporalDeadZone: true }
   const list = ts.isVariableDeclaration(declaration) ? declaration.parent : undefined
   if (!list || !ts.isVariableDeclarationList(list)) return { mutable: true, temporalDeadZone: false }
   const isConst = (list.flags & ts.NodeFlags.Const) !== 0

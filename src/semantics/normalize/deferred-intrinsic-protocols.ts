@@ -7,7 +7,9 @@ import { intrinsicObjectKeysIntact, keySetTouches, prototypeKeyQuerySignature, t
 
 /** @semanticCategory generic-primitive */
 export interface IntrinsicProtocolRequirement {
-  readonly intrinsic: 'Array' | 'Object' | 'Map' | 'WeakMap' | 'Reflect' | 'Function' | 'Symbol' | 'JSON' | 'Date'
+  readonly intrinsic: 'Array' | 'Object' | 'Map' | 'WeakMap' | 'Reflect' | 'Function' | 'Symbol' | 'JSON' | 'Date' | 'Proxy'
+  /** Standard global identity only; Proxy has no prototype to authenticate. */
+  readonly standardGlobalBinding?: true
   readonly member?: string
   /**
    * Without `sourceGlobalBinding` or `member`: the prototype keys the obligation depends on. Absent,
@@ -32,6 +34,7 @@ export interface DeferredIntrinsicProtocolLedger {
   readonly capture: <T>(work: () => T) => { readonly value: T; readonly requirements: readonly IntrinsicProtocolRequirement[] }
   readonly guard: <T>(work: () => T, accepts: (value: T) => boolean) => T
   readonly require: (intrinsic: IntrinsicProtocolRequirement['intrinsic'], location: ts.Node) => boolean
+  readonly requireStandardGlobalBinding: (intrinsic: 'Proxy', location: ts.Node) => boolean
   readonly requireMember: (intrinsic: 'Object' | 'Reflect' | 'JSON', member: string, location: ts.Node) => boolean
   readonly requireSourceGlobalBinding: (declaration: ts.FunctionDeclaration | ts.VariableDeclaration) => boolean
   /** The per-key prototype obligation: only `keys` of the intrinsic's prototype must be as declared. */
@@ -95,6 +98,7 @@ export const createDeferredIntrinsicProtocolLedger = (): DeferredIntrinsicProtoc
       return result.value
     },
     require: (intrinsic, location) => include([{ intrinsic, location }]),
+    requireStandardGlobalBinding: (intrinsic, location) => include([{ intrinsic, standardGlobalBinding: true, location }]),
     requireMember: (intrinsic, member, location) => include([{ intrinsic, member, location }]),
     requireSourceGlobalBinding: (declaration) =>
       include([{ intrinsic: 'Function', sourceGlobalBinding: declaration, location: declaration }]),
@@ -122,7 +126,9 @@ export const createDeferredIntrinsicProtocolLedger = (): DeferredIntrinsicProtoc
 
 /** What distinguishes two obligations on one intrinsic at one location: a static member, a key set, or the whole prototype. */
 export const intrinsicProtocolRequirementKind = (requirement: IntrinsicProtocolRequirement): string | undefined =>
-  requirement.sourceGlobalBinding !== undefined
+  requirement.standardGlobalBinding === true
+    ? 'standard-global-binding'
+    : requirement.sourceGlobalBinding !== undefined
     ? 'source-global-binding'
     : requirement.callableOwnKeys !== undefined
       ? `callable-own:${requirement.callableOwnKeys.prototypeMember}:${prototypeKeyQuerySignature(requirement.callableOwnKeys.keys)}`
@@ -183,6 +189,23 @@ export const failedIntrinsicProtocolRequirements = (
   requirements: readonly IntrinsicProtocolRequirement[]
 ): readonly IntrinsicProtocolRequirement[] =>
   requirements.filter((requirement) => {
+    if (requirement.standardGlobalBinding === true) {
+      // This says nothing about prototype/member slots or the values passed
+      // through a construction. The operation producer proves those separately.
+      if (
+        requirement.intrinsic !== 'Proxy' ||
+        requirement.sourceGlobalBinding !== undefined ||
+        requirement.member !== undefined ||
+        requirement.prototypeKeys !== undefined ||
+        requirement.prototypeAbsentNames !== undefined ||
+        requirement.callableOwnKeys !== undefined
+      ) return true
+      const symbol = context.checker.resolveName('Proxy', requirement.location, ts.SymbolFlags.Value, false)
+      if (!symbol?.valueDeclaration || context.isStandardLibraryDeclaration?.(symbol.valueDeclaration) !== true) return true
+      const id = context.identities.symbolValueDeclarationId(symbol, requirement.location)
+      const taint = context.globalHostMutationTaint
+      return id === null || taint.has('*') || taint.keysOf(id)?.every === true || keySetTouches(taint.surfaceKeys, { names: ['Proxy'] })
+    }
     if (requirement.sourceGlobalBinding !== undefined) {
       const declaration = requirement.sourceGlobalBinding
       if (

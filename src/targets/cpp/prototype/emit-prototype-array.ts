@@ -771,13 +771,15 @@ const rangedMethodText =
  * against every element, which is a comparison between two VALUES and never a
  * store: the search value is not written into the array, so it need not carry
  * the element's own carrier, only one the comparison can be decided across.
- * Two such pairs are rendered beyond the exact one `rangedMethodText` gates:
+ * These cross-carrier pairs are rendered beyond the exact one `rangedMethodText` gates:
  *
  * - a DYNAMIC search value over a primitive element. 7.2.12 step 1 compares
  *   Types first, so the value can only match when its tag is the element's;
  *   the tag test decides that, and only then is it unboxed and compared
  *   natively. `Object.values(Enum).includes(value as any)` is the
  *   shape.
+ * - an optional primitive search over its payload element: absence compares
+ *   equal only to a hole, while present payloads use SameValueZero.
  * - a search value that is the PRESENT arm of an optional element
  *   (`(string | undefined)[]`'s `.includes(name)`): an absent element never
  *   equals a string, so only present payloads are compared
@@ -787,6 +789,27 @@ const includesText: ArrayCallRenderer = (ctx, receiverText, element, args, resul
   const search = args[0]
   if (search === undefined || elementKey(search.representation) === elementKey(element)) {
     return rangedMethodText('includes', '23.1.3.16', [1, 2], 0)(ctx, receiverText, element, args, result)
+  }
+  // An optional search is still a value, never a store into the array.
+  // Undefined cannot equal a present primitive, but DOES equal a hole (Get
+  // returns undefined). Keep both carriers native and use the existing
+  // SameValueZero/relativeIndex authorities, evaluating each operand once.
+  if (
+    search.representation.kind === 'optional' &&
+    search.representation.absence === 'undefined' &&
+    elementKey(search.representation.payload) === elementKey(element) &&
+    (element.kind === 'string' || (element.kind === 'scalar' && element.domain !== 'bigint'))
+  ) {
+    requireArity('includes', '23.1.3.16', [1, 2], args)
+    if (args[1] !== undefined) requireNumber('includes', 1, args)
+    const from = args[1] === undefined ? '0.0' : operandText(ctx, args[1])
+    return (
+      `([&]() -> bool { const auto gea_array = ${receiverText}; const auto gea_search = ${operandText(ctx, search)}; ` +
+      `const double gea_from = ${from}; if (!gea_array) return false; const std::size_t gea_length = gea_array->size(); ` +
+      `for (std::size_t gea_index = gea::runtime::array::relativeIndex(gea_from, gea_length); gea_index < gea_length; ++gea_index) { ` +
+      `if (!gea_array->present(gea_index)) { if (!gea_search.has_value()) return true; continue; } ` +
+      `if (gea_search.has_value() && gea::sameValueZero(gea_array->readElement(gea_index), *gea_search)) return true; } return false; }())`
+    )
   }
   if (args.length === 1 && search.representation.kind === 'dynamic') {
     const cppElement = cppTypeOf(element)

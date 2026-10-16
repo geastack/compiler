@@ -15,7 +15,8 @@ import { createFrontendTiming, type FrontendTiming } from './frontend-timing.js'
 import { isUncheckedGuardCopyArtifact, uncheckedGuardArgumentCopies } from './unchecked-guard-argument-copies.js'
 import { knownCallerPredicateParameters } from './known-caller-predicate-parameters.js'
 import { uncheckedWriteMemberDeclarations } from './unchecked-write-member-declarations.js'
-import type { SourceTransform, SourceTransformProtocol } from './source-transform-protocol.js'
+import type { SourceTransform, SourceTransformProtocol, SourceTransformModule } from './source-transform-protocol.js'
+import { resolveSourceTransformExport, sourceTransformExportStatus } from './source-transform-exports.js'
 
 /**
  * The TypeScript program host.
@@ -147,6 +148,10 @@ export interface CompiledProgram {
   readonly absentRequirePackageOf: (specifier: string, containingFile: string) => boolean
   /** The Program's canonical source-file object for a resolved path. */
   readonly sourceFileOf: (fileName: string) => ts.SourceFile | null
+  /** Existing source-export resolver over this Program's canonical runtime graph.
+   * Only missing proves absence; unsupported exports remain conservative. */
+  readonly runtimeExportOf: (fileName: string, name: string) =>
+    { readonly kind: 'binding'; readonly symbol: ts.Symbol } | { readonly kind: 'missing' | 'refused' }
   /** Source files reached only through authenticated static CommonJS require edges. */
   readonly commonJsSourceFiles: readonly ts.SourceFile[]
   /** The files the compiler is responsible for, excluding ambient declarations. */
@@ -1054,12 +1059,55 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
       .map(({ diagnostic }) => diagnostic)
   ]
   timing.report()
+  const exportModules = new Map<string, SourceTransformModule>()
+  const exportModuleOf = (fileName: string): SourceTransformModule | null => {
+    const file = program.getSourceFile(fileName)
+    if (!file) return null
+    const previous = exportModules.get(file.fileName)
+    if (previous) return previous
+    const selected: SourceTransformModule = Object.freeze({
+      fileName: file.fileName, text: file.text, declarationFileName: undefined, packageManifest: null,
+      resolveSource: (specifier: string) => {
+        const target = configured.runtimeModuleTargetOf(specifier, file.fileName, 'import')
+        return target ? exportModuleOf(target) : null
+      }
+    })
+    exportModules.set(file.fileName, selected)
+    return selected
+  }
   return {
     program,
     checker,
     runtimeModuleTargetOf: configured.runtimeModuleTargetOf,
     absentRequirePackageOf: configured.absentRequirePackageOf,
     sourceFileOf: (fileName) => program.getSourceFile(fileName) ?? null,
+    runtimeExportOf: (fileName, name) => {
+      const module = exportModuleOf(fileName)
+      if (!module) return { kind: 'refused' }
+      const status = sourceTransformExportStatus(module, name)
+      if (status !== 'binding') return { kind: status }
+      const binding = resolveSourceTransformExport(module, name)
+      const file = binding ? program.getSourceFile(binding.module.fileName) : undefined
+      if (!binding || !file) return { kind: 'refused' }
+      // The barrel's checker export may denote a type-only shadow of the
+      // actual runtime star export. Resolve only the resolver's terminal local
+      // declaration, never the barrel alias or a same-spelled global symbol.
+      const symbols = new Set<ts.Symbol>()
+      for (const statement of file.statements) {
+        if ((ts.isClassDeclaration(statement) || ts.isFunctionDeclaration(statement) || ts.isEnumDeclaration(statement)) &&
+            statement.name?.text === binding.localName) {
+          const symbol = checker.getSymbolAtLocation(statement.name)
+          if (symbol) symbols.add(symbol)
+        }
+        if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations)
+          if (ts.isIdentifier(declaration.name) && declaration.name.text === binding.localName) {
+            const symbol = checker.getSymbolAtLocation(declaration.name)
+            if (symbol) symbols.add(symbol)
+          }
+      }
+      const [symbol] = symbols
+      return symbols.size === 1 && symbol ? { kind: 'binding', symbol } : { kind: 'refused' }
+    },
     commonJsSourceFiles: configured.commonJsTargetPaths.flatMap((fileName) => {
       const sourceFile = program.getSourceFile(fileName)
       return sourceFile ? [sourceFile] : []

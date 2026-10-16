@@ -164,6 +164,8 @@ export interface HostBindingPolicy {
    */
   readonly basesOf: (native: string | null) => readonly string[]
   readonly viewsInto?: (native: string | null) => ReadonlyMap<string, string>
+  /** Explicit host contract, never inferred from a native type name. */
+  readonly referenceIdentityOf?: (native: string | null) => boolean
 }
 
 /** No bindings installed: every declared type falls through to its structural answer, unchanged. */

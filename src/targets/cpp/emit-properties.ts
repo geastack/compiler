@@ -1802,7 +1802,9 @@ const emitFieldStoreLines = (
           `"${representationKey(operation.value.representation)}"; no conversion is installed between them`
       )
     }
-    lines.push(`${staticField.name} = ${movedValueText(ctx, operation.value, staticField.representation, converted)};`)
+    const state = constructorStateText(operation.receiver.representation, operandText(ctx, operation.receiver))
+    if (state === null) throw createCppEmitBlockedError('property-access:constructor-static-state', 'has no evaluated constructor identity')
+    lines.push(`{ auto gea_static = gea::constructorStaticView<${staticField.viewStruct}>(${state}); gea_static->value = ${movedValueText(ctx, operation.value, staticField.representation, converted)}; gea_static->present = true; }`)
     // A store's result is the receiver threaded onward, exactly as the record
     // branch below explains -- here that receiver is the class value itself.
     if (operation.result) defineValueAlias(ctx, operation.result, operandText(ctx, operation.receiver))

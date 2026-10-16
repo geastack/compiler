@@ -100,7 +100,7 @@ export const lowerProtocol = (ctx: LoweringContext, block: IrBlockId, operation:
       // dynamic call needed" (see build.ts).
       const method = resolveOptionalOperand(ctx, block, lineage, operandOf(operation, 'method'))
       const representation = requireResultRepresentation(ctx, operation, 'iterator-record', 'a get-iterator step')
-      registerResult(ctx, operation, ctx.builder.getIterator(block, lineage, operation.protocol, target, method, representation))
+      registerResult(ctx, operation, ctx.builder.getIterator(block, lineage, operation.protocol, target, method, representation, operation.nativeIterable))
       return
     }
     case 'next': {

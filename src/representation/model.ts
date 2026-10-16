@@ -496,6 +496,8 @@ export type Representation =
        * that share one runtime type share one claim and one member table.
        */
       readonly native: string | null
+      /** Host promises identity() with an owner retained by native carrier copies. */
+      readonly referenceIdentity?: boolean
       /**
        * Every host carrier this one derives from, transitively, as the host
        * states it (`PluginCapabilities.nativeBases`) -- nearest base first,
@@ -1151,6 +1153,7 @@ const buildRepresentationKey = (representation: Representation): string => {
       // case `representationKey` exists to catch.
       return (
         `native-handle(${representation.protocol}@${representation.version}` +
+        `${representation.referenceIdentity === true ? ';identity=owner' : ''}` +
         `;call=${representation.call ? abiKey(representation.call) : '-'}` +
         `;construct=${representation.construct ? abiKey(representation.construct) : '-'})`
       )

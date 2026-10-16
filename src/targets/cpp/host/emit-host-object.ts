@@ -1875,7 +1875,8 @@ const dynamicDescriptorConversionText = (
   member: string,
   receiver: string,
   key: IrOperand,
-  operation: CallOperation
+  operation: CallOperation,
+  nativeDescriptorCall?: string
 ): string => {
   const resultRepresentation = operation.result?.representation ?? null
   if (resultRepresentation === null) {
@@ -1890,7 +1891,7 @@ const dynamicDescriptorConversionText = (
     `"Object.${member}" of a dynamic receiver`,
     operation
   )
-  const nativeCall = `gea::host::ObjectConstructor::${member}(${receiver}, ${propertyKeyText(ctx, member, key)})`
+  const nativeCall = nativeDescriptorCall ?? `gea::host::ObjectConstructor::${member}(${receiver}, ${propertyKeyText(ctx, member, key)})`
   const halves = accessorHalvesOf('static_cast<const gea::PropertyDescriptor&>(*__gea_native)')
   const aggregate = aggregateOf(
     {
@@ -2093,6 +2094,22 @@ export const getOwnPropertyDescriptorText = (ctx: EmitContext, operation: CallOp
     const view = objectViewFrom(ctx, member, representation, receiver, 'object')
     if (view.kind === 'dynamic') return dynamicDescriptorConversionText(ctx, member, view.receiver, key, operation)
     if (view.kind === 'dictionary') {
+      if (
+        representation.kind === 'dictionary' &&
+        representation.key === 'string' &&
+        representation.ownership === 'shared-refcount' &&
+        representation.value.kind === 'dynamic' &&
+        representation.value.reason === 'declared-any-never-narrowed' &&
+        key.representation.kind === 'string'
+      ) {
+        // The original dictionary's document overlay owns accessor Functions;
+        // project its descriptor through the same dynamic entry frame as any.
+        const call =
+          `([&]() -> gea::Optional<gea::PropertyDescriptor> { gea::PropertyDescriptor descriptor; ` +
+          `if (!gea::detail::nativeDocumentDescriptor(${receiver}, ${propertyKeyText(ctx, member, key)}, descriptor)) return {}; ` +
+          `return descriptor; })()`
+        return dynamicDescriptorConversionText(ctx, member, receiver, key, operation, call)
+      }
       return refuseDictionaryArm(
         member,
         view,
@@ -3464,6 +3481,23 @@ const definePropertyText = (ctx: EmitContext, operation: CallOperation): string 
         'defineProperty',
         view,
         `the key carries "${representationKey(key.representation)}" rather than the table's "${view.representation.key}" key domain`
+      )
+    }
+    if (
+      view.representation.key === 'string' &&
+      view.representation.ownership === 'shared-refcount' &&
+      view.value.kind === 'dynamic' &&
+      view.value.reason === 'declared-any-never-narrowed' &&
+      operation.nativeAccessorDefinition !== undefined
+    ) {
+      // Only the certified native accessor installation reaches this branch.
+      // Reuse the dictionary's owned document overlay, including replacement
+      // compatibility and retained native accessor invocation frames.
+      const slot = '__gea_descriptor'
+      return (
+        `([&]() { ${defineDescriptorLines(ctx, operation, descriptor, slot)} ` +
+        `if (!gea::detail::nativeDocumentDefine(${operandText(ctx, target)}, ${propertyKeyText(ctx, 'defineProperty', key)}, ${slot})) ` +
+        `gea::host::throwRuntimeError("TypeError", "Cannot redefine property"); return ${operandText(ctx, target)}; })()`
       )
     }
     const value = dictionaryDefinePropertyValue(ctx, descriptor)

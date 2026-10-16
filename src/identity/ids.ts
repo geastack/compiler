@@ -278,3 +278,9 @@ export const roleOfResult = (result: SemanticResultId): ResultRole => {
   if (!known) throw new Error(`semantic result ${result} does not carry a known result role`)
   return known
 }
+
+/** A lexical cell associated with a declaration, distinct from its source
+ * declaration identity. Role slots are assigned by the owning language rule.
+ */
+export const lexicalCellDeclarationId = (owner: DeclarationId, slot: number): DeclarationId =>
+  `lexical-cell|${encode(owner)}|${slot}` as DeclarationId

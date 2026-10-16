@@ -45,7 +45,7 @@ export interface NativeAccessorHalfRecipe {
   readonly observe: ConversionNodeId | null
 }
 
-/** Exact literal storage and Function provenance, independently replayed
+/** Exact descriptor storage and Function provenance, independently replayed
  * before installation or any future accessor invocation.
  * @semanticCategory generic-primitive
  */
@@ -53,7 +53,8 @@ export interface NativeAccessorDefinitionRecipe {
   readonly receiver: IrValueId
   readonly descriptor: IrValueId
   readonly key: IrValueId
-  readonly keyText: string
+  /** null authenticates only this SSA key, never a fixed-key reflection. */
+  readonly keyText: string | null
   readonly halves: readonly NativeAccessorHalfRecipe[]
 }
 
@@ -193,15 +194,26 @@ export const nativeAccessorDefinitionOf = (
   const descriptorSource = operandOf(semantic, 'argument', 2)
   const semanticKey = operandOf(semantic, 'argument', 1)
   const keySource = definitionOf(key.value)
-  if (
-    descriptorSource?.source.kind !== 'result' ||
-    keySource?.kind !== 'constant' ||
-    keySource.literal !== 'string' ||
-    semanticKey?.source.kind !== 'constant' ||
-    semanticKey.source.literal !== 'string' ||
-    semanticKey.source.text !== keySource.text
-  )
-    return null
+  const literalKey =
+    keySource?.kind === 'constant' &&
+    keySource.literal === 'string' &&
+    semanticKey?.source.kind === 'constant' &&
+    semanticKey.source.literal === 'string' &&
+    semanticKey.source.text === keySource.text
+  // A real declared-any string dictionary already owns arbitrary string slots.
+  // This additional installation route authenticates the actual argument SSA;
+  // it supplies no fixed-key/field proof to native records or later reflection.
+  // Native Functions remain native: only the dictionary's genuinely dynamic
+  // read/write boundary receives its separately certified observation frame.
+  const dictionaryKey =
+    !literalKey &&
+    receiver.representation.kind === 'dictionary' &&
+    receiver.representation.key === 'string' &&
+    receiver.representation.value.kind === 'dynamic' &&
+    receiver.representation.value.reason === 'declared-any-never-narrowed' &&
+    key.representation.kind === 'string' &&
+    intrinsicCallArgumentMatches(operation, semantic, 1, definitionOf)
+  if (descriptorSource?.source.kind !== 'result' || (!literalKey && !dictionaryKey)) return null
   const fields = descriptorLayout.fields
   if (
     !fields.some((field) => field.key === 'get' || field.key === 'set') ||
@@ -374,11 +386,17 @@ export const nativeAccessorDefinitionOf = (
       origins.get(producer.lineage) !== source.callable
     )
       return null
-    const half = nativeAccessorHalfOf(field.key as 'get' | 'set', held, source.callable, input, receiver.representation.kind === 'dynamic')
+    const half = nativeAccessorHalfOf(
+      field.key as 'get' | 'set',
+      held,
+      source.callable,
+      input,
+      receiver.representation.kind === 'dynamic' || dictionaryKey
+    )
     if (half === null) return null
     halves.push(half)
   }
-  return { receiver: receiver.value, descriptor: descriptor.value, key: key.value, keyText: keySource.text, halves }
+  return { receiver: receiver.value, descriptor: descriptor.value, key: key.value, keyText: literalKey ? keySource.text : null, halves }
 }
 
 export const nativeAccessorDefinitionMatches = (
@@ -482,7 +500,14 @@ export const nativeAccessorObservationNeedsReceipt = (
     .flatMap((body) => [...body.blocks.values()].flatMap((block) => block.operations))
     .some((candidate) => {
       if (candidate.kind !== 'call' || !candidate.nativeAccessorDefinition) return false
-      if (observedKey !== null && candidate.nativeAccessorDefinition.keyText !== observedKey) return false
+      // An SSA-key installation might have installed this literal key too; do
+      // not misclassify it as absent. Only a known, different key is excluded.
+      if (
+        observedKey !== null &&
+        candidate.nativeAccessorDefinition.keyText !== null &&
+        candidate.nativeAccessorDefinition.keyText !== observedKey
+      )
+        return false
       // The ambient descriptor's own `get(): any` / `set(v: any)` halves call
       // the installed Function through its dynamic frame with an undefined
       // receiver (`gea::descriptorGetCallable`), which is exactly a detached
@@ -570,6 +595,8 @@ export const nativeAccessorObservationOf = (
     const source = semanticOf(input.graph, candidate)
     const held = source?.family === 'invocation' ? operandOf(source, 'argument', 0) : undefined
     return (
+      // SSA-key installation alone never authenticates a fixed-key view.
+      candidate.nativeAccessorDefinition.keyText !== null &&
       candidate.nativeAccessorDefinition.keyText === keySource.text &&
       held?.source.kind === 'result' &&
       census.origins.get(held.source.result) === owner

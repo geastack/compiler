@@ -796,7 +796,7 @@ const lowerClassLifecycle = (ctx: LoweringContext, block: IrBlockId, operation: 
     lowerPrototypeReparenting(ctx, block, operation)
     return
   }
-  if (operation.event !== 'define-field' || operation.placement !== 'static') return
+  if (operation.event !== 'run-static-block' && (operation.event !== 'define-field' || operation.placement !== 'static')) return
   const initializerOperand = operandOf(operation, 'initializer')
   if (!initializerOperand || initializerOperand.source.kind !== 'result') return
   const lineage = initializerOperand.source.result
@@ -827,7 +827,10 @@ const lowerClassLifecycle = (ctx: LoweringContext, block: IrBlockId, operation: 
     source: { kind: 'result', result: constructorValue.id },
     type: constructorAllocation.shape
   })
+  if (operation.event === 'run-static-block' && abi.result.kind !== 'void')
+    throw new IrLoweringBlockedError('a static block must publish its actual void callable convention')
   const result = ctx.builder.call(block, lineage, callee, receiver, [], abi.result)
+  if (operation.event === 'run-static-block') return
   if (result === null) {
     throw new IrLoweringBlockedError(`a static field initializer for ${operation.classDeclaration} produces no value to store`)
   }
@@ -1321,9 +1324,10 @@ const iteratorCloseRegionsOf = (
       blocks: blockOrder.slice(first, last + 1),
       dismissTargets: [],
       onlyIfOpen: true,
-      // A finite pattern has no body to separate from its step. Its own
-      // step/default split is the same question one level down and is not
-      // answered here; see `IrIteratorCloseRegion.bodyEntry`.
+      // Step/value failure completes the record; a later default/assignment
+      // failure still closes its open iterator. Certification authenticates
+      // this finite-pattern obligation independently against the source close.
+      completeOnStepAbrupt: true,
       bodyEntry: null
     })
   }

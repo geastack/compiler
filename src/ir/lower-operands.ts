@@ -299,7 +299,15 @@ export const resolveRequiredOperand = (
         )
       }
       return {
-        value: ctx.builder.allocateConstructor(block, lineage, declaration, [], representation),
+        value: ctx.builder.allocateConstructor(
+          block,
+          lineage,
+          declaration,
+          [],
+          representation,
+          undefined,
+          ctx.program.classes.get(declaration)?.constructionDeferred ? true : undefined
+        ),
         representation
       }
     }
