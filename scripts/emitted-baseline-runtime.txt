@@ -365,6 +365,7 @@ dynamic-optional-absence-mismatch.ts.cpp ed2499511ca5
 dynamic-record-method-binds-the-object-as-this.runtime.ts.cpp c464d7a30de4
 dynamic-regexp.ts.cpp 990d4ac4b0b5
 dynamic-spread-into-string-dictionary.runtime.ts.cpp 0b3f8b970af5
+dynamic-string-replace.runtime.ts.cpp f54482eaa82f
 dynamic-tonumber-bigint.ts.cpp d381f4d118f3
 dynamic-tonumber-symbol.ts.cpp 8b9a96be3ca2
 dynamic-tonumber.ts.cpp 54a2114b82dd
