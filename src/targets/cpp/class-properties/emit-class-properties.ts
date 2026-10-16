@@ -817,7 +817,11 @@ export const computedClassPrototypeMethodText = (ctx: EmitContext, operation: Ge
     }
     if (branches.length === 0) return null
     const keyBinding = staticKey === undefined ? `const std::string& gea_method_key = ${operandText(ctx, operation.key)}; ` : ''
-    return { text: `([&]() -> ${type} { ${keyBinding}${branches.join(' ')} return gea::Value(); })()`, spelling: type, carrier: result }
+    // A key naming no method can still name an accessor up the prototype
+    // chain (`Material.setValues`'s `this[ key ]` for `alphaTest`); the
+    // runtime's own [[Get]] reaches it through the class's prototype hook.
+    const miss = staticKey === undefined ? `gea::nativeDynamicGet(${object}, gea::PropertyKey::string(gea_method_key))` : 'gea::Value()'
+    return { text: `([&]() -> ${type} { ${keyBinding}${branches.join(' ')} return ${miss}; })()`, spelling: type, carrier: result }
   }
   if (staticKey !== undefined) return null
   if (result.kind !== 'function-value-dispatch') return null
