@@ -19,7 +19,7 @@ any-object-literal-accessors-enumerate-through-get.runtime.ts.cpp a4ed12454e66
 any-record-union-arm-into-interface-parameter.runtime.ts.cpp 25631fd81877
 any-sourced-null-into-optional-class-field.runtime.ts.cpp e2ac6ff9043b
 app-root-through-factory-and-host-callback.runtime.ts.cpp 4da12264662c
-arguments-forwarding-function-in-reflective-record.runtime.js.cpp fe0e60922782
+arguments-forwarding-function-in-reflective-record.runtime.js.cpp 5e23cf5f9a90
 arithmetic-over-two-dynamic-operands.runtime.js.cpp bd4373185ed1
 array-assignment-rest-target.ts.cpp ef7af69b9332
 array-buffer-inline-storage-aliasing.runtime.ts.cpp 1c2f4d4ce21b
@@ -147,7 +147,7 @@ callable-field-written-through-an-any-receiver.runtime.js.cpp 9b60271a211e
 callable-identity-anyfunction.ts.cpp 288b34ef0ec5
 callable-identity-blind-uses.runtime.ts.cpp 688bc489542e
 callable-intersection.ts.cpp 168c47c4468b
-callable-literal-union-slot-result.ts.cpp e7cbb1efff6a
+callable-literal-union-slot-result.ts.cpp bed011040a49
 callable-member-guard-covers-the-view-source.runtime.ts.cpp 2efce3fb4671
 callable-omitted-trailing-optional-parameter.ts.cpp f4d557220eee
 callable-operand-coerces-to-its-source-text.runtime.js.cpp 6e6dbe91b8b3
@@ -234,8 +234,8 @@ computed-class-prototype-method.ts.cpp 3621b3951dfd
 computed-get-over-literal-key-union.ts.cpp 02d689db8735
 computed-key-bag-passed-as-union-argument.runtime.js.cpp 8720a1013159
 computed-key-before-declared-field-key-order.runtime.ts.cpp 7acf4bd935a1
-computed-key-own-assignment-into-dictionary-field.runtime.js.cpp 80e5823ca899
-computed-key-store-into-typed-table-of-union-slots.runtime.js.cpp d5fc7a08eaac
+computed-key-own-assignment-into-dictionary-field.runtime.js.cpp a4331251fcfe
+computed-key-store-into-typed-table-of-union-slots.runtime.js.cpp 501f20deef72
 computed-key-writes-do-not-taint-intrinsics.runtime.ts.cpp 668fac2705ff
 computed-literal-union-key-writes-past-member-type.runtime.ts.cpp a7b0952b1c20
 computed-method-value-called-with-its-receiver.ts.cpp f9fcba2e4a69
@@ -303,7 +303,7 @@ descriptor-array-splice.js.cpp da01ddf3b77a
 descriptor-function-this-is-the-lookup-receiver.ts.cpp 5890edf8d0fa
 destructured-default-host-options.ts.cpp c6b3a7d88150
 destructured-module-namespace-function-call.runtime.ts.cpp afae7c24c2ed
-destructured-read-over-proxy-error-module-union.runtime.ts.cpp b05befca364e
+destructured-read-over-proxy-error-module-union.runtime.ts.cpp 60a4012814a8
 destructuring-defaults.ts.cpp 00e33a3e6331
 dictionary-define-property-nondefault.ts.cpp b57366529622
 dictionary-define-property.ts.cpp 51bdce200ba6
@@ -331,6 +331,7 @@ dynamic-array-literal-gather.runtime.js.cpp 60a83cabf76e
 dynamic-array-projection.ts.cpp d45bdc12f79b
 dynamic-array-rebuild-keeps-holes-and-order.runtime.ts.cpp fe99e85a7b77
 dynamic-bag-method-call-behind-property-guard.runtime.js.cpp a27d020fbea0
+dynamic-call-argument-views-the-callers-record-and-array.runtime.js.cpp 38078c9e1b05
 dynamic-callable-boxed-call-frame.runtime.js.cpp a32e69173685
 dynamic-callable-rest-adapter.runtime.js.cpp 1beef327d2cb
 dynamic-callable-union-identity.runtime.ts.cpp 90b0eef9cefa
@@ -507,7 +508,7 @@ generic-method-under-a-later-class-copy.ts.cpp 9ac4fdf4d53d
 generic-nested-hole-filling.ts.cpp 94141356c4e5
 generic-object-alias-instantiations-are-distinct.runtime.ts.cpp e516869b9663
 generic-override-copy-through-class-union-arm.runtime.ts.cpp 62d53f6e095a
-generic-reader-family-at-any-and-concrete-copies.runtime.ts.cpp 982322ef726a
+generic-reader-family-at-any-and-concrete-copies.runtime.ts.cpp 27b2b0beaa23
 generic-receiver-member-result-through-bound-override.runtime.ts.cpp 5035d1026cb9
 generic-receiver-method-result-per-copy-async.runtime.ts.cpp c808b62c9644
 generic-receiver-method-result-per-copy-bare.runtime.ts.cpp d3c645971467
@@ -652,10 +653,10 @@ json-stringify-record-with-dynamic-dictionary-field.runtime.ts.cpp aba0429ae08d
 json-stringify-replacer.ts.cpp f6dfc12166dc
 json-stringify-tuples-are-arrays.ts.cpp 58af76ba0b96
 jsx-class-map.tsx.cpp b5c7a7c87ca4
-jsx-component-timer-initialization.tsx.cpp 2afa104798e6
+jsx-component-timer-initialization.tsx.cpp e0302934c812
 jsx-conditional-reactive-class.tsx.cpp 92254f1574f9
 jsx-derived-getter-local-binding.tsx.cpp bb6bceb6ab31
-jsx-inline-event-parameter.tsx.cpp c274414ab3fe
+jsx-inline-event-parameter.tsx.cpp 2a9cfd32c41f
 jsx-inventory-reactive-fields.tsx.cpp 71b0593b51b2
 jsx-reactive-block-map.tsx.cpp 0f44b948dc0e
 jsx-reactive-getter-branch.tsx.cpp 2c5666b0d59e
@@ -975,7 +976,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp ba66f3c8919a
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 1529f347bb00
-printer-drift.txt 018a0c3a962b
+printer-drift.txt 9d36269ae90e
 private-names-are-not-own-properties.ts.cpp 5d0e90d41f28
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp 0998df9c0cd5
@@ -1014,7 +1015,7 @@ prototype-object-class-typed-instance.ts.cpp e53246f08c16
 proxy-answered-method-called-with-the-proxy-as-this-aborts-by-name.runtime.ts.cpp 204d52f50cfa
 proxy-error-module-at-any-stays-native.runtime.ts.cpp 5ac94617249a
 proxy-error-module-method-reads-become-typed-callables.runtime.ts.cpp 7a1c4ae49c61
-proxy-non-normal-method-get-retains-effects.runtime.ts.cpp 51d3a64bc15b
+proxy-non-normal-method-get-retains-effects.runtime.ts.cpp ed2f3abd10ed
 proxy-static-field-logical-assignment-carries-the-proxy.runtime.ts.cpp ce9ef5aeb064
 proxy-static-no-traps.runtime.ts.cpp cdb0550460b5
 proxy-static-traps.runtime.ts.cpp 685bf05fca0e
@@ -1069,7 +1070,7 @@ rest-array-of-any-spread-into-a-null-absent-parameter.runtime.ts.cpp 07d128ceb8e
 rest-forwarding-spread-argument.ts.cpp 17dfc09c6a23
 rest-parameter-rebase.ts.cpp 0bf289371daa
 rest-parameter-union-of-tuples-mixed.ts.cpp 64ee2f9267fd
-rest-parameter-union-of-tuples.ts.cpp 1167f286faed
+rest-parameter-union-of-tuples.ts.cpp a66bb78e3a2d
 rest-tuple-element-union-keeps-every-member.ts.cpp cf45b8b0046f
 rest-tuple-spread.ts.cpp 3024af425c03
 return-type-mints-no-copy.ts.cpp 84e54e8223f0
@@ -1182,7 +1183,7 @@ symbol-keyed-class-field-declarations.ts.cpp 17a558062aca
 symbol-keyed-method-deletes-symbol-expando.ts.cpp 70daf853607b
 symbol-keyed-this-writes-get-an-absent-native-slot.runtime.ts.cpp 9c078ffdc578
 tail-conversion-never-allocated.ts.cpp 42a0331af439
-target-surface-options-from-a-partial-bag.runtime.js.cpp e6feb017f6fa
+target-surface-options-from-a-partial-bag.runtime.js.cpp a020a40f4364
 template-strings-array-identity.ts.cpp be8b199a9d03
 template-strings-array-structural.ts.cpp 9bebf40eefec
 template-strings-readonly-array.ts.cpp 7ed11e4d3e8f

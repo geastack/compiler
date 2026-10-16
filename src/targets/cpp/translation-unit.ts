@@ -139,7 +139,8 @@ import {
   cppResultTypeOf,
   cppTypeOf,
   publishNarrowedStorageSlots,
-  sanitizeForCppIdentifier
+  sanitizeForCppIdentifier,
+  unitFunctionName
 } from './types.js'
 import { buildHostMethodAliasIndex } from './host/host-method-aliases.js'
 import { constructionOnlyFieldsOf, reflectiveFieldWritesOf } from '../../ir/construction-only-fields.js'
@@ -2972,7 +2973,31 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   const unionAliasMarker = '// gea-union-aliases'
   const unitFunctionMarker = '// gea-unit-functions'
   const unitFunctionLinkage = perFile ? 'inline ' : '[[maybe_unused]] static '
+  // A boxed frame's record argument of another layout is read through the
+  // certified live view (`dynamic-call-argument`, gea_runtime.h's
+  // `DynamicArgumentView`). Each reader is a unit function, recorded while
+  // the session is open and named by address, which needs only its
+  // declaration: the struct it returns is incomplete where the hook is.
+  const dynamicArgumentViews = (): readonly string[] =>
+    (input.programConversionRecipes ?? []).flatMap((recipe) => {
+      if (recipe.role !== 'dynamic-call-argument' || !('shapeId' in recipe.target)) return []
+      const { role, owner, slot, source, target } = recipe
+      const load = programConversionText(programSite, role, owner, slot, source, target, 'gea_value')
+      const name = unitFunctionName(
+        'gea_dynamic_argument',
+        (named) => `${cppTypeOf(target)} ${named}(const gea::Value& gea_value)`,
+        `return ${load};`
+      )
+      if (name === null)
+        throw createCppEmitBlockedError('runtime-helper:program-conversion-recipes', `${owner} has no unit for its argument view`)
+      const qualifier = isolate && namespaceName !== null ? `${namespaceName}::` : ''
+      const struct = `${qualifier}${cppRecordStructName(target.shapeId)}`
+      return [
+        `template <> struct DynamicArgumentView<${struct}> { static constexpr bool installed = true; static constexpr auto in = &${qualifier}${name}; };`
+      ]
+    })
   const spliceUnionAliases = (source: RenderedCppSource): RenderedCppSource => {
+    const argumentViews = dynamicArgumentViews()
     const { aliases, functions } = endUnionAliasing()
     const forwards = [...recursiveContainers, ...structs.declarations, ...jsonStructs.declarations].filter(
       (declaration) => declaration.startsWith('struct ') && declaration.endsWith(';') && !declaration.includes('{')
@@ -2983,12 +3008,13 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
       ...forwards,
       ...aliases.map(({ name, spelling }) => `using ${name} = ${spelling};`),
       ...functions.map(({ signature }) => `${unitFunctionLinkage}${signature};`),
-      ...(omitted.length === 0
+      ...(omitted.length === 0 && argumentViews.length === 0
         ? []
         : [
             ...(isolate ? [namespaceClose] : []),
             'namespace gea::detail {',
             ...omitted.map((type) => `template <> inline constexpr bool dynamicProtocolOmitted<${type}> = true;`),
+            ...argumentViews,
             '}  // namespace gea::detail',
             ...(isolate ? [namespaceOpen] : [])
           ])
