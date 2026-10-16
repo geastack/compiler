@@ -1270,11 +1270,11 @@ const dynamicFieldAccessOf = (
  *
  * The three canonical primitive tags keep their exact `unboxField` arm, and a
  * member whose declared C++ type is not the representation's own spelling has
- * no conversion to name, so it stays refused. So does a `Function` field: its
- * load adapts a box to the field's frame through `DynamicCarrier`, which only
- * exists for frames whose every position has an exact carrier (a `BigInt`
- * result, an iterator parameter or a recursive alias has none), and that is a
- * C++ `static_assert`, not a fact this renderer can ask.
+ * no conversion to name, so it stays refused. A `Function` field loads only
+ * through its IR plan: its load adapts a box to the field's frame through
+ * `DynamicCarrier`, which only exists for frames whose every position has an
+ * exact carrier, and that is a C++ `static_assert` the census answers
+ * (`program-conversions.ts`) and this renderer cannot ask.
  */
 /**
  * The IR's planned `dynamic-field-write` load for one slot, or `null` when the
@@ -1291,9 +1291,9 @@ const objectFieldWriteLoadText = (
   access: DynamicFieldAccess,
   selected?: DynamicFieldLoad
 ): ((text: string) => string) | null => {
-  if (layouts === undefined || access.tag !== 'Object' || cppTypeOf(value) !== access.type) return null
+  if (layouts === undefined || (access.tag !== 'Object' && access.tag !== 'Function') || cppTypeOf(value) !== access.type) return null
   const planned = selected?.(access.key, value) ?? null
-  if (planned !== null) return planned
+  if (planned !== null || access.tag === 'Function') return planned
   if (withoutUnitFunctions(() => dynamicValueLoadText(layouts, value, 'gea_value')) === null) return null
   return (text) => dynamicValueLoadText(layouts, value, text)!
 }

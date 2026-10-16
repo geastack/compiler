@@ -1,6 +1,7 @@
 import type { ConversionNode } from '../conversion/algebra.js'
 import type { ConversionCensus } from '../conversion/nodes.js'
 import type { DeclarationId, FunctionId, StructuralTypeId } from '../identity/ids.js'
+import { abiOfCallee } from '../projection/callee.js'
 import { runtimeClassLayoutsOf, type ClassLayout } from '../projection/classes.js'
 import { virtualDispatchVerdictOf, type VirtualMethodFamily } from '../projection/dispatch.js'
 import { declaredRecordFieldOf, recordShapeLayoutsOf } from '../projection/fields.js'
@@ -9,6 +10,7 @@ import type { RepresentationDeriver } from '../representation/derive.js'
 import type { RecordLayoutPolicy } from '../representation/policies.js'
 import { representationKey, walkRepresentation, type CallableAbi, type Representation } from '../representation/model.js'
 import { dynamicRecordLoadNeedsPlan } from '../conversion/document-record-view.js'
+import { recipeClosureOf } from '../conversion/recipe-closure.js'
 import { capturesNothing } from './captures.js'
 import { asyncPromiseViewOf } from './coroutine-bodies.js'
 import type { IrBody } from './model.js'
@@ -104,6 +106,31 @@ export const prototypePropertyDeclarationsOf = (
 
 export const prototypeSetterValue: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
 
+/**
+ * Whether the census carries out `any -> value`, every cited recipe included.
+ * A plan without one would refuse the whole program at certification; with no
+ * plan the one operation that reaches the slot keeps its named refusal.
+ */
+const dynamicLoadInstalled = (value: Representation, conversions: ConversionCensus): boolean => {
+  try {
+    const closure = recipeClosureOf([conversions.nodeFor(prototypeSetterValue, value)], conversions.nodeById)
+    return [...closure.values()].every((node) => node.capability.kind !== 'never')
+  } catch {
+    // Conflicting citations are certification's `missing` verdict: no plan.
+    return false
+  }
+}
+
+/**
+ * A Function field written through a dynamic receiver (`mat.onBeforeCompile =
+ * fn` on an `any` material) stores the box adapted to the field's own frame.
+ * Only the census knows which frames the runtime can adapt and whether the
+ * slot admits an unknown Function at all, so the write cites its installed
+ * reader; a field with none keeps the dispatcher's named refusal.
+ */
+const dynamicCallableLoadInstalled = (value: Representation, conversions: ConversionCensus): boolean =>
+  abiOfCallee(value) !== null && dynamicLoadInstalled(value, conversions)
+
 export const programConversionKey = (input: Pick<ProgramConversionInput, 'role' | 'owner' | 'slot'>): string =>
   JSON.stringify([input.role, input.owner, input.slot])
 
@@ -171,7 +198,11 @@ export const programConversionInputsOf = (input: ProgramConversionInputs): reado
         if (isPrivateNameKey(field.key)) continue
         const operations = demand.fieldOperations?.get(field.key)
         if (demand.fieldOperations !== undefined && !operations?.has('write') && !operations?.has('define')) continue
-        if (dynamicRecordLoadNeedsPlan(field.value, layouts) || dynamicTableLoadNeedsPlan(field.value, layouts))
+        if (
+          dynamicRecordLoadNeedsPlan(field.value, layouts) ||
+          dynamicTableLoadNeedsPlan(field.value, layouts) ||
+          dynamicCallableLoadInstalled(field.value, input.conversions)
+        )
           add('dynamic-field-write', owner, field.key, prototypeSetterValue, field.value)
       }
     }
