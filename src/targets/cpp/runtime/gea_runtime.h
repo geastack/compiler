@@ -28657,20 +28657,30 @@ bool nativeDynamicRead(const gea::Ref<T>& object, const PropertyKey& key, Value&
   }
   if (const auto read = record::readDocumentView(Ref<void>(object), key, answer)) return *read;
   if (const auto read = record::readNativeViewValue(Ref<void>(object), key, answer)) return *read;
+  // OrdinaryGet continues from every own miss to the prototype, exactly as the
+  // boxed twin `Value::getProperty` does: a class's accessors and methods are
+  // answered by its generated prototype hook, never by instance storage.
+  const auto inherited = [&]() -> bool {
+    if constexpr (requires(const T& reader) { reader.gea_readPrototypeProperty(key, answer); })
+      return object->gea_readPrototypeProperty(key, answer);
+    else
+      return false;
+  };
   if constexpr (requires(const T& reader) { reader.gea_readOwnField(key, answer); }) {
     if (object->gea_readOwnField(key, answer)) return true;
     if constexpr (detail::NativeOwnFieldPredicate<T>) {
       // A deleted fixed slot is still the layout's slot. Do not let an index
       // sidecar or expando shadow it merely because its presence bit is false.
-      if (object->gea_matchesOwnField(key)) return false;
+      if (object->gea_matchesOwnField(key)) return inherited();
     }
   }
   if constexpr (requires(const T& reader) { reader.gea_readOwnIndex(key, answer); reader.gea_matchesOwnIndex(key); }) {
     if (object->gea_readOwnIndex(key, answer)) return true;
-    if (object->gea_matchesOwnIndex(key)) return false;
+    if (object->gea_matchesOwnIndex(key)) return inherited();
   }
   const gea::Ref<DynamicObject> expando = detail::expandoFor(nativePropertyAnchor(object), false);
-  return expando && expando->readWithReceiver(key, [&] { return Value::box(Value::Tag::Object, object); }, answer);
+  if (expando && expando->readWithReceiver(key, [&] { return Value::box(Value::Tag::Object, object); }, answer)) return true;
+  return inherited();
 }
 
 // A certified missing property still evaluates its receiver/key and throws on

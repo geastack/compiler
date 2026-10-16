@@ -235,14 +235,15 @@ computed-class-prototype-method.ts.cpp 3621b3951dfd
 computed-get-over-literal-key-union.ts.cpp 02d689db8735
 computed-key-bag-passed-as-union-argument.runtime.js.cpp 8720a1013159
 computed-key-before-declared-field-key-order.runtime.ts.cpp 7acf4bd935a1
-computed-key-own-assignment-into-dictionary-field.runtime.js.cpp a4331251fcfe
-computed-key-store-into-typed-table-of-union-slots.runtime.js.cpp 501f20deef72
+computed-key-own-assignment-into-dictionary-field.runtime.js.cpp baec08ecaf0a
+computed-key-store-into-typed-table-of-union-slots.runtime.js.cpp e581f9754e94
 computed-key-writes-do-not-taint-intrinsics.runtime.ts.cpp 668fac2705ff
 computed-literal-union-key-writes-past-member-type.runtime.ts.cpp a7b0952b1c20
 computed-method-value-called-with-its-receiver.ts.cpp f9fcba2e4a69
-computed-overridden-method-value.runtime.js.cpp 392f538580da
+computed-overridden-method-value.runtime.js.cpp f5e84b01ec91
+computed-read-reaches-a-prototype-accessor.runtime.js.cpp 53affd1be4ff
 computed-record-union.ts.cpp c6d1fcc632a3
-computed-this-read-over-own-methods-into-any.runtime.js.cpp d061c614f0ed
+computed-this-read-over-own-methods-into-any.runtime.js.cpp a4e24d698260
 computed-union-key-literal-keeps-insertion-order.runtime.ts.cpp 5c86d36284ea
 computed-union-key-object-literal.runtime.ts.cpp d6ee1e930c6e
 conditional-and-spread-into-field-record-literal.runtime.ts.cpp b2859869feb3
@@ -258,7 +259,7 @@ construction-only-field-alias.runtime.ts.cpp 0c16ad25b505
 constructor-alias-installed-members-class.runtime.js.cpp 0cb38d7d13ac
 constructor-alias-installed-members.runtime.js.cpp 9ebf6447b0db
 constructor-carried-by-abi-reads-its-properties.runtime.ts.cpp 61269b8abed7
-constructor-dispatch-into-typed-parameters-with-uniform-table.runtime.js.cpp 88562dc4dd9b
+constructor-dispatch-into-typed-parameters-with-uniform-table.runtime.js.cpp 5292a5fc02ca
 constructor-family-into-narrower-constructor-type.runtime.ts.cpp cd6ce6efe766
 constructor-family-into-open-constructor-type.runtime.ts.cpp 710d121e92d9
 constructor-function-absent-option-or-default-field.runtime.js.cpp 2726c68fd990
@@ -279,7 +280,7 @@ control-flow-structural-view.ts.cpp 671b41e09ea8
 converted-operand-evaluated-once.runtime.ts.cpp 9f5c7a4a2be1
 copy-into-narrower-record-follows-layout-or-keeps-order.runtime.ts.cpp a27ee97c56c7
 copy-present-options-through-a-literal-key-tuple.runtime.ts.cpp 51489a4dcc02
-cpn-numeric-computed-keys.runtime.js.cpp 2483a04a6e66
+cpn-numeric-computed-keys.runtime.js.cpp 891ca002d6e2
 date-prototype-method-reflection.runtime.js.cpp d1119cfc8164
 date-setter-argument-coercion.runtime.js.cpp 34061e383254
 date-setter-time-value-read-first.runtime.js.cpp b9bb8b2270c3
@@ -761,7 +762,7 @@ native-class-union-widen-field-flow.ts.cpp 91a70a893684
 native-constructor-choice-field-flow.ts.cpp 4d7d05adca12
 native-default-merge-field-flow.ts.cpp c7aa67023db6
 native-defined-callable-field.ts.cpp 6727867a8c2a
-native-derived-prototype-read.runtime.js.cpp e734f54ff176
+native-derived-prototype-read.runtime.js.cpp df8a6e355369
 native-dictionary-field-flow.ts.cpp cc49b2de3636
 native-document-nested-entry.runtime.ts.cpp 238f606ab4c1
 native-dynamic-equality.ts.cpp 47ad0a0aa3a9
@@ -977,7 +978,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp ba66f3c8919a
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 1529f347bb00
-printer-drift.txt 243511f6803a
+printer-drift.txt 5cd533718e98
 private-names-are-not-own-properties.ts.cpp 5d0e90d41f28
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp 0998df9c0cd5
@@ -1184,7 +1185,7 @@ symbol-keyed-class-field-declarations.ts.cpp 17a558062aca
 symbol-keyed-method-deletes-symbol-expando.ts.cpp 70daf853607b
 symbol-keyed-this-writes-get-an-absent-native-slot.runtime.ts.cpp 9c078ffdc578
 tail-conversion-never-allocated.ts.cpp 42a0331af439
-target-surface-options-from-a-partial-bag.runtime.js.cpp a020a40f4364
+target-surface-options-from-a-partial-bag.runtime.js.cpp 2b4847723f3b
 template-strings-array-identity.ts.cpp be8b199a9d03
 template-strings-array-structural.ts.cpp 9bebf40eefec
 template-strings-readonly-array.ts.cpp 7ed11e4d3e8f
