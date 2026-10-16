@@ -322,7 +322,7 @@ inline Value dynamicStringPrototypeGet(const PropertyKey& key) {
   static const std::map<std::string, Value> methods = [] {
     std::map<std::string, Value> result;
     for (const char* name : {"toLowerCase", "toUpperCase", "toLocaleLowerCase", "toLocaleUpperCase", "trim", "trimStart", "trimEnd",
-                             "toString", "valueOf", "includes", "startsWith", "endsWith", "indexOf", "slice", "charAt"}) {
+                             "toString", "valueOf", "includes", "startsWith", "endsWith", "indexOf", "slice", "charAt", "replace"}) {
       auto callable = Method(+[](void* environment, Value receiver, Args args) -> Value {
         alignas(void*) unsigned char slot[sizeof(void*)];
         const std::string& method = *gea::unpackEnvironment<std::string>(environment, slot);
@@ -345,6 +345,22 @@ inline Value dynamicStringPrototypeGet(const PropertyKey& key) {
         if (method == "toString" || method == "valueOf") return string(text);
         if (method == "slice") return string(runtime::string::slice(text, position(first, 0.0), position(second, std::numeric_limits<double>::infinity())));
         if (method == "charAt") return string(runtime::string::charAt(text, position(first, 0.0)));
+        if (method == "replace") {
+          // ECMA-262 22.1.3.19: a RegExp searchValue replaces through its own
+          // @@replace, the walk the typed path renders as `replaceByPattern`;
+          // any other searchValue and replaceValue are ToString'd, in that
+          // order, into the typed path's string/string `replace`. A callable
+          // replaceValue has no boxed-callback arm in either native replace,
+          // so it is refused by name rather than ToString'd into a wrong answer.
+          if (second.tag() == Value::Tag::Function)
+            host::throwRuntimeError("TypeError", "String.prototype.replace through a dynamic receiver does not take a callable replaceValue");
+          if (host::instanceOfRegExp(first)) {
+            const auto& pattern = detail::unboxAs<Ref<runtime::regex::Pattern>>(first, Value::Tag::Object, "String.prototype.replace's RegExp searchValue");
+            return string(runtime::string::replaceByPattern(text, *pattern, dynamicToString(second)));
+          }
+          const std::string searchValue = dynamicToString(first);
+          return string(runtime::string::replace(text, searchValue, dynamicToString(second)));
+        }
         const std::string needle = dynamicToString(first);
         if (method == "indexOf") return Value::box(Value::Tag::Number, runtime::string::indexOf(text, needle, position(second, 0.0)));
         if (method == "includes") return Value::box(Value::Tag::Boolean, runtime::string::includes(text, needle, position(second, 0.0)));
