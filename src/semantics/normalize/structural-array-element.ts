@@ -241,6 +241,32 @@ const isOpenStringIndexType = (checker: ts.TypeChecker, type: ts.Type): boolean 
   return index !== undefined && (index.type.flags & ts.TypeFlags.Any) !== 0 && type.getCallSignatures().length === 0
 }
 
+/**
+ * Whether a computed read (`this.koto[layer]`) can select an object literal's
+ * `[]` member that `arrayHoldsUnjoinedWrites`. That member is stored as the
+ * box (`inferredArrayElementAt`), while the checker still answers the read
+ * with the member's `never[]`.
+ */
+export const readsUnjoinedArrayMember = (
+  checker: ts.TypeChecker,
+  collections: CollectionBindingCensus,
+  layoutTypeAt: (node: ts.Node) => ts.Type,
+  node: ts.ElementAccessExpression
+): boolean => {
+  const receiver = checker.getNonNullableType(layoutTypeAt(node.expression))
+  return (receiver.isUnion() ? receiver.types : [receiver]).some((arm) =>
+    checker.getPropertiesOfType(arm).some((property) => {
+      const declaration = property.declarations?.[0]
+      return (
+        declaration !== undefined &&
+        ts.isPropertyAssignment(declaration) &&
+        ts.isArrayLiteralExpression(declaration.initializer) &&
+        collections.arrayHoldsUnjoinedWrites(declaration.initializer)
+      )
+    })
+  )
+}
+
 export const unstatedNeverArray = (
   checker: ts.TypeChecker,
   collections: CollectionBindingCensus,
@@ -365,9 +391,16 @@ export const inferredArrayElementAt = (
   layoutTypeAt: (node: ts.Node) => ts.Type,
   node: ts.Node
 ): ts.Type | null => {
+  // An array filled with values the census could not join holds the box.
+  // Answered here, not by `unstatedNeverArray`, which leaves an object
+  // literal's member to the record's `never[]`: the record's member storage is
+  // asked at this same literal (`structural-parts.ts`), so both get the box.
   if (ts.isArrayLiteralExpression(node))
     return (
-      collections.arrayElementAt(node) ?? iterableMergeArmElement(checker, layoutTypeAt, node) ?? definedPropertyArrayElement(checker, node)
+      collections.arrayElementAt(node) ??
+      iterableMergeArmElement(checker, layoutTypeAt, node) ??
+      definedPropertyArrayElement(checker, node) ??
+      (collections.arrayHoldsUnjoinedWrites(node) ? checker.getAnyType() : null)
     )
   // THE CELL'S OWN DECLARATION -- neither the literal that filled it nor a
   // read of it, and the node a cell's stored carrier is actually published

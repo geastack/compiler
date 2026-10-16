@@ -891,6 +891,7 @@ object-integrity-uses-physical-index-protocol.runtime.ts.cpp 23551c4185ed
 object-is-over-union-and-optional-carriers.runtime.ts.cpp 199c1035ac10
 object-key-enumeration-requires-native-object.runtime.ts.cpp d3b37557d08e
 object-literal-beside-class-in-or-keeps-its-own-layout.runtime.ts.cpp 6555e186d0c2
+object-literal-empty-array-filled-through-untyped-computed-read.runtime.js.cpp e31523a96f45
 object-literal-es5-method-receiver.runtime.js.cpp a12d2dacaf49
 object-literal-getter-capture.ts.cpp f63f14f03eef
 object-literal-into-data-only-class-slot-is-a-plain-object.ts.cpp c6b295760431
