@@ -886,6 +886,7 @@ nullish-union.ts.cpp 3c0abfde50fa
 number-keyed-index-signature-with-any-key.runtime.ts.cpp 99f4d25d2ecc
 number-of-class-with-value-of.runtime.ts.cpp f58627acd0f2
 number-predicates-over-a-dynamic-argument.runtime.ts.cpp 86b62bcad64d
+number-union-with-declared-integer-is-one-carrier.runtime.ts.cpp fd89e97fb827
 numeric-dictionary-integer-key-lookup.runtime.ts.cpp d6ff0b36fa49
 numeric-dictionary-own-keys.ts.cpp ba2ce14ee2d3
 numeric-dictionary-property-keys.js.cpp d9a782f17b26

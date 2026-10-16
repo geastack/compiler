@@ -1,5 +1,5 @@
 import type { StructuralTypeId } from '../identity/ids.js'
-import { primitiveDomainOf } from './primitive-domain.js'
+import { joinedPrimitiveDomainOf, primitiveDomainOf } from './primitive-domain.js'
 import type { StructuralShape } from '../semantics/model/structural-types.js'
 import type { Representation, TaggedUnionArm } from './model.js'
 import { representationKey } from './model.js'
@@ -313,11 +313,11 @@ export const createUnionDeriver = (
     // A union of literals of one primitive is that primitive: the arms differ in
     // value, not in carrier, so a sum would add a tag that discriminates nothing.
     // `primitiveDomainOf` is the one authority for "these values are all this
-    // primitive" -- `value-records.ts` asks it of a record's field.
-    const primitives = new Set(present.map((member) => primitiveDomainOf(shapeOf(member))))
-    if (primitives.size === 1 && !primitives.has(null)) {
-      const [primitive] = [...primitives]
-      const carrier = primitive ? primitiveCarrier(primitive) : null
+    // primitive" -- `value-records.ts` asks it of a record's field -- and
+    // `joinedPrimitiveDomainOf` for "these Numbers are one Number carrier".
+    const primitive = joinedPrimitiveDomainOf(new Set(present.map((member) => primitiveDomainOf(shapeOf(member)))))
+    if (primitive !== null) {
+      const carrier = primitiveCarrier(primitive)
       if (carrier) return carrier
     }
 

@@ -1,1 +1,1 @@
-export { primitiveDomainOf, sharedPrimitiveDomainOf } from '../semantics/model/primitive-domain.js'
+export { joinedPrimitiveDomainOf, primitiveDomainOf, sharedPrimitiveDomainOf } from '../semantics/model/primitive-domain.js'

@@ -2227,6 +2227,29 @@ struct alignas(64) ThreadRegion {
     limit = granuleEnd(current);
   }
 
+  /**
+   * Gives this thread its first granule, faulted in and with its ownership-map
+   * entries made, before any region needs it. Left to the first region, every
+   * pool thread took its first chunk, faulted its pages and grew the map at the
+   * same moment, each fault queueing on the address space's lock behind the
+   * others': a region that allocated one result per task ran ~10% past its
+   * schedule at 20 threads. Runs on
+   * the region's own thread, which is the only one that touches `current`.
+   */
+  void prepare() {
+    if (current != nullptr) return;
+    current = RegionGranules::instance().take(1);
+    current->state = granuleActive;
+    std::memset(granuleCells(current), 0, granuleBytes - granuleHeaderBytes);
+    tagGranules(current, granuleBytes, 0);
+    // The deferred-count table and the lists a region fills, sized now for
+    // the same reason: their first growth is an allocation and page faults.
+    if (table.empty()) grow();
+    used.reserve(table.size() / 2);
+    spent.reserve(64);
+    donations.reserve(16);
+    donors.reserve(16);
+  }
   /** Runs on the region's own thread once its tasks are done and its cell lists dropped: pools each granule it left empty. */
   void finish() {
     for (RegionGranule* granule : spent) {
@@ -5547,6 +5570,7 @@ class RegionPool {
       if (affinity != 0) pin(workers_.back(), affinity);
     }
     for (auto& worker : workers_) worker.detach();
+    regions_[0].prepare();
   }
 
   /**
@@ -5599,6 +5623,8 @@ class RegionPool {
   // The epoch and its helper count travel in ONE word: read separately, a
   // worker could pair one region's epoch with the next region's count.
   void serve(std::size_t slot) {
+    regions_[slot].prepare();
+    cycleState();
     std::uint64_t seen = 0;
     for (;;) {
       std::uint64_t epoch = 0;

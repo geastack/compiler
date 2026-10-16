@@ -37,8 +37,30 @@ export const sharedPrimitiveDomainOf = (
   shape: StructuralShape | null | undefined
 ): string | null => {
   if (shape?.kind !== 'union') return primitiveDomainOf(shape)
-  const domains = new Set(shape.members.map((member) => primitiveDomainOf(shapeOf(member))))
-  if (domains.size !== 1 || domains.has(null)) return null
-  const [domain] = [...domains]
-  return domain ?? null
+  return joinedPrimitiveDomainOf(new Set(shape.members.map((member) => primitiveDomainOf(shapeOf(member)))))
+}
+
+const integerWidths: readonly string[] = ['int32', 'int64']
+
+/**
+ * The one domain a set of member domains joins to, or `null` when they join to
+ * none.
+ *
+ * One domain is itself. Several join only when every one is a Number: `int`
+ * and `i32` are Numbers the program opted into holding as machine integers
+ * (`declared-integers.ts`), so `0 | int` -- what TypeScript infers for a
+ * callback returning `0` on one path and an `int` on another -- names Number
+ * values of one carrier, not a sum. A sum of `double` and `int64_t` arms has
+ * no runtime test that could tell its arms apart, and the emitter has no `+`
+ * over it. Every member a declared integer joins to the widest of them; any
+ * other Number member (`number`, a literal) joins to `number`, the carrier
+ * that holds every value of each.
+ */
+export const joinedPrimitiveDomainOf = (domains: ReadonlySet<string | null>): string | null => {
+  if (domains.has(null) || domains.size === 0) return null
+  const [only] = [...domains]
+  if (domains.size === 1) return only ?? null
+  if (![...domains].every((domain) => domain === 'number' || (domain !== null && integerWidths.includes(domain)))) return null
+  if (domains.has('number')) return 'number'
+  return domains.has('int64') ? 'int64' : 'int32'
 }
