@@ -25,6 +25,7 @@ export type ProgramConversionRole =
   | 'construct-argument'
   | 'field-initializer'
   | 'dynamic-field-write'
+  | 'dynamic-call-argument'
   | 'prototype-method'
   | 'prototype-setter-argument'
   | 'prototype-setter-receiver'
@@ -131,6 +132,20 @@ const dynamicLoadInstalled = (value: Representation, conversions: ConversionCens
 const dynamicCallableLoadInstalled = (value: Representation, conversions: ConversionCensus): boolean =>
   abiOfCallee(value) !== null && dynamicLoadInstalled(value, conversions)
 
+/**
+ * The shared records a boxed callable's frame reads its arguments into: a
+ * record parameter, the present arm of an optional one, and an Array's
+ * element (each element crosses the same per-carrier rule).
+ */
+const argumentRecordsOf = (value: Representation): readonly Representation[] =>
+  value.kind === 'optional'
+    ? argumentRecordsOf(value.payload)
+    : value.kind === 'array-object'
+      ? argumentRecordsOf(value.element)
+      : value.kind === 'record' || value.kind === 'record-with-index' || value.kind === 'native-record-ref'
+        ? [value]
+        : []
+
 export const programConversionKey = (input: Pick<ProgramConversionInput, 'role' | 'owner' | 'slot'>): string =>
   JSON.stringify([input.role, input.owner, input.slot])
 
@@ -145,12 +160,20 @@ export const programConversionInputsOf = (input: ProgramConversionInputs): reado
   const inputs = new Map<string, ProgramConversionInput>()
   const propertyDeclarations = prototypePropertyDeclarationsOf(input.classes, input.reflection)
   const prototypeDeclarations = new Set<DeclarationId>()
+  // Every frame a dynamic caller can invoke with its own arguments: a
+  // Function boxed into `any`, a prototype method a boxed instance answers
+  // with, and a callable own field a full-reflection receiver answers with.
+  const boxedFrames: CallableAbi[] = []
   for (const body of bodies) {
     const operations = [...body.blocks.values()].flatMap((block) => allOperationsOf(block))
     const definitions = new Map(
       operations.flatMap((operation) => (operation.kind === 'constant' ? [[operation.result.id, operation] as const] : []))
     )
     for (const operation of operations) {
+      if (operation.kind === 'convert' && operation.result.representation.kind === 'dynamic') {
+        const abi = abiOfCallee(operation.source.representation)
+        if (abi !== null) boxedFrames.push(abi)
+      }
       if (operation.kind !== 'get' || constantPropertyKeyTextOf(definitions.get(operation.key.value)) !== 'prototype') continue
       const receivers =
         operation.receiver.representation.kind === 'tagged-union'
@@ -197,6 +220,8 @@ export const programConversionInputsOf = (input: ProgramConversionInputs): reado
         // reader refused a class only full reflection had touched.
         if (isPrivateNameKey(field.key)) continue
         const operations = demand.fieldOperations?.get(field.key)
+        const callable = abiOfCallee(field.value)
+        if (callable !== null && (demand.fieldOperations === undefined || operations?.has('read'))) boxedFrames.push(callable)
         if (demand.fieldOperations !== undefined && !operations?.has('write') && !operations?.has('define')) continue
         if (
           dynamicRecordLoadNeedsPlan(field.value, layouts) ||
@@ -206,6 +231,20 @@ export const programConversionInputsOf = (input: ProgramConversionInputs): reado
           add('dynamic-field-write', owner, field.key, prototypeSetterValue, field.value)
       }
     }
+  for (const layout of runtimeClassLayoutsOf(input.classes))
+    if (propertyDeclarations === null || propertyDeclarations.has(layout.declaration))
+      for (const method of layout.methods) {
+        const abi = method.callable === null ? null : abiOf(method.callable)
+        if (abi !== null) boxedFrames.push(abi)
+      }
+  for (const abi of boxedFrames)
+    for (const parameter of abi.parameters)
+      for (const record of argumentRecordsOf(parameter.value)) {
+        const owner = dynamicFieldConversionOwnerOf(record)
+        if (owner === null || inputs.has(programConversionKey({ role: 'dynamic-call-argument', owner, slot: '' }))) continue
+        if (dynamicRecordLoadNeedsPlan(record, layouts) && dynamicLoadInstalled(record, input.conversions))
+          add('dynamic-call-argument', owner, '', prototypeSetterValue, record)
+      }
   for (const body of bodies) {
     const view = asyncPromiseViewOf(body)
     if (view?.abi && body.abi) add('async-entry', String(body.sourceOwner), '', view.abi.result, body.abi.result)

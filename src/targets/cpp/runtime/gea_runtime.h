@@ -24459,6 +24459,20 @@ struct DynamicCallableCarrier<Optional<T>> {
   }
 };
 
+/**
+ * The compiler's certified live view of a dynamic object as record `T`, for a
+ * record a boxed callable's frame names (`program-conversions.ts`'s
+ * `dynamic-call-argument`). The generated program specializes it for exactly
+ * the records it published that recipe for; every other `T` has none.
+ */
+template <typename T>
+struct DynamicArgumentView {
+  static constexpr bool installed = false;
+};
+
+template <typename Element>
+gea::Ref<ArrayObject<Element>> dynamicArgumentArrayView(const Value& value);
+
 template <typename T>
 struct DynamicCarrier<gea::Ref<T>> {
   static constexpr bool supported = true;
@@ -24470,6 +24484,19 @@ struct DynamicCarrier<gea::Ref<T>> {
   }
   static gea::Ref<T> in(const Value& value, std::size_t position) {
     if (value.tag() == Value::Tag::Undefined) refuseMissingCallArgument(position);
+    // A caller hands the callee its own object, whatever layout the caller
+    // gave it: `pts.map(([r, y]) => ...)` over `number[]` rows, an options
+    // literal into an `o = {}` parameter. Another layout is read through a
+    // live view of that same object, so the callee's writes reach the caller.
+    if (value.tag() == Value::Tag::Object && !accepts(value)) {
+      if constexpr (IsArrayObjectStruct<T>::value) {
+        using Element = typename ArrayObjectElementOf<T>::type;
+        if constexpr (DynamicCarrier<Element>::supported)
+          if (value.isArrayPayload()) return dynamicArgumentArrayView<Element>(value);
+      } else if constexpr (DynamicArgumentView<T>::installed) {
+        return DynamicArgumentView<T>::in(value);
+      }
+    }
     return unboxClassRef<T>(value, "a dynamic call argument");
   }
 };
@@ -29432,6 +29459,14 @@ using ::gea::checkedNativeArrayView;
 using ::gea::nativeArrayViewAccepts;
 using ::gea::nativeArrayViewAcceptsExact;
 using ::gea::nativeArrayViewElementsAccept;
+
+/** Each element crosses by the frame's own rule for its carrier, in both directions. */
+template <typename Element>
+gea::Ref<ArrayObject<Element>> dynamicArgumentArrayView(const Value& value) {
+  return checkedNativeArrayView<Element, NativeFieldLeafPolicy>(
+      value, "a dynamic call argument", [](const Value& entry) -> Element { return DynamicCarrier<Element>::in(entry, 0); },
+      [](const Element& entry) -> Value { return DynamicCarrier<Element>::out(entry); });
+}
 }
 
 /** A descriptor query creates a new ordinary object. Its copied native
