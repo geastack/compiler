@@ -183,8 +183,8 @@ const finishComputation = (
       // checker subtype-reduces `cond ? xs.map(f) : []` to the populated arm
       // for the same reason, and `structural.ts` drops the identical arm from
       // a checker union. Kept as a second arm, the merge was a tagged union of
-      // two arrays the binding had to select from (hono's RegExpRouter
-      // `ownRoute`), where `mergeIncoming` builds the empty literal directly
+      // two arrays the binding had to select from (a regular-expression
+      // router's `ownRoute`), where `mergeIncoming` builds the empty literal directly
       // in the populated arm's carrier.
       const shapeOf = (id: typeof first.type) => (context.table.isOpen(id) ? undefined : context.table.get(id).shape)
       const elementless = (id: typeof first.type): boolean => {

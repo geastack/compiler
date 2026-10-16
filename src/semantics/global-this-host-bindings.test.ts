@@ -2385,10 +2385,9 @@ test('global alias fixed point scales through cyclic diamonds, repeated storage 
     (_, index) =>
       `const bsonObjectIdState${index}: any = cycle${index}.next.next.next.next; bsonObjectIdState${index}.hostProcess = undefined;`
   ).join('\n')
-  const fastifyDeepReads = Array.from(
+  const hookDeepReads = Array.from(
     { length: count },
-    (_, index) =>
-      `const fastifyHookState${index}: any = diamond${index}.left.right.left.right; fastifyHookState${index}.hostProcess = undefined;`
+    (_, index) => `const hookState${index}: any = diamond${index}.left.right.left.right; hookState${index}.hostProcess = undefined;`
   ).join('\n')
   const hotValues = Array.from({ length: hotCount }, (_, index) => `const hotValue${index}: any = {};`).join('\n')
   const hotWrites = Array.from({ length: hotCount }, (_, index) => `hot.slot = hotValue${index};`).join('\n')
@@ -2401,7 +2400,7 @@ test('global alias fixed point scales through cyclic diamonds, repeated storage 
     ${diamonds}
     ${diamondEdges}
     ${bsonDeepReads}
-    ${fastifyDeepReads}
+    ${hookDeepReads}
     const hot: any = {}
     ${hotValues}
     ${hotWrites}

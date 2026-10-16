@@ -1,4 +1,4 @@
-// Hono's query parser as hono ships it: `_getQueryParam` fills one
+// An HTTP framework's query parser as the framework ships it: `_getQueryParam` fills one
 // `Object.create(null)` with strings or arrays by a flag, `getQueryParam` is the
 // same function under a cast that drops the `multiple` parameter, and
 // `getQueryParams` passes `true`. The cast alias only ever holds that function

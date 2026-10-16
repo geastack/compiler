@@ -148,7 +148,7 @@ const armFieldSite = (
   if (!addressableArmKind(arm.kind)) return null
   if (arm.kind === 'class-ref') {
     const member = classMemberOf(ctx.classes, arm.declaration, key)
-    // A method some write shadows with an own property (hono's routers'
+    // A method some write shadows with an own property (an HTTP framework's routers'
     // `this.match = match`) has a physical override slot, and a STORE lands in
     // it: that slot is the field `declaredRecordFieldOf` answers, the one the
     // IR certified the store's conversion against, and a lone class receiver

@@ -59,14 +59,16 @@ The compiler resolves unbuilt checkouts through the same source-discovery engine
 
 Run `npm run build`, then `node --test test/module-resolution.mjs`.
 The tests exercise package layouts in memory, native compilation and execution,
-and the installed Fastify, Hono, MongoDB, BSON and Three packages. Installed-package
+and the installed web framework, HTTP framework, database driver, serializer
+and Three packages of the test applications. Installed-package
 tests require this workspace's application dependencies; missing dependencies
 fail visibly. Loading a real library's source graph is tested separately from
 native compilation. It is not recorded as an end-to-end library pass.
 
-The Fastify application with the Node plugin now loads 189 JavaScript files;
+The web framework test application with the Node plugin now loads 189
+JavaScript files;
 the previous application probe loaded zero. Its full compilation remains blocked
-on CommonJS/runtime and representation gaps; see `Fastify status` (archived).
+on CommonJS/runtime and representation gaps (archived status notes).
 
 The existing WebGL type-realization test currently fails linking with
 `Undefined symbols: "_Map"`. The same emitted external Map reference reproduces

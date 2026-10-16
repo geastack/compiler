@@ -30,7 +30,7 @@ export const nativeArrayTransportOf = (operation: IrOperation, constantKey: stri
   // index enters this path. A runtime STRING key is rendered as an element
   // access through CanonicalNumericIndexString (`arrayIndexFromKeyText` in
   // `emit-carrier-members.ts`/`emit-properties.ts`) -- the `for (const i in
-  // array)` key hono's RegExpRouter indexes back with -- so it reaches no
+  // array)` key a regular-expression router indexes back with -- so it reaches no
   // field protocol either.
   const indexed =
     constantKey !== null
@@ -51,7 +51,7 @@ export const nativeArrayTransportOf = (operation: IrOperation, constantKey: stri
  * A numeric index read off a union whose every arm is an Array reads each
  * arm's own element storage, exactly as the single-Array read above does, and
  * injects it into the result's arm for that element: no field protocol, no
- * adaptation. Hono's `compose` reads `middleware[i]` off
+ * adaptation. An HTTP framework's `compose` reads `middleware[i]` off
  * `[[Function, unknown], unknown][] | [[Function]][]`; as a computed key it
  * published every handler tuple the router holds.
  */

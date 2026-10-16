@@ -466,7 +466,7 @@ export const hostTemplateFrameOf = (
   // fresh object with no own property, which publishes nothing it could
   // hand to dynamic code. Without this frame `Object.create(null)` was an
   // unknown call whose result published every carrier its value type
-  // reaches -- hono's `Record<string, HandlerSet<T>>` made the router's
+  // reaches -- an HTTP framework's `Record<string, HandlerSet<T>>` made the router's
   // handler tuples fully reflected.
   if (template === 'object-create') return operation.arguments.length === 1 && operation.arguments[0]?.representation.kind === 'null'
   if (template === 'typed-array-set') {

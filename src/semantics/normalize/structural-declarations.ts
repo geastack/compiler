@@ -357,7 +357,7 @@ export const physicalInitializerTypeOf = (
   // RETURN (`structural.ts` rebuilds the callable shape from the literal's
   // own signature for exactly that reason, and `signatureOf` reads the bound
   // return through it). Taking that answer as the literal's type made a
-  // member whose arrow had a settled return -- hono's `this[method] = (...)
+  // member whose arrow had a settled return -- an HTTP framework's `this[method] = (...)
   // => { ...; return this as any }` -- look non-callable, and the member fell
   // back to its overload set's `callable-identity`.
   const censused = censusedTypeAt(checker, parameters, initializer)

@@ -25,7 +25,7 @@ export const nativeKeyQueryOf = (operation: IrOperation, closedLayoutOf: (value:
   // has no such contract and must retain its ordinary call effects. The
   // queried object is read through its carrier exactly as an enumeration's
   // receiver is: an absent arm makes `ToObject` throw a TypeError and runs no
-  // user code (hono's `Object.keys(this.#routes!)` over an optional table).
+  // user code (a router's `Object.keys(this.#routes!)` over an optional table).
   if (queried === undefined || !closedReceiver(queried)) return false
   // `Object.hasOwn(o, key)` is the one member of this family that takes a
   // second argument -- the queried KEY, not a second object -- and

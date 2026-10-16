@@ -1,4 +1,4 @@
-// Hono's SmartRouter replaces its own `match` with the first router that
+// A router that picks among routers replaces its own `match` with the first router that
 // answers: `this.match = router.match.bind(router)`. One router class holds a
 // free `function match(this: R, ...)` in a `match` FIELD, the others declare a
 // `match` METHOD, so the read is of a member the program states on every arm,

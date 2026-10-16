@@ -1,7 +1,7 @@
 // node-compat's `Request` reads `init.body.buffer` off a `BodyInit` holding
 // both a `Buffer` and a structural `ArrayBufferView<ArrayBuffer>` record, and
-// that record is a LIVE VIEW of a Document whenever a dynamic body (hono's
-// `cloneRawRequest` assigns `await req[cacheKey]()`) is read as it. The read
+// that record is a LIVE VIEW of a Document whenever a dynamic body (a framework's
+// raw-request clone assigns `await req[cacheKey]()`) is read as it. The read
 // is that view's descriptor route on one arm and the typed array's own
 // `buffer` internal slot on the other.
 export {}

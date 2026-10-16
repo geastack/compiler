@@ -1,4 +1,4 @@
-// Hono's `_getQueryParam` fills ONE `Object.create(null)` declared
+// An HTTP framework's `_getQueryParam` fills ONE `Object.create(null)` declared
 // `Record<string, string> | Record<string, string[]>`: with `multiple` every
 // value is an array, without it every value is a string. The two records are
 // views of one table, not two allocations, so the closed fresh-table census

@@ -166,8 +166,8 @@ const checkedDynamicWrapperRead = (node: ConversionNode, resolve?: (id: string) 
  * An entry read into the table's declared any/unknown carrier: `gea::Value::box`
  * of a primitive keeps the ECMAScript value, and of a shared class reference
  * holds that same object. The box allocates only its envelope, so the read is
- * live -- `Record<string, Node>` reaching `Record<string, unknown>` (Hono's
- * `hasChildren`) or `Record<string, number>` likewise.
+ * live -- `Record<string, Node>` reaching `Record<string, unknown>` (a trie
+ * router's `hasChildren`) or `Record<string, number>` likewise.
  */
 const boxedEntryIsLive = (node: ConversionNode): boolean => {
   if (node.target.kind !== 'dynamic' || node.target.reason === 'untyped-callable' || node.capability.kind !== 'atom') return false

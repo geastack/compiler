@@ -268,7 +268,7 @@ const copyIndexes = new WeakMap<ReadonlyMap<DeclarationId, ClassLayout>, Map<Dec
  * it names the source function -- the root every copy is cut from -- while a
  * generic class's layout names the copy body it kept. Every copy of one class
  * that folds onto one struct keeps ONE body, so no per-copy spelling at the
- * site could name it either: mongodb's `new FindCursor(...)` in
+ * site could name it either: a database driver's `new FindCursor(...)` in
  * `Collection.find` names `fn|decl|f166|167` against a layout whose seven
  * copies kept `fn|decl|f166|167@6`, and exact equality read that as a
  * contradictory implementation, left the construction open and pulled the
@@ -457,7 +457,7 @@ const genericRootOf = (declaration: DeclarationId): DeclarationId => {
  * The result was a class whose members were published under an id no consumer
  * ever asks about. `classMemberOf` looked up the carrier's root, found
  * nothing, and `emit-class-properties.ts` refused with "whose members no class
- * evaluation published" -- for hono's `Context` and `Hono`, whose every method
+ * evaluation published" -- for an HTTP framework's context and application classes, whose every method
  * read (`c.text`, `c.json`, `c.req`, `app.fetch`) died on it.
  *
  * So the copy id is re-keyed onto the root, and ONLY when the root has exactly
@@ -1344,7 +1344,7 @@ export const publishClassMethodOverrides = (
 /**
  * Whether an object literal can be laid out as this class without being its
  * instance: TypeScript accepts `{ w: 0 }` where a `WriteConcern` is declared
- * because a class type is structural, and mongodb writes exactly that. The
+ * because a class type is structural, and a database driver writes exactly that. The
  * literal takes the class's native layout but none of its behaviour, so the
  * layout may be shared only where the class HAS no behaviour a read could
  * reach -- no prototype method or accessor (the literal inherits neither), no

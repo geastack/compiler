@@ -247,7 +247,7 @@ export const operationConversionInputsOf = (
         if (result.kind === 'tagged-union' && carriesUndefined(result)) add('index-read', { kind: 'undefined' }, result)
         // A `null`-absent result is not the hole's carrier, so the element is
         // aligned into the whole result (`reconciledElementText`), not into its
-        // payload: hono's `...(args as Parameters<NewResponse>)` reads a rest
+        // payload: an HTTP framework's `...(args as Parameters<NewResponse>)` reads a rest
         // array of `any` into `Data | null`.
         if (result.kind === 'optional' && result.absence !== 'undefined') add('index-read', receiver.element, result)
       }

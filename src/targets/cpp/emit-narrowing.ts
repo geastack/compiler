@@ -5288,7 +5288,7 @@ export const recipeText = (ctx: ConversionSite, node: ConversionNode, text: stri
 /**
  * A union read out of a box depends on its plan alone, so a unit defines it
  * once and every site calls it by name (`unitFunctionName`). Spelled inline it
- * was re-emitted at every read: one `Headers`-or-record union in hono tests
+ * was re-emitted at every read: one `Headers`-or-record union in an HTTP framework tests
  * some seventy required keys, ~46 KB of machine code per copy.
  */
 const dynamicWrapperText = (ctx: ConversionSite, plan: DynamicWrapperPlan, node: ConversionNode, text: string): string | null => {

@@ -34,7 +34,7 @@ export const classAllocationDomainOf = (
   // An unknown observer can recover every constructor along an instance's
   // prototype chain, including a bodyless base declaration's constructor --
   // but only from an instance that exists. A value it receives whose type is
-  // a class names that class's family, not an allocation of it: hono's `Context`
+  // a class names that class's family, not an allocation of it: an HTTP framework's `Context`
   // reaches an `executionCtx?: FetchEventLike` that nothing ever constructs,
   // and treating the type as an instance made the abstract class allocatable
   // and its bodyless `respondWith` an evaluated read. So a received class type
@@ -73,7 +73,7 @@ export const classAllocationDomainOf = (
     }
   }
   // A class's own declared data field read as the `any` it is declared --
-  // hono's `const { bodyCache } = this`, a `Partial<Body>` whose `json: any`
+  // an HTTP framework's `const { bodyCache } = this`, a `Partial<Body>` whose `json: any`
   // makes the field dynamic -- is a load from the instance's slot. It hands
   // no observer the instance: the Value it yields was exposed when stored.
   let definitions = new Map<IrValueId, IrOperation>()

@@ -1,4 +1,4 @@
-// Hono's RegExpRouter builds `const ownRoute = r[method] ?
+// A regular-expression router builds `const ownRoute = r[method] ?
 // Object.keys(r[method]).map((path) => [path, r[method][path]]) : []`. The
 // checker types the conditional as the populated arm's array (an empty literal
 // is already a value of it), so the binding, the merge and the `[]` arm all

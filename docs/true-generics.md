@@ -117,9 +117,9 @@ has already drifted once.
 with the copy pushed onto the path. Every node, operation, structural mapper
 and flow fact under it is minted again. `admittedUnder` (`specialization.ts`,
 in the census object) prunes cross-product copies that could not type-check
-(mongodb's `emitAndLog<EventKey extends keyof Events>`). `deadMethodCopies`
+(a database driver's `emitAndLog<EventKey extends keyof Events>`). `deadMethodCopies`
 (`dead-method-copies.ts`, 288 lines) prunes copies of an abstract generic
-class's method body that no dispatch lands on (mongodb's
+class's method body that no dispatch lands on (a database driver's
 `AbstractOperation.handleOk` at `number`, where `as TResult` has no native
 meaning).
 
@@ -227,11 +227,11 @@ gea::Ref<gea_class_decl_f168_1_1> gea_body_fn_decl_f168_62_0_1(                 
 The program is 30 lines of TypeScript and emits 880 lines of C++. Each copy is a
 full, separately printed text.
 
-Measured scale on the one recent full hono build in the tree
-(`node-compat/apps/hono-hello/dist/server.cpp`, 2026-09-23): 607 body
+Measured scale on the one recent full HTTP framework build in the tree
+(node-compat's HTTP framework test app, 2026-09-23): 607 body
 definitions. 201 of them sit inside a generic copy path, spread over 173
 distinct generic roots, so most generic bodies there have exactly one copy.
-The copy machinery is load-bearing for **correctness** on hono. It does not
+The copy machinery is load-bearing for **correctness** on that framework. It does not
 carry much size.
 
 ### 1.6 Invariants the copy model maintains
@@ -265,13 +265,13 @@ Every row is a real defect, each with a runtime test or memory note. They
 cluster into five shapes. All five come from the same cause: **a decision was
 made on a copy, and a later layer had to recover which copy it was.**
 
-| #   | shape                                               | instances                                                                                                                                                                                                                                                                                                                                                              |
-| --- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A   | **wrong copy by name/first-match**                  | Union-of-classes receiver picked the class's first (`void`) copy of `handleOk` (`generic-override-copy-through-class-union-arm.runtime.ts`). Generic method copies all under one key, `classMemberOf` took the first (`generic-method-at-two-type-arguments.ts`). `methodCopyPreferenceOf`'s "falls back to the first".                                                |
-| B   | **fold vs split decided with the wrong instrument** | `c61d97066` broke hono: `copiesMayDifferInLayout` used assignability, one `any` filling collapsed every copy onto one struct, and the first completer's carriers won (`geatsc-layout-identity-must-be-representation-not-assignability`). Folding `Queue<unknown>` onto `Queue<Uint8Array>` aborted at runtime (`generic-class-at-a-top-type-and-a-concrete-type.ts`). |
-| C   | **the `any` copy is two things at once**            | Classes split at `any` became a tagged union of copies. The `any` copy's own `this` then needed `exactClassInstanceOf`, `implicitReceiver`, `classBoundReceiver`, and a construct-result override (`geatsc-any-copy-family-union`).                                                                                                                                    |
-| D   | **override families and heritage per copy**         | Override copies missing at some base instantiations (`mintOverrideCopies`, `generic-method-override-minted-at-every-base-copy.runtime.ts`). Override families needed a per-copy split (`classCopyFamiliesOf`). A derived class had to split when its base's copies split (`baseCopiesDiffer`, `derived-class-splits-with-its-base`).                                   |
-| E   | **two spellings of one class**                      | Statics refused as `constructor-family(uncensused)` because lifecycle events named `@0` while the carrier named the root (`geatsc-generic-class-static-copy-id`). A generic class needed several physical classes and one shared static side (`shareStaticSides`, `generic-class-two-layouts.ts`). `familyNamesClassCopy` accepts either spelling.                     |
+| #   | shape                                               | instances                                                                                                                                                                                                                                                                                                                                                                             |
+| --- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A   | **wrong copy by name/first-match**                  | Union-of-classes receiver picked the class's first (`void`) copy of `handleOk` (`generic-override-copy-through-class-union-arm.runtime.ts`). Generic method copies all under one key, `classMemberOf` took the first (`generic-method-at-two-type-arguments.ts`). `methodCopyPreferenceOf`'s "falls back to the first".                                                               |
+| B   | **fold vs split decided with the wrong instrument** | `c61d97066` broke the framework build: `copiesMayDifferInLayout` used assignability, one `any` filling collapsed every copy onto one struct, and the first completer's carriers won (`geatsc-layout-identity-must-be-representation-not-assignability`). Folding `Queue<unknown>` onto `Queue<Uint8Array>` aborted at runtime (`generic-class-at-a-top-type-and-a-concrete-type.ts`). |
+| C   | **the `any` copy is two things at once**            | Classes split at `any` became a tagged union of copies. The `any` copy's own `this` then needed `exactClassInstanceOf`, `implicitReceiver`, `classBoundReceiver`, and a construct-result override (`geatsc-any-copy-family-union`).                                                                                                                                                   |
+| D   | **override families and heritage per copy**         | Override copies missing at some base instantiations (`mintOverrideCopies`, `generic-method-override-minted-at-every-base-copy.runtime.ts`). Override families needed a per-copy split (`classCopyFamiliesOf`). A derived class had to split when its base's copies split (`baseCopiesDiffer`, `derived-class-splits-with-its-base`).                                                  |
+| E   | **two spellings of one class**                      | Statics refused as `constructor-family(uncensused)` because lifecycle events named `@0` while the carrier named the root (`geatsc-generic-class-static-copy-id`). A generic class needed several physical classes and one shared static side (`shareStaticSides`, `generic-class-two-layouts.ts`). `familyNamesClassCopy` accepts either spelling.                                    |
 
 Plus the enumeration's own holes: `T` bound only through `T | undefined` minted
 no copy (`geatsc-generic-bound-only-through-absence`). Nested holes needed
@@ -325,7 +325,7 @@ is no longer an error to reach representation with one.
   - _storage_: reaches instance storage (`parametersInInstanceStorage`,
     including callable-typed fields per `structural-layout-relevance.ts`). These
     become C++ class template parameters.
-  - _convention_: appears only in member signatures (mongodb's `TResult`).
+  - _convention_: appears only in member signatures (a database driver's `TResult`).
     These are not class template parameters (§3b).
   - For functions, every parameter is a template parameter.
 - **Type-level computations over parameters** (`JSTypeOf[T]`, `WithId<T>`,
@@ -351,7 +351,7 @@ specializations. So enumeration survives with a different output:
 - Reachability: an instantiation exists because a reached site or a reached
   instantiation names it. A method of a class template is instantiated only if
   a reached site calls it (or a virtual slot needs it, §3b). This replaces
-  `admittedUnder`: the mongodb `emitAndLog` cross-product copy is simply never
+  `admittedUnder`: the driver's `emitAndLog` cross-product copy is simply never
   requested.
 - Deleted: `copiesMayDifferInLayout`, `canonicalLayoutFillings`,
   `canonicalOrdinalOf`, `baseCopiesDiffer`, the assignability instrument, and
@@ -421,7 +421,7 @@ twelve.
   ```
 
   A literal-typed filling whose literal matters to a type-level computation
-  (mongodb's `get<'object'>` vs `get<'timestamp'>`) is carried as a
+  (a database driver's `get<'object'>` vs `get<'timestamp'>`) is carried as a
   compiler-emitted tag type (`gea::lit::object`). That keeps the two apart even
   though both carriers are `std::string`. **The instantiation key is the carrier
   tuple, refined by any literal the body's type-level traits read.** A
@@ -695,7 +695,7 @@ clang diagnostic`, as a third net behind `exact` and the deleted catch-alls.
 ### (a) Values that mix instantiations
 
 The cases: `Base<number>` and `Base<string>` flowing into one slot; a
-`Base<any>` or bare `Base` slot (mongodb's `Set<AbstractCursor>`,
+`Base<any>` or bare `Base` slot (a database driver's `Set<AbstractCursor>`,
 `session.owner`, `new ReadableCursorStream(this)`); a union of instantiations;
 and TS covariance (`Box<Dog>` into `Box<Animal>`, `Token<number>` into
 `Token<unknown>`).
@@ -833,7 +833,7 @@ Covariant overrides (an override returning a narrower class) keep today's
 adapters (`virtualDispatchVerdictOf`'s protocol boundaries). C++ covariant
 returns do not apply to `gea::Ref<>`.
 
-mongodb's shape: `AbstractOperation<TResult>` has `TResult` convention-only, so
+A database driver's shape: `AbstractOperation<TResult>` has `TResult` convention-only, so
 it is one struct with its per-convention slots (as today).
 `AbstractCursor<TSchema>` has `TSchema` in storage, so it is a template with
 `AbstractCursor_erased` holding `id`, `closed`, `killed`, the session, and the
@@ -940,7 +940,7 @@ With one body per generic they get **fewer** sites, not different ones.
     `receiverDowncastText` pattern (note `geatsc-any-copy-family-union`)
     generalized.
   - Inside a trusted declared type, no checks.
-- **The reinterpretation case.** mongodb's `AbstractCursor.map` returns
+- **The reinterpretation case.** a database driver's `AbstractCursor.map` returns
   `this as unknown as AbstractCursor<T>`: one object, viewed at two
   instantiations, on purpose. A tag check there throws on every call, which
   breaks a real program the user wants compiled. The current rule
@@ -1065,9 +1065,9 @@ source of instantiations and one more operation family in §2.7.
   today's separately named copies any better.
 - **Emitted C++ text**: smaller, in proportion to the generic share. The
   reflection hooks (about 170 lines per class struct in the excerpt above) and
-  every uniform body are printed once. Hono: 201 of 607 bodies are inside
+  every uniform body are printed once. The HTTP framework: 201 of 607 bodies are inside
   generic copies but only about 28 are second copies, so the text saving there
-  is modest. mongodb (`Collection` ×5, `AbstractCursor` 10 layouts) should see
+  is modest. The database driver (`Collection` ×5, `AbstractCursor` 10 layouts) should see
   more. These are expectations; neither is to be claimed until measured once,
   at the end.
 - **clang time**: template instantiation is cheap next to parsing. Explicit
@@ -1076,7 +1076,7 @@ source of instantiations and one more operation family in §2.7.
   instantiate a body in every TU that sees it. Template definitions go into the
   shared prelude those TU modes already emit.
 - **geatsc time**: the frontend no longer walks, maps, flows and lowers each
-  generic body N times. That is the real saving, largest on mongodb. Note
+  generic body N times. That is the real saving, largest on the database driver. Note
   `geatsc-pairing-walk-warms-the-checker` warns that cutting frontend work can
   make compiles _slower_ through checker warm-up effects, so this is an
   expectation, not a claim.
@@ -1134,10 +1134,10 @@ Every slice passes:
 4. The runtime tests for the named movers, one file at a time
    (`scripts/run-runtime-tests.mjs --only=…`), under both arms. The `expect:`
    lines are the equivalence proof, since the C++ differs by design.
-5. From slice 3 on, once per slice: the hono build (the bare
-   `node scripts/build.mjs apps/hono-hello/server.ts`, run from `node-compat/`)
-   and the mongodb probe (the command in note
-   `geatsc-mongodb-driver-campaign-2026-09-23`), under `--generics=templates`.
+5. From slice 3 on, once per slice: the HTTP framework build (the bare
+   build of node-compat's HTTP framework test app with `scripts/build.mjs`)
+   and the database driver probe (the command in the driver campaign note of
+   2026-09-23), under `--generics=templates`.
    Compare the row set, not the count.
 
 The slices:
@@ -1190,11 +1190,11 @@ liveness. Movers must include `generic-override-copy-through-class-union-arm.run
 **Slice 7: `class-family-ref` and erased bases.** The mixed-instantiation
 slots, closed and open. Movers: `generic-split-copy-into-its-any-copy.runtime.ts`,
 `split-copy-this-listener-into-emitter-slot.runtime.ts`,
-`generic-class-at-a-top-type-and-a-concrete-type.ts`, and the mongodb cursor
+`generic-class-at-a-top-type-and-a-concrete-type.ts`, and the database driver's cursor
 family. Checked casts at explicit cast sites land here.
 
 **Slice 8: flip the default.** Take one full runtime run (the landing gate for a
-default flip, once), plus hono and the mongodb probe. Retake both gate
+default flip, once), plus the HTTP framework build and the database driver probe. Retake both gate
 baselines in the same commit. Name the moved set: every program with a
 generic.
 
@@ -1210,7 +1210,7 @@ Questions that need the user's call:
 1. **Reinterpretation casts** (`this as unknown as AbstractCursor<T>`). Keep the
    current rule (such a class is instantiated once at its top filling, and the
    cast is the identity)? Or apply the stated cast policy strictly (tag check,
-   `TypeError`), which breaks mongodb's `cursor.map()`? This note proposes
+   `TypeError`), which breaks a database driver's `cursor.map()`? This note proposes
    keeping the rule, because the program cast through a top type.
 2. **Writes through a covariant slot** (`Box<unknown>` slot holding a
    `Box<number>`, assigned a string). JavaScript stores the string. The
@@ -1261,7 +1261,7 @@ Risks:
    clang template error at a trait with no specialization. That is correct
    (fail closed) but harder to read. The certificate must carry a mapping from
    trait names to sites for the diagnostic sweep.
-6. **clang build time for large instantiation sets** (mongodb). Explicit
+6. **clang build time for large instantiation sets** (a database driver). Explicit
    instantiation plus `extern template` should keep it at today's level. This
    is unmeasured.
 7. **The gate's normalization** hashes emitted C++ after normalizing SSA

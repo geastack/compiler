@@ -25288,7 +25288,7 @@ gea::Ref<Dictionary<V>> unboxDynamicDictionary(const Value& value, const char* s
  * dynamic object or an open Document -- what `unboxDynamicDictionary` rebuilds
  * -- is told apart by its values instead: the arm whose value carrier admits
  * every enumerable own string-keyed data value, tried after every exact test,
- * in arm order, so an empty object is the first such arm. Hono's static routes
+ * in arm order, so an empty object is the first such arm. A router's static routes
  * store `Object.create(null)` in an `any` tuple slot that is later read as
  * `ParamIndexMap | Params`.
  */

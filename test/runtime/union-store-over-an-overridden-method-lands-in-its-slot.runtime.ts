@@ -1,4 +1,4 @@
-// Hono's RegExpRouter `match` runs with `this` typed as any router and ends
+// A regular-expression router's `match` runs with `this` typed as any router and ends
 // with `this.match = match`: one router class holds `match` in a field, the
 // others declare it as a method that some write shadows. Through the union,
 // the store lands in each arm's own storage -- the field, or the method's

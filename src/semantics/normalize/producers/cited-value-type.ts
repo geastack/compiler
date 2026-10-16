@@ -15,8 +15,8 @@ import { logicalMergeTypeOf } from './logical-merge-type.js'
  * - An `Object.create(null)` call, which publishes the carrier
  *   `objectCreateResultOverride` mints rather than the ambient `any`.
  *
- * A citation that re-asked the checker boxed the value at the citation: hono's
- * trie-router `Node` does `this.#children = children || Object.create(null)`;
+ * A citation that re-asked the checker boxed the value at the citation: a
+ * trie router's `Node` does `this.#children = children || Object.create(null)`;
  * the merge cited the call as `any` and the field write cited the merge as
  * `any`, so the optional parameter was boxed and unboxed into the field.
  */

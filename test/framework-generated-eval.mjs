@@ -7,8 +7,8 @@ import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
-// fastify is a devDependency here, not a sibling checkout: this test needs a
-// real generator of `new Function` bodies, and fastify's router is one.
+// The web framework is a devDependency here, not a sibling checkout: this test
+// needs a real generator of `new Function` bodies, and its router is one.
 const require = createRequire(import.meta.url)
 const OriginalFunction = globalThis.Function
 const generated = []
@@ -23,9 +23,9 @@ globalThis.Function = new Proxy(OriginalFunction, {
   }
 })
 try {
-  const Fastify = require('fastify')
-  const app = Fastify({ logger: false })
-  app.get('/', (_req, reply) => reply.send('Hello Fastify!'))
+  const createApp = require('fastify')
+  const app = createApp({ logger: false })
+  app.get('/', (_req, reply) => reply.send('Hello!'))
   app.get('/json', (_req, reply) => reply.send({ hello: 'world' }))
   await app.ready()
   await app.close()
@@ -49,9 +49,9 @@ execFileSync(
   ],
   { stdio: 'inherit' }
 )
-assert.equal(bodies.length, 4, 'Fastify generator corpus changed; inspect and extend the test cases')
+assert.equal(bodies.length, 4, 'framework generator corpus changed; inspect and extend the test cases')
 for (const [index, args] of bodies.entries())
-  test(`real Fastify generated body ${index}`, () => {
+  test(`real framework-generated body ${index}`, () => {
     const params = args.slice(0, -1),
       body = args.at(-1)
     if (params.join(',') === 'NullObject') {

@@ -9,7 +9,7 @@ import type { SpecializationCensus } from './specialization.js'
  * A `const` whose stated type leaves positions open (`Matcher<any>`) and whose
  * every use hands it, whole, to one concrete slot is laid out as that slot.
  *
- * Hono's RegExpRouter states `const nullMatcher: Matcher<any> = [/^$/, [],
+ * A regular-expression router states `const nullMatcher: Matcher<any> = [/^$/, [],
  * Object.create(null)]` and only ever `return`s it from
  * `buildMatcherFromPreprocessedRoutes<T>(): Matcher<T>`. Laid out as written,
  * the binding is a record of arrays of `[any, ParamIndexMap]` tuples that the

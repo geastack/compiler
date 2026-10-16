@@ -55,8 +55,8 @@ transactional rollback.
 
 ## Explicit limits
 
-This is a tested subset, **not full ECMAScript conformance or general Fastify
-compatibility**. Missing syntax includes function declarations, classes,
+This is a tested subset, **not full ECMAScript conformance or general web
+framework compatibility**. Missing syntax includes function declarations, classes,
 async/generators, try/catch/finally, switch, for-in/of, destructuring, default/rest
 parameters, optional chaining, exponentiation, logical assignment, templates,
 regular expressions, and spread. Duplicate parameters, `arguments`, direct
@@ -81,7 +81,7 @@ budget. This API is not an isolation boundary for untrusted code.
 npm run build
 node --test test/eval.mjs
 node --test test/dynamic-fallback.mjs
-node --test test/fastify-eval.mjs
+node --test test/framework-generated-eval.mjs
 ```
 
 The evaluator suite compares supported results and error types against Node,
@@ -90,9 +90,9 @@ and compiles source through the shared `dist/compiler.js` for both Function
 constructor spellings. `test/runtime/eval-boundaries.cpp` checks native
 integration, early errors, conversion hints, limits, and escaped closure lifetime.
 
-The Fastify generator test captures all four distinct bodies produced by the
-installed Fastify hello-world setup, leaves those strings unchanged, and
+The framework generator test captures all four distinct bodies produced by the
+installed web framework's hello-world setup, leaves those strings unchanged, and
 compares their executed results against Node. It covers routing guards, UTF-16
 segment matchers, and nested parameter-object factories. This is a component
-test of generated functions, not a claim that Fastify's application source
+test of generated functions, not a claim that the framework's application source
 compiles or that schema serializers are supported.

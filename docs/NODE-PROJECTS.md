@@ -99,12 +99,12 @@ npm run typecheck
 
 Project tests include no-argument native compile/link/run through the npm
 Node target dependency, project aliases under NodeNext, unbuilt real Zod, neverthrow,
-tiny-invariant, Hono, and MongoDB checkouts, exact-version source acquisition
+tiny-invariant, HTTP framework, and database driver checkouts, exact-version source acquisition
 and cache reuse, nested dependency identity, and the Node source oracle.
 
 Automatic project preparation is not universal JavaScript/Node compatibility.
 The compiler still refuses unsupported semantics and host APIs. The tiny-invariant
 corpus slice resolves its implementation without overrides but remains blocked
 by the target's missing global process binding and a tagged-union array allocation
-in the test. Fastify still has the runtime/compiler blockers documented in
-No native Fastify benchmark is claimed.
+in the test. The web framework test app still has the runtime/compiler blockers documented in
+No native benchmark of it is claimed.

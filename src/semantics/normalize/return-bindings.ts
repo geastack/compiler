@@ -1177,7 +1177,7 @@ export const censusReturnBindings = (
    * into a slot whose every signature returns a type the operand already is:
    * the assertion changes only the checker's view, so the function returns
    * the operand's own type, exactly as `physicalAssertionReturns` reads an
-   * `as unknown as T` past its assertion. Hono's constructor installs
+   * `as unknown as T` past its assertion. An HTTP framework's constructor installs
    * `this[method] = (...) => { ...; return this as any }` under overloaded
    * `HandlerInterface`s that all return the app; laid out as `any`, each
    * return boxed the app and published its whole router to dynamic code.
@@ -1192,8 +1192,8 @@ export const censusReturnBindings = (
     if (operand === null || isAnyType(operand)) return null
     if (signatures.every((signature) => checker.isTypeAssignableTo(operand, checker.getReturnTypeOfSignature(signature)))) return operand
     // The slot's signatures may name the operand's own class at other type
-    // arguments -- hono's return `HonoBase<E, S & ToSchema<...>, BasePath>`
-    // while `this` is `HonoBase<E, S, BasePath>`, which is why the source
+    // arguments -- an HTTP framework's return `AppBase<E, S & ToSchema<...>, BasePath>`
+    // while `this` is `AppBase<E, S, BasePath>`, which is why the source
     // needed the assertion at all. The value is still that one instance of
     // that one class; the type arguments are the checker's bookkeeping.
     const instance = checker.getApparentType(operand)

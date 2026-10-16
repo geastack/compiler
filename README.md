@@ -34,7 +34,7 @@ boards, desktop, mobile and consoles. The other repositories plug into it:
 - Xbox — the Xbox target is not open source; it is available commercially.
   Contact [contact@geastack.com](mailto:contact@geastack.com).
 - [`node-compat`](https://github.com/geastack/node-compat) — the Node.js
-  runtime and geatsc plugin for compiling Node servers (`node:http`, Hono) to
+  runtime and geatsc plugin for compiling Node servers (`node:http`, HTTP frameworks) to
   native executables. It is a dependency of this package: running `geatsc`
   with no input file inside a Node project builds each of the project's entry
   points through node-compat into `dist/`.

@@ -164,8 +164,8 @@ export const programConversionInputsOf = (input: ProgramConversionInputs): reado
             : null
       for (const field of fields ?? []) {
         // A `#private` element is not a property: no dynamic write can name
-        // it, and the reflected protocol leaves it out (`records.ts`). Hono's
-        // Context keeps `#matchResult: Result<[H, RouterRoute]>`, whose
+        // it, and the reflected protocol leaves it out (`records.ts`). An HTTP
+        // framework's Context keeps `#matchResult: Result<[H, RouterRoute]>`, whose
         // handler arm no dynamic value can be read into -- demanding that
         // reader refused a class only full reflection had touched.
         if (isPrivateNameKey(field.key)) continue

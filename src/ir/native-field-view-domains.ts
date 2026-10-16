@@ -305,7 +305,7 @@ export const nativeFieldViewDomainsOf = (
             // An accessor with no admitted ABI (a getter nothing calls has
             // no body) states no route for ITS key; it does not void the
             // class's other members. node-compat's `ResponseImpl` declares
-            // every WHATWG attribute as a getter and hono reads only
+            // every WHATWG attribute as a getter and an HTTP framework reads only
             // `headers` off `Response | ResponseInit`.
             if (
               !getter ||

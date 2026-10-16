@@ -1,4 +1,4 @@
-// Hono's trie-router asks `hasChildren(child.#children)`, a helper typed
+// A trie router asks `hasChildren(child.#children)`, a helper typed
 // `(children: Record<string, unknown>)` that only enumerates keys. The
 // `unknown` value states nothing, and the one argument is the node's own
 // `Record<string, Node>`: the parameter takes that dictionary, so the call

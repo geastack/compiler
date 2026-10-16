@@ -311,9 +311,9 @@ if (wanted('node-compat')) {
   // node_modules, so this names the candidate even where no link is made.
   const env = { GEA_COMPILER_DIR: compiler }
   add('node-compat', 'test:package', nodeCompat, ['npm', 'run', 'test:package'], env)
-  // The full Hono app, compiled from source and served: `test:package` checks
-  // only the package's shape, so the 1.0.29 compiler released with hono-hello
-  // failing to certify and nothing here noticed. The build must emit a binary
+  // The full HTTP framework test app, compiled from source and served:
+  // `test:package` checks only the package's shape, so the 1.0.29 compiler
+  // released with that app failing to certify and nothing here noticed. The build must emit a binary
   // and every route must answer exactly.
   const dist = join(nodeCompat, 'apps/hono-hello/dist')
   const binary = join(dist, process.platform === 'win32' ? 'server.exe' : 'server')

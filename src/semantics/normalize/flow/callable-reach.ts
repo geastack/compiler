@@ -2305,7 +2305,7 @@ const closedMemberCallableUses = (
    * Every caller of the function value `value` holds, when the cell it
    * initializes is the function's only handle: a `const` written once, whose
    * every executable use -- in its own module or an importer's -- is an
-   * entered call, or initializes another such cell. Hono exports its query
+   * entered call, or initializes another such cell. An HTTP framework exports its query
    * parser twice, `getQueryParam = _getQueryParam as (...) => ...` and a
    * wrapper calling it directly; the cast alias is one more name for the same
    * function, and its calls are this function's calls.

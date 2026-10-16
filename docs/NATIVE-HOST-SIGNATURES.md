@@ -83,13 +83,13 @@ stores under ASan/UBSan.
 
 ## Automatic integer cloning removed
 
-Commit `d5e9da41c` (October 2, 2026), the MongoDB driver CPU campaign, added a
+Commit `d5e9da41c` (October 2, 2026), a database driver CPU campaign, added a
 second rendering of eligible Number-taking functions. The source comment names
-BSON's dynamically supplied `options.index` as its motivation: a runtime integer
+a serializer's dynamically supplied `options.index` as its motivation: a runtime integer
 test could authorize integer arithmetic where static input proof was unavailable.
 The original Number body remained for fractional and other noninteger inputs.
 
-The policy applied to the entire program, not just MongoDB. Its profitability
+The policy applied to the entire program, not just the driver. Its profitability
 rule was `premised.values.size - original.values.size >= 8`: eight additional
 IR values eligible for integer storage justified copying the whole body. It had
 no generated-byte budget, hot-path evidence, or measured-speedup requirement.
@@ -102,7 +102,8 @@ worked, not that its cost was justified. They had no output-size assertion;
 the emitted-set gate detects changed output but supplies no profitability
 criterion. That is why correctness checks did not prevent the expansion.
 
-Read-only inspection of Skytail's retained Mosaico build on October 6 found 91
+Read-only inspection of a three.js game's retained Mosaico build on October 6
+found 91
 unique generated integer copies and 90 retained `_integral` code symbols totaling
 175,156 bytes. The largest copy was 22,530 bytes. The binary was 8,669,712 bytes,
 modified at 17:52:56 local time. No earlier 6.4 MB ELF was available in the
@@ -120,7 +121,7 @@ has not been remeasured; no speedup is claimed from this removal.
 
 ## Async task cloning replaced with one convention
 
-The same October 2 MongoDB commit also introduced `_task` twins. Eligible
+The same October 2 driver commit also introduced `_task` twins. Eligible
 suspending async functions were rendered twice: the regular Promise body and
 the same statements returning `gea::Task<V>`. An immediate, single-use await
 selected the twin at compile time to avoid a Promise state. The commit reports

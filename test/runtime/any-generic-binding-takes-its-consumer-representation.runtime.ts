@@ -1,4 +1,4 @@
-// Hono's RegExpRouter declares `const nullMatcher: Matcher<any> = [/^$/, [],
+// A regular-expression router declares `const nullMatcher: Matcher<any> = [/^$/, [],
 // Object.create(null)]` and returns it from `buildMatcher<T>(): Matcher<T>`.
 // The `any` positions are never read or written dynamically: the binding's one
 // consumer wants `Matcher<T>`, so the binding is laid out as `Matcher<T>` from

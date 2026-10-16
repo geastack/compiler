@@ -1,4 +1,4 @@
-// Hono's Context declares `newResponse = (...args) =>
+// An HTTP framework's Context declares `newResponse = (...args) =>
 // this.#newResponse(...(args as Parameters<NewResponse>))`: the rest array is
 // `any[]`, and spreading it into the stated frame reads each element into its
 // parameter's carrier. The first parameter is `Data | null` -- absent as

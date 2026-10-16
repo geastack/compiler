@@ -1,4 +1,4 @@
-// Hono's RegExpRouter fills its static table with `staticMap[path] =
+// A regular-expression router fills its static table with `staticMap[path] =
 // [handlers.map(([h]) => [h, Object.create(null)]), emptyParam]`. The lib types
 // `Object.create` as `any`, so the callback's tuple is `[T, any]` and its
 // second slot is a box, while the table's stated position is

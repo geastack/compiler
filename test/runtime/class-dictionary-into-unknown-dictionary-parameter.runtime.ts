@@ -1,9 +1,9 @@
-// Hono's TrieRouter keeps its children as `Record<string, Node<T>>` and asks
+// A trie router keeps its children as `Record<string, Node<T>>` and asks
 // `hasChildren(children: Record<string, unknown>)` whether any key is there.
 // The callee only enumerates keys, so the class-valued table reaches the
 // `unknown`-valued parameter as a read-only view of the same object -- no copy,
 // no second identity. Compiler 1.0.29 dropped the element-wise copy recast and
-// installed nothing in its place for an argument, so the hono build stopped in
+// installed nothing in its place for an argument, so the framework build stopped in
 // certification ("no runtime conversion is installed").
 class RouteNode {
   constructor(readonly label: string) {}

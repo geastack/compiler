@@ -5,7 +5,7 @@ import ts from 'typescript'
  * immediately states: `const matchers: MatcherMap<T> = (this as any)
  * .buildAllMatchers()`.
  *
- * Hono's RegExpRouter installs a free `match` function as its `match` field,
+ * A regular-expression router installs a free `match` function as its `match` field,
  * and that function calls back into the router through `this as any` because
  * its declared receiver (`R extends Router<T>`) names no such method. The `as`
  * erases the static type and nothing else: the receiver is still the router

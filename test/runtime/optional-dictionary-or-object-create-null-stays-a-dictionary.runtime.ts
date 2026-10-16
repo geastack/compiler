@@ -1,4 +1,4 @@
-// Hono's trie-router `Node` takes its children as an optional parameter and
+// A trie router's `Node` takes its children as an optional parameter and
 // falls back to a fresh null-prototype object: `this.#children = children ||
 // Object.create(null)`. `Object.create(null)` is declared to return `any`, so
 // the checker types the whole `||` as `any`; the call itself is minted as the

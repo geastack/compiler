@@ -1,4 +1,4 @@
-// Hono's trie-router keys a child by `Array.isArray(pattern) ? pattern[0] :
+// A trie router keys a child by `Array.isArray(pattern) ? pattern[0] :
 // p`, where `pattern` is `readonly [string, string, RegExp | true] | '*' |
 // null`. `Array.isArray` narrows it to the tuple arm, whose index 0 is a
 // `string`: the key is a string, and the `in` test against the children

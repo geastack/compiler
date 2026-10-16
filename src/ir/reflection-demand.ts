@@ -337,7 +337,7 @@ const publishedChildrenOf = (
       // A `#private` element is reachable only from the class's own body,
       // never by dynamic code holding the instance: the reflected protocol
       // leaves it out (`records.ts`), so publishing the instance publishes
-      // none of what it holds there. Hono's Context keeps the router's
+      // none of what it holds there. An HTTP framework's Context keeps the router's
       // `#matchResult` that way; walking it made every handler tuple in the
       // router fully reflected.
       const layout = classes.get(representation.declaration)
@@ -610,8 +610,8 @@ const callableAdapterInputsOf = (
  * not two native callables joined by an installed conversion. The adapter is
  * the same one a `convert` installs, so it publishes exactly what that
  * `convert` would (`callableAdapterInputsOf`) and never the callable's own
- * result graph. Hono's `this.match = match` stores a receiver-less arrow into
- * RegExpRouter's `this`-stating `match` slot; as an unproven slot value it
+ * result graph. A router's `this.match = match` stores a receiver-less arrow
+ * into a regular-expression router's `this`-stating `match` slot; as an unproven slot value it
  * published every handler tuple the router returns.
  */
 const inlineCallableAdapterInputsOf = (
@@ -1340,7 +1340,7 @@ export const reflectionExposureOf = (
       // element goes through (`ConvertOperation.rebuild`), so its node pairs
       // the element carriers, not the arrays this operation converts between.
       // Matched against the arrays it never cited, and an element converted
-      // into a live view (hono's RegExpRouter maps routes to `[handler, any]`
+      // into a live view (a regular-expression router maps routes to `[handler, any]`
       // tuples stored as `[handler, ParamIndexMap]`) read through a source
       // protocol nothing demanded.
       const node = operation.rebuild !== undefined ? options.conversions?.nodeById(operation.conversionUse) : null
@@ -1661,8 +1661,8 @@ export const reflectionExposureOf = (
   // A member read whose value is only ever the callee of a closed call is
   // that call's own dispatch, not a value: the printer calls each proven
   // function with the receiver it was read from and never materializes the
-  // read. Hono's `this.router.match(method, path)` over a union of routers is
-  // the shape -- RegExpRouter's `match` states its `this` in its ABI and the
+  // read. An HTTP framework's `this.router.match(method, path)` over a union of routers is
+  // the shape -- a regular-expression router's `match` states its `this` in its ABI and the
   // joined read cannot, so the read looked inexact and published the
   // router's whole match result.
   // Read lazily: `closedCallOperations` is completed by later loops.
@@ -2161,7 +2161,7 @@ export const reflectionExposureOf = (
     // (`IrArrayElement.element`) copies each element through the ordinary
     // `array-element` recipe (`internal-operation-conversions.ts`), so its
     // demand is that recipe's, exactly as a `convert` citing the same node.
-    // Hono's `routes.push(...(ownRoute as [string, H[]][]))` is the case: the
+    // A router's `routes.push(...(ownRoute as [string, H[]][]))` is the case: the
     // elements are read by index and converted, never through a field protocol.
     if (operation.kind === 'allocate-array-object' && operation.result.representation.kind === 'array-object') {
       const element = operation.result.representation.element
@@ -2414,7 +2414,7 @@ export const reflectionExposureOf = (
     // An unshared array rebuilt at another element carrier
     // (`ConvertOperation.rebuild`) cites the ELEMENT conversion each copied
     // element goes through, so its demand is that conversion's -- the copy
-    // itself is `appendRangeConverted` over native storage. Hono's static
+    // itself is `appendRangeConverted` over native storage. A router's static
     // route table (`[handlers.map(([h]) => [h, Object.create(null)]),
     // emptyParam]`) is the case: the `[T, any]` tuples are rebuilt as `[T,
     // ParamIndexMap]`, and only the unboxed dictionary is read dynamically.

@@ -504,7 +504,7 @@ const sliceBody = (
       const scopes = receiverClassScopes(operation.receiver.representation, structuralViewScopes)
       // A computed key the semantic graph proved to a finite name set
       // (`GetOperation.provenKeyTexts`) names exactly those members, the same
-      // fact `reflection-demand.ts` demands fields by. Hono's
+      // fact `reflection-demand.ts` demands fields by. An HTTP framework's
       // `bodyCache[key]` for `key: keyof Body` reads a cache boxed because
       // `Body` states `json: any`; filed as an unknown key on an unknown
       // receiver, it kept every method of every class -- `HonoRequest#query`

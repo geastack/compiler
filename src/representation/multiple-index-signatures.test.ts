@@ -486,7 +486,7 @@ test('duplicate symbol domains refuse incompatible native value carriers', () =>
   assert.match(carrier.reason, /symbol index signatures have incompatible native value carriers/)
 })
 
-test('a Fastify-style callable ABI carries all three compatible index signatures without boxing', () => {
+test('a web-framework-style callable ABI carries all three compatible index signatures without boxing', () => {
   const table = createStructuralTypeTable()
   const string = table.intern({ kind: 'primitive', primitive: 'string' })
   const undefinedValue = table.intern({ kind: 'primitive', primitive: 'undefined' })

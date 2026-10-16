@@ -215,7 +215,7 @@ export const censusFreshDictionaryStorage = (
     if (ts.isVoidExpression(source)) return []
     if (ts.isObjectLiteralExpression(source)) return [makeOrigin(source, targetKey)]
     // `Object.create(null)` is an empty table with no prototype to read
-    // through, exactly the storage a closed component lays out. Hono's
+    // through, exactly the storage a closed component lays out. An HTTP framework's
     // `_getQueryParam` starts its results this way; typed `any`, it was an
     // unknown input that refused the whole component.
     if (isNullPrototypeCreate(checker, source)) return [makeOrigin(source, targetKey)]
@@ -574,7 +574,7 @@ export const isNullPrototypeCreate = (checker: ts.TypeChecker, node: ts.Expressi
  * Blocked nodes the table only flows INTO, each stating one table view.
  *
  * A component reaching a public method is the ordinary case, not the
- * exception: hono's `HonoRequest.query()` returns the query parser's table to
+ * exception: an HTTP framework's request `query()` returns the query parser's table to
  * whatever the application does with it -- `JSON.stringify`, a field, a
  * callback -- and no closed proof covers that. Blocking such a consumer
  * refused the whole component, and the parser's one null-prototype object

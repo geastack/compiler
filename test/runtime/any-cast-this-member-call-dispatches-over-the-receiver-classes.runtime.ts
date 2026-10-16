@@ -1,4 +1,4 @@
-// Hono's RegExpRouter installs a free function as its `match` field, and that
+// A regular-expression router installs a free function as its `match` field, and that
 // function reaches back into the router through `(this as any)
 // .buildAllMatchers()`. Its `this` is whatever `Router<T>` the field was
 // called on, so the receiver's carrier is the union of every router class; the
