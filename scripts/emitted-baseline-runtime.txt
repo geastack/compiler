@@ -1262,6 +1262,7 @@ type-query-escapes.ts.cpp f2142e269ca4
 type-query-snapshots.ts.cpp b839a9a2aac2
 typed-array-buffer-into-array-buffer-like.ts.cpp 212e4c0498cc
 typed-array-byte-offsets.runtime.ts.cpp 5b0139fc2bee
+typed-array-construct-from-boxed-array-or-length.runtime.js.cpp f776ed872a04
 typed-array-from-an-absent-buffer-entry.runtime.ts.cpp cde304de63de
 typed-array-into-buffer-source-parameter.runtime.ts.cpp 4ed5e2178325
 typed-array-key-bounds-the-read-not-the-rewrite.runtime.ts.cpp 2b849b5ea443
