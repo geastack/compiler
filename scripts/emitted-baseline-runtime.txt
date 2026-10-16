@@ -660,6 +660,7 @@ iterator-result-arm-read-off-done.runtime.ts.cpp 3ac12d0a5f98
 iterator-result-literal-into-promise-of-union.runtime.ts.cpp 93d172185efa
 iterator-view-captures-next-and-reads-return-at-close.runtime.ts.cpp 2ac4a3175e6a
 js-constructor-with-statics.js.cpp 8ae071607ed1
+js-field-seeded-null-holds-every-later-write.runtime.js.cpp d5ae1f2c6c7f
 jsdoc-asserted-class-method.runtime.js.cpp 46fa5923eaf0
 jsdoc-defaulted-class-constructor.runtime.js.cpp 7fef347adb7c
 jsdoc-object-or-string-optional-param-takes-boolean.runtime.js.cpp 2e489a1ac043
