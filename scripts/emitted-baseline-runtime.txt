@@ -158,6 +158,7 @@ captured-slot-alias.runtime.ts.cpp afd412f439f5
 caught-non-instance-into-class-parameter-propagates.runtime.ts.cpp b76bf40c5cce
 census-typed-maps-into-document-parameter-stay-native.runtime.ts.cpp 65a7553539b2
 census-union-parameter-into-narrower-census-union-parameter.runtime.ts.cpp 3d719ad523f1
+census-union-parameter-stored-into-optional-record-field.runtime.ts.cpp f567c88a05a1
 circular-list-head-null-placeholder-literal.runtime.ts.cpp 815374370ae9
 class-accessors-viewed-as-record.ts.cpp ab78ac4187d1
 class-alias-cast-to-constructor-type-holds-the-class.runtime.ts.cpp 9bbeed4cf503
@@ -614,7 +615,7 @@ interface-union-this-typed-method-field.ts.cpp 1e451b993fae
 interface-with-several-implementors.ts.cpp 97422a74aded
 interleaved-buffer-to-json-shares-array-buffers.runtime.js.cpp ed8684f56f34
 intersection-field-reduces-absence-and-subclass.runtime.ts.cpp b63ff15bd997
-intersection-of-union-substitution.ts.cpp f50b27aa926f
+intersection-of-union-substitution.ts.cpp 12a9f5fdb351
 intrinsic-callback-parameter-wider-than-element.ts.cpp 548c6ebcedb4
 inventory-fractional-reducers.runtime.ts.cpp 156954b40a9f
 invocation-argument-conversions.ts.cpp bfde285f9737

@@ -552,10 +552,13 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
         // A conditional can have one exact record arm and another record
         // that satisfies the same interface. Dispatch the complete source
         // when its native view is admitted; selecting the exact arm would
-        // discard the other live value.
+        // discard the other live value. An optional record target is the
+        // same question: `this._c = c` into a `{...} | null` field selected
+        // the record arm of a `record | Vector3` parameter unchecked and
+        // stored the Vector3's bytes as the record.
         if (
           source.kind === 'tagged-union' &&
-          (target.kind === 'record' || (target.kind === 'native-record-ref' && target.native === null)) &&
+          (nativeRecord.kind === 'record' || (nativeRecord.kind === 'native-record-ref' && nativeRecord.native === null)) &&
           (capability.materializer.armSelection !== undefined || capability.materializer.nativeSelection !== undefined)
         ) {
           const complete = input.registry.structuralRecipe?.(
