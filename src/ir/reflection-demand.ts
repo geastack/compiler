@@ -315,12 +315,27 @@ const callableChildrenOf = (abi: {
  * the call operation accounts for their exposure. Decoding an argument into
  * a native frame does not publish that frame's fields back to dynamic code.
  * Keep the full type inventory in directChildrenOf for candidate discovery.
+ *
+ * A callable parameter is the exception: a dynamic caller passes its own
+ * function there, and decoding it installs the adapter that boxes that
+ * parameter's inputs out to it (`DynamicCarrier<CallableObject>`), so those
+ * inputs are published exactly as a `convert` to the parameter's convention
+ * publishes them. Sakura's untyped `dom.addEventListener('pointerdown', (e) =>
+ * e.button)` reaches a typed `HostListener` slot that way, and its event
+ * class had no field protocol for the listener's read.
  */
 const publishedChildrenOf = (
   representation: Representation,
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   deriver: RepresentationDeriver | null
 ): readonly Representation[] => {
+  const withCallbackInputs = (abi: CallableAbi): readonly Representation[] => [
+    abi.result,
+    ...abi.parameters.flatMap((parameter) => {
+      const callback = unwrappedCallableAbi(parameter.value)
+      return callback === null ? [] : callableAdapterInputsOf(null, callback)
+    })
+  ]
   switch (representation.kind) {
     case 'function':
     case 'function-family':
@@ -328,11 +343,11 @@ const publishedChildrenOf = (
     case 'constructor-value-dispatch':
     case 'function-value-dispatch':
     case 'function-value-family':
-      return [representation.abi.result]
+      return withCallbackInputs(representation.abi)
     case 'function-and-constructor':
-      return [representation.call.result, representation.construct.result]
+      return [...withCallbackInputs(representation.call), ...withCallbackInputs(representation.construct)]
     case 'native-handle':
-      return [representation.call, representation.construct].flatMap((abi) => (abi ? [abi.result] : []))
+      return [representation.call, representation.construct].flatMap((abi) => (abi ? withCallbackInputs(abi) : []))
     case 'class-ref': {
       // A `#private` element is reachable only from the class's own body,
       // never by dynamic code holding the instance: the reflected protocol
