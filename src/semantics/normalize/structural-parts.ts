@@ -789,15 +789,20 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // `IteratorResult`. An answer equal to the node's own declared type added
     // nothing, so the checker's instantiated answer stands.
     const censused = needsCensus && censusNode ? input.layoutTypeAt(censusNode) : null
-    // A JS assignment declaration (`this.x = k * 2`) is its own first write, so
-    // the checker's type AT that node is the written value's, not the member's:
-    // with a second, `any`-typed write (`this.x = opts.n`) the member is `any`
-    // while this node reads `number`, and the census join agreeing with that one
-    // write is real evidence, not an echo of the declared form. Treating it as an
-    // echo left the field `any` -- boxed -- exactly when a typed write came first.
-    const nodeStatesWrittenValue = censusNode !== null && ts.isBinaryExpression(censusNode)
-    const fromCensus =
-      censused !== null && censusNode && !nodeStatesWrittenValue && censused === checker.getTypeAtLocation(censusNode) ? null : censused
+    // A JS assignment declaration (`this.x = k * 2`) is its own first write,
+    // and an answer there that only echoes its right-hand side says nothing
+    // about the field's other writes: a constructor's `this.shaku = null` typed
+    // the field `null` whatever a later `this.shaku = index.shakuhachi` stored.
+    // The field is the LEFT side, where `field-bindings.ts` joins every write
+    // (a typed `k * 2` beside an `any` write still binds `number` there) or
+    // answers nothing, leaving the checker's `any`.
+    const assignedField =
+      censusNode !== null && ts.isBinaryExpression(censusNode) && censused !== null && censused === checker.getTypeAtLocation(censusNode)
+        ? censusNode.left
+        : null
+    const censusCell = assignedField ?? censusNode
+    const cellAnswer = assignedField ? input.layoutTypeAt(assignedField) : censused
+    const fromCensus = cellAnswer !== null && censusCell && cellAnswer === checker.getTypeAtLocation(censusCell) ? null : cellAnswer
     // Which of the three sources actually answered one named member. A record
     // that carries ONE dynamic field among 130 gives the reader no way to tell
     // "the checker was fine" from "the census had nothing to add".

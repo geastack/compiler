@@ -519,7 +519,12 @@ export const createLayoutTypeResolver = (
       : ts.isShorthandPropertyAssignment(declaration)
         ? declaration.name
         : declaration
-    const fromCensus = parameters.typeAt(censusNode)
+    // ...unless that write's answer is only its own right-hand side, which
+    // states nothing about the field's other writes: see `memberOf`'s
+    // `assignedField`.
+    const written = parameters.typeAt(censusNode)
+    const fromCensus =
+      ts.isBinaryExpression(censusNode) && written === checker.getTypeAtLocation(censusNode) ? parameters.typeAt(censusNode.left) : written
     if (fromCensus && !isUnreducedTypeForm(fromCensus) && (fromCensus.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0)
       return fromCensus
     const objectFlags = (receiver as ts.ObjectType).objectFlags ?? 0
