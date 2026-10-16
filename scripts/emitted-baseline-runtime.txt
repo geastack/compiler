@@ -254,6 +254,7 @@ computed-key-writes-do-not-taint-intrinsics.runtime.ts.cpp b53bcfb3bc9e
 computed-literal-union-key-writes-past-member-type.runtime.ts.cpp 7de33ca84dc3
 computed-method-value-called-with-its-receiver.ts.cpp db105dc0afa6
 computed-overridden-method-value.runtime.js.cpp b15da130f001
+computed-read-reaches-a-prototype-accessor.runtime.js.cpp 53affd1be4ff
 computed-record-union.ts.cpp c6d1fcc632a3
 computed-this-read-over-own-methods-into-any.runtime.js.cpp 60e2a233413d
 computed-union-key-literal-keeps-insertion-order.runtime.ts.cpp 5c86d36284ea
