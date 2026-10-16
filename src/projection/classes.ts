@@ -883,7 +883,12 @@ export const projectClasses = (input: ClassProjectionInput): ReadonlyMap<Declara
         if (operation.classConstructionDeferred) constructionDeferred.add(member)
         constructs.set(member, operation.classConstructionDeferred ? null : abi)
         instances.set(member, abi?.result ?? null)
-        constructors.set(member, operation.classConstructionDeferred ? null : constructorBodies.get(member) ?? constructorBodyOfCopy(operation) ?? constructorBodyOfRoot(member))
+        constructors.set(
+          member,
+          operation.classConstructionDeferred
+            ? null
+            : (constructorBodies.get(member) ?? constructorBodyOfCopy(operation) ?? constructorBodyOfRoot(member))
+        )
       }
       if (operation.classDeclaration !== undefined && operation.functionName !== undefined)
         names.set(operation.classDeclaration, operation.functionName)

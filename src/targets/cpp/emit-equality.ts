@@ -89,8 +89,11 @@ const nativeHandleIdentityText = (
 ): string | null => {
   const a = left.representation
   const b = right.representation
-  return a.kind === 'native-handle' && b.kind === 'native-handle' &&
-    a.native === b.native && hasReferenceIdentity(a) && hasReferenceIdentity(b)
+  return a.kind === 'native-handle' &&
+    b.kind === 'native-handle' &&
+    a.native === b.native &&
+    hasReferenceIdentity(a) &&
+    hasReferenceIdentity(b)
     ? `gea::weakCollectionIdentity(${left.text}) == gea::weakCollectionIdentity(${right.text})`
     : null
 }

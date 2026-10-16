@@ -223,8 +223,10 @@ export interface ReachabilityInput {
    */
   readonly verbatimModuleSyntax?: boolean
   /** Canonical runtime export binding; only proven absence may drop an export. */
-  readonly runtimeExportOf?: (file: ts.SourceFile, name: string) =>
-    { readonly kind: 'binding'; readonly symbol: ts.Symbol } | { readonly kind: 'missing' | 'refused' }
+  readonly runtimeExportOf?: (
+    file: ts.SourceFile,
+    name: string
+  ) => { readonly kind: 'binding'; readonly symbol: ts.Symbol } | { readonly kind: 'missing' | 'refused' }
   /** Closed source construction selections; null retains conservative type-compatible alternatives. */
   readonly constructorTargetsOf?: (expression: ts.Expression) => readonly ts.ClassDeclaration[] | null
 }
@@ -1031,19 +1033,23 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
   }
   const markConstruction = (expression: ts.Expression): void => {
     const selected = input.constructorTargetsOf?.(expression)
-    if (selected) { for (const owner of selected) markConstructed(owner); return }
+    if (selected) {
+      for (const owner of selected) markConstructed(owner)
+      return
+    }
     const signatures = input.checker.getTypeAtLocation(expression).getConstructSignatures()
-    const results = signatures.flatMap(signature => {
+    const results = signatures.flatMap((signature) => {
       const result = input.checker.getReturnTypeOfSignature(signature)
       return result.isUnion() ? result.types : [result]
     })
-    for (const file of input.files) for (const statement of file.statements) {
-      if (!ts.isClassDeclaration(statement) || !statement.name) continue
-      const symbol = input.checker.getSymbolAtLocation(statement.name)
-      if (!symbol) continue
-      const instance = input.checker.getDeclaredTypeOfSymbol(symbol)
-      if (results.length === 0 || results.some(result => input.checker.isTypeAssignableTo(instance,result))) markConstructed(statement)
-    }
+    for (const file of input.files)
+      for (const statement of file.statements) {
+        if (!ts.isClassDeclaration(statement) || !statement.name) continue
+        const symbol = input.checker.getSymbolAtLocation(statement.name)
+        if (!symbol) continue
+        const instance = input.checker.getDeclaredTypeOfSymbol(symbol)
+        if (results.length === 0 || results.some((result) => input.checker.isTypeAssignableTo(instance, result))) markConstructed(statement)
+      }
   }
   const exposeNamespace = (file: ts.SourceFile): void => {
     if (!compiled.has(file) || exposedNamespaceFiles.has(file)) return
@@ -1051,9 +1057,9 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
     fileQueue.push(file)
     const module = input.checker.getSymbolAtLocation(file)
     for (const exported of module ? input.checker.getExportsOfModule(module) : []) {
-        const value = input.runtimeExportOf?.(file, exported.getName())
-        if (value?.kind !== 'missing') markSymbol(value?.kind === 'binding' ? value.symbol : exported)
-      }
+      const value = input.runtimeExportOf?.(file, exported.getName())
+      if (value?.kind !== 'missing') markSymbol(value?.kind === 'binding' ? value.symbol : exported)
+    }
   }
   const markSymbol = (symbol: ts.Symbol | undefined, constructionUse = true): void => {
     if (!symbol) return
@@ -1063,10 +1069,11 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
         while (imported && !ts.isSourceFile(imported) && !ts.isImportDeclaration(imported)) imported = imported.parent
         if (imported && ts.isImportDeclaration(imported)) {
           const module = input.checker.getSymbolAtLocation(imported.moduleSpecifier)
-          for (const target of module?.declarations ?? []) if (ts.isSourceFile(target)) {
-            fileQueue.push(target)
-            if (constructionUse && ts.isNamespaceImport(declaration)) exposeNamespace(target)
-          }
+          for (const target of module?.declarations ?? [])
+            if (ts.isSourceFile(target)) {
+              fileQueue.push(target)
+              if (constructionUse && ts.isNamespaceImport(declaration)) exposeNamespace(target)
+            }
         }
         // Reading an imported binding needs the imported module. The alias's
         // declaration does not execute every statement in its containing file.
@@ -1287,12 +1294,19 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
     // and construct recipes. Their implicit or explicit super frame therefore
     // still requires the base construction convention, even though evaluating
     // a named class declaration alone does not construct its base.
-    if (ts.isClassExpression(node)) for (const clause of node.heritageClauses ?? []) {
-      if (clause.token === ts.SyntaxKind.ExtendsKeyword) for (const base of clause.types) markConstruction(base.expression)
-    }
+    if (ts.isClassExpression(node))
+      for (const clause of node.heritageClauses ?? []) {
+        if (clause.token === ts.SyntaxKind.ExtendsKeyword) for (const base of clause.types) markConstruction(base.expression)
+      }
     if (ts.isConstructorDeclaration(node) && ts.isClassDeclaration(node.parent) && !constructedClasses.has(node.parent)) return
-    if (ts.isPropertyDeclaration(node.parent) && node.parent.initializer === node && ts.isClassDeclaration(node.parent.parent) &&
-        !memberIsStatic(node.parent) && !constructedClasses.has(node.parent.parent)) return
+    if (
+      ts.isPropertyDeclaration(node.parent) &&
+      node.parent.initializer === node &&
+      ts.isClassDeclaration(node.parent.parent) &&
+      !memberIsStatic(node.parent) &&
+      !constructedClasses.has(node.parent.parent)
+    )
+      return
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node) || ts.isImportEqualsDeclaration(node)) return
     if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) return
     if (ts.isTypeNode(node)) {
@@ -1463,7 +1477,8 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
       const parent = node.parent
       if (!parent) return false
       if (ts.isHeritageClause(node) && ts.isClassDeclaration(parent) && layoutClasses.has(parent)) return true
-      if (ts.isConstructorDeclaration(node) && ts.isClassDeclaration(parent)) return layoutClasses.has(parent) || !constructedClasses.has(parent)
+      if (ts.isConstructorDeclaration(node) && ts.isClassDeclaration(parent))
+        return layoutClasses.has(parent) || !constructedClasses.has(parent)
       if (ts.isClassStaticBlockDeclaration(node) && ts.isClassDeclaration(parent)) return layoutClasses.has(parent)
       return (
         ts.isPropertyDeclaration(parent) &&

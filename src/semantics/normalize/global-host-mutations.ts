@@ -6299,7 +6299,8 @@ export const censusGlobalHostMutations = (
         // kind of writer and nothing to taint.
         const storesScriptVar = mutator === 'Object.defineProperty' && scriptGlobalValueRedefinitionOf(checker, names, node) !== null
         for (const receiver of receivers) {
-          if (receiver && !storesScriptVar && mayMutateReflectedSurface(receiver)) taintMutationKeys(receiver, keyReader.keysOfKeyExpression(key))
+          if (receiver && !storesScriptVar && mayMutateReflectedSurface(receiver))
+            taintMutationKeys(receiver, keyReader.keysOfKeyExpression(key))
         }
       } else if ((mutator === 'Object.assign' || mutator === 'Object.defineProperties') && node.arguments[0]) {
         const target = node.arguments[0]!

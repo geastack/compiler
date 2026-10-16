@@ -45,7 +45,9 @@ for (const name of ['finite-destructuring-abrupt-phase.runtime.ts'])
   })
 
 test('typed custom-cursor destructuring retains its existing unsupported carrier boundary', () => {
-  const result = compile({rootFileNames:[resolve('test/runtime/finite-destructuring-typed-abrupt.runtime.ts')],projectFileName:null})
-  assert.equal(result.source,null)
-  assert.ok(result.refusals.some(refusal=>refusal.key==='lower:blocked' && refusal.reason.includes('record layout has no field keyed "0"')))
+  const result = compile({ rootFileNames: [resolve('test/runtime/finite-destructuring-typed-abrupt.runtime.ts')], projectFileName: null })
+  assert.equal(result.source, null)
+  assert.ok(
+    result.refusals.some((refusal) => refusal.key === 'lower:blocked' && refusal.reason.includes('record layout has no field keyed "0"'))
+  )
 })

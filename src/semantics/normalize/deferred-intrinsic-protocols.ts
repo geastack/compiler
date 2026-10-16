@@ -129,16 +129,16 @@ export const intrinsicProtocolRequirementKind = (requirement: IntrinsicProtocolR
   requirement.standardGlobalBinding === true
     ? 'standard-global-binding'
     : requirement.sourceGlobalBinding !== undefined
-    ? 'source-global-binding'
-    : requirement.callableOwnKeys !== undefined
-      ? `callable-own:${requirement.callableOwnKeys.prototypeMember}:${prototypeKeyQuerySignature(requirement.callableOwnKeys.keys)}`
-      : requirement.member !== undefined
-        ? requirement.member
-        : requirement.prototypeKeys
-          ? `keys:${prototypeKeyQuerySignature(requirement.prototypeKeys)}${
-              requirement.prototypeAbsentNames === undefined ? '' : `:absent:${[...requirement.prototypeAbsentNames].sort().join(',')}`
-            }`
-          : undefined
+      ? 'source-global-binding'
+      : requirement.callableOwnKeys !== undefined
+        ? `callable-own:${requirement.callableOwnKeys.prototypeMember}:${prototypeKeyQuerySignature(requirement.callableOwnKeys.keys)}`
+        : requirement.member !== undefined
+          ? requirement.member
+          : requirement.prototypeKeys
+            ? `keys:${prototypeKeyQuerySignature(requirement.prototypeKeys)}${
+                requirement.prototypeAbsentNames === undefined ? '' : `:absent:${[...requirement.prototypeAbsentNames].sort().join(',')}`
+              }`
+            : undefined
 
 const ledgers = new WeakMap<ValueFlowIndex, DeferredIntrinsicProtocolLedger>()
 export const attachDeferredIntrinsicProtocolLedger = (flow: ValueFlowIndex, ledger: DeferredIntrinsicProtocolLedger): void => {
@@ -199,7 +199,8 @@ export const failedIntrinsicProtocolRequirements = (
         requirement.prototypeKeys !== undefined ||
         requirement.prototypeAbsentNames !== undefined ||
         requirement.callableOwnKeys !== undefined
-      ) return true
+      )
+        return true
       const symbol = context.checker.resolveName('Proxy', requirement.location, ts.SymbolFlags.Value, false)
       if (!symbol?.valueDeclaration || context.isStandardLibraryDeclaration?.(symbol.valueDeclaration) !== true) return true
       const id = context.identities.symbolValueDeclarationId(symbol, requirement.location)

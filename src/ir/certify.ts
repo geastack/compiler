@@ -1003,7 +1003,13 @@ const ownDemandsOf = (operation: IrOperation, ctx: CertifyContext): CapabilityDe
     case 'iterator-next':
     case 'iterator-close': {
       if (operation.kind === 'get-iterator' && !nativeIterableReceiptMatches(operation, ctx.semanticOperationOf(operation.lineage), ctx))
-        return [{ key: 'call-abi:native-iterable-source-proof', verdict: 'missing', detail: 'native iterator receipt lacks exact independent source, provider and typed cursor authority' }]
+        return [
+          {
+            key: 'call-abi:native-iterable-source-proof',
+            verdict: 'missing',
+            detail: 'native iterator receipt lacks exact independent source, provider and typed cursor authority'
+          }
+        ]
       const sourceIgnores = (functionId: FunctionId): boolean => {
         const variants = [...ctx.bodies.values()].filter((body) => body.sourceOwner === functionId)
         return variants.length > 0 && variants.every(nativeBodyIgnoresLogicalReceiver)
@@ -2186,7 +2192,15 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
     }
     for (const region of body.iteratorCloseRegions ?? []) {
       if (!finiteIteratorCloseRegionMatches(region, ctx.semanticOperationOf(region.lineage), ctx.definitionOf))
-        decide(owner, { key: 'call-abi:finite-iterator-close-state', verdict: 'missing', detail: 'finite iterator step completion lacks exact source close and iterator lineage authority' }, ctx)
+        decide(
+          owner,
+          {
+            key: 'call-abi:finite-iterator-close-state',
+            verdict: 'missing',
+            detail: 'finite iterator step completion lacks exact source close and iterator lineage authority'
+          },
+          ctx
+        )
       for (const demand of nativeIteratorFieldDemandsOf(region.iterator, 'return', region.nativeMethodRead, ctx)) decide(owner, demand, ctx)
     }
     for (const blockId of body.blockOrder) {

@@ -92,7 +92,9 @@ const walk = (dir) =>
   readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = join(dir, entry.name)
     if (entry.isDirectory()) return walk(path)
-    return entry.isFile() && (runtimeFiles === null ? /\.tsx?$/ : /\.[cm]?[jt]sx?$/).test(entry.name) && !entry.name.endsWith('.d.ts') ? [path] : []
+    return entry.isFile() && (runtimeFiles === null ? /\.tsx?$/ : /\.[cm]?[jt]sx?$/).test(entry.name) && !entry.name.endsWith('.d.ts')
+      ? [path]
+      : []
   })
 
 const moduleSpecifier = (node) =>
@@ -248,7 +250,10 @@ const runOnNode = (entry) =>
           if (!spec?.startsWith('.')) return
           const resolved = ts.resolveModuleName(spec, file, compilerOptions, host).resolvedModule
           if (!resolved || resolved.isExternalLibraryImport) throw new Error(`unsupported runtime Node dependency ${spec} from ${file}`)
-          let target = relative(dirname(file), resolved.resolvedFileName).replace(/\.[cm]?[jt]sx?$/, '.js').split(sep).join('/')
+          let target = relative(dirname(file), resolved.resolvedFileName)
+            .replace(/\.[cm]?[jt]sx?$/, '.js')
+            .split(sep)
+            .join('/')
           if (!target.startsWith('.')) target = './' + target
           replacements.push({ start: node.moduleSpecifier.getStart(parsed), end: node.moduleSpecifier.end, text: JSON.stringify(target) })
         })

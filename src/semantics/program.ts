@@ -150,8 +150,10 @@ export interface CompiledProgram {
   readonly sourceFileOf: (fileName: string) => ts.SourceFile | null
   /** Existing source-export resolver over this Program's canonical runtime graph.
    * Only missing proves absence; unsupported exports remain conservative. */
-  readonly runtimeExportOf: (fileName: string, name: string) =>
-    { readonly kind: 'binding'; readonly symbol: ts.Symbol } | { readonly kind: 'missing' | 'refused' }
+  readonly runtimeExportOf: (
+    fileName: string,
+    name: string
+  ) => { readonly kind: 'binding'; readonly symbol: ts.Symbol } | { readonly kind: 'missing' | 'refused' }
   /** Source files reached only through authenticated static CommonJS require edges. */
   readonly commonJsSourceFiles: readonly ts.SourceFile[]
   /** The files the compiler is responsible for, excluding ambient declarations. */
@@ -1066,7 +1068,10 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
     const previous = exportModules.get(file.fileName)
     if (previous) return previous
     const selected: SourceTransformModule = Object.freeze({
-      fileName: file.fileName, text: file.text, declarationFileName: undefined, packageManifest: null,
+      fileName: file.fileName,
+      text: file.text,
+      declarationFileName: undefined,
+      packageManifest: null,
       resolveSource: (specifier: string) => {
         const target = configured.runtimeModuleTargetOf(specifier, file.fileName, 'import')
         return target ? exportModuleOf(target) : null
@@ -1094,16 +1099,19 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
       // declaration, never the barrel alias or a same-spelled global symbol.
       const symbols = new Set<ts.Symbol>()
       for (const statement of file.statements) {
-        if ((ts.isClassDeclaration(statement) || ts.isFunctionDeclaration(statement) || ts.isEnumDeclaration(statement)) &&
-            statement.name?.text === binding.localName) {
+        if (
+          (ts.isClassDeclaration(statement) || ts.isFunctionDeclaration(statement) || ts.isEnumDeclaration(statement)) &&
+          statement.name?.text === binding.localName
+        ) {
           const symbol = checker.getSymbolAtLocation(statement.name)
           if (symbol) symbols.add(symbol)
         }
-        if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations)
-          if (ts.isIdentifier(declaration.name) && declaration.name.text === binding.localName) {
-            const symbol = checker.getSymbolAtLocation(declaration.name)
-            if (symbol) symbols.add(symbol)
-          }
+        if (ts.isVariableStatement(statement))
+          for (const declaration of statement.declarationList.declarations)
+            if (ts.isIdentifier(declaration.name) && declaration.name.text === binding.localName) {
+              const symbol = checker.getSymbolAtLocation(declaration.name)
+              if (symbol) symbols.add(symbol)
+            }
       }
       const [symbol] = symbols
       return symbols.size === 1 && symbol ? { kind: 'binding', symbol } : { kind: 'refused' }

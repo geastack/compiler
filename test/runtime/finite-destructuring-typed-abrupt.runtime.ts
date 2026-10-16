@@ -24,7 +24,7 @@ function dynamicCase(mode: string) {
         return() {
           closes++
           if (mode === 'default-return') throw new Error('close')
-          return {done:true,value:undefined}
+          return { done: true, value: undefined }
         }
       }
     }

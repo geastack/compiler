@@ -235,7 +235,14 @@ test('exact console-constructor TDZ probe retains unsupported stringification re
   assert.ok(result.certificate)
   assert.equal(result.source, null)
   assert.ok(result.refusals.some((refusal) => refusal.key === 'host-member-call:Console.log'))
-  const key = [...result.graph.operations.values()].find((operation) => operation.family === 'allocation' && operation.functionName === 'key')
+  const key = [...result.graph.operations.values()].find(
+    (operation) => operation.family === 'allocation' && operation.functionName === 'key'
+  )
   assert.ok(key?.family === 'allocation' && key.callable)
-  assert.ok([...result.graph.operations.values()].some((operation) => operation.family === 'invocation' && operation.caller.kind === 'function' && operation.caller.functionId === key.callable))
+  assert.ok(
+    [...result.graph.operations.values()].some(
+      (operation) =>
+        operation.family === 'invocation' && operation.caller.kind === 'function' && operation.caller.functionId === key.callable
+    )
+  )
 })

@@ -4388,5 +4388,10 @@ export const classStaticFieldStorageRows = (
   return [...uniqueViews.values()]
     .filter((entry) => entry.representation.kind !== 'unresolved' && entry.representation.kind !== 'void')
     .sort((left, right) => left.name.localeCompare(right.name))
-    .map((entry) => ({ type: cppTypeOf(entry.representation), name: entry.name, storageName: entry.storageName ?? entry.name, viewStruct: entry.viewStruct }))
+    .map((entry) => ({
+      type: cppTypeOf(entry.representation),
+      name: entry.name,
+      storageName: entry.storageName ?? entry.name,
+      viewStruct: entry.viewStruct
+    }))
 }

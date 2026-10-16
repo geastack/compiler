@@ -458,7 +458,11 @@ export const classConstructorKeepsInstanceOf = (checker: ts.TypeChecker, flow: V
  * instanceof proof or a complete constructor-entry inventory by itself.
  * @semanticCategory generic-primitive
  */
-export const classConstructorBindingUsesAreClosed = (checker: ts.TypeChecker, flow: ValueFlowIndex, instance: ts.InterfaceType): boolean => {
+export const classConstructorBindingUsesAreClosed = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  instance: ts.InterfaceType
+): boolean => {
   let held = closedConstructorBindings.get(flow)
   if (!held) closedConstructorBindings.set(flow, (held = new Map()))
   const known = held.get(instance)
@@ -654,7 +658,8 @@ const classConstructorKeepsInstanceUncached = (
       role === 'binding-uses' &&
       isModuleExportedDeclaration(checker, owner, null) &&
       inProgramImportReferencesOf(checker, flow, owner) === null
-    ) return false
+    )
+      return false
     if (!referenceUsesAreClosed(owner, owner.name, type)) return false
     // The member walk below asks two questions of CLASS syntax: does a static
     // block or static field leak the constructor through `this`, and does a
@@ -682,7 +687,8 @@ const classConstructorKeepsInstanceUncached = (
     }
     if (role === 'result') {
       const completions = sourceConstructorReturnValuesOf(checker, flow, owner)
-      if (completions === null || completions.some((value) => unwrapErasedExpression(value).kind !== ts.SyntaxKind.ThisKeyword)) return false
+      if (completions === null || completions.some((value) => unwrapErasedExpression(value).kind !== ts.SyntaxKind.ThisKeyword))
+        return false
     }
     return (checker.getBaseTypes(type) ?? []).every((base) => {
       const declared = heritageClassOrInterfaceOf(base)

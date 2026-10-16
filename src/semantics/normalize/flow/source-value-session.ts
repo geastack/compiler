@@ -66,7 +66,15 @@ type Query =
   | { readonly kind: 'completion'; readonly node: ts.CallExpression | ts.NewExpression }
   | { readonly kind: 'construct-targets'; readonly node: ts.CallExpression | ts.NewExpression }
   | {
-      readonly kind: 'frame-receiver' | 'frame-argument' | 'frame-parameter' | 'frame-value' | 'frame-completion' | 'constructor-value' | 'constructor-parameter' | 'constructor-completion'
+      readonly kind:
+        | 'frame-receiver'
+        | 'frame-argument'
+        | 'frame-parameter'
+        | 'frame-value'
+        | 'frame-completion'
+        | 'constructor-value'
+        | 'constructor-parameter'
+        | 'constructor-completion'
       readonly node: ts.CallExpression | ts.NewExpression
       readonly body: ts.SignatureDeclaration
       readonly subject: ts.Expression | ts.ParameterDeclaration | null
@@ -181,7 +189,11 @@ export interface SourceConstructorProxyResultIdentity {
   readonly constructor: ts.ConstructorDeclaration
   readonly result: ts.NewExpression
   readonly targets: readonly (
-    | { readonly kind: 'base-constructor-allocation'; readonly construction: ts.NewExpression; readonly constructor: ts.ConstructorDeclaration }
+    | {
+        readonly kind: 'base-constructor-allocation'
+        readonly construction: ts.NewExpression
+        readonly constructor: ts.ConstructorDeclaration
+      }
     | { readonly kind: 'source-object'; readonly value: Value }
   )[]
   readonly handlers: readonly Value[]
@@ -396,8 +408,13 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   }
   const undefinedValue = ts.factory.createVoidZero()
   const conditionTruthOf = (root: Value): boolean | null => {
-    if (root === undefinedValue || ts.isVoidExpression(root) || root.kind === ts.SyntaxKind.NullKeyword ||
-        root.kind === ts.SyntaxKind.FalseKeyword) return false
+    if (
+      root === undefinedValue ||
+      ts.isVoidExpression(root) ||
+      root.kind === ts.SyntaxKind.NullKeyword ||
+      root.kind === ts.SyntaxKind.FalseKeyword
+    )
+      return false
     if (root.kind === ts.SyntaxKind.TrueKeyword || isObjectRoot(root) || isBody(root)) return true
     if (ts.isStringLiteralLike(root)) return root.text.length !== 0
     if (ts.isNumericLiteral(root)) {
@@ -519,7 +536,15 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   }
   const value = (expression: ts.Expression): Query => nodeQuery('value', unwrapErasedExpression(expression))
   const frameQuery = (
-    kind: 'frame-receiver' | 'frame-argument' | 'frame-parameter' | 'frame-value' | 'frame-completion' | 'constructor-value' | 'constructor-parameter' | 'constructor-completion',
+    kind:
+      | 'frame-receiver'
+      | 'frame-argument'
+      | 'frame-parameter'
+      | 'frame-value'
+      | 'frame-completion'
+      | 'constructor-value'
+      | 'constructor-parameter'
+      | 'constructor-completion',
     call: ts.CallExpression | ts.NewExpression,
     body: ts.SignatureDeclaration,
     subject: ts.Expression | ts.ParameterDeclaration | null = null
@@ -1031,8 +1056,12 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     if (!sites.has(call)) return null
     const selections = sourceConstructorSelectionsOf(checker, flow, call.expression)
     const owner = selections?.length === 1 ? selections[0] : null
-    if (!owner || (!ts.isClassDeclaration(owner) && !ts.isClassExpression(owner)) ||
-        owner.heritageClauses?.some((one) => one.token === ts.SyntaxKind.ExtendsKeyword)) return null
+    if (
+      !owner ||
+      (!ts.isClassDeclaration(owner) && !ts.isClassExpression(owner)) ||
+      owner.heritageClauses?.some((one) => one.token === ts.SyntaxKind.ExtendsKeyword)
+    )
+      return null
     const constructors = owner.members.filter(ts.isConstructorDeclaration)
     return constructors.find((one) => one.body !== undefined) ?? null
   }
@@ -1044,11 +1073,17 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     const symbol = checker.getSymbolAtLocation(callee)
     const declaration = checker.getResolvedSignature(node)?.getDeclaration()
     const owner = declaration?.parent
-    if (!ts.isIdentifier(callee) || callee.text !== 'Proxy' ||
-        !symbol?.valueDeclaration?.getSourceFile().hasNoDefaultLib ||
-        !owner || !ts.isInterfaceDeclaration(owner) || owner.name.text !== 'ProxyConstructor' ||
-        !owner.getSourceFile().hasNoDefaultLib ||
-        deferredIntrinsicProtocolLedgerOf(flow)?.requireStandardGlobalBinding('Proxy', node) !== true) return null
+    if (
+      !ts.isIdentifier(callee) ||
+      callee.text !== 'Proxy' ||
+      !symbol?.valueDeclaration?.getSourceFile().hasNoDefaultLib ||
+      !owner ||
+      !ts.isInterfaceDeclaration(owner) ||
+      owner.name.text !== 'ProxyConstructor' ||
+      !owner.getSourceFile().hasNoDefaultLib ||
+      deferredIntrinsicProtocolLedgerOf(flow)?.requireStandardGlobalBinding('Proxy', node) !== true
+    )
+      return null
     return [target, handler]
   }
 
@@ -3036,7 +3071,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           break
         }
         case 'proxy-result': {
-          if (proxyOperandsOf(query.node) === null) { fail('unproven-proxy-construction'); break }
+          if (proxyOperandsOf(query.node) === null) {
+            fail('unproven-proxy-construction')
+            break
+          }
           read(nodeQuery('proxy-target', query.node))
           read(nodeQuery('proxy-handler', query.node))
           // This identity domain is deliberately separate from generic value
@@ -3049,7 +3087,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         case 'proxy-target':
         case 'proxy-handler': {
           const operands = proxyOperandsOf(query.node)
-          if (operands === null) { fail('unproven-proxy-construction'); break }
+          if (operands === null) {
+            fail('unproven-proxy-construction')
+            break
+          }
           const operand = operands[query.kind === 'proxy-target' ? 0 : 1]
           for (const root of carry(value(operand))) {
             if (!isObjectRoot(root)) fail('non-object-proxy-operand', operand)
@@ -3356,8 +3397,11 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         case 'constructor-value':
         case 'constructor-parameter':
         case 'constructor-completion': {
-          if (!ts.isNewExpression(query.node) || !ts.isConstructorDeclaration(query.body) ||
-              directBaseConstructorOf(query.node) !== query.body) {
+          if (
+            !ts.isNewExpression(query.node) ||
+            !ts.isConstructorDeclaration(query.body) ||
+            directBaseConstructorOf(query.node) !== query.body
+          ) {
             fail('unproven-base-constructor-context', query.node)
             break
           }
@@ -3371,54 +3415,73 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             break
           }
           const subject = query.subject
-          if (!subject) { fail('unindexed-constructor-context'); break }
+          if (!subject) {
+            fail('unindexed-constructor-context')
+            break
+          }
           if (query.kind === 'constructor-parameter') {
-            if (!ts.isParameter(subject) || subject.parent !== query.body || subject.dotDotDotToken ||
-                flow.writesToDeclaration(subject).some((write) => write.slot === 'whole' &&
-                  !['call-argument', 'super-argument', 'default-parameter'].includes(write.edge))) {
+            if (
+              !ts.isParameter(subject) ||
+              subject.parent !== query.body ||
+              subject.dotDotDotToken ||
+              flow
+                .writesToDeclaration(subject)
+                .some((write) => write.slot === 'whole' && !['call-argument', 'super-argument', 'default-parameter'].includes(write.edge))
+            ) {
               fail('unmodelled-constructor-parameter', subject)
               break
             }
             const layout = sourceInvocationFrameLayoutOf(flow, query.node, query.body)
-            const slot = layout?.arguments.kind === 'positional'
-              ? layout.arguments.slots.find((one) => one.parameter === subject) : null
-            if (!slot || slot.kind !== 'single') { fail('unindexed-constructor-parameter', subject); break }
+            const slot = layout?.arguments.kind === 'positional' ? layout.arguments.slots.find((one) => one.parameter === subject) : null
+            if (!slot || slot.kind !== 'single') {
+              fail('unindexed-constructor-parameter', subject)
+              break
+            }
             if (!slot.actual) {
               if (slot.defaultValue) add(carry(contextual(slot.defaultValue)))
-              else { facts.add(undefinedValue); seeded = true }
-            } else for (const candidate of carry(value(slot.actual))) {
-              if (ts.isVoidExpression(candidate) && slot.defaultValue) add(carry(contextual(slot.defaultValue)))
-              else facts.add(candidate)
-            }
+              else {
+                facts.add(undefinedValue)
+                seeded = true
+              }
+            } else
+              for (const candidate of carry(value(slot.actual))) {
+                if (ts.isVoidExpression(candidate) && slot.defaultValue) add(carry(contextual(slot.defaultValue)))
+                else facts.add(candidate)
+              }
             break
           }
-          if (ts.isParameter(subject)) { fail('unindexed-constructor-value', subject); break }
+          if (ts.isParameter(subject)) {
+            fail('unindexed-constructor-value', subject)
+            break
+          }
           const expression = unwrapErasedExpression(subject)
           const declaration = ts.isIdentifier(expression) ? flow.targetOf(expression)?.declaration : null
           if (declaration && ts.isParameter(declaration) && declaration.parent === query.body)
             add(carry(frameQuery('constructor-parameter', query.node, query.body, declaration)))
-          else if (declaration && ts.isVariableDeclaration(declaration) &&
-                   ts.findAncestor(declaration, ts.isFunctionLike) === query.body) {
+          else if (declaration && ts.isVariableDeclaration(declaration) && ts.findAncestor(declaration, ts.isFunctionLike) === query.body) {
             const incoming = sourceBindingValuesOf(checker, flow, declaration, iterationValuesAt)
             if (incoming === null) fail('unaccounted-constructor-binding', declaration)
             else for (const entry of incoming) add(carry(contextual(entry)))
             if (incoming !== null && bindingReadMayPrecedeFirstWrite(declaration, expression)) {
-              facts.add(undefinedValue); seeded = true
+              facts.add(undefinedValue)
+              seeded = true
             }
           } else if (expression.kind === ts.SyntaxKind.ThisKeyword && flow.receiverOwnerOf(expression) === query.body) {
             // This token belongs ONLY to the explicit allocation domain. It
             // never passes through value(new C()) or class-field inference.
-            facts.add(query.node); seeded = true
+            facts.add(query.node)
+            seeded = true
           } else if (ts.isNewExpression(expression) && proxyOperandsOf(expression) !== null) {
             const operands = proxyOperandsOf(expression)!
             for (const operand of operands) {
               const roots = carry(contextual(operand))
               if (sealing && roots.size === 0) fail('unresolved-constructor-proxy-operand', operand)
-              for (const root of roots) if (!isObjectRoot(root) ||
-                (ts.isNewExpression(root) && root !== query.node && proxyOperandsOf(root) !== null))
-                fail('unsupported-constructor-proxy-operand', operand)
+              for (const root of roots)
+                if (!isObjectRoot(root) || (ts.isNewExpression(root) && root !== query.node && proxyOperandsOf(root) !== null))
+                  fail('unsupported-constructor-proxy-operand', operand)
             }
-            facts.add(expression); seeded = true
+            facts.add(expression)
+            seeded = true
           } else if (ts.isConditionalExpression(expression)) {
             // Require the complete condition family, not its first discovered
             // value or checker nullability. New facts can only add branch
@@ -4363,7 +4426,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       const targets = admitted(nodeQuery('proxy-target', expression))
       const handlers = admitted(nodeQuery('proxy-handler', expression))
       return result?.length === 1 && result[0] === expression && targets?.length && handlers?.length
-        ? { result: expression, targets, handlers } : null
+        ? { result: expression, targets, handlers }
+        : null
     },
     constructorProxyResultIdentitiesOf: (construction) => {
       const body = directBaseConstructorOf(construction)
@@ -4378,10 +4442,17 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         const targets = admitted(frameQuery('constructor-value', construction, body, operands[0]))
         const handlers = admitted(frameQuery('constructor-value', construction, body, operands[1]))
         if (!targets?.length || !handlers?.length) return null
-        answer.push({ construction, constructor: body, result, handlers,
-          targets: targets.map((target) => target === construction
-            ? { kind: 'base-constructor-allocation', construction, constructor: body }
-            : { kind: 'source-object', value: target }) })
+        answer.push({
+          construction,
+          constructor: body,
+          result,
+          handlers,
+          targets: targets.map((target) =>
+            target === construction
+              ? { kind: 'base-constructor-allocation', construction, constructor: body }
+              : { kind: 'source-object', value: target }
+          )
+        })
       }
       return answer
     },

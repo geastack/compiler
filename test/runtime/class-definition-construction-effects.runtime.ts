@@ -1,10 +1,12 @@
 // The imported Dormant definition executes its computed/static effects but is
 // never constructed. The two real construction routes retain base/field/body order.
-import {Constructed} from './_class-definition-construction-effects'
-function constructEscaped(Constructor:typeof Constructed):Constructed { return new Constructor() }
+import { Constructed } from './_class-definition-construction-effects'
+function constructEscaped(Constructor: typeof Constructed): Constructed {
+  return new Constructor()
+}
 console.log('entry')
-console.log('direct',new Constructed().value)
-console.log('escaped',constructEscaped(Constructed).own)
+console.log('direct', new Constructed().value)
+console.log('escaped', constructEscaped(Constructed).own)
 //! expect: computed
 //! expect: dormant-static
 //! expect: base-static

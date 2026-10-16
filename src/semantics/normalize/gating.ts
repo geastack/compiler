@@ -469,9 +469,10 @@ export const gatingEdges = (input: GatingInput): readonly SemanticEdge[] => {
       if (ts.isConditionalExpression(node)) {
         visit(node.condition, gates)
         const cited = citeExpressionResult(node.condition, facts)
-        const guard = cited.kind === 'source' && cited.source.kind === 'constant'
-          ? constantConditionalGuardResult(node.condition, facts)
-          : guardOf(node.condition, facts)
+        const guard =
+          cited.kind === 'source' && cited.source.kind === 'constant'
+            ? constantConditionalGuardResult(node.condition, facts)
+            : guardOf(node.condition, facts)
         visit(node.whenTrue, guard === null ? gates : [...gates, { kind: 'guard', guard, takenWhen: 'truthy' }])
         visit(node.whenFalse, guard === null ? gates : [...gates, { kind: 'guard', guard, takenWhen: 'falsy' }])
         return

@@ -1,6 +1,8 @@
 import * as namespace from './_construction-type-export-module'
-function construct(Constructor:typeof namespace.Visible):namespace.Visible {return new Constructor()}
-console.log('visible-value',construct(namespace.Visible).value)
+function construct(Constructor: typeof namespace.Visible): namespace.Visible {
+  return new Constructor()
+}
+console.log('visible-value', construct(namespace.Visible).value)
 //! expect: visible-module
 //! expect: visible-constructor
 //! expect: visible-value 1

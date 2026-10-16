@@ -2,7 +2,11 @@
 function define(label: string) {
   class C {
     static read: () => string
-    static { const captured = label; this.read = () => captured; console.log(label, this === C) }
+    static {
+      const captured = label
+      this.read = () => captured
+      console.log(label, this === C)
+    }
   }
   return C
 }

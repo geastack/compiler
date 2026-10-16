@@ -130,7 +130,14 @@ test('a shared record and differently shaped native view compare their certified
 })
 
 const hostHandle = (native: string, referenceIdentity = true): Representation => ({
-  kind: 'native-handle', protocol: 'TestHost', version: 1, native, referenceIdentity, bases: [], call: null, construct: null
+  kind: 'native-handle',
+  protocol: 'TestHost',
+  version: 1,
+  native,
+  referenceIdentity,
+  bases: [],
+  call: null,
+  construct: null
 })
 
 test('explicit native owner identity compares wrappers without boxing and rejects unstated contracts', () => {

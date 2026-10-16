@@ -510,7 +510,8 @@ export const familiesOf = (node: ts.Node, paths: NamespacePathCensus): readonly 
   // stated convention (`class-lifecycle.ts`'s `writtenConstructorAllocationOf`).
   if (
     ts.isClassExpression(node) &&
-    (node.name !== undefined || node.heritageClauses?.some((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword) ||
+    (node.name !== undefined ||
+      node.heritageClauses?.some((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword) ||
       node.members.some((member) => ts.isConstructorDeclaration(member) && member.body !== undefined))
   ) {
     return primary ? [primary, 'class-lifecycle'] : ['class-lifecycle']

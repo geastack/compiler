@@ -20,7 +20,9 @@ class Derived extends Base {}
 console.log('inherited', Base.value, Derived.value)
 Derived.value = 9
 console.log('own', Base.value, Derived.value)
-class OptionalBase { static value: number | undefined = 7 }
+class OptionalBase {
+  static value: number | undefined = 7
+}
 class OptionalDerived extends OptionalBase {}
 OptionalDerived.value = undefined
 console.log('present-undefined', OptionalBase.value, OptionalDerived.value)

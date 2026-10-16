@@ -416,17 +416,29 @@ const contributeConditional = (
     const id = constantConditionalGuardId(node.condition, context)
     const type = context.types.typeAt(node.condition)
     materialized = {
-      id, family: 'computation', form: 'comma', operator: ',',
-      caller: candidate.caller, evaluationOrdinal: candidate.evaluationOrdinal,
+      id,
+      family: 'computation',
+      form: 'comma',
+      operator: ',',
+      caller: candidate.caller,
+      evaluationOrdinal: candidate.evaluationOrdinal,
       operands: [operand('value', 0, rawCondition, type)],
       results: [mintResult(id, 'value', type)],
-      completion: normalCompletion, effects: pureEffects
+      completion: normalCompletion,
+      effects: pureEffects
     }
-    conditionSource = {kind: 'result', result: constantConditionalGuardResult(node.condition, context)}
+    conditionSource = { kind: 'result', result: constantConditionalGuardResult(node.condition, context) }
   }
   if (conditionSource.kind !== 'result') {
-    return {kind: 'blocked', blocker: blocked(candidate.id, 'computation',
-      'a conditional expression needs a producible condition result; this or super is not modelled', 'P0')}
+    return {
+      kind: 'blocked',
+      blocker: blocked(
+        candidate.id,
+        'computation',
+        'a conditional expression needs a producible condition result; this or super is not modelled',
+        'P0'
+      )
+    }
   }
   const condition = operand('condition', 0, conditionSource, context.types.typeAt(node.condition))
   const branchValueTypeAt = (branch: ts.Expression) =>
@@ -444,10 +456,22 @@ const contributeConditional = (
     takenWhen: 'falsy'
   })
 
-  const contribution = finishComputation(context, candidate, node, 'conditional', '?:', [condition, consequent, alternate], normalCompletion, pureEffects)
+  const contribution = finishComputation(
+    context,
+    candidate,
+    node,
+    'conditional',
+    '?:',
+    [condition, consequent, alternate],
+    normalCompletion,
+    pureEffects
+  )
   if (!materialized || contribution.kind !== 'operations') return contribution
-  return {...contribution, operations: [materialized, ...contribution.operations],
-    edges: [...valueEdgesInto(materialized.id, materialized.operands), ...contribution.edges]}
+  return {
+    ...contribution,
+    operations: [materialized, ...contribution.operations],
+    edges: [...valueEdgesInto(materialized.id, materialized.operands), ...contribution.edges]
+  }
 }
 
 const contributeTemplate = (context: ProducerContext, candidate: CensusCandidate, node: ts.TemplateExpression): CandidateContribution => {

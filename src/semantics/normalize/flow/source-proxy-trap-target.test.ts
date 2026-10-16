@@ -48,34 +48,73 @@ test('a shadowed Proxy constructor supplies no intrinsic trap frame', () => {
 })
 
 test('a handler handed to unknown code does not have a complete invocation inventory', () => {
-  assert.equal(targets(`declare function expose(value: unknown): void; const target = {}; const handler = { ${operation} }; new Proxy(target, handler); expose(handler);`), null)
+  assert.equal(
+    targets(
+      `declare function expose(value: unknown): void; const target = {}; const handler = { ${operation} }; new Proxy(target, handler); expose(handler);`
+    ),
+    null
+  )
 })
 
 test('a mutable handler method with unknown replacement cannot authenticate its old trap', () => {
-  assert.equal(targets(`declare const replacement: any; const target = {}; const handler = { ${operation} }; handler.set = replacement; new Proxy(target, handler);`), null)
+  assert.equal(
+    targets(
+      `declare const replacement: any; const target = {}; const handler = { ${operation} }; handler.set = replacement; new Proxy(target, handler);`
+    ),
+    null
+  )
 })
 
 test('multiple exact Proxy retentions keep every target without aliasing the returned Proxy', () => {
-  assert.deepEqual(targets(`const first = {}; const second = {}; const handler = { ${operation} }; new Proxy(first, handler); new Proxy(second, handler);`), ['first', 'second'])
+  assert.deepEqual(
+    targets(
+      `const first = {}; const second = {}; const handler = { ${operation} }; new Proxy(first, handler); new Proxy(second, handler);`
+    ),
+    ['first', 'second']
+  )
 })
 
 test('an unknown alternative handler does not change the retained known handler operation target', () => {
-  assert.deepEqual(targets(`declare const choose: boolean; declare const other: any; const target = {}; const handler = { ${operation} }; const chosen = choose ? other : handler; new Proxy(target, chosen);`), ['target'])
+  assert.deepEqual(
+    targets(
+      `declare const choose: boolean; declare const other: any; const target = {}; const handler = { ${operation} }; const chosen = choose ? other : handler; new Proxy(target, chosen);`
+    ),
+    ['target']
+  )
 })
 
 test('reflected handler mutations and hidden receiver reentry keep the operation inventory open', () => {
-  assert.equal(targets(`const target = {}; const handler = { ${operation} }; Object.setPrototypeOf(handler, {}); new Proxy(target, handler);`), null)
-  assert.equal(targets('const target = {}; const handler = {set(trapTarget: object, key: PropertyKey, value: unknown) { this.set(Object, key, value); return true }}; new Proxy(target, handler);'), null)
+  assert.equal(
+    targets(`const target = {}; const handler = { ${operation} }; Object.setPrototypeOf(handler, {}); new Proxy(target, handler);`),
+    null
+  )
+  assert.equal(
+    targets(
+      'const target = {}; const handler = {set(trapTarget: object, key: PropertyKey, value: unknown) { this.set(Object, key, value); return true }}; new Proxy(target, handler);'
+    ),
+    null
+  )
 })
 
 test('an exported entry handler or detached trap is not native-only invocation provenance', () => {
   assert.equal(targets(`const target = {}; export const handler = { ${operation} }; new Proxy(target, handler);`), null)
-  assert.equal(targets(`const target = {}; const handler = { ${operation} }; const detached = handler.set; new Proxy(target, handler);`), null)
+  assert.equal(
+    targets(`const target = {}; const handler = { ${operation} }; const detached = handler.set; new Proxy(target, handler);`),
+    null
+  )
 })
 
 test('only the actual first native trap parameter has the target role', () => {
-  assert.deepEqual(targets('const target = {}; const handler = {get(trapTarget: object, key: PropertyKey) { return 1 }}; new Proxy(target, handler);'), ['target'])
-  assert.equal(targets('const target = {}; const handler = {set(targetArg: object, trapTarget: PropertyKey, value: unknown) { return true }}; new Proxy(target, handler);'), null)
+  assert.deepEqual(
+    targets('const target = {}; const handler = {get(trapTarget: object, key: PropertyKey) { return 1 }}; new Proxy(target, handler);'),
+    ['target']
+  )
+  assert.equal(
+    targets(
+      'const target = {}; const handler = {set(targetArg: object, trapTarget: PropertyKey, value: unknown) { return true }}; new Proxy(target, handler);'
+    ),
+    null
+  )
 })
 
 test('real Proxy construction retains the returned identity separately from the raw target', () => {
@@ -84,7 +123,12 @@ test('real Proxy construction retains the returned identity separately from the 
   class ReturnedProxy {
     constructor() {
       raw = this
-      return new Proxy(this, {set(target, key, value) { observed = target; return Reflect.set(target, key, value) }})
+      return new Proxy(this, {
+        set(target, key, value) {
+          observed = target
+          return Reflect.set(target, key, value)
+        }
+      })
     }
   }
   const result = new ReturnedProxy()

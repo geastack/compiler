@@ -18,11 +18,24 @@ export interface SourceProxyOperationFrame {
 const propertyKey = (name: ts.PropertyName): string | null =>
   ts.isIdentifier(name) || ts.isStringLiteralLike(name) || ts.isNumericLiteral(name)
     ? name.text
-    : ts.isComputedPropertyName(name) ? literalSourcePropertyKeyOf(name.expression) : null
+    : ts.isComputedPropertyName(name)
+      ? literalSourcePropertyKeyOf(name.expression)
+      : null
 
 const trapNames: ReadonlySet<string> = new Set([
-  'get', 'set', 'has', 'deleteProperty', 'defineProperty', 'getOwnPropertyDescriptor',
-  'getPrototypeOf', 'setPrototypeOf', 'isExtensible', 'preventExtensions', 'ownKeys', 'apply', 'construct'
+  'get',
+  'set',
+  'has',
+  'deleteProperty',
+  'defineProperty',
+  'getOwnPropertyDescriptor',
+  'getPrototypeOf',
+  'setPrototypeOf',
+  'isExtensible',
+  'preventExtensions',
+  'ownKeys',
+  'apply',
+  'construct'
 ])
 
 /** A first trap argument supplied by authenticated native Proxy operations.
@@ -42,7 +55,9 @@ export const sourceProxyOperationFramesOf = (
   if (flow.writesToDeclaration(parameter).some((write) => write.slot === 'whole' && write.edge !== 'call-argument')) return null
   const property = ts.isMethodDeclaration(body)
     ? body
-    : (ts.isArrowFunction(body) || ts.isFunctionExpression(body)) && ts.isPropertyAssignment(body.parent) && body.parent.initializer === body
+    : (ts.isArrowFunction(body) || ts.isFunctionExpression(body)) &&
+        ts.isPropertyAssignment(body.parent) &&
+        body.parent.initializer === body
       ? body.parent
       : null
   if (!property || !ts.isObjectLiteralExpression(property.parent)) return null
@@ -64,8 +79,12 @@ export const sourceProxyOperationFramesOf = (
     const inspect = (node: ts.Node): void => {
       // A native trap receiver is the handler. Calling another trap through
       // `this` or arguments.callee would add a non-native argument route.
-      if (node.kind === ts.SyntaxKind.ThisKeyword || node.kind === ts.SyntaxKind.SuperKeyword ||
-        (ts.isIdentifier(node) && (node.text === 'arguments' || node.text === 'eval'))) hiddenReceiverUse = true
+      if (
+        node.kind === ts.SyntaxKind.ThisKeyword ||
+        node.kind === ts.SyntaxKind.SuperKeyword ||
+        (ts.isIdentifier(node) && (node.text === 'arguments' || node.text === 'eval'))
+      )
+        hiddenReceiverUse = true
       ts.forEachChild(node, inspect)
     }
     inspect(callable)
@@ -78,9 +97,7 @@ export const sourceProxyOperationFramesOf = (
     if (visited.has(declaration)) return true
     visited.add(declaration)
     if (!ts.isIdentifier(declaration.name) || !sourceBindingWritesAreComplete(checker, flow, declaration)) return false
-    const imported = isModuleExportedDeclaration(checker, declaration, null)
-      ? inProgramImportReferencesOf(checker, flow, declaration)
-      : []
+    const imported = isModuleExportedDeclaration(checker, declaration, null) ? inProgramImportReferencesOf(checker, flow, declaration) : []
     if (imported === null) return false
     for (const reference of [...flow.referencesToDeclaration(declaration), ...imported]) {
       if (reference === declaration.name || isTypePositionReference(reference)) continue
@@ -122,11 +139,16 @@ export const sourceProxyOperationFramesOf = (
       const declaration = checker.getResolvedSignature(parent)?.getDeclaration()
       const owner = declaration?.parent
       if (
-        !ts.isIdentifier(callee) || callee.text !== 'Proxy' ||
+        !ts.isIdentifier(callee) ||
+        callee.text !== 'Proxy' ||
         !symbol?.valueDeclaration?.getSourceFile().hasNoDefaultLib ||
-        !owner || !ts.isInterfaceDeclaration(owner) || owner.name.text !== 'ProxyConstructor' || !owner.getSourceFile().hasNoDefaultLib ||
+        !owner ||
+        !ts.isInterfaceDeclaration(owner) ||
+        owner.name.text !== 'ProxyConstructor' ||
+        !owner.getSourceFile().hasNoDefaultLib ||
         deferredIntrinsicProtocolLedgerOf(flow)?.requireStandardGlobalBinding('Proxy', parent) !== true
-      ) return null
+      )
+        return null
       frames.set(parent, { construction: parent, trap, target })
       continue
     }
@@ -164,8 +186,7 @@ export const sourceProxyGetOperationsOf = (
 ): readonly SourceProxyGetOperation[] | null => {
   if (operation.questionDotToken) return null
   const construction = unwrapErasedExpression(operation.expression)
-  const key = ts.isPropertyAccessExpression(operation) ? operation.name.text
-    : literalSourcePropertyKeyOf(operation.argumentExpression)
+  const key = ts.isPropertyAccessExpression(operation) ? operation.name.text : literalSourcePropertyKeyOf(operation.argumentExpression)
   if (!ts.isNewExpression(construction) || key === null) return null
   const contexts = sourceValueSessionOf(checker, flow).constructorProxyResultIdentitiesOf(construction)
   if (!contexts?.length) return null
@@ -173,10 +194,15 @@ export const sourceProxyGetOperationsOf = (
   for (const context of contexts) {
     for (const handler of context.handlers) {
       if (!ts.isObjectLiteralExpression(handler)) return null
-      const member = handler.properties.find((candidate) =>
-        (ts.isMethodDeclaration(candidate) || ts.isPropertyAssignment(candidate)) && propertyKey(candidate.name) === 'get')
-      const body = member && ts.isMethodDeclaration(member) ? member
-        : member && ts.isPropertyAssignment(member) ? unwrapErasedExpression(member.initializer) : null
+      const member = handler.properties.find(
+        (candidate) => (ts.isMethodDeclaration(candidate) || ts.isPropertyAssignment(candidate)) && propertyKey(candidate.name) === 'get'
+      )
+      const body =
+        member && ts.isMethodDeclaration(member)
+          ? member
+          : member && ts.isPropertyAssignment(member)
+            ? unwrapErasedExpression(member.initializer)
+            : null
       if (!body || (!ts.isMethodDeclaration(body) && !ts.isArrowFunction(body) && !ts.isFunctionExpression(body))) return null
       const first = runtimeParametersOf(body)[0]
       if (!first) return null

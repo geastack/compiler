@@ -802,15 +802,19 @@ export const censusClassStaticFieldStorage = (
       while (ancestor !== null && !seen.has(ancestor)) {
         seen.add(ancestor)
         const inheritedLayout = classes.get(ancestor)
-        if (inheritedLayout?.staticAccessors.some((member) => member.key === key) ||
-            inheritedLayout?.staticMethods.some((member) => member.key === key)) {
+        if (
+          inheritedLayout?.staticAccessors.some((member) => member.key === key) ||
+          inheritedLayout?.staticMethods.some((member) => member.key === key)
+        ) {
           conflicts.push(`${declaration}.${key}: inherited static method/accessor barrier needs property dispatch`)
           break
         }
         const inherited = storage.get(staticStorageOwnerOf(classes, ancestor))?.get(key)
         if (inherited) {
-          if (representationKey(inherited.representation) !== representationKey(slot.representation) ||
-              !samePhysicalCarrier(inherited.representation, slot.representation)) {
+          if (
+            representationKey(inherited.representation) !== representationKey(slot.representation) ||
+            !samePhysicalCarrier(inherited.representation, slot.representation)
+          ) {
             conflicts.push(`${declaration}.${key}: inherited static property carriers disagree`)
             break
           }

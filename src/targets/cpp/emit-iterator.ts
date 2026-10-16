@@ -1721,8 +1721,8 @@ export const renderIteratorCloseRegion = (
     if (id !== region.entry) lines.push(`${rendering.labelOf(rendering.labels, id)}:`)
     if (closingFlag !== null && id === splitEntry) lines.push(`${closingFlag} = true;`)
     for (const operation of block.operations) {
-      const completesOnAbrupt = region.completeOnStepAbrupt === true && operation.kind === 'iterator-next' &&
-        operation.iterator.value === region.iterator.value
+      const completesOnAbrupt =
+        region.completeOnStepAbrupt === true && operation.kind === 'iterator-next' && operation.iterator.value === region.iterator.value
       if (completesOnAbrupt) lines.push('try {')
       rendering.emitOperation(ctx, lines, operation, (targetLines, terminator) =>
         scopedRendering.emitTerminator(ctx, targetLines, rendering.labels, rendering.isSingleBlock, terminator)

@@ -55,7 +55,10 @@ const ownedDeclaration = (
   // contract, unlike an unrelated @types package. Keep the match exact: two
   // files merely lacking package metadata do not establish ownership.
   const declaredFile = resolve(declaration.resolvedFileName)
-  const sibling = declaredFile.replace(/\.d\.ts$/, '.js').replace(/\.d\.mts$/, '.mjs').replace(/\.d\.cts$/, '.cjs')
+  const sibling = declaredFile
+    .replace(/\.d\.ts$/, '.js')
+    .replace(/\.d\.mts$/, '.mjs')
+    .replace(/\.d\.cts$/, '.cjs')
   if (sibling !== declaredFile && sibling === resolve(implementation.resolvedFileName)) return declaration
   const declaredPackage = packageRootOf(declaration.resolvedFileName, host)
   const implementedPackage = packageRootOf(implementation.resolvedFileName, host)

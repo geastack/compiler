@@ -29,10 +29,17 @@ const proxyBindingIntact = (source: string): boolean => {
   const proof = ledger.capture(() => ledger.requireStandardGlobalBinding('Proxy', file))
   assert.equal(proof.value, true)
   assert.equal(proof.requirements.length, 1)
-  return failedIntrinsicProtocolRequirements({
-    checker, identities, globalHostMutationTaint: taint,
-    isStandardLibraryDeclaration: (one) => program.isSourceFileDefaultLibrary(one.getSourceFile())
-  }, proof.requirements).length === 0
+  return (
+    failedIntrinsicProtocolRequirements(
+      {
+        checker,
+        identities,
+        globalHostMutationTaint: taint,
+        isStandardLibraryDeclaration: (one) => program.isSourceFileDefaultLibrary(one.getSourceFile())
+      },
+      proof.requirements
+    ).length === 0
+  )
 }
 
 test('Proxy authenticates its standard binding without inventing a prototype', () => {
@@ -47,7 +54,12 @@ test('shadowed and replaced Proxy bindings cannot authenticate construction sema
 })
 
 test('a reflective receiver that may be the actual global object cannot retain its binding receipt', () => {
-  assert.equal(proxyBindingIntact('declare const choose: boolean; const target = choose ? globalThis : {}; Reflect.set(target, "Proxy", function () {})'), false)
+  assert.equal(
+    proxyBindingIntact(
+      'declare const choose: boolean; const target = choose ? globalThis : {}; Reflect.set(target, "Proxy", function () {})'
+    ),
+    false
+  )
 })
 
 test('an ambient any target may alias the actual global object', () => {
@@ -67,7 +79,8 @@ test('all reflected unknown surface writers preserve the external-alias refusal'
     'Object.defineProperties(target, {Proxy: {value: function () {}}})',
     'Object.setPrototypeOf(target, {})',
     'Reflect.setPrototypeOf(target, {})'
-  ]) assert.equal(proxyBindingIntact(`declare const target: any; ${write}`), false, write)
+  ])
+    assert.equal(proxyBindingIntact(`declare const target: any; ${write}`), false, write)
 })
 
 test('reflected writes to a closed ordinary allocation do not replace the global binding', () => {
@@ -78,7 +91,9 @@ test('reflected writes to a closed ordinary allocation do not replace the global
 
 test('a real externally supplied reflective target can replace the global Proxy binding', () => {
   const original = globalThis.Proxy
-  const replacement = function () { throw new Error('must not construct') } as unknown as ProxyConstructor
+  const replacement = function () {
+    throw new Error('must not construct')
+  } as unknown as ProxyConstructor
   const hostTarget = (): object => globalThis
   try {
     assert.equal(Reflect.set(hostTarget(), 'Proxy', replacement), true)
@@ -90,17 +105,23 @@ test('a real externally supplied reflective target can replace the global Proxy 
 })
 
 test('a source class annotation is not an ordinary protocol proof for a returned Proxy', () => {
-  assert.equal(proxyBindingIntact(`
+  assert.equal(
+    proxyBindingIntact(`
     class Claimed { value = 1 }
     declare function handlerFactory(): ProxyHandler<any>
     function acquire(): Claimed { return new Proxy(globalThis, handlerFactory()) as unknown as Claimed }
     Reflect.set(acquire(), 'Proxy', function () {})
-  `), false)
+  `),
+    false
+  )
 })
 
 test('a borrowed source method cannot authenticate a non-global reflective receiver', () => {
-  assert.equal(proxyBindingIntact(`
+  assert.equal(
+    proxyBindingIntact(`
     class Claimed { mutate() { Reflect.set(this, 'Proxy', function () {}) } }
     Claimed.prototype.mutate.call(globalThis)
-  `), false)
+  `),
+    false
+  )
 })
