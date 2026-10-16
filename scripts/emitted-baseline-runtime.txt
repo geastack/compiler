@@ -1349,6 +1349,7 @@ unshared-array-return-local.ts.cpp c1ff5e483612
 untyped-code-writes-forwarding-and-union-methods-into-typed-field.runtime.js.cpp fe45f0078fbd
 untyped-code-writes-method-record-into-object-typed-field.runtime.js.cpp 640eacc744af
 untyped-code-writes-method-record-into-typed-field.runtime.ts.cpp 8bfd82caf09c
+untyped-listener-through-any-receiver-reads-event-fields.runtime.ts.cpp 11d2bba93f30
 untyped-map-into-document-or-unknown-map-parameter.runtime.ts.cpp 42bf0606c234
 untyped-map-returned-as-typed-map.runtime.ts.cpp 4bd0e98e5eb3
 unused-subclass-is-pruned.ts.cpp 43345a8020e0
