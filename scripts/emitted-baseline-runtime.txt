@@ -347,6 +347,7 @@ dynamic-array-literal-gather.runtime.js.cpp 60a83cabf76e
 dynamic-array-projection.ts.cpp 1eae2374ff84
 dynamic-array-rebuild-keeps-holes-and-order.runtime.ts.cpp fe99e85a7b77
 dynamic-bag-method-call-behind-property-guard.runtime.js.cpp a27d020fbea0
+dynamic-call-argument-views-the-callers-record-and-array.runtime.js.cpp 38078c9e1b05
 dynamic-callable-boxed-call-frame.runtime.js.cpp f850d0629758
 dynamic-callable-rest-adapter.runtime.js.cpp 53c778910dad
 dynamic-callable-union-identity.runtime.ts.cpp 90b0eef9cefa
