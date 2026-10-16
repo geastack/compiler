@@ -1542,7 +1542,8 @@ const renderSuspendingIteratorCloseRegion = (
   lines.push(`std::exception_ptr ${thrown};`)
   lines.push(`bool ${guard}_returning = false;`)
   if (closingFlag !== null) lines.push(`bool ${closingFlag} = false;`)
-  lines.push('try {')
+  // Fenced under the MSVC ABI (`GEA_EH_FENCED` in the runtime header); the handlers below only record.
+  lines.push('GEA_EH_FENCE_OPEN try { GEA_EH_BODY_FENCE')
   const leaves = (target: IrBlockId): boolean => !selected.has(target) && !region.dismissTargets.includes(target)
   const scopedRendering: IteratorCloseRegionRendering = {
     ...rendering,
@@ -1610,10 +1611,12 @@ const renderSuspendingIteratorCloseRegion = (
   const returning = `${guard}_returning`
   lines.push(
     `} catch (const gea::Value&) { ${thrown} = std::current_exception(); } ` +
-      `catch (...) { ${thrown} = std::current_exception(); ${returning} = true; }`
+      `catch (...) { ${thrown} = std::current_exception(); ${returning} = true; } GEA_EH_FENCE_CLOSE`
   )
   // Reached only through a handler: every block above ends in a terminator.
-  const closing = `if (${armed}) { ${armed} = false; if (${returning}) { ${close} } else { try { ${close} } catch (const gea::Value&) {} } }`
+  const closing =
+    `if (${armed}) { ${armed} = false; if (${returning}) { ${close} } else ` +
+    `{ GEA_EH_FENCE_OPEN try { GEA_EH_BODY_FENCE ${close} } catch (const gea::Value&) {} GEA_EH_FENCE_CLOSE } }`
   lines.push(closingFlag === null ? closing : `if (${closingFlag}) { ${closing} }`)
   lines.push(`std::rethrow_exception(${thrown});`)
   lines.push('}')
@@ -1677,7 +1680,11 @@ export const renderIteratorCloseRegion = (
       : null
   const closingFlag = splitEntry === null ? null : `${guard}_in_body`
   if (closingFlag !== null) lines.push(`bool ${closingFlag} = false;`)
-  lines.push('try {')
+  // The plain `try`/`catch (const gea::Value&)` everywhere but the MSVC ABI,
+  // where the handler records the throw and closes after the statement
+  // (`GEA_EH_FENCED` in the runtime header).
+  const caught = `${guard}_caught`
+  lines.push(`GEA_EH_TRY_VALUE(${caught}) {`)
   const scopedRendering: IteratorCloseRegionRendering = {
     ...rendering,
     emitTerminator: (inner, targetLines, labels, isSingleBlock, terminator) => {
@@ -1720,11 +1727,13 @@ export const renderIteratorCloseRegion = (
     for (const write of rendering.mergeWrites.get(id) ?? []) lines.push(`${write.name} = ${operandText(ctx, write.value)};`)
     scopedRendering.emitTerminator(ctx, lines, rendering.labels, rendering.isSingleBlock, block.terminator)
   }
-  lines.push('} catch (const gea::Value&) {')
-  if (closingFlag === null) lines.push(`try { ${guard}.close(); } catch (const gea::Value&) {}`)
-  else lines.push(`if (${closingFlag}) { try { ${guard}.close(); } catch (const gea::Value&) {} } else { ${guard}.dismiss(); }`)
-  lines.push('throw;')
+  lines.push(`} GEA_EH_CATCH_VALUE_UNNAMED(${caught}) {`)
+  const closeQuietly = `GEA_EH_FENCE_OPEN try { GEA_EH_BODY_FENCE ${guard}.close(); } catch (const gea::Value&) {} GEA_EH_FENCE_CLOSE`
+  if (closingFlag === null) lines.push(closeQuietly)
+  else lines.push(`if (${closingFlag}) { ${closeQuietly} } else { ${guard}.dismiss(); }`)
+  lines.push(`GEA_EH_RETHROW_VALUE(${caught});`)
   lines.push('}')
+  lines.push('GEA_EH_END')
   lines.push('}')
   return order
 }

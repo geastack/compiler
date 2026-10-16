@@ -668,8 +668,8 @@ const promiseAllOverIteratorText = (
   const resultType = cppTypeOf(result)
   return (
     `[&]() -> ${resultType} { gea::Ref<gea::ArrayObject<${cppTypeOf(elements.element)}>> gea_elements; ` +
-    `try { gea_elements = gea::runtime::array::fromIterator(${operandText(ctx, argument)}); } ` +
-    `catch (...) { ${resultType} gea_rejected; gea_rejected.reject(std::current_exception()); return gea_rejected; } ` +
+    `GEA_EH_TRY_ANY(gea_eh_failed) { gea_elements = gea::runtime::array::fromIterator(${operandText(ctx, argument)}); } ` +
+    `GEA_EH_CATCH_ANY(gea_eh_failed) { ${resultType} gea_rejected; gea_rejected.reject(GEA_EH_CURRENT(gea_eh_failed)); return gea_rejected; } GEA_EH_END ` +
     `return gea::host::PromiseConstructor::all(gea_elements, ${resolver}); }()`
   )
 }

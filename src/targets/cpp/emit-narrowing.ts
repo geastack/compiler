@@ -4306,7 +4306,8 @@ const promiseAdoptionText = (
     `if (${promiseSourceName}.settled()) return ${cppTypeOf(target)}(${settledPayload}); ` +
     `${cppTypeOf(target)} ${promiseTargetName}; ` +
     `${promiseSourceName}.observe([${promiseTargetName}](const ${cppTypeOf(source.value)}& ${promiseValueName}) mutable ` +
-    `{ try { ${promiseTargetName}.resolveInline(${pendingPayload}); } catch (...) { ${promiseTargetName}.rejectInline(std::current_exception()); } }, ` +
+    `{ GEA_EH_TRY_ANY(gea_eh_failed) { ${promiseTargetName}.resolveInline(${pendingPayload}); } ` +
+    `GEA_EH_CATCH_ANY(gea_eh_failed) { ${promiseTargetName}.rejectInline(GEA_EH_CURRENT(gea_eh_failed)); } GEA_EH_END }, ` +
     `[${promiseTargetName}](const std::exception_ptr& ${promiseRejectionName}) mutable ` +
     `{ ${promiseTargetName}.rejectInline(${promiseRejectionName}); }); ` +
     `return ${promiseTargetName}; }())`

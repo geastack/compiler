@@ -1732,8 +1732,9 @@ const commonJsDefinitionsOf = (bodies: readonly IrBody[], realm = false): Common
         `  auto& state = ${stateAccessor}();`,
         `  if (state.phase != ${stateName}::Phase::fresh) return state.module->${exportField};`,
         `  state.phase = ${stateName}::Phase::loading;`,
-        `  try { ${cppBodyName(target)}(); state.phase = ${stateName}::Phase::loaded; return state.module->${exportField}; }`,
-        `  catch (...) { state.phase = ${stateName}::Phase::fresh; state.module = ${recordInit}; throw; }`,
+        `  GEA_EH_TRY_ANY(gea_eh_failed) { ${cppBodyName(target)}(); state.phase = ${stateName}::Phase::loaded; return state.module->${exportField}; }`,
+        `  GEA_EH_CATCH_ANY(gea_eh_failed) { state.phase = ${stateName}::Phase::fresh; state.module = ${recordInit}; GEA_EH_RETHROW_ANY(gea_eh_failed); } GEA_EH_END`,
+        `  GEA_EH_UNREACHABLE`,
         '}'
       ].join('\n')
     )

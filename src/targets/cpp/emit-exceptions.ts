@@ -502,6 +502,19 @@ const preparePart = (
  */
 const finallyGuardType = 'const gea::ScopeExit'
 
+/**
+ * The fences every native `try` statement is written with: nothing at all
+ * except under the MSVC ABI, where `gea_runtime.h`'s `GEA_EH_FENCED` makes
+ * them a scope of its own around the statement and a first statement inside
+ * the try block. That header's comment on `GEA_EH_FENCED` has the two LLVM
+ * defects they avoid. A handler that is not already record-only is written
+ * with `GEA_EH_TRY_*`/`GEA_EH_CATCH_*` instead, which add the fences and
+ * record the catch, running the handler after the statement.
+ */
+const ehFenceOpen = 'GEA_EH_FENCE_OPEN'
+const ehBodyFence = 'GEA_EH_BODY_FENCE'
+const ehFenceClose = 'GEA_EH_FENCE_CLOSE'
+
 const finallyGuardName = (region: IrTryRegion): string => cppFinallyGuardName(region.region)
 
 const finallyPendingName = (region: IrTryRegion): string => cppFinallyPendingName(region.region)
@@ -707,11 +720,11 @@ export const renderTryRegion = (
     lines.push(`${finallyGuardType} ${finallyGuardName(region)}{[&]() {`)
     lines.push(...renderPart(ctx, body, finallyRendering(rendering), finallyPart.order, finallyPart.owned, false, true))
     lines.push('}};')
-    lines.push('try {')
+    lines.push(`${ehFenceOpen} try { ${ehBodyFence}`)
   }
   lines.push(...renderTryAndCatch(ctx, body, region, rendering, tryPart, catchPart, binding, catchSuspends))
   if (finallyPart) {
-    lines.push(`} catch (...) { ${finallyPendingName(region)} = std::current_exception(); }`)
+    lines.push(`} catch (...) { ${finallyPendingName(region)} = std::current_exception(); } ${ehFenceClose}`)
     lines.push('}')
     lines.push(`if (${finallyPendingName(region)}) std::rethrow_exception(${finallyPendingName(region)});`)
     lines.push('}')
@@ -745,22 +758,34 @@ const renderTryAndCatch = (
   const lines: string[] = []
   if (catchPart === null) return renderPart(ctx, body, rendering, tryPart.order, tryPart.owned, false, true)
   if (!catchSuspends) {
-    const parameter = binding
-      ? `const ${cppTypeOf(binding.result.representation)}& ${defineValueBoundElsewhere(ctx, binding.result)}`
-      : '...'
+    // `GEA_EH_TRY_*`/`GEA_EH_CATCH_*` are the plain `try`/`catch` everywhere
+    // but the MSVC ABI, where they record the catch and run the handler after
+    // the statement -- see `ehFenceOpen`.
+    const slot = `${finallyPendingName(region)}_caught`
+    // Named before the body renders, which numbers its own values after it.
+    const name = binding ? defineValueBoundElsewhere(ctx, binding.result) : null
     const tryText = renderPart(ctx, body, rendering, tryPart.order, tryPart.owned, false, true)
-    lines.push('try {', ...tryText, '}', `catch (${parameter}) {`)
+    if (name !== null) lines.push(`GEA_EH_TRY_VALUE(${slot}) {`, ...tryText, '}', `GEA_EH_CATCH_VALUE(${slot}, ${name}) {`)
+    else lines.push(`GEA_EH_TRY_ANY(${slot}) {`, ...tryText, '}', `GEA_EH_CATCH_ANY(${slot}) {`)
     lines.push(...renderPart(ctx, body, rendering, catchPart.order, catchPart.owned, binding !== null, false))
-    lines.push('}')
+    lines.push('}', 'GEA_EH_END')
     return lines
   }
   const tryText = renderPart(ctx, body, rendering, tryPart.order, tryPart.owned, false, true)
   const caught = `${finallyPendingName(region)}_caught`
   const thrownType = cppTypeOf(thrownValueCarrier)
   const record = binding
-    ? `catch (const ${thrownType}& gea_thrown) { ${defineValue(ctx, binding.result, thrownType)} = gea_thrown; ${caught} = true; }`
+    ? `catch (const ${thrownType}& gea_thrown) { GEA_EH_ASSIGN_THROWN(${defineValue(ctx, binding.result, thrownType)}, gea_thrown); ${caught} = true; }`
     : `catch (...) { ${caught} = true; }`
-  lines.push('{', `bool ${caught} = false;`, 'try {', ...tryText, '}', record, `if (${caught}) {`)
+  lines.push(
+    '{',
+    `bool ${caught} = false;`,
+    `${ehFenceOpen} try { ${ehBodyFence}`,
+    ...tryText,
+    '}',
+    `${record} ${ehFenceClose}`,
+    `if (${caught}) {`
+  )
   lines.push(...renderPart(ctx, body, rendering, catchPart.order, catchPart.owned, binding !== null, false))
   lines.push('}', '}')
   return lines
@@ -866,8 +891,8 @@ const renderSuspendingFinally = (
     }
   }
   const statement = renderStatement(partRendering)
-  lines.push('{', `std::exception_ptr ${pending};`, `int ${completion} = 0;`, 'try {', ...statement, '}')
-  lines.push(`catch (...) { ${pending} = std::current_exception(); }`, `goto ${run};`)
+  lines.push('{', `std::exception_ptr ${pending};`, `int ${completion} = 0;`, `${ehFenceOpen} try { ${ehBodyFence}`, ...statement, '}')
+  lines.push(`catch (...) { ${pending} = std::current_exception(); } ${ehFenceClose}`, `goto ${run};`)
   exits.forEach((_, index) => lines.push(`${exitLabel(index)}: ${completion} = ${index + 1}; goto ${run};`))
   lines.push(`${run}:`)
   const clauseRendering: RegionRendering = {

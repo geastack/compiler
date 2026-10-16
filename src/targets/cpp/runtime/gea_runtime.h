@@ -1393,6 +1393,126 @@ struct ScopeExit {
 template <typename Body>
 ScopeExit(Body) -> ScopeExit<Body>;
 
+/**
+ * How a native `try` statement is spelled: every one the compiler emits, and
+ * every one in this header that code can be inlined from, is written with the
+ * `GEA_EH_*` macros below. Where `GEA_EH_FENCED` is 0 -- every target but the
+ * MSVC ABI -- they expand to exactly the plain statement:
+ *
+ *   GEA_EH_TRY_VALUE(s) { B } GEA_EH_CATCH_VALUE(s, e) { H } GEA_EH_END
+ *     ==  try { B } catch (const gea::Value& e) { H }
+ *
+ * Under the MSVC ABI they spell the same statement for two LLVM defects in its
+ * funclet EH lowering (clang 16 through trunk, every -O level above -O0):
+ *
+ *   { std::optional<gea::Value> s;
+ *     { gea::EhFence f; try { gea::EhFence b; { B } }
+ *       catch (const gea::Value& t) { gea::detail::recordThrown(s, t); } }
+ *     if (s) if (const gea::Value& e = *s; true) { H } }
+ *
+ * - CoroSplit (CoroFrame's `rewritePHIsForCleanupPad`) rewrites a cleanuppad
+ *   that a catchswitch unwinds to, when anything else unwinds to it too, into
+ *   IR where a value defined in the handler no longer dominates its use. A
+ *   coroutine -- or any function inlined into one before it is split -- with
+ *   `try { co_await p } catch (e) { x = f() }` and a reference-counted local
+ *   outside the try was enough; unverified, clang crashed in a later pass or
+ *   emitted a wrong program. The outer fence gives the catchswitch a
+ *   cleanuppad of its own, and the handler only RECORDS (`noexcept`, no
+ *   unwind edge), so that pad has one predecessor and nothing to rewrite.
+ *   The handler's code runs after the statement, as the language describes.
+ * - WinEHPrepare's PHI demotion spills `poison` for a PHI in a catchswitch
+ *   block whose value reaches another catchswitch's PHI through a cleanup --
+ *   nested try statements -- and the outer handler reads an uninitialized
+ *   stack slot. The inner fence makes every throwing call in the block unwind
+ *   into a cleanup first, so a catchswitch has one predecessor and no PHI.
+ *
+ * A fence's destructor is an empty asm statement: no instruction on the
+ * normal path. The slots are `std::optional`, so the normal path never
+ * destroys an `exception_ptr` (an out-of-line call under MSVC's STL).
+ * Define `GEA_EH_FENCED` to 1 to run the fenced shape on another target.
+ */
+#ifndef GEA_EH_FENCED
+#if defined(_MSC_VER)
+#define GEA_EH_FENCED 1
+#else
+#define GEA_EH_FENCED 0
+#endif
+#endif
+
+#if GEA_EH_FENCED
+struct EhFence {
+  EhFence() = default;
+  EhFence(const EhFence&) = delete;
+  EhFence& operator=(const EhFence&) = delete;
+  ~EhFence() {
+#if defined(__GNUC__) || defined(__clang__)
+    __asm__ __volatile__("");
+#endif
+  }
+};
+
+namespace detail {
+/** A record-only handler's one action: `noexcept`, so it is a call and never an `invoke`. */
+template <typename Thrown>
+inline void recordThrown(std::optional<Thrown>& slot, const Thrown& thrown) noexcept {
+  static_assert(std::is_nothrow_copy_constructible_v<Thrown>, "a record-only catch handler must not be able to throw");
+  slot.emplace(thrown);
+}
+
+/** `recordThrown` for any exception: the one in flight. */
+inline void recordCurrentException(std::optional<std::exception_ptr>& slot) noexcept { slot.emplace(std::current_exception()); }
+
+/** An assignment of the caught value inside a handler, made a call rather than an `invoke`. */
+template <typename Target, typename Thrown>
+inline void assignThrown(Target& target, const Thrown& thrown) noexcept {
+  target = thrown;
+}
+}  // namespace detail
+
+#define GEA_EH_FENCE_OPEN { ::gea::EhFence gea_eh_fence;
+#define GEA_EH_FENCE_CLOSE }
+#define GEA_EH_BODY_FENCE ::gea::EhFence gea_eh_body;
+#define GEA_EH_NOINLINE [[gnu::noinline]]
+#define GEA_EH_TRY_VALUE(slot) { std::optional<::gea::Value> slot; { ::gea::EhFence gea_eh_fence; try { ::gea::EhFence gea_eh_body;
+#define GEA_EH_CATCH_VALUE(slot, name) \
+  } catch (const ::gea::Value& gea_eh_thrown) { ::gea::detail::recordThrown(slot, gea_eh_thrown); } } if (slot) if (const ::gea::Value& name = *slot; true)
+#define GEA_EH_CATCH_VALUE_UNNAMED(slot) \
+  } catch (const ::gea::Value& gea_eh_thrown) { ::gea::detail::recordThrown(slot, gea_eh_thrown); } } if (slot)
+#define GEA_EH_RETHROW_VALUE(slot) throw *slot
+#define GEA_EH_TRY_ANY(slot) { std::optional<std::exception_ptr> slot; { ::gea::EhFence gea_eh_fence; try { ::gea::EhFence gea_eh_body;
+#define GEA_EH_CATCH_ANY(slot) } catch (...) { ::gea::detail::recordCurrentException(slot); } } if (slot)
+#define GEA_EH_CURRENT(slot) (*slot)
+#define GEA_EH_RETHROW_ANY(slot) std::rethrow_exception(*slot)
+#define GEA_EH_TRY_VALUE_OR_ANY(slot, other) \
+  { std::optional<::gea::Value> slot; bool other = false; { ::gea::EhFence gea_eh_fence; try { ::gea::EhFence gea_eh_body;
+#define GEA_EH_CATCH_VALUE_OR_ANY(slot, other, name)                                                                                     \
+  } catch (const ::gea::Value& gea_eh_thrown) { ::gea::detail::recordThrown(slot, gea_eh_thrown); } catch (...) { other = true; } } \
+  if (slot) if (const ::gea::Value& name = *slot; true)
+#define GEA_EH_CATCH_REMAINDER(slot, other) if (other)
+#define GEA_EH_ASSIGN_THROWN(target, thrown) ::gea::detail::assignThrown(target, thrown)
+#define GEA_EH_END }
+#define GEA_EH_UNREACHABLE __builtin_unreachable();
+#else
+#define GEA_EH_FENCE_OPEN
+#define GEA_EH_FENCE_CLOSE
+#define GEA_EH_BODY_FENCE
+#define GEA_EH_NOINLINE
+#define GEA_EH_TRY_VALUE(slot) try
+#define GEA_EH_CATCH_VALUE(slot, name) catch (const gea::Value& name)
+#define GEA_EH_CATCH_VALUE_UNNAMED(slot) catch (const gea::Value&)
+#define GEA_EH_RETHROW_VALUE(slot) throw
+#define GEA_EH_TRY_ANY(slot) try
+#define GEA_EH_CATCH_ANY(slot) catch (...)
+#define GEA_EH_CURRENT(slot) std::current_exception()
+#define GEA_EH_RETHROW_ANY(slot) throw
+#define GEA_EH_TRY_VALUE_OR_ANY(slot, other) try
+#define GEA_EH_CATCH_VALUE_OR_ANY(slot, other, name) catch (const gea::Value& name)
+#define GEA_EH_CATCH_REMAINDER(slot, other) catch (...)
+#define GEA_EH_ASSIGN_THROWN(target, thrown) target = thrown
+#define GEA_EH_END
+#define GEA_EH_UNREACHABLE
+#endif
+
 /** A function pointer over the plan's exact ABI, plus its environment -- a separate field, not a lambda, since the ABI is a *physical* fact the plan publishes and a std::function erasure would hide it behind an allocation never chosen. Capture-free callables pass `nullptr`; the thunk ignores it. */
 template <typename Signature>
 struct CallableObject;
@@ -3352,12 +3472,12 @@ class CycleGraphStorage {
     if (memory == nullptr) throw CycleGraphExhausted();
     // The chunk table holds one pointer per chunk (a few dozen), so its own
     // growth is never the large request this class exists to avoid.
-    try {
+    GEA_EH_TRY_ANY(gea_eh_failed) {
       chunks_.push_back(static_cast<T*>(memory));
-    } catch (...) {
+    } GEA_EH_CATCH_ANY(gea_eh_failed) {
       ::operator delete(memory);
-      throw;
-    }
+      GEA_EH_RETHROW_ANY(gea_eh_failed);
+    } GEA_EH_END
   }
   std::vector<T*> chunks_;
   std::size_t size_ = 0;
@@ -3557,13 +3677,13 @@ inline void filterBufferedCandidates(CycleState& state) {
   flushDipCache(state);
   if (state.filtered < state.candidates.size()) {
     state.collecting = true;
-    try {
+    GEA_EH_TRY_ANY(gea_eh_failed) {
       filterCycleCandidates(state.candidates, state.filtered, /* pin = */ true, /* prefix = */ false);
-    } catch (...) {
+    } GEA_EH_CATCH_ANY(gea_eh_failed) {
       state.collecting = false;
       state.filtered = 0;
-      throw;
-    }
+      GEA_EH_RETHROW_ANY(gea_eh_failed);
+    } GEA_EH_END
     state.collecting = false;
   }
   state.filtered = state.candidates.size();
@@ -3656,7 +3776,7 @@ inline void filterBufferedCandidates(CycleState& state) {
  *    `strong`, so `WeakRef` expiration (which only ever reads `strong`)
  *    is unchanged.
  */
-inline void collectReferenceCycles(bool full = false) {
+GEA_EH_NOINLINE inline void collectReferenceCycles(bool full = false) {
   // Small embedded heaps trade generational throughput for one complete tracing path.
   if constexpr (!cycleGenerational) full = true;
   auto& state = cycleState();
@@ -4417,12 +4537,12 @@ inline void filterRegionCandidates(ThreadRegion& region, CycleState& state) {
                                     [&](const CycleReference& reference) { return !region.owns(reference.counts); });
   const auto from = static_cast<std::size_t>(owned - list.begin());
   state.collecting = true;
-  try {
+  GEA_EH_TRY_ANY(gea_eh_failed) {
     filterCycleCandidates(list, from, /* pin = */ true, /* prefix = */ false);
-  } catch (...) {
+  } GEA_EH_CATCH_ANY(gea_eh_failed) {
     state.collecting = false;
-    throw;
-  }
+    GEA_EH_RETHROW_ANY(gea_eh_failed);
+  } GEA_EH_END
   state.collecting = false;
   state.filterAt = list.size() + (state.filterInterval != 0 ? state.filterInterval : state.candidateThreshold);
 }
@@ -5179,7 +5299,7 @@ inline Ref<T> makeRef(Arguments&&... arguments) {
   }
   void* block = detail::AllocationPool<detail::refBlockSize<T>, detail::refBlockAlign<T>>::take();
   T* object = reinterpret_cast<T*>(static_cast<unsigned char*>(block) + detail::refStride<T>);
-  try {
+  GEA_EH_TRY_ANY(gea_eh_failed) {
     // `T()` with no arguments is VALUE-initialization: for a type whose
     // default constructor is not user-provided, that zero-fills the whole
     // object before a single member constructor runs. An emitted record's
@@ -5192,10 +5312,10 @@ inline Ref<T> makeRef(Arguments&&... arguments) {
     // default-initialized instead, which runs exactly those constructors.
     if constexpr (sizeof...(Arguments) == 0 && requires { typename T::gea_default_init; }) ::new (static_cast<void*>(object)) T;
     else ::new (static_cast<void*>(object)) T(static_cast<Arguments&&>(arguments)...);
-  } catch (...) {
+  } GEA_EH_CATCH_ANY(gea_eh_failed) {
     detail::AllocationPool<detail::refBlockSize<T>, detail::refBlockAlign<T>>::give(block);
-    throw;
-  }
+    GEA_EH_RETHROW_ANY(gea_eh_failed);
+  } GEA_EH_END
   detail::RefCounts* counts = static_cast<detail::RefCounts*>(block);
   counts->strong = 1;
   counts->weak = 0;
@@ -13521,12 +13641,12 @@ class Dictionary {
     if (found != npos) return entries_[found].second;
     enumerableKeys_.reset();
     Entry& entry = entries_.emplace_back(detail::duplicateString(key), V{});
-    try {
+    GEA_EH_TRY_ANY(gea_eh_failed) {
       indexInsert(entries_.size() - 1);
-    } catch (...) {
+    } GEA_EH_CATCH_ANY(gea_eh_failed) {
       entries_.pop_back();
-      throw;
-    }
+      GEA_EH_RETHROW_ANY(gea_eh_failed);
+    } GEA_EH_END
     if constexpr (aliasable) detail::noteDocumentDataKeyCreated(this, key);
     return entry.second;
   }
@@ -14108,12 +14228,12 @@ class Dictionary {
       return;
     }
     entries_.emplace_back(detail::duplicateString(key), std::move(value));
-    try {
+    GEA_EH_TRY_ANY(gea_eh_failed) {
       indexInsert(entries_.size() - 1);
-    } catch (...) {
+    } GEA_EH_CATCH_ANY(gea_eh_failed) {
       entries_.pop_back();
-      throw;
-    }
+      GEA_EH_RETHROW_ANY(gea_eh_failed);
+    } GEA_EH_END
   }
 
   template <typename V2, typename Convert>
@@ -14466,12 +14586,12 @@ class SymbolDictionary {
     const auto found = positions_.find(key);
     if (found != positions_.end()) return entries_[found->second].second;
     entries_.emplace_back(key, V{});
-    try {
+    GEA_EH_TRY_ANY(gea_eh_failed) {
       positions_.emplace(key, entries_.size() - 1);
-    } catch (...) {
+    } GEA_EH_CATCH_ANY(gea_eh_failed) {
       entries_.pop_back();
-      throw;
-    }
+      GEA_EH_RETHROW_ANY(gea_eh_failed);
+    } GEA_EH_END
     return entries_.back().second;
   }
   V read(const Symbol& key) const {
@@ -17628,12 +17748,12 @@ auto Promise<V>::then(F&& onFulfilled) const {
         result.reject(*state->rejection);
         return;
       }
-      try {
+      GEA_EH_TRY_ANY(gea_eh_failed) {
         detail::callSettledHandler(handler, state->value);
         result.resolve();
-      } catch (...) {
-        result.reject(std::current_exception());
-      }
+      } GEA_EH_CATCH_ANY(gea_eh_failed) {
+        result.reject(GEA_EH_CURRENT(gea_eh_failed));
+      } GEA_EH_END
     });
     return result;
   } else {
@@ -17644,11 +17764,11 @@ auto Promise<V>::then(F&& onFulfilled) const {
         result.reject(*state->rejection);
         return;
       }
-      try {
+      GEA_EH_TRY_ANY(gea_eh_failed) {
         detail::settleThenFromHandled(result, detail::callSettledHandler(handler, state->value));
-      } catch (...) {
-        result.reject(std::current_exception());
-      }
+      } GEA_EH_CATCH_ANY(gea_eh_failed) {
+        result.reject(GEA_EH_CURRENT(gea_eh_failed));
+      } GEA_EH_END
     });
     return result;
   }
@@ -17665,12 +17785,12 @@ auto Promise<void>::then(F&& onFulfilled) const {
         result.reject(*state->rejection);
         return;
       }
-      try {
+      GEA_EH_TRY_ANY(gea_eh_failed) {
         detail::callSettledHandler(handler, gea::Undefined{});
         result.resolve();
-      } catch (...) {
-        result.reject(std::current_exception());
-      }
+      } GEA_EH_CATCH_ANY(gea_eh_failed) {
+        result.reject(GEA_EH_CURRENT(gea_eh_failed));
+      } GEA_EH_END
     });
     return result;
   } else {
@@ -17681,11 +17801,11 @@ auto Promise<void>::then(F&& onFulfilled) const {
         result.reject(*state->rejection);
         return;
       }
-      try {
+      GEA_EH_TRY_ANY(gea_eh_failed) {
         detail::settleThenFromHandled(result, detail::callSettledHandler(handler, gea::Undefined{}));
-      } catch (...) {
-        result.reject(std::current_exception());
-      }
+      } GEA_EH_CATCH_ANY(gea_eh_failed) {
+        result.reject(GEA_EH_CURRENT(gea_eh_failed));
+      } GEA_EH_END
     });
     return result;
   }
@@ -17704,11 +17824,11 @@ template <typename R, typename V, typename F>
 Promise<R> mapSettledPromise(const Promise<V>& source, F&& mapper) {
   if (source.settled() && !source.rejected()) {
     Promise<R> out;
-    try {
+    GEA_EH_TRY_ANY(gea_eh_failed) {
       out.resolve(detail::callSettledHandler(mapper, source.value()));
-    } catch (...) {
-      out.reject(std::current_exception());
-    }
+    } GEA_EH_CATCH_ANY(gea_eh_failed) {
+      out.reject(GEA_EH_CURRENT(gea_eh_failed));
+    } GEA_EH_END
     return out;
   }
   return source.then(std::forward<F>(mapper));
@@ -22591,18 +22711,18 @@ inline Value evaluate(ModuleRecord& record, Initializer&& initializer) {
   const auto exportsOf = [](ModuleRecord& current) { return current.moduleObject.getProperty(PropertyKey::string("exports")); };
   if (record.state == ModuleRecord::State::loaded || record.state == ModuleRecord::State::loading) return exportsOf(record);
   record.state = ModuleRecord::State::loading;
-  try {
+  GEA_EH_TRY_ANY(gea_eh_failed) {
     Scope scope(record);
     initializer();
     record.state = ModuleRecord::State::loaded;
     return exportsOf(record);
-  } catch (...) {
+  } GEA_EH_CATCH_ANY(gea_eh_failed) {
     // Node removes a module that failed to evaluate from its cache, so a later
     // require retries rather than observing a permanently poisoned record.
     record.state = ModuleRecord::State::fresh;
     record.resetBindings();
-    throw;
-  }
+    GEA_EH_RETHROW_ANY(gea_eh_failed);
+  } GEA_EH_END
 }
 
 /**
@@ -26649,11 +26769,12 @@ inline void NativeOwnKeyOrderRecycler::operator()(NativeOwnKeyOrder* order) cons
   order->ordinals.layout = nullptr;
   order->ordinals.declared.clear();
   order->next = 0;
-  try {
+  GEA_EH_FENCE_OPEN try {
+    GEA_EH_BODY_FENCE
     pool.push_back(order);
   } catch (...) {
     delete order;
-  }
+  } GEA_EH_FENCE_CLOSE
 }
 inline NativeOwnKeyOrderPtr makeNativeOwnKeyOrder() {
   std::vector<NativeOwnKeyOrder*>& pool = nativeOwnKeyOrderPool();
@@ -30483,13 +30604,13 @@ gea::Ref<View> makeViewWithOrigin(const gea::Ref<Source>& source, Arguments&&...
   }
   void* block = Operations::Pool::take();
   auto* object = reinterpret_cast<View*>(static_cast<unsigned char*>(block) + detail::refHeaderStride);
-  try {
+  GEA_EH_TRY_ANY(gea_eh_failed) {
     if constexpr (sizeof...(Arguments) == 0 && requires { typename View::gea_default_init; }) ::new (static_cast<void*>(object)) View;
     else ::new (static_cast<void*>(object)) View(static_cast<Arguments&&>(arguments)...);
-  } catch (...) {
+  } GEA_EH_CATCH_ANY(gea_eh_failed) {
     Operations::release(block);
-    throw;
-  }
+    GEA_EH_RETHROW_ANY(gea_eh_failed);
+  } GEA_EH_END
   void* originStorage = static_cast<unsigned char*>(static_cast<void*>(object)) + Operations::originOffset;
   ::new (originStorage) NativeViewOrigin{std::move(owner.held), owner.boxObject, held};
   const auto* sourceOrigin = nativeViewRoute(held);
@@ -37241,11 +37362,25 @@ struct Pattern {
     // kill the process. The source validator deliberately covers only the
     // syntax this runtime rewrites itself; this catch remains the fail-closed
     // boundary for an incompatibility in the platform regex implementation.
+#if GEA_EH_FENCED
+    std::optional<std::regex_error> failure;
+    {
+      ::gea::EhFence gea_eh_fence;
+      try {
+        ::gea::EhFence gea_eh_body;
+        return cache.emplace(key, Utf16Regex(source, flags)).first->second;
+      } catch (const std::regex_error &error) {
+        ::gea::detail::recordThrown(failure, error);
+      }
+    }
+    throwSyntaxErrorLate(std::string("Invalid regular expression: ") + failure->what());
+#else
     try {
       return cache.emplace(key, Utf16Regex(source, flags)).first->second;
     } catch (const std::regex_error &error) {
       throwSyntaxErrorLate(std::string("Invalid regular expression: ") + error.what());
     }
+#endif
   }
 
   static const Utf16Regex &cachedStdRegex(const std::string &source, std::regex::flag_type flags) {
@@ -38924,15 +39059,15 @@ auto fromIterator(gea::Iterator<E> source, const Callable& fn) {
     // generator source before the throw propagates. A throw out of that
     // `return()` is discarded -- the mapper's completion is the one that
     // escapes (IteratorClose step 5). A native cursor has nothing to close.
-    try {
+    GEA_EH_TRY_ANY(gea_eh_failed) {
       if constexpr (std::is_void_v<Produced>) { fromCall(fn, value, index); result->push(Undefined{}); }
       else result->push(fromCall(fn, value, index));
-    } catch (...) {
+    } GEA_EH_CATCH_ANY(gea_eh_failed) {
       if (source.isGeneratorFrame()) {
-        try { (void)source.resumeReturn({}); } catch (...) {}
+        GEA_EH_FENCE_OPEN try { GEA_EH_BODY_FENCE (void)source.resumeReturn({}); } catch (...) {} GEA_EH_FENCE_CLOSE
       }
-      throw;
-    }
+      GEA_EH_RETHROW_ANY(gea_eh_failed);
+    } GEA_EH_END
     index += 1;
   }
   return result;
@@ -43922,11 +44057,12 @@ inline gea::Ref<ErrorRecord> create(const gea::Optional<std::string>& message) {
 namespace PromiseConstructor {
 
 inline std::exception_ptr rejectionReason(const gea::Value& reason) {
-  try {
+  GEA_EH_TRY_ANY(gea_eh_failed) {
     throw reason;
-  } catch (...) {
-    return std::current_exception();
-  }
+  } GEA_EH_CATCH_ANY(gea_eh_failed) {
+    return GEA_EH_CURRENT(gea_eh_failed);
+  } GEA_EH_END
+  GEA_EH_UNREACHABLE
 }
 
 /**
@@ -44026,11 +44162,11 @@ struct RejecterFactory;
 template <typename Reason, typename V>
 struct RejecterFactory<gea::CallableObject<void(Reason)>, V> {
   static void invoke(void* environment, Reason reason) {
-    try {
+    GEA_EH_TRY_ANY(gea_eh_failed) {
       throw gea::detail::DynamicCarrier<Reason>::out(reason);
-    } catch (...) {
-      static_cast<gea::Promise<V>*>(environment)->reject(std::current_exception());
-    }
+    } GEA_EH_CATCH_ANY(gea_eh_failed) {
+      static_cast<gea::Promise<V>*>(environment)->reject(GEA_EH_CURRENT(gea_eh_failed));
+    } GEA_EH_END
   }
 
   static gea::CallableObject<void(Reason)> make(const gea::Promise<V>& promise) {
@@ -44102,22 +44238,22 @@ struct VoidExecutorRunner<gea::CallableObject<Completion(Resolver, Rejecter)>> {
 template <typename V, typename Executor>
 inline gea::Promise<V> construct(const Executor& executor) {
   gea::Promise<V> result;
-  try {
+  GEA_EH_TRY_ANY(gea_eh_failed) {
     ExecutorRunner<Executor, V>::run(executor, result);
-  } catch (...) {
-    result.reject(std::current_exception());
-  }
+  } GEA_EH_CATCH_ANY(gea_eh_failed) {
+    result.reject(GEA_EH_CURRENT(gea_eh_failed));
+  } GEA_EH_END
   return result;
 }
 
 template <typename Executor>
 inline gea::Promise<void> constructVoid(const Executor& executor) {
   gea::Promise<void> result;
-  try {
+  GEA_EH_TRY_ANY(gea_eh_failed) {
     VoidExecutorRunner<Executor>::run(executor, result);
-  } catch (...) {
-    result.reject(std::current_exception());
-  }
+  } GEA_EH_CATCH_ANY(gea_eh_failed) {
+    result.reject(GEA_EH_CURRENT(gea_eh_failed));
+  } GEA_EH_END
   return result;
 }
 
@@ -44130,20 +44266,20 @@ inline gea::Promise<void> constructVoid(const Executor& executor) {
  */
 template <typename V, typename Executor>
 inline void initialize(gea::Promise<V>& target, const Executor& executor) {
-  try {
+  GEA_EH_TRY_ANY(gea_eh_failed) {
     ExecutorRunner<Executor, V>::run(executor, target);
-  } catch (...) {
-    target.reject(std::current_exception());
-  }
+  } GEA_EH_CATCH_ANY(gea_eh_failed) {
+    target.reject(GEA_EH_CURRENT(gea_eh_failed));
+  } GEA_EH_END
 }
 
 template <typename Executor>
 inline void initializeVoid(gea::Promise<void>& target, const Executor& executor) {
-  try {
+  GEA_EH_TRY_ANY(gea_eh_failed) {
     VoidExecutorRunner<Executor>::run(executor, target);
-  } catch (...) {
-    target.reject(std::current_exception());
-  }
+  } GEA_EH_CATCH_ANY(gea_eh_failed) {
+    target.reject(GEA_EH_CURRENT(gea_eh_failed));
+  } GEA_EH_END
 }
 
 template <typename V>
@@ -44453,12 +44589,12 @@ struct ThenableSettlement {
  */
 inline bool adoptThenable(gea::Promise<gea::Value>& target, const gea::Value& thenable) {
   gea::Value then;
-  try {
+  GEA_EH_TRY_ANY(gea_eh_failed) {
     then = thenable.getProperty(gea::PropertyKey::string("then"));
-  } catch (...) {
-    target.reject(std::current_exception());
+  } GEA_EH_CATCH_ANY(gea_eh_failed) {
+    target.reject(GEA_EH_CURRENT(gea_eh_failed));
     return true;
-  }
+  } GEA_EH_END
   if (then.tag() != gea::Value::Tag::Function) return false;
   gea::Promise<gea::Value> adopting = target;
   queuePromiseJob([adopting, thenable, then]() mutable {
@@ -44485,13 +44621,13 @@ inline bool adoptThenable(gea::Promise<gea::Value>& target, const gea::Value& th
           gea::Value::Tag::Function,
           gea::CallableObject<gea::Value(gea::Value)>(invoke, packEnvironment(ThenableSettlement{adopting, settled, rejecting})));
     };
-    try {
+    GEA_EH_TRY_ANY(gea_eh_failed) {
       then.callWithReceiver(thenable, {function(false), function(true)});
-    } catch (...) {
+    } GEA_EH_CATCH_ANY(gea_eh_failed) {
       if (*settled) return;
       *settled = true;
-      adopting.reject(std::current_exception());
-    }
+      adopting.reject(GEA_EH_CURRENT(gea_eh_failed));
+    } GEA_EH_END
   });
   return true;
 }
@@ -44518,11 +44654,12 @@ inline bool boxedPromiseMethod(const gea::Value& self, const gea::PropertyKey& k
 }
 
 inline std::exception_ptr boxedRejection(const gea::Value& reason) {
-  try {
+  GEA_EH_TRY_ANY(gea_eh_failed) {
     throw reason;
-  } catch (...) {
-    return std::current_exception();
-  }
+  } GEA_EH_CATCH_ANY(gea_eh_failed) {
+    return GEA_EH_CURRENT(gea_eh_failed);
+  } GEA_EH_END
+  GEA_EH_UNREACHABLE
 }
 
 /** Settles `result` with what `handler` makes of `argument`; a non-callable handler passes the argument through. */
@@ -44532,11 +44669,11 @@ inline void settleThroughHandler(gea::Promise<gea::Value>& result, const gea::Va
     else result.resolve(argument);
     return;
   }
-  try {
+  GEA_EH_TRY_ANY(gea_eh_failed) {
     result.resolve(handler.callWithReceiver(gea::Value(), {argument}));
-  } catch (...) {
-    result.reject(std::current_exception());
-  }
+  } GEA_EH_CATCH_ANY(gea_eh_failed) {
+    result.reject(GEA_EH_CURRENT(gea_eh_failed));
+  } GEA_EH_END
 }
 
 template <typename V>
@@ -44561,11 +44698,11 @@ gea::Promise<V> promiseFromDynamic(const gea::Value& value, Unbox unbox) {
   gea::Promise<V> result;
   boxed.observe(
       [result, unbox](const gea::Value& settled) mutable {
-        try {
+        GEA_EH_TRY_ANY(gea_eh_failed) {
           result.resolve(unbox(settled));
-        } catch (...) {
-          result.reject(std::current_exception());
-        }
+        } GEA_EH_CATCH_ANY(gea_eh_failed) {
+          result.reject(GEA_EH_CURRENT(gea_eh_failed));
+        } GEA_EH_END
       },
       [result](std::exception_ptr reason) mutable { result.reject(reason); });
   return result;
@@ -44613,11 +44750,11 @@ BoxedPromiseOps boxedPromiseOpsFor() {
   using Settle = std::function<void(const gea::Value&)>;
   static const auto observe = [](const P& source, Settle fulfilled, Settle rejected) {
     auto onRejected = [rejected](std::exception_ptr reason) {
-      try {
+      GEA_EH_TRY_VALUE(gea_eh_caught) {
         std::rethrow_exception(reason);
-      } catch (const gea::Value& thrown) {
+      } GEA_EH_CATCH_VALUE(gea_eh_caught, thrown) {
         rejected(thrown);
-      }
+      } GEA_EH_END
     };
     if constexpr (std::is_void_v<V>) {
       source.observe([fulfilled]() { fulfilled(gea::Value()); }, onRejected);
@@ -44794,22 +44931,24 @@ inline void validateCloseResult(const gea::Value& value) {
 
 /** IteratorClose with an already-throwing completion preserves that original throw. */
 inline void closePreservingThrow(const gea::Value& iterator) {
-  try {
+  GEA_EH_FENCE_OPEN try {
+    GEA_EH_BODY_FENCE
     close(iterator);
   } catch (const gea::Value&) {
     // ECMA-262 IteratorClose gives an existing throw completion precedence
     // over GetMethod/Call/result-validation failures from `return`.
-  }
+  } GEA_EH_FENCE_CLOSE
 }
 
 /** A failing IteratorNext/IteratorComplete/IteratorValue is an abrupt completion that closes the iterator. */
 inline Step stepClosing(const gea::Value& iterator) {
-  try {
+  GEA_EH_TRY_VALUE(gea_eh_caught) {
     return step(iterator);
-  } catch (const gea::Value&) {
+  } GEA_EH_CATCH_VALUE_UNNAMED(gea_eh_caught) {
     closePreservingThrow(iterator);
-    throw;
-  }
+    GEA_EH_RETHROW_VALUE(gea_eh_caught);
+  } GEA_EH_END
+  GEA_EH_UNREACHABLE
 }
 
 /**
@@ -44913,10 +45052,11 @@ class CompletionGuard {
     if (closed_) return;
     if (std::uncaught_exceptions() > uncaughtOnEntry_) {
       closed_ = true;
-      try {
+      GEA_EH_FENCE_OPEN try {
+        GEA_EH_BODY_FENCE
         action_();
       } catch (...) {
-      }
+      } GEA_EH_FENCE_CLOSE
       return;
     }
     close();
@@ -45713,12 +45853,13 @@ gea::Promise<void> addIceCandidate(const gea::host::RTCPeerConnection& peer, con
 namespace gea::runtime::hostaudio {
 template<class MediaElement>
 inline gea::Promise<void> play(const MediaElement& element) {
-  try {
+  GEA_EH_TRY_ANY(gea_eh_failed) {
     if (element.play()) return gea::Promise<void>::settled_value();
     return gea::Promise<void>::rejected_with(std::make_exception_ptr(std::runtime_error("Media playback could not start")));
-  } catch (...) {
-    return gea::Promise<void>::rejected_with(std::current_exception());
-  }
+  } GEA_EH_CATCH_ANY(gea_eh_failed) {
+    return gea::Promise<void>::rejected_with(GEA_EH_CURRENT(gea_eh_failed));
+  } GEA_EH_END
+  GEA_EH_UNREACHABLE
 }
 }
 

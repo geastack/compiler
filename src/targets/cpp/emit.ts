@@ -3715,9 +3715,13 @@ export const emitBody = (
     return [
       declarations,
       ...prologue,
-      { text: 'try {', facts: declarationFacts },
+      // The plain `try`/`catch (...)` everywhere but the MSVC ABI (`GEA_EH_FENCED` in the runtime header).
+      { text: 'GEA_EH_TRY_ANY(gea_eh_failed) {', facts: declarationFacts },
       ...blocks,
-      { text: `} catch (...) { return ${result}::rejected_with(std::current_exception()); }`, facts: declarationFacts }
+      {
+        text: `} GEA_EH_CATCH_ANY(gea_eh_failed) { return ${result}::rejected_with(GEA_EH_CURRENT(gea_eh_failed)); } GEA_EH_END GEA_EH_UNREACHABLE`,
+        facts: declarationFacts
+      }
     ]
   }
   return [declarations, ...prologue, ...blocks]

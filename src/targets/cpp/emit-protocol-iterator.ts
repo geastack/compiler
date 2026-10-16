@@ -184,7 +184,8 @@ export const certifiedProtocolIteratorText = (
       `gea_protocol_steps->raise = [${holder}](std::exception_ptr gea_protocol_thrown, ${element}& ${out}, ${storage}& ${completion}) -> bool { ` +
         (present === null ? '' : `if (!(${present})) std::rethrow_exception(gea_protocol_thrown); `) +
         `${thrownType} gea_protocol_error; ` +
-        `try { std::rethrow_exception(gea_protocol_thrown); } catch (const ${thrownType}& gea_protocol_caught) { gea_protocol_error = gea_protocol_caught; } ` +
+        `GEA_EH_TRY_VALUE(gea_protocol_slot) { std::rethrow_exception(gea_protocol_thrown); } ` +
+        `GEA_EH_CATCH_VALUE(gea_protocol_slot, gea_protocol_caught) { gea_protocol_error = gea_protocol_caught; } GEA_EH_END ` +
         `auto ${result} = ${raiseCall}; (void)${completion}; return ${raiseStep}; };`
     )
   }
@@ -253,7 +254,9 @@ const asyncProtocolText = (ctx: ConversionSite, plan: ProtocolIteratorPlan, text
       `gea_protocol_steps->raise = [&${holder}](std::exception_ptr gea_protocol_thrown) -> gea::Promise<${step}> { ` +
         (present === null ? '' : `if (!(${present})) ${rejected} `) +
         `${thrownType} gea_protocol_error; ` +
-        `try { std::rethrow_exception(gea_protocol_thrown); } catch (const ${thrownType}& gea_protocol_caught) { gea_protocol_error = gea_protocol_caught; } catch (...) ${rejected} ` +
+        `GEA_EH_TRY_VALUE_OR_ANY(gea_protocol_slot, gea_protocol_other) { std::rethrow_exception(gea_protocol_thrown); } ` +
+        `GEA_EH_CATCH_VALUE_OR_ANY(gea_protocol_slot, gea_protocol_other, gea_protocol_caught) { gea_protocol_error = gea_protocol_caught; } ` +
+        `GEA_EH_CATCH_REMAINDER(gea_protocol_slot, gea_protocol_other) ${rejected} GEA_EH_END ` +
         `return ${mapped(plan.raise, raiseCall, raiseStep)}; };`
     )
   }

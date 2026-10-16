@@ -158,8 +158,8 @@ export const certifiedIteratorObjectViewText = (
         // step that throws is that promise's rejection (ECMA-262 27.6.3.3), as
         // `prototype/emit-prototype-iterator.ts` answers a generator's own call.
         body = planned.awaited
-          ? `try { return ${resultType}(([&]() -> ${settledType} { ${step} }())); } ` +
-            `catch (...) { return ${resultType}::rejected_with(std::current_exception()); }`
+          ? `GEA_EH_TRY_ANY(gea_eh_failed) { return ${resultType}(([&]() -> ${settledType} { ${step} }())); } ` +
+            `GEA_EH_CATCH_ANY(gea_eh_failed) { return ${resultType}::rejected_with(GEA_EH_CURRENT(gea_eh_failed)); } GEA_EH_END GEA_EH_UNREACHABLE`
           : step
       }
       callable =

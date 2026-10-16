@@ -595,8 +595,8 @@ const promiseReactionText = (
         : argumentText(abi, receiverCarrier.value, caughtValueName, 'prototype/emit-prototype-invoke.ts:then-value', 'value')
       return (
         `[${catchResultName}, ${fulfilledHandlerName}](${fulfilledParameter}) mutable { ` +
-        `try { ${settledText(abi, fulfilledHandlerName, argument)} } ` +
-        `catch (...) { ${catchResultName}.reject(std::current_exception()); } }`
+        `GEA_EH_TRY_ANY(gea_eh_failed) { ${settledText(abi, fulfilledHandlerName, argument)} } ` +
+        `GEA_EH_CATCH_ANY(gea_eh_failed) { ${catchResultName}.reject(GEA_EH_CURRENT(gea_eh_failed)); } GEA_EH_END }`
       )
     }
     // 27.2.5.1 installs no fulfillment handler, so the receiver's fulfillment
@@ -637,9 +637,9 @@ const promiseReactionText = (
     `${caughtSettledName}.observe(` +
     `${fulfilledArm}, ` +
     `[${catchResultName}, ${catchHandlerName}](const std::exception_ptr& gea_catch_rejection) mutable { ` +
-    `try { std::rethrow_exception(gea_catch_rejection); } ` +
-    `catch (const ${cppTypeOf(thrownValueCarrier)}& ${caughtReasonName}) { try { ${rejectedBody} } ` +
-    `catch (...) { ${catchResultName}.reject(std::current_exception()); } } }); return ${catchResultName}; }())`
+    `GEA_EH_TRY_VALUE(gea_catch_caught) { std::rethrow_exception(gea_catch_rejection); } ` +
+    `GEA_EH_CATCH_VALUE(gea_catch_caught, ${caughtReasonName}) { GEA_EH_TRY_ANY(gea_eh_failed) { ${rejectedBody} } ` +
+    `GEA_EH_CATCH_ANY(gea_eh_failed) { ${catchResultName}.reject(GEA_EH_CURRENT(gea_eh_failed)); } GEA_EH_END } GEA_EH_END }); return ${catchResultName}; }())`
   )
 }
 
@@ -753,11 +753,11 @@ const promiseFinallyText = (
     `const auto ${finallyHandlerName} = ${operandText(ctx, onFinally)}; ` +
     `${caughtSettledName}.observe(` +
     `[${catchResultName}, ${finallyHandlerName}](${fulfilledParameter}) mutable { ` +
-    `try { ${finallyHandlerName}.call(); ${catchResultName}.resolve(${passThrough}); } ` +
-    `catch (...) { ${catchResultName}.reject(std::current_exception()); } }, ` +
+    `GEA_EH_TRY_ANY(gea_eh_failed) { ${finallyHandlerName}.call(); ${catchResultName}.resolve(${passThrough}); } ` +
+    `GEA_EH_CATCH_ANY(gea_eh_failed) { ${catchResultName}.reject(GEA_EH_CURRENT(gea_eh_failed)); } GEA_EH_END }, ` +
     `[${catchResultName}, ${finallyHandlerName}](const std::exception_ptr& gea_finally_rejection) mutable { ` +
-    `try { ${finallyHandlerName}.call(); ${catchResultName}.reject(gea_finally_rejection); } ` +
-    `catch (...) { ${catchResultName}.reject(std::current_exception()); } }); return ${catchResultName}; }())`
+    `GEA_EH_TRY_ANY(gea_eh_failed) { ${finallyHandlerName}.call(); ${catchResultName}.reject(gea_finally_rejection); } ` +
+    `GEA_EH_CATCH_ANY(gea_eh_failed) { ${catchResultName}.reject(GEA_EH_CURRENT(gea_eh_failed)); } GEA_EH_END }); return ${catchResultName}; }())`
   )
 }
 

@@ -132,8 +132,8 @@ const iteratorResultText = (
     const promiseType = cppTypeOf(result.representation)
     const settled = iteratorResultText(ctx, receiverText, carrier, { ...result, representation: result.representation.value }, stepText)
     return (
-      `([&]() -> ${promiseType} { try { return ${promiseType}(${settled}); } ` +
-      `catch (...) { return ${promiseType}::rejected_with(std::current_exception()); } }())`
+      `([&]() -> ${promiseType} { GEA_EH_TRY_ANY(gea_eh_failed) { return ${promiseType}(${settled}); } ` +
+      `GEA_EH_CATCH_ANY(gea_eh_failed) { return ${promiseType}::rejected_with(GEA_EH_CURRENT(gea_eh_failed)); } GEA_EH_END GEA_EH_UNREACHABLE }())`
     )
   }
   const union = iteratorResultUnionOf(carrier, result.representation)
