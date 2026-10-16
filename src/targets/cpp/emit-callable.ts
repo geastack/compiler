@@ -87,6 +87,7 @@ import {
   typedArrayTargetSpelling
 } from './emit-buffers.js'
 import { armAt, armIs } from './emit-union-properties.js'
+import { constructorStateText, genericStaticOwnerOf } from './class-properties/emit-class-properties.js'
 import {
   cppAbiType,
   cppBodyName,
@@ -3159,4 +3160,9 @@ export const emitAllocateConstructor = (ctx: EmitContext, lines: string[], opera
   // but no source construction can consume a construct entry.
   const construct = operation.constructionDeferred ? 'nullptr' : `&${cppConstructThunkName(operation.declaration)}`
   lines.push(`${name} = ${cppTypeOf(operation.result.representation)}{${construct}, ${environment}};`)
+  // A generic's layout copy is a separate evaluation of the one class
+  // JavaScript evaluates once; its static own properties live on that class.
+  const shared = genericStaticOwnerOf(ctx, operation.result.representation)
+  const state = constructorStateText(operation.result.representation, name)
+  if (shared !== null && state !== null) lines.push(`gea::shareConstructorStatics(${state}, ${cppStringLiteral(shared)});`)
 }

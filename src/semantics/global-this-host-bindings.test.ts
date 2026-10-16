@@ -3076,3 +3076,37 @@ test('a receiver merged with a proven global path still surface-taints without a
   `)
   assert.ok(audit.taint.surfaceKeys.every || audit.taint.surfaceKeys.names.has('k'), [...audit.taint.surfaceKeys.names].join(','))
 })
+
+// A program proxy's traps are called only by the proxy: `target` is its
+// target and `receiver` the proxy or an explicit `Reflect.get`/`Reflect.set`
+// receiver. The forwarding write every set trap makes is therefore no write
+// to `globalThis`, under any key.
+const forwardingProxy = (
+  extra: string,
+  trap = 'set(target: any, name: any, value: any, receiver: any) { return Reflect.set(target, name, value, receiver) }'
+): string => `
+  export {}
+  declare var hostProcess: object
+  const proxy: any = new Proxy([1, 2, 3], { ${trap} })
+  proxy[String(Math.random())] = 4
+  ${extra}
+`
+
+test('a forwarding proxy set trap writes only its own target and receiver', () => {
+  const taint = globalHostMutationTaintOf(forwardingProxy(''))
+  assert.ok(!taint.has('*'), [...taint].join(','))
+})
+
+test('a proxy trap that can be handed another receiver stays fail-closed', () => {
+  for (const source of [
+    forwardingProxy('Reflect.set(proxy, String(Math.random()), 1, globalThis)'),
+    forwardingProxy('const reflect = Reflect; reflect.get(proxy, "x", globalThis)'),
+    forwardingProxy(
+      '',
+      'set(target: any, name: any, value: any, receiver: any) { return Reflect.set(target, name, value, receiver) }, get(target: any, name: any) { return this.set(target, name, 1, globalThis) }'
+    )
+  ]) {
+    const taint = globalHostMutationTaintOf(source)
+    assert.ok(taint.has('*'), source)
+  }
+})

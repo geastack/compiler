@@ -5,6 +5,7 @@ import { resolve } from 'node:path'
 import { indexValueFlow } from './value-flow.js'
 import { attachClosedScriptScope } from './targets.js'
 import { wholeProgram } from '../reachability.js'
+import { attachDeferredIntrinsicProtocolLedger, createDeferredIntrinsicProtocolLedger } from '../deferred-intrinsic-protocols.js'
 import { sourceNativeIterableIntegrityOf } from './source-native-iterable-integrity.js'
 import type { NativeIterableProvider } from '../../../plugins/native-iterable-providers.js'
 
@@ -29,6 +30,10 @@ const proof = (body: string, closed = true): boolean => {
     file = program.getSourceFile(entry)!
   const flow = indexValueFlow(checker, [file], wholeProgram)
   if (closed) attachClosedScriptScope(flow, { files: new Set([file]) })
+  // The compile asks inside a producer's ledger capture, which records the
+  // deferred intrinsic obligations an admitted answer carries.
+  const ledger = createDeferredIntrinsicProtocolLedger()
+  attachDeferredIntrinsicProtocolLedger(flow, ledger)
   const declaration = file.statements.find((node): node is ts.InterfaceDeclaration => ts.isInterfaceDeclaration(node))!
   const symbol = checker.getSymbolAtLocation(declaration.name)
   const terminals = flow.calls.filter(
@@ -36,14 +41,16 @@ const proof = (body: string, closed = true): boolean => {
   )
   const terminal = terminals.at(-1)!.call as ts.CallExpression
   return (
-    sourceNativeIterableIntegrityOf(
-      checker,
-      flow,
-      terminal.arguments[0]!,
-      provider,
-      (type) => (type.getSymbol() === symbol ? 'host::Collection' : null),
-      new Set([terminal])
-    ) !== null
+    ledger.capture(() =>
+      sourceNativeIterableIntegrityOf(
+        checker,
+        flow,
+        terminal.arguments[0]!,
+        provider,
+        (type) => (type.getSymbol() === symbol ? 'host::Collection' : null),
+        new Set([terminal])
+      )
+    ).value !== null
   )
 }
 

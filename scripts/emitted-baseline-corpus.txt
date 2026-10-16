@@ -8,7 +8,7 @@ array-literal-index.ts.cpp 522614a86b58
 arrow-captures-receiver.ts.cpp 94bc1b478878
 arrow.ts.cpp 6634942010d4
 assign.ts.cpp a01bc2886d1e
-async-iteration-class.ts.cpp bfd60a1a49e5
+async-iteration-class.ts.cpp 2658e22de1d3
 await-basic.ts.cpp d869bea3b0f4
 bag-member-disjoint-writes.js.cpp 8f7ebaf794af
 base-placeholder-unknown.ts.cpp d984f1af772b
@@ -22,7 +22,8 @@ class-inheritance.ts.cpp cfcc34bc3169
 class-intersection-ancestor.ts.cpp 61654a30a468
 class-named-only-by-type-instance.ts.cpp 1a47c4500b4b
 class-named-only-by-type.ts.cpp 55c2d63f7f83
-class-static-assignment.ts.cpp ce798d6e70a8
+class-static-assignment.ts.cpp bc2e4e7502b5
+class-static-block-identity.ts.cpp d4f2fa878fae
 class-upcast-merge.ts.cpp d653e02d08b8
 collection-literal-arguments.ts.cpp 26906e86908e
 collection-member-result.ts.cpp 7660c28c2227
@@ -51,7 +52,7 @@ for-in-narrowed-optional-field.ts.cpp abcbc9de7999
 function-call-rewrite.ts.cpp 6bf57a961ac7
 function-typed-value.ts.cpp 98a0ec93058a
 function-value-dispatch-get-repro.ts.cpp 0b7426b2b77c
-generator-method-receiver.ts.cpp bc641dea8759
+generator-method-receiver.ts.cpp 1853ba0aba2a
 generic-arrow-declaration.ts.cpp 69fbc3fa89cf
 generic-forwards-to-generic.ts.cpp 75ab419263cf
 generic-function-in-binding.ts.cpp da35351673c6
@@ -87,7 +88,7 @@ logical-guard-optional-instance.ts.cpp afb5019b8713
 logical-merge-boolean-left.ts.cpp 1b706cab96b0
 logical-merge-nullable-reference.ts.cpp f789391e3036
 logical.ts.cpp f9b3a5edd223
-loop-iteration-helper-repro.ts.cpp 0d1c342489a0
+loop-iteration-helper-repro.ts.cpp f126b9ba7159
 merge-array-materialization.ts.cpp 03a7af77396c
 method.ts.cpp 9dc90f211c56
 namespace-generic-member.ts.cpp 2e55cd707939
@@ -157,7 +158,7 @@ typed-array-intersection-carrier.ts.cpp 8398ffd4b2c1
 typed-array-pcm-map.ts.cpp 89932eb1d3ff
 typeof-narrowed-union-field-store.js.cpp af58aadd50a7
 typeof-narrowed-union-field-store.ts.cpp 06954d6cddbb
-uncertified.txt 2ea6d4ec4d2d
+uncertified.txt 41fdd419c43e
 uniform-value-union.ts.cpp 9f25536ee6bc
 uninhabited-intersection-branch.ts.cpp bc07d1b5ac40
 uninstantiated-generic.ts.cpp 1621e1aebca3

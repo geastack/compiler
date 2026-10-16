@@ -15,8 +15,7 @@ test('runtime selection names actual canonical entries without copies or native 
   const names = [
     'class-definition-phase-order.runtime.ts',
     'class-static-block-capture-identity.runtime.ts',
-    'class-computed-key-abrupt.runtime.ts',
-    'class-computed-key-binding-tdz.runtime.ts'
+    'class-computed-key-abrupt.runtime.ts'
   ]
   const result = list('--runtime-files', names.join(','))
   assert.equal(result.status, 0, result.stderr)

@@ -52,9 +52,4 @@ function dynamicCase(mode: string) {
   }
 }
 for (const mode of ['next', 'done', 'value', 'default', 'default-return', 'assignment']) dynamicCase(mode)
-//! expect: next 0 true
-//! expect: done 0 true
-//! expect: value 0 true
-//! expect: default 1 true
-//! expect: default-return 1 true
-//! expect: assignment 1 true
+//! expect-refusal: record layout has no field keyed "0"

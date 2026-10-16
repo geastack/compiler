@@ -75,10 +75,15 @@ const first = (lane, name, cwd, argv, env = {}) => prerequisites.push({ lane, na
 if (wanted('compiler')) {
   const examples = checkout('examples', 'apps')
   const nodeCompat = checkout('node-compat', 'apps')
+  const core = checkout('core', 'packages/core/package.json')
   add('compiler', 'test/run.mjs (release)', compiler, ['node', 'test/run.mjs'], {
     GEA_NATIVE_RELEASE: '1',
     GEA_APPS_ROOT: examples,
-    GEA_NODE_COMPAT_ROOT: nodeCompat
+    GEA_NODE_COMPAT_ROOT: nodeCompat,
+    // The native host tests that compile core's own sources take the core
+    // this release ships, never an installed copy.
+    GEA_CORE: join(core, 'packages/core'),
+    GEA_CORE_ROOT: core
   })
 }
 
@@ -148,6 +153,12 @@ if (wanted('core')) {
     GEA_PLUGIN_DIR: join(core, 'packages/geatsc-plugin-gea'),
     GEA_CORE_DIR: join(core, 'packages/core'),
     GEA_HOST_DIR: join(core, 'packages/host'),
+    // Core's native DOM contracts compile their fixtures with this compiler,
+    // against its own runtime, and compare with core's installed jsdom.
+    GEA_COMPILER_CLI: join(compiler, 'dist/cli.js'),
+    GEA_COMPILER_RUNTIME: join(compiler, 'src/targets/cpp/runtime'),
+    GEA_TEST_RUNTIME_HEADER: join(compiler, 'src/targets/cpp/runtime/gea_runtime.h'),
+    GEA_JSDOM_PACKAGE: join(core, 'packages/core/node_modules/jsdom'),
     GEA_THREE_AUDIO_MUTED: '1',
     GEA_APPLE_ROOT: apple,
     // The UI memory census asserts that a feature-pruned engine renders the

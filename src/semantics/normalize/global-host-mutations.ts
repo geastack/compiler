@@ -1512,6 +1512,94 @@ export const censusGlobalHostMutations = (
     }
     return { target, reads }
   }
+  /**
+   * The values a program proxy trap's `target` and `receiver` parameters can
+   * hold, or `null` when this cannot be stated (another parameter, or a
+   * program that can hand the proxy a receiver this census does not see).
+   *
+   * Only the proxy invokes its traps, with `target` = the proxy's target and
+   * `receiver` = the object `[[Get]]`/`[[Set]]` started on: the proxy, an
+   * object inheriting from it, or an explicit `Reflect.get`/`Reflect.set`
+   * receiver. Putting a surface on the chain is a prototype replacement the
+   * census already turns into a wildcard, a fresh inheriting object is the
+   * program's own allocation, and the explicit receivers are enumerated here
+   * -- so `receiver` is the proxy plus those arguments, provided nothing can
+   * reach `Reflect.get`/`Reflect.set` other than as a direct call, and no
+   * `super` access or `__proto__` key can start a lookup on an unseen object.
+   * Sealing a trap's `receiver` opaque instead made `Reflect.set(target,
+   * name, value, receiver)` -- the forwarding every set trap writes -- a
+   * possible write to `globalThis` under every key, refusing every host
+   * global in the program.
+   */
+  const reflectSymbol = (() => {
+    const anchor = files[0]
+    const symbol = anchor ? checker.resolveName('Reflect', anchor, ts.SymbolFlags.Value, false) : undefined
+    return symbol && hasStandardLibraryDeclaration(symbol) ? symbol : null
+  })()
+  let explicitTrapReceivers: { readonly get: readonly ts.Expression[]; readonly set: readonly ts.Expression[] } | null | undefined
+  const explicitTrapReceiversOf = (): { readonly get: readonly ts.Expression[]; readonly set: readonly ts.Expression[] } | null => {
+    if (explicitTrapReceivers !== undefined) return explicitTrapReceivers
+    const get: ts.Expression[] = []
+    const set: ts.Expression[] = []
+    const closed = ((): boolean => {
+      if (reflectSymbol === null || intrinsicSymbolIsOverwritten(reflectSymbol)) return false
+      for (const node of nodes) {
+        if (
+          (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+          node.expression.kind === ts.SyntaxKind.SuperKeyword
+        )
+          return false
+        if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node) || ts.isPrivateIdentifier(node)) && node.text === '__proto__')
+          return false
+        if (!ts.isIdentifier(node) || actualSymbol(checker.getSymbolAtLocation(node)) !== reflectSymbol) continue
+        const access = outermostErasureOf(node).parent
+        // `Reflect` as a value (passed, stored, indexed) can reach `get`/`set` unseen.
+        if (!access || !ts.isPropertyAccessExpression(access) || unwrapErasedExpression(access.expression) !== node) return false
+        const member = access.name.text
+        if (member !== 'get' && member !== 'set') continue
+        const call = outermostErasureOf(access).parent
+        if (!call || !ts.isCallExpression(call) || unwrapErasedExpression(call.expression) !== access) return false
+        if (call.arguments.some(ts.isSpreadElement)) return false
+        const receiver = call.arguments[member === 'get' ? 2 : 3]
+        if (receiver) (member === 'get' ? get : set).push(receiver)
+      }
+      return true
+    })()
+    explicitTrapReceivers = closed ? { get, set } : null
+    return explicitTrapReceivers
+  }
+  const handlerMentionsThis = (literal: ts.ObjectLiteralExpression): boolean => {
+    const visit = (node: ts.Node): boolean => node.kind === ts.SyntaxKind.ThisKeyword || (ts.forEachChild(node, visit) ?? false)
+    return visit(literal)
+  }
+  const proxyTrapParameterValuesOf = (parameter: ts.ParameterDeclaration): readonly ts.Expression[] | null => {
+    if (parameter.dotDotDotToken || parameter.initializer) return null
+    const trap = parameter.parent
+    const property = ts.isMethodDeclaration(trap)
+      ? trap
+      : ts.isPropertyAssignment(outermostErasureOf(trap).parent)
+        ? outermostErasureOf(trap).parent
+        : null
+    if (!property || (!ts.isMethodDeclaration(property) && !ts.isPropertyAssignment(property))) return null
+    const literal = property.parent
+    if (!ts.isObjectLiteralExpression(literal)) return null
+    const construct = outermostErasureOf(literal).parent
+    if (!construct || !ts.isNewExpression(construct) || construct.arguments?.[1] === undefined) return null
+    if (unwrapErasedExpression(construct.arguments[1]) !== literal) return null
+    const proxy = programProxyOf(construct)
+    if (proxy === null) return null
+    // Traps run with `this` = the handler, so `this.set(...)` calls a trap with
+    // arguments of the program's choosing; so does a named trap calling itself.
+    if ((ts.isFunctionExpression(trap) && trap.name) || handlerMentionsThis(literal)) return null
+    const name = staticPropertyName(property.name)
+    const index = trap.parameters.indexOf(parameter)
+    if (index === 0) return [proxy.target]
+    const receiverIndex = name === 'get' ? 2 : name === 'set' ? 3 : -1
+    if (index !== receiverIndex) return null
+    const explicit = explicitTrapReceiversOf()
+    if (explicit === null) return null
+    return [construct, ...(name === 'get' ? explicit.get : explicit.set)]
+  }
   const publishedTypeRepresentation = (type: ts.Type, location: ts.Node): PublishedRepresentation | null =>
     primitiveResult(type) ? 'primitive' : nativeResult(type, location) ? 'native' : representedObjectResult(type) ? 'object' : null
   // An object-shaped result type is evidence only at an authenticated call
@@ -3933,10 +4021,12 @@ export const censusGlobalHostMutations = (
       // the identifier-parameter case the census can actually enumerate.
       const isIdentifierParameter = ts.isParameter(declaration) && ts.isIdentifier(declaration.name)
       // TEMPORARY bisect switch, remove before landing.
-      const parameterValues =
-        isIdentifierParameter && process.env['GEA_NO_ENUMERATED_PARAMETER_VALUES'] !== '1'
-          ? enumeratedParameterValuesOf(declaration as ts.ParameterDeclaration)
-          : null
+      const parameterValues = !isIdentifierParameter
+        ? null
+        : (proxyTrapParameterValuesOf(declaration as ts.ParameterDeclaration) ??
+          (process.env['GEA_NO_ENUMERATED_PARAMETER_VALUES'] !== '1'
+            ? enumeratedParameterValuesOf(declaration as ts.ParameterDeclaration)
+            : null))
       // An EMPTY closed set is not a proof of safety, it is the absence of
       // any runtime data point: a function with zero enumerated callers
       // (dead code, or a call graph this proof cannot yet see) never

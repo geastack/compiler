@@ -70,7 +70,7 @@ import { structuralRecordViewText } from './emit-record-view.js'
 import {
   classMemberText,
   classConstructorStaticFieldStorage,
-  constructorStateText,
+  constructorStaticStateText,
   constructorViewFieldFor,
   classConstructorStaticMemberText,
   constructorIdentityMemberText
@@ -1226,7 +1226,7 @@ const constructorViewStaticStoreText = (ctx: EmitContext, receiver: IrOperand, k
   if (representation.kind !== 'constructor-family' && representation.kind !== 'constructor-identity') return null
   const viewed = constructorViewFieldFor(ctx, key)
   if (viewed === null) return null
-  const state = constructorStateText(representation, operandText(ctx, receiver))
+  const state = constructorStaticStateText(ctx, representation, () => operandText(ctx, receiver))
   const converted = alignedValueText(
     ctx,
     'emit-properties.ts:constructor-view',
@@ -1802,7 +1802,7 @@ const emitFieldStoreLines = (
           `"${representationKey(operation.value.representation)}"; no conversion is installed between them`
       )
     }
-    const state = constructorStateText(operation.receiver.representation, operandText(ctx, operation.receiver))
+    const state = constructorStaticStateText(ctx, operation.receiver.representation, () => operandText(ctx, operation.receiver))
     if (state === null) throw createCppEmitBlockedError('property-access:constructor-static-state', 'has no evaluated constructor identity')
     lines.push(
       `{ auto gea_static = gea::constructorStaticView<${staticField.viewStruct}>(${state}); gea_static->value = ${movedValueText(ctx, operation.value, staticField.representation, converted)}; gea_static->present = true; }`

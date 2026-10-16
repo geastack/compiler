@@ -966,6 +966,27 @@ export const constructorStateText = (receiver: Representation, text: string): st
       ? `static_cast<gea::NativeClassMethodState*>((${text}).environment)`
       : null
 
+/**
+ * The generic declaration whose layout copies all share one static side.
+ * JavaScript evaluates `class Box<T>` once, so `Box.count` is one property;
+ * the copies (`ClassLayout.staticOwner`) are each evaluated with their own
+ * constructor state, and the root name a program reads has no cell at all
+ * (`emit-bindings.ts`'s `classObjectReadsOf`).
+ */
+export const genericStaticOwnerOf = (ctx: EmitContext, receiver: Representation): DeclarationId | null => {
+  if (receiver.kind !== 'constructor-family') return null
+  const owner = sharedStaticOwnerOf(ctx.classes, receiver.members)
+  if (owner === null) return null
+  for (const [declaration, layout] of ctx.classes) if (declaration !== owner && layout.staticOwner === owner) return owner
+  return null
+}
+
+/** The runtime state a static own property lives on; a shared generic static side never renders the receiver. */
+export const constructorStaticStateText = (ctx: EmitContext, receiver: Representation, text: () => string): string | null => {
+  const shared = genericStaticOwnerOf(ctx, receiver)
+  return shared !== null ? `gea::sharedConstructorStaticState(${cppStringLiteral(shared)})` : constructorStateText(receiver, text())
+}
+
 export const classConstructorStaticFieldName = (ctx: EmitContext, receiver: Representation, key: string): string | null =>
   classConstructorStaticFieldStorage(ctx, receiver, key)?.name ?? null
 
@@ -1028,7 +1049,7 @@ export const classConstructorStaticMemberTextFor = (
   }
   const viewed = constructorViewFieldFor(ctx, key)
   if (viewed !== null) {
-    const state = constructorStateText(receiver, receiverText())
+    const state = constructorStaticStateText(ctx, receiver, receiverText)
     if (state === null) return null
     const presence = `&${viewed.struct}::${cppRecordFieldPresenceName(key)}`
     const read = `gea::constructorStaticViewHolder(gea::constructorStaticView<${viewed.struct}>(${state}), ${presence})->${cppRecordFieldName(key)}`
@@ -1042,7 +1063,7 @@ export const classConstructorStaticMemberTextFor = (
   }
   const censused = classConstructorStaticFieldStorage(ctx, receiver, key)
   if (censused !== null) {
-    const state = constructorStateText(receiver, receiverText())
+    const state = constructorStaticStateText(ctx, receiver, receiverText)
     if (state === null) throw createCppEmitBlockedError('property-access:constructor-static-state', 'has no evaluated constructor identity')
     const read = `gea::constructorStaticViewHolder(gea::constructorStaticView<${censused.viewStruct}>(${state}), &${censused.viewStruct}::present)->value`
     const converted = alignedValueText(ctx, 'class-properties/emit-class-properties.ts:713', censused.representation, result, read)

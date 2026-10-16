@@ -2191,7 +2191,7 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
       for (const demand of embeddedNativeBoundaryDemands(representation)) decide(owner, demand, ctx)
     }
     for (const region of body.iteratorCloseRegions ?? []) {
-      if (!finiteIteratorCloseRegionMatches(region, ctx.semanticOperationOf(region.lineage), ctx.definitionOf))
+      if (!finiteIteratorCloseRegionMatches(region, ctx.semanticOperationOf(region.lineage), ctx.definitionOf, ctx.semanticOperationOf))
         decide(
           owner,
           {

@@ -68,10 +68,10 @@ if [ $sync = 1 ]; then
     "$HOST:/home/dashersw/geastack/compiler/node_modules/@geastack/"
   # Sibling checkouts the tests include headers from (core) and the benchmarks
   # build (node-compat, parallel, benchmarks), and every package the release
-  # suite tests (examples, cli, targets, simulator, windows, debugger, apple).
+  # suite tests (examples, cli, targets, linux, simulator, windows, debugger, apple).
   # Gitignored build output and WSL's
   # own results stay put; benchmarks keeps WSL's package.json stub and lock.
-  for d in core native-webgl-angle node-compat parallel benchmarks examples demos cli targets simulator windows debugger apple; do
+  for d in core native-webgl-angle node-compat parallel benchmarks examples demos cli targets linux simulator windows debugger apple; do
     extra=()
     [ $d = benchmarks ] && extra=(--exclude=/package.json --exclude=/package-lock.json --exclude=results/)
     mirror --include=.env.example --filter=':- .gitignore' --exclude=.git --exclude=node_modules --exclude=.DS_Store "${extra[@]}" \

@@ -1108,7 +1108,7 @@ const renderableAccessors = (layout: RecordLayout): readonly RecordAccessor[] =>
  * a boxed read answers `undefined`: exactly what an unaddressable FIELD
  * already does, rather than a new refusal for a shape that compiles today.
  */
-const accessorBoxedText = (accessor: RecordAccessor, call: string): string | null => {
+const accessorBoxedText = (accessor: RecordAccessor, structName: string, call: string): string | null => {
   if (accessor.value.kind === 'dynamic') return call
   // A member the checker types `undefined` (a getter that only ever throws
   // reaches here as one) is compiled with a `void` ABI, so there is no value to
@@ -1118,8 +1118,10 @@ const accessorBoxedText = (accessor: RecordAccessor, call: string): string | nul
   // The three carriers a FIELD reaches through the runtime's typed adapter
   // rather than through a box (`dynamicFieldAccessOf`'s `dynamicCarrier` arm).
   // `boxedText` would `static_cast` them into a payload no reader can name, so
-  // this refuses instead and the dispatcher emits a named runtime refusal.
-  if (accessor.value.kind === 'optional' || accessor.value.kind === 'tagged-union' || accessor.value.kind === 'dictionary') return null
+  // the getter's result crosses through the same adapter a field's storage
+  // does -- bound once, because the call is the getter's observable effect.
+  if (accessor.value.kind === 'optional' || accessor.value.kind === 'tagged-union' || accessor.value.kind === 'dictionary')
+    return `gea::detail::readDynamicField(${call}, ${cppStringLiteral(structName)}, ${cppStringLiteral(accessor.key)})`
   const tag = dynamicTagFor(accessor.value)
   if (tag === null) return null
   const canonical = canonicalDynamicPayloads.get(tag)
@@ -1130,7 +1132,8 @@ const accessorBoxedText = (accessor: RecordAccessor, call: string): string | nul
 /** The other direction: what a boxed write hands the setter body, or `null` when no static tag names the carrier. */
 const accessorUnboxText = (accessor: RecordAccessor, structName: string, text: string): string | null => {
   if (accessor.value.kind === 'dynamic') return text
-  if (accessor.value.kind === 'optional' || accessor.value.kind === 'tagged-union' || accessor.value.kind === 'dictionary') return null
+  if (accessor.value.kind === 'optional' || accessor.value.kind === 'tagged-union' || accessor.value.kind === 'dictionary')
+    return `gea::detail::unboxDynamicField<${cppTypeOf(accessor.value)}>(${text}, ${cppStringLiteral(structName)}, ${cppStringLiteral(accessor.key)})`
   const tag = dynamicTagFor(accessor.value)
   if (tag === null) return null
   const type = cppTypeOf(accessor.value)
@@ -2371,7 +2374,9 @@ const renderFieldDispatcher = (
     const descriptorGetEnvironment = environmentOf('getter', accessor.getter, 'gea_self->')
     const descriptorSetEnvironment = environmentOf('setter', accessor.setter, 'gea_self->')
     const getText = (receiver: string, environment: string): string | null =>
-      accessor.getter === null ? 'gea::Value()' : accessorBoxedText(accessor, `${cppBodyName(accessor.getter)}(${environment}${receiver})`)
+      accessor.getter === null
+        ? 'gea::Value()'
+        : accessorBoxedText(accessor, structName, `${cppBodyName(accessor.getter)}(${environment}${receiver})`)
     const setText = (receiver: string, written: string, environment: string): string | null => {
       if (accessor.setter === null) return null
       const unboxed = accessorUnboxText(accessor, structName, written)

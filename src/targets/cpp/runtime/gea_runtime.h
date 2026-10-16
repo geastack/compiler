@@ -1247,6 +1247,11 @@ template <typename Piece>
   return pieceView(piece).size();
 }
 // Literals and formatted numbers own their bytes; anything else may view the destination.
+// An EMPTY piece starting in the destination counts too: a typed piece is
+// viewed again while the pieces are written, and where `overwriteString`
+// falls back to `resize` (libstdc++ before C++23) the destination itself, as
+// a piece, has grown to the whole capacity by then (`s = s + n` on an empty
+// `s` wrote NULs and pushed the digits past the end).
 template <typename Piece>
 [[gnu::always_inline]] inline bool pieceViews(const Piece& piece, std::uintptr_t begin, std::uintptr_t end) {
   if constexpr (std::is_array_v<Piece> || DigitWordPiece<Piece>) {
@@ -1254,7 +1259,7 @@ template <typename Piece>
   } else {
     const auto view = pieceView(piece);
     const auto at = reinterpret_cast<std::uintptr_t>(view.data());
-    return view.size() != 0 && at >= begin && at < end;
+    return at >= begin && at < end;
   }
 }
 // A formatted number's digits go from the register they were computed in to
@@ -21881,9 +21886,12 @@ struct NativeClassMethodState {
    * (`constructorOwnProperty`), so a program that never does pays nothing.
    */
   Ref<FunctionObjectIdentity> functionObject;
+  /** Every layout copy of one generic class keeps its static own properties on this one state (`shareConstructorStatics`). */
+  Ref<NativeClassMethodState> staticOwner;
 
   friend void geaTraceRefs(const NativeClassMethodState& value, detail::RefVisitor& visitor) {
     detail::traceRefs(value.functionObject, visitor);
+    detail::traceRefs(value.staticOwner, visitor);
     detail::traceRefs(value.parent, visitor);
     detail::traceRefs(value.prototypeObject, visitor);
     for (const auto& entry : value.methods) detail::traceRefs(entry.second, visitor);
@@ -22176,17 +22184,38 @@ inline std::unordered_map<const void*, Ref<NativeClassMethodState>>& constructor
   return *owners;
 }
 
+inline NativeClassMethodState* constructorStaticStateOwner(NativeClassMethodState* state) {
+  while (state != nullptr && state->staticOwner) state = state->staticOwner.get();
+  return state;
+}
+
 template <typename Record>
 Record* existingConstructorStaticView(NativeClassMethodState* state) {
+  state = constructorStaticStateOwner(state);
+  if (state == nullptr) return nullptr;
   for (const auto& entry : state->staticViews)
     if (entry.first == &constructorStaticViewTag<Record>) return static_cast<Record*>(entry.second.get());
   return nullptr;
 }
 }  // namespace detail
 
+/** The one static side of a generic class whose layout copies are evaluated separately, keyed by its declaration. */
+inline NativeClassMethodState* sharedConstructorStaticState(const char* owner) {
+  using Owners = std::unordered_map<std::string, Ref<NativeClassMethodState>>;
+  GEA_REALM_LOCAL(Owners, ownerStorage, {});
+  auto& slot = ownerStorage[owner];
+  if (!slot) slot = makeRef<NativeClassMethodState>();
+  return slot.get();
+}
+
+inline void shareConstructorStatics(NativeClassMethodState* state, const char* owner) {
+  if (state != nullptr) state->staticOwner = Ref<NativeClassMethodState>::adopt(sharedConstructorStaticState(owner), true);
+}
+
 template <typename Record>
 Ref<Record> constructorStaticView(NativeClassMethodState* state) {
   if (state == nullptr) detail::refusePayloadMismatch("a class constructor viewed as a record has no class evaluation");
+  state = detail::constructorStaticStateOwner(state);
   if (Record* existing = detail::existingConstructorStaticView<Record>(state)) return Ref<Record>::adopt(existing, true);
   auto view = makeRef<Record>();
   state->staticViews.emplace_back(&constructorStaticViewTag<Record>, view.template staticCast<void>());
@@ -24968,6 +24997,13 @@ Value readDynamicField(const T& field, const char* owner, const char* key) {
 template <typename T>
 void writeDynamicField(T& field, const Value& value, const char* owner, const char* key) {
   if constexpr (DynamicCarrier<T>::supported) field = DynamicCarrier<T>::in(value, 0);
+  else refuseUnaddressableField(owner, key);
+}
+
+/** `writeDynamicField`'s conversion alone, for a setter that takes the carrier by value rather than storing it. */
+template <typename T>
+T unboxDynamicField(const Value& value, const char* owner, const char* key) {
+  if constexpr (DynamicCarrier<T>::supported) return DynamicCarrier<T>::in(value, 0);
   else refuseUnaddressableField(owner, key);
 }
 
@@ -46394,6 +46430,23 @@ bool isDocumentLevelEvent(const Node&, const std::string& name) {
   return name == "rotary";
 }
 
+/**
+ * Restores an event's currentTarget/phase after a node handler runs. It lives at
+ * namespace scope: clang leaves a local class's inline destructor inside a
+ * generic lambda of a function template uninstantiated, and the link fails.
+ */
+struct CurrentTargetRestore {
+  gea::framework::events::PointerEvent& event;
+  gea::framework::events::EventTarget target;
+  int targetId;
+  gea::framework::events::EventPhase phase;
+  ~CurrentTargetRestore() {
+    event.currentTarget = target;
+    event.currentTargetId = targetId;
+    event.eventPhase = phase;
+  }
+};
+
 /** Bind native node handlers to their allocation and retain the compiler's early-disposal fence. */
 template <typename Node, typename Invoke>
 void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
@@ -46401,17 +46454,7 @@ void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
   auto alive = nodeLiveToken(node);
   auto run = gea::framework::events::explicitEventCallback([](auto& target, auto& alive, auto& invoke, gea::framework::events::PointerEvent& event) {
     if (!*alive || !target.valid() || !target.isConnected()) return;
-    struct Restore {
-      gea::framework::events::PointerEvent& event;
-      gea::framework::events::EventTarget target;
-      int targetId;
-      gea::framework::events::EventPhase phase;
-      ~Restore() {
-        event.currentTarget = target;
-        event.currentTargetId = targetId;
-        event.eventPhase = phase;
-      }
-    } restore{event, event.currentTarget, event.currentTargetId, event.eventPhase};
+    CurrentTargetRestore restore{event, event.currentTarget, event.currentTargetId, event.eventPhase};
     event.currentTarget = gea::framework::events::EventTarget(target.id());
     event.currentTargetId = target.id();
     event.eventPhase = event.targetId == target.id() ? gea::framework::events::EventPhase::AtTarget

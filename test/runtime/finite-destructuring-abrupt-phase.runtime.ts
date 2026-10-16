@@ -15,7 +15,8 @@ function dynamicCase(mode: string) {
             },
             get value() {
               if (mode === 'value') throw original
-              return undefined
+              // The assignment target's setter takes a number.
+              return mode === 'assignment' ? 0 : undefined
             }
           }
         },

@@ -975,6 +975,19 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
    * declares `member`: a class constructor type naming that class or one of
    * its ancestors, or a structural constructor type the class fits.
    */
+  const classDescendsFrom = (from: ts.Symbol, ancestor: ts.Symbol): boolean => {
+    const seen = new Set<ts.Symbol>()
+    const pending: ts.Type[] = [input.checker.getDeclaredTypeOfSymbol(from)]
+    for (let current = pending.pop(); current !== undefined; current = pending.pop()) {
+      const symbol = current.getSymbol()
+      if (!symbol || seen.has(symbol)) continue
+      seen.add(symbol)
+      if (symbol === ancestor) return true
+      const target = (current as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference ? (current as ts.TypeReference).target : current
+      if (target.isClassOrInterface()) pending.push(...input.checker.getBaseTypes(target))
+    }
+    return false
+  }
   const readReachesStatic = (receiver: ts.Type, member: ts.Node): boolean => {
     const own = constructorTypeOfMember(member)
     if (own === null) return true
@@ -982,17 +995,10 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
     if (receiverSymbol && (receiverSymbol.flags & ts.SymbolFlags.Class) !== 0) {
       const ownSymbol = own.getSymbol()
       if (!ownSymbol) return true
-      const seen = new Set<ts.Symbol>()
-      const pending: ts.Type[] = [input.checker.getDeclaredTypeOfSymbol(ownSymbol)]
-      for (let current = pending.pop(); current !== undefined; current = pending.pop()) {
-        const symbol = current.getSymbol()
-        if (!symbol || seen.has(symbol)) continue
-        seen.add(symbol)
-        if (symbol === receiverSymbol) return true
-        const target = (current as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference ? (current as ts.TypeReference).target : current
-        if (target.isClassOrInterface()) pending.push(...input.checker.getBaseTypes(target))
-      }
-      return false
+      // A read on a base may run with a subclass as `this`; a read on a
+      // subclass reaches an inherited static whenever its own same-named
+      // static field is not yet defined (`static a = this.b; static b = 1`).
+      return classDescendsFrom(ownSymbol, receiverSymbol) || classDescendsFrom(receiverSymbol, ownSymbol)
     }
     return input.checker.isTypeAssignableTo(own, receiver)
   }
@@ -1001,7 +1007,9 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
     // The class's own binding (`Readable.from`, an imported alias of it) is
     // exactly that class -- TypeScript refuses an assignment to it -- and its
     // read already opened the one declaration it names by symbol.
-    let named = input.checker.getSymbolAtLocation(receiver)
+    // A static method's `this` also resolves to the class symbol, but it is
+    // whichever subclass the call ran on, so it takes the typed path below.
+    let named = receiver.kind === ts.SyntaxKind.ThisKeyword ? undefined : input.checker.getSymbolAtLocation(receiver)
     if (named && named.flags & ts.SymbolFlags.Alias) named = input.checker.getAliasedSymbol(named)
     if (named && named.flags & ts.SymbolFlags.Class) return
     const type = input.checker.getNonNullableType(input.checker.getTypeAtLocation(receiver))
