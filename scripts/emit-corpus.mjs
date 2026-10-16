@@ -10,7 +10,6 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, basename } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import ts from 'typescript'
 const D = process.env.GEA_DIST ?? `${process.cwd()}/dist`
 // GEA_DIST is an absolute path, and on Windows that makes `C:` look like a
 // URL scheme to the ESM loader, so the specifier has to be a file URL.
@@ -59,10 +58,6 @@ if (runtime) {
       })
     }
 } else {
-  const cfg = process.env.GEA_EXTERNAL_APP_TSCONFIG ?? `${process.cwd()}/projects/external-app.tsconfig.json`
-  const raw = ts.readConfigFile(cfg, ts.sys.readFile)
-  const parsed = ts.parseJsonConfigFileContent(raw.config, ts.sys, cfg.replace(/\/[^/]+$/, ''))
-  targets.push({ name: 'taurus-display', files: parsed.fileNames, project: cfg })
   for (const f of readdirSync('test/fixtures'))
     if (isProgram(f)) targets.push({ name: basename(f), files: [join('test/fixtures', f)], project: null })
   for (const sub of ['jsx', 'jsx-factory']) {

@@ -2072,8 +2072,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
        * Mentions of an exported cell in the modules that import it, or null
        * when the set of modules that can read it is not enumerable.
        *
-       * `export const taurus = new TaurusStore()` -- taurus-display's entire
-       * store, and the receiver of every `this.<method>()` in it. An export
+       * `export const store = new AppStore()` -- an app's entire store, and
+       * the receiver of every `this.<method>()` in it. An export
        * was refused outright unless NOTHING imported it, which reads "someone
        * imports this" as "this escaped". It is not an escape while every
        * module that can read the name is enumerated: the importers' mentions

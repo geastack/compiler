@@ -822,9 +822,8 @@ test('per-call receivers and synchronous undefined completions remain explicit g
 })
 
 test('a receiver destructured out of an object resolves through the same slot the property spelling reads', () => {
-  // `template({ app }: { app: App })` with `<HomeView app={this}/>` is every
-  // view in `taurus-display`, and it refused while `p.app.run()` — the same
-  // read, spelled as a property — resolved. Destructuring is a slot read; the
+  // `template({ app }: { app: App })` with `<HomeView app={this}/>` refused
+  // while `p.app.run()` — the same read, spelled as a property — resolved. Destructuring is a slot read; the
   // graph now says so once, so the two spellings cannot disagree.
   const runner = 'interface Runner { run(): number }'
   const method = '{ run() { return 1 } }'
@@ -1001,7 +1000,7 @@ test('a class instance dispatches through a callable member slot, and a replaced
       'go(name: string) { return name }'
     ],
     [
-      'a receiver destructured out of a prop object, taurus-shaped',
+      'a receiver destructured out of a prop object',
       `${app}
        class View { template({ app }: { app: App }) { return /* target */ app.go("home") } }
        const held = new App();
