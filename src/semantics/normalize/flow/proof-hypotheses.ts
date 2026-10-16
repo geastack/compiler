@@ -211,6 +211,26 @@ export const registerGuardedAnswer = (answer: GuardedAnswer, discard?: () => voi
 /** TEMPORARY INSTRUMENT -- not for landing. Counts how the discharge actually settles. */
 export const hypothesisStats = { registered: 0, confirmed: 0, struck: 0, discarded: 0 }
 
+/**
+ * Work waiting on a guard's settlement. A REFUSAL stored while a re-entry
+ * guard was open assumes that guard: it may only be replayed while the same
+ * question is still open, because the guard's re-entries were handed
+ * "unknown". When the guard then settles as truth -- the question's real
+ * answer was the refusal it handed out -- the refusal lost nothing by leaning
+ * on it, which is exactly why a memo already discharges such a key when it
+ * has closed before the memo stores (`hypothesisSettledAsTruth`). A key that
+ * closes only after the store is the same fact arriving later.
+ */
+const settlementWaiters = new Map<object, (() => void)[]>()
+
+/** Runs `settle` when the open guard on `key` closes having settled as truth; never otherwise. */
+export const whenHypothesisSettles = (key: object, settle: () => void): void => {
+  if (!openGuards.has(key)) return
+  let waiting = settlementWaiters.get(key)
+  if (!waiting) settlementWaiters.set(key, (waiting = []))
+  waiting.push(settle)
+}
+
 export const exitHypothesisGuard = (key: object, confirmed?: boolean, settled?: boolean): void => {
   const remaining = (openGuards.get(key) ?? 0) - 1
   if (remaining > 0) {
@@ -219,6 +239,11 @@ export const exitHypothesisGuard = (key: object, confirmed?: boolean, settled?: 
   }
   openGuards.delete(key)
   if (settled === true) settledAsTruth.add(key)
+  const waiting = settlementWaiters.get(key)
+  if (waiting !== undefined) {
+    settlementWaiters.delete(key)
+    if (settled === true) for (const settle of waiting) settle()
+  }
   const dependents = guardDependents.get(key)
   if (dependents === undefined) return
   guardDependents.delete(key)

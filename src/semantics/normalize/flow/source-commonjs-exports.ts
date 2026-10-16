@@ -25,3 +25,7 @@ export const sourceCommonJsExportUsesOf = (flow: ValueFlowIndex, assignment: ts.
 
 export const sourceCommonJsScopeIsClosed = (flow: ValueFlowIndex, file: ts.SourceFile): boolean =>
   identities.get(flow)?.scopes.has(file) === true
+
+/** The sealed identities attached to `flow`, for caches whose answers read them. */
+export const sourceCommonJsExportIdentitiesOf = (flow: ValueFlowIndex): SourceCommonJsExportIdentities | null =>
+  identities.get(flow) ?? null

@@ -7,7 +7,8 @@ import {
   hypothesisSettledAsTruth,
   noteHypothesis,
   popHypothesisTrail,
-  pushHypothesisTrail
+  pushHypothesisTrail,
+  whenHypothesisSettles
 } from './proof-hypotheses.js'
 
 test('a guard stays open until the outermost re-entry leaves it', () => {
@@ -85,4 +86,27 @@ test('reopening a guard clears what it settled last time', () => {
   assert.equal(hypothesisSettledAsTruth(question), false)
   exitHypothesisGuard(question, true, false)
   assert.equal(hypothesisSettledAsTruth(question), false)
+})
+
+test('settlement work runs once, at the outermost exit, and only when the guard settled as truth', () => {
+  const settled = {}
+  const unsettled = {}
+  const closed = {}
+  const ran: string[] = []
+  enterHypothesisGuard(settled)
+  enterHypothesisGuard(settled)
+  enterHypothesisGuard(unsettled)
+  whenHypothesisSettles(settled, () => ran.push('settled'))
+  whenHypothesisSettles(unsettled, () => ran.push('unsettled'))
+  // A key no guard holds open has nothing to wait for.
+  whenHypothesisSettles(closed, () => ran.push('closed'))
+  exitHypothesisGuard(settled, true, true)
+  assert.deepEqual(ran, [])
+  exitHypothesisGuard(settled, true, true)
+  exitHypothesisGuard(unsettled, true, false)
+  assert.deepEqual(ran, ['settled'])
+  // A later episode of the same question starts with nothing waiting.
+  enterHypothesisGuard(settled)
+  exitHypothesisGuard(settled, true, true)
+  assert.deepEqual(ran, ['settled'])
 })

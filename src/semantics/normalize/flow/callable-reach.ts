@@ -8,6 +8,7 @@ import {
   exitHypothesisGuard,
   registerGuardedAnswer,
   hypothesisGuardIsOpen,
+  whenHypothesisSettles,
   hypothesisNotes,
   noteHypothesis,
   popHypothesisTrail,
@@ -2000,6 +2001,17 @@ const closedMemberCallableUses = (
       const stored: SharedAnswer = { assumed, escaped, value: computed.value, requirements: [...computed.requirements], opens: recorded }
       answers.push(stored)
       if (dischargeEnabled && computed.value !== null && grounded && assumed.size !== 0) provisionalAnswers.push(stored)
+      // A refusal assumes every re-entry guard still open when it was stored,
+      // and is replayed only while all of them are open again. A guard that
+      // closes before the store and settles as truth is discharged above; one
+      // that closes after the store and settles is the same fact, later. Kept
+      // instead, the condition made this memo grow without bound: a stored
+      // refusal assumed every guard on the stack (about twelve on
+      // a server app), so each new combination of open record-method calls
+      // missed and stored one more -- two million in ten minutes, with the
+      // compile not finishing in hours.
+      if (computed.value === null)
+        for (const key of assumed) if (hypothesisGuardIsOpen(key)) whenHypothesisSettles(key, () => assumed.delete(key))
       return { value: computed.value, requirements: stored.requirements }
     }
     return computed

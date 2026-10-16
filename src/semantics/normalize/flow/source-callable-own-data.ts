@@ -3,9 +3,16 @@ import { isGlobalObjectConstructor, isStandardGlobalValue } from '../derived-exp
 import type { ValueFlowIndex } from './model.js'
 import { unwrapErasedExpression } from '../producers/erasure.js'
 import { localBindingValuesOf } from './value-provenance.js'
-import { deferredIntrinsicProtocolLedgerOf } from '../deferred-intrinsic-protocols.js'
+import {
+  deferredIntrinsicProtocolLedgerOf,
+  intrinsicProtocolRequirementKind,
+  type DeferredIntrinsicProtocolLedger,
+  type IntrinsicProtocolRequirement
+} from '../deferred-intrinsic-protocols.js'
 import { intrinsicPrototypeKeyIsAbsent } from '../intrinsic-prototype.js'
 import { sourceGlobalCallableBindingIsClosed } from './source-global-binding.js'
+import { closedScriptScopeOf, type ClosedScriptScope } from './targets.js'
+import { sourceCommonJsExportIdentitiesOf, type SourceCommonJsExportIdentities } from './source-commonjs-exports.js'
 
 export type SourceCallableObject = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction
 export const isSourceCallableObject = (node: ts.Node): node is SourceCallableObject =>
@@ -108,22 +115,117 @@ export const sourceCallableReflectSetOf = (checker: ts.TypeChecker, call: ts.Cal
   return { site: call, target: call.arguments[0]!, key: key.text, value: call.arguments[2]!, call }
 }
 
+/** Every property write's owner resolved once, filed by owner, for one flow,
+ * ledger, capture state and attached realm boundary -- everything
+ * `sourceCallableObjectOf` reads. Per query, the scan over all of a
+ * program's writes was quadratic: a large server app spent minutes in it.
+ *
+ * Resolving an owner can file a global-binding obligation in the active
+ * ledger capture, and the scan filed one for every write it passed. A query
+ * replays exactly those -- the ones filed by writes up to where the scan
+ * would have stopped -- so the capture ends with the same obligations.
+ */
+interface CallableOwnerWriteIndex {
+  readonly checker: ts.TypeChecker
+  readonly ledger: DeferredIntrinsicProtocolLedger | null
+  readonly capturing: boolean
+  readonly scriptScope: ClosedScriptScope | null
+  readonly commonJs: SourceCommonJsExportIdentities | null
+  /** Positions count every write in `flow.allWrites` order. */
+  readonly writesByOwner: ReadonlyMap<SourceCallableObject, readonly { readonly position: number; readonly access: PropertyWriteAccess }[]>
+  /** The first filing of each distinct obligation, in scan order; `unique` keeps no other. */
+  readonly obligations: readonly { readonly position: number; readonly requirement: IntrinsicProtocolRequirement }[]
+}
+type PropertyWriteAccess = ts.PropertyAccessExpression | ts.ElementAccessExpression
+
+const callableOwnerWriteIndexes = new WeakMap<ValueFlowIndex, Map<boolean, CallableOwnerWriteIndex>>()
+const callableOwnerWriteIndexOf = (checker: ts.TypeChecker, flow: ValueFlowIndex): CallableOwnerWriteIndex => {
+  const ledger = deferredIntrinsicProtocolLedgerOf(flow)
+  // Including nothing files nothing; it only answers whether a capture is active.
+  const capturing = ledger?.include([]) === true
+  const scriptScope = closedScriptScopeOf(flow)
+  const commonJs = sourceCommonJsExportIdentitiesOf(flow)
+  let variants = callableOwnerWriteIndexes.get(flow)
+  if (!variants) callableOwnerWriteIndexes.set(flow, (variants = new Map()))
+  const known = variants.get(capturing)
+  if (known && known.checker === checker && known.ledger === ledger && known.scriptScope === scriptScope && known.commonJs === commonJs)
+    return known
+  const writesByOwner = new Map<SourceCallableObject, { readonly position: number; readonly access: PropertyWriteAccess }[]>()
+  const obligations: { readonly position: number; readonly requirement: IntrinsicProtocolRequirement }[] = []
+  const filed = new Map<ts.Node, Set<string>>()
+  let position = 0
+  for (const write of flow.allWrites) {
+    position++
+    const access = write.propertyAccess
+    if (!access) continue
+    let owner: SourceCallableObject | null
+    if (capturing && ledger) {
+      const resolved = ledger.capture(() => sourceCallableObjectOf(checker, flow, access.expression))
+      owner = resolved.value
+      for (const requirement of resolved.requirements) {
+        let kinds = filed.get(requirement.location)
+        if (!kinds) filed.set(requirement.location, (kinds = new Set()))
+        const kind = `${requirement.intrinsic}\0${intrinsicProtocolRequirementKind(requirement) ?? ''}`
+        if (kinds.has(kind)) continue
+        kinds.add(kind)
+        obligations.push({ position, requirement })
+      }
+    } else owner = sourceCallableObjectOf(checker, flow, access.expression)
+    if (owner === null) continue
+    let writes = writesByOwner.get(owner)
+    if (!writes) writesByOwner.set(owner, (writes = []))
+    writes.push({ position, access })
+  }
+  const index = { checker, ledger, capturing, scriptScope, commonJs, writesByOwner, obligations }
+  variants.set(capturing, index)
+  return index
+}
+
+/** The calls the intrinsic-installation scan below can match, by spelling
+ * alone; which intrinsic each actually reaches is still asked per query. */
+interface InstallationCall {
+  readonly call: ts.CallExpression
+  readonly callee: ts.PropertyAccessExpression
+}
+const intrinsicInstallationCalls = new WeakMap<ValueFlowIndex, readonly InstallationCall[]>()
+const INSTALLATION_MEMBERS = new Set(['set', 'defineProperty', 'deleteProperty', 'defineProperties', 'setPrototypeOf'])
+const intrinsicInstallationCallsOf = (flow: ValueFlowIndex): readonly InstallationCall[] => {
+  let calls = intrinsicInstallationCalls.get(flow)
+  if (!calls) {
+    calls = flow.calls.flatMap(({ call }) => {
+      if (!ts.isCallExpression(call) || call.arguments.length < 2) return []
+      const callee = unwrapErasedExpression(call.expression)
+      return ts.isPropertyAccessExpression(callee) && INSTALLATION_MEMBERS.has(callee.name.text) ? [{ call, callee }] : []
+    })
+    intrinsicInstallationCalls.set(flow, calls)
+  }
+  return calls
+}
+
 /** A possible own write partitions dispatch before installation is proved.
  * Conditional stores and unsupported Receiver/key frames must not fall back
  * to the checker's inherited call/apply wrapper after their proof fails.
  */
 const callableOwnDataMayBeWritten = (checker: ts.TypeChecker, flow: ValueFlowIndex, root: SourceCallableObject, key: string): boolean => {
-  for (const write of flow.allWrites) {
-    const access = write.propertyAccess
-    if (!access || sourceCallableObjectOf(checker, flow, access.expression) !== root) continue
+  const index = callableOwnerWriteIndexOf(checker, flow)
+  let stop = Infinity
+  for (const { position, access } of index.writesByOwner.get(root) ?? []) {
     const name = keyOf(access)
-    if (name === null || name === key || name === '__proto__') return true
+    if (name === null || name === key || name === '__proto__') {
+      stop = position
+      break
+    }
   }
-  for (const site of flow.calls) {
-    const call = site.call
-    if (!ts.isCallExpression(call) || call.arguments.length < 2) continue
-    const callee = unwrapErasedExpression(call.expression)
-    if (!ts.isPropertyAccessExpression(callee)) continue
+  if (index.capturing && index.ledger && index.obligations.length > 0) {
+    const replayed: IntrinsicProtocolRequirement[] = []
+    for (const { position, requirement } of index.obligations) {
+      if (position > stop) break
+      replayed.push(requirement)
+    }
+    index.ledger.include(replayed)
+  }
+  if (stop !== Infinity) return true
+  for (const { call, callee } of intrinsicInstallationCallsOf(flow)) {
     // The receiver is recognised by declaration identity, never by its
     // spelling: `globalThis.Reflect.set` and an alias of `Object` reach the
     // same intrinsic, and a local binding that happens to be named `Object`
