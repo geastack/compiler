@@ -1291,6 +1291,7 @@ untyped-map-into-document-or-unknown-map-parameter.runtime.ts.cpp e64644b6cf87
 untyped-map-returned-as-typed-map.runtime.ts.cpp 4bd0e98e5eb3
 unused-subclass-is-pruned.ts.cpp 43345a8020e0
 value-record-literal-union.ts.cpp ddc2cf3b65a9
+view-over-view-reads-absent-optional-field.runtime.ts.cpp 1bc53cca3b10
 view-union-slot-into-tagged-view-union-parameter.runtime.ts.cpp b2f059a89c23
 virtual-call-through-a-base-whose-override-narrows-unknown.ts.cpp c0f488a28645
 virtual-parameter-widening.ts.cpp 63aa223cab05

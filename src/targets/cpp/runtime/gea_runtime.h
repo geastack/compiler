@@ -29797,9 +29797,21 @@ Result readLiveField(
     return (*context.adapter)(context.answer, type, policy, value);
   }, accepts);
   read.slot = &context;
-  if (!readFieldView(held, key, read) || !answer)
-    host::throwRuntimeError("TypeError", "a native view read has no certified carrier route");
-  return std::move(*answer);
+  if (readFieldView(held, key, read) && answer) return std::move(*answer);
+  // A route answers only what its source stores, and a declared optional field
+  // that is absent stores nothing. When the whole chain lacks the key, [[Get]]
+  // is undefined, offered to the reader's certified adapter in each spelling
+  // the runtime has: Undefined, Value, and the undefined-absence optional the
+  // plain read beside this one and the view routes answer. A null-absence or
+  // non-optional carrier certifies none of them, or its Value conversion
+  // rejects undefined, so it still throws.
+  if (!hasPropertyFieldView(held, key)) {
+    bool assigned = read.assign(Undefined{}) || read.assign(Value());
+    if constexpr (gea::is_optional_v<Result>)
+      assigned = assigned || read.assign<NativeFieldOptionalPolicy<false, NativeFieldLeafPolicy>>(Result{});
+    if (assigned && answer) return std::move(*answer);
+  }
+  host::throwRuntimeError("TypeError", "a native view read has no certified carrier route");
 }
 
 template <typename Receiver, typename Source, typename Adapter, typename Fallback>
