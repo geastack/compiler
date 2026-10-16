@@ -108,6 +108,7 @@ await-union-of-value-or-promise-settles-same-tick.runtime.ts.cpp 216fe68d93d8
 await-void-promise-settles-to-undefined.runtime.ts.cpp 5058ec50b786
 base-typed-derived-dynamic-dictionary.ts.cpp c72af9c50e57
 base-typed-derived-dynamic-fields.ts.cpp b5dd6b7b8a2d
+base-typed-read-of-a-field-a-subclass-redeclares-as-an-accessor.runtime.js.cpp 96f0ad809cbf
 bigint-of-number-bigint-or-class-union.ts.cpp 114bd37ac811
 binary-view-arm-beside-a-live-record-view.runtime.ts.cpp df154b52bec6
 bind-guarded-when-a-boxed-instance-can-shadow-it.runtime.ts.cpp 363f51cf20ad
