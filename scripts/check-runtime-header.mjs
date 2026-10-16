@@ -31,3 +31,46 @@ for (const [label, flags] of [
   }
   process.stdout.write(`Runtime header: ${label} C++ syntax passed\n`)
 }
+
+// The fenced try shape (GEA_EH_FENCED, the MSVC ABI's default) must cost
+// nothing on the normal path. Its fences were once empty volatile asm
+// statements, which clang hands LLVM with no memory effects, so every try
+// statement -- makeRef's in every allocation -- was two barriers no load could
+// be forwarded across. A load right after a fenced statement must fold at
+// -O2, the release level (-O1's EarlyCSE forwards across no volatile store).
+// Each host checks its own spelling of the fence: the MSVC one on Windows.
+const fenceProbe = `#include "gea_runtime.h"
+extern "C" int gea_fence_probe(int* p) {
+  *p = 1;
+  GEA_EH_TRY_ANY(gea_probe_failed) {
+  } GEA_EH_CATCH_ANY(gea_probe_failed) {
+    return -1;
+  } GEA_EH_END
+  return *p;
+}
+`
+const probe = spawnSync(
+  process.env.CXX ?? 'clang++',
+  [
+    '-std=c++20',
+    '-O2',
+    '-DGEA_EH_FENCED=1',
+    '-S',
+    '-emit-llvm',
+    '-o',
+    '-',
+    `-I${resolve(root, 'src/targets/cpp/runtime')}`,
+    '-x',
+    'c++',
+    '-'
+  ],
+  { input: fenceProbe, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 }
+)
+const probeBody = /define [^\n]*@gea_fence_probe\([^\n]*\{\n([\s\S]*?)\n\}/.exec(probe.stdout ?? '')?.[1]
+if (probe.status !== 0 || probe.error || probeBody === undefined || /asm sideeffect/.test(probeBody) || !/ret i32 1\b/.test(probeBody)) {
+  process.stderr.write(probe.stderr ?? '')
+  if (probe.error) process.stderr.write(`${probe.error}\n`)
+  process.stderr.write(`Runtime header: a fenced try statement is a barrier on its normal path:\n${probeBody ?? '(probe not compiled)'}\n`)
+  process.exit(1)
+}
+process.stdout.write('Runtime header: fenced try shape passed, with no barrier on the normal path\n')

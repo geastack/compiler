@@ -1427,10 +1427,17 @@ ScopeExit(Body) -> ScopeExit<Body>;
  *   stack slot. The inner fence makes every throwing call in the block unwind
  *   into a cleanup first, so a catchswitch has one predecessor and no PHI.
  *
- * A fence's destructor is an empty asm statement: no instruction on the
- * normal path. The slots are `std::optional`, so the normal path never
- * destroys an `exception_ptr` (an out-of-line call under MSVC's STL).
- * Define `GEA_EH_FENCED` to 1 to run the fenced shape on another target.
+ * A fence's destructor is one relaxed volatile byte store into the fence
+ * itself: the one instruction LLVM keeps in a cleanup that touches nothing
+ * else. Not an empty asm statement: clang gives a volatile asm no memory
+ * effects, so the optimizer took one as a read and write of all memory -- two
+ * compiler barriers on the normal path of every try statement, makeRef's
+ * included, after which no load could be forwarded across it. The store is
+ * relaxed (`__iso_volatile_store8`) because a plain volatile store under
+ * /volatile:ms is a release store. The slots are `std::optional`, so the
+ * normal path never destroys an `exception_ptr` (an out-of-line call under
+ * MSVC's STL). Define `GEA_EH_FENCED` to 1 to run the fenced shape on another
+ * target.
  */
 #ifndef GEA_EH_FENCED
 #if defined(_MSC_VER)
@@ -1446,10 +1453,15 @@ struct EhFence {
   EhFence(const EhFence&) = delete;
   EhFence& operator=(const EhFence&) = delete;
   ~EhFence() {
-#if defined(__GNUC__) || defined(__clang__)
-    __asm__ __volatile__("");
+#if defined(_MSC_VER)
+    __iso_volatile_store8(reinterpret_cast<volatile __int8*>(&mark_), 0);
+#else
+    *static_cast<volatile char*>(&mark_) = 0;
 #endif
   }
+
+ private:
+  char mark_;
 };
 
 namespace detail {
