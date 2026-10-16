@@ -39,7 +39,7 @@ static void heapEnvironmentSharesIdentityAcrossCopies() {
   auto& identities = gea::detail::allocationTypeProfile<gea::FunctionObjectIdentity>();
   const auto createdBefore = identities.created;
   auto original =
-      gea::identifyCallable<&addEnv>(gea::CallableObject<double(double)>{&addEnv, gea::packEnvironmentStorage(Env{10.0, 20.0})});
+      gea::identifyCallable<&addEnv>(gea::CallableObject<double(double)>{gea::CallableObject<double(double)>::recorded<&addEnv>(), gea::packEnvironmentStorage(Env{10.0, 20.0})});
   assert(identities.created == createdBefore);  // identifyCallable only stamps the tag; no mint yet
   auto copyA = original;
   auto copyB = original;
@@ -80,7 +80,7 @@ static void captureFreeMintsOnceAndCopiesShare() {
 // object: a property written through one is visible through the other's
 // `getProperty` and through `Value::functionProperties()` on either.
 static void boxedPropertiesShareThroughIdentity() {
-  auto callable = gea::identifyCallable<&addEnv>(gea::CallableObject<double(double)>{&addEnv, gea::packEnvironmentStorage(Env{1.0, 2.0})});
+  auto callable = gea::identifyCallable<&addEnv>(gea::CallableObject<double(double)>{gea::CallableObject<double(double)>::recorded<&addEnv>(), gea::packEnvironmentStorage(Env{1.0, 2.0})});
   auto boxA = gea::Value::box(gea::Value::Tag::Function, callable);
   auto boxB = gea::Value::box(gea::Value::Tag::Function, callable);
   const auto key = gea::PropertyKey::string("tag");
@@ -94,7 +94,7 @@ static void boxedPropertiesShareThroughIdentity() {
 // nothing else has forced one); `name`/`length` appear only once something
 // actually reads a property, and only then.
 static void ownFactsInstallLazily() {
-  auto callable = gea::identifyCallable<&addEnv>(gea::CallableObject<double(double)>{&addEnv, gea::packEnvironmentStorage(Env{3.0, 4.0})});
+  auto callable = gea::identifyCallable<&addEnv>(gea::CallableObject<double(double)>{gea::CallableObject<double(double)>::recorded<&addEnv>(), gea::packEnvironmentStorage(Env{3.0, 4.0})});
   auto box = gea::Value::box(gea::Value::Tag::Function, callable);
   const auto& identity = callable.functionObjectIdentity();
   assert(!identity->ownFactsInstalled);
@@ -116,7 +116,7 @@ static void neverAskedNeverAllocates() {
   const auto createdBefore = identities.created;
   {
     auto callable =
-        gea::identifyCallable<&addEnv>(gea::CallableObject<double(double)>{&addEnv, gea::packEnvironmentStorage(Env{5.0, 6.0})});
+        gea::identifyCallable<&addEnv>(gea::CallableObject<double(double)>{gea::CallableObject<double(double)>::recorded<&addEnv>(), gea::packEnvironmentStorage(Env{5.0, 6.0})});
     auto copy1 = callable;
     auto copy2 = copy1;
     assert(copy1.call(1.0) == 12.0);

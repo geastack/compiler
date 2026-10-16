@@ -46,7 +46,7 @@ static double doubleIt(void*, double value) { return value * 2; }
 static const bool doubleItRegistered = gea::CallableObject<double(double)>::registerSource<&doubleIt>("doubleIt", 1, "(x) => x * 2");
 
 static void nullHeldDoesNotCrashFunctionProperties() {
-  auto callable = gea::identifyCallable<&doubleIt>(gea::CallableObject<double(double)>{&doubleIt, nullptr});
+  auto callable = gea::identifyCallable<&doubleIt>(gea::CallableObject<double(double)>{gea::CallableObject<double(double)>::recorded<&doubleIt>(), nullptr});
   gea::Value boxed = gea::Value::box(gea::Value::Tag::Function, callable);
   assert(boxed.functionObject_);
   assert(boxed.metadata_ != nullptr && boxed.metadata_->calls != nullptr);

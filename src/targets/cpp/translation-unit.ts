@@ -1240,6 +1240,8 @@ const signatureOf = (
 interface RenderedThunk {
   readonly prototype: string
   readonly definition: string
+  /** Whether the body has a real `[[Construct]]` thunk, which every value minted from it publishes (`cppThunkEntryText`). */
+  readonly publishesConstruct?: boolean
 }
 
 const thunkOf = (
@@ -1304,6 +1306,7 @@ const thunkOf = (
   const signature = `${linkagePrefix(linkage)}${cppResultTypeOf(abi.result)} ${cppThunkName(body.sourceOwner)}(${formals.join(', ')})`
   const construct = constructThunkOf(body, abi, hasEnvironment, linkage)
   return {
+    ...(construct?.publishesConstruct ? { publishesConstruct: true } : {}),
     prototype: [`${signature};`, ...(construct === null ? [] : [construct.prototype])].join('\n'),
     // No `registerSource` beside the thunk any more: the function's
     // `name`/`length`/source text register at the sites that mint a function
@@ -1346,7 +1349,7 @@ const constructThunkOf = (
   abi: CallableAbi,
   hasEnvironment: boolean,
   linkage: CppLinkage
-): { readonly prototype: string; readonly definition: string } | null => {
+): { readonly prototype: string; readonly definition: string; readonly publishesConstruct?: boolean } | null => {
   const construct = body.construct
   if (!construct) return null
   const instance = construct.result
@@ -1385,19 +1388,20 @@ const constructThunkOf = (
   // question. A body with no environment is called through it just the same,
   // with the `void*` the signature carries either way.
   const entry = `${cppThunkName(body.sourceOwner)}(${actuals.join(', ')});`
-  // Published against the INVOKE pointer, beside the `name`/`length`/source
-  // text `registerSource` publishes against the same key. A value that is
-  // later viewed under a type naming its `[[Construct]]` -- `Factory as typeof
-  // Factory & (new (v: number) => T)` -- carries that pointer and nothing
-  // else about its declaration, so this is what lets the conversion stay a
-  // property of the VALUE rather than a guess about which declaration a cell
-  // holds (`gea::withConstructEntry`, gea_runtime.h).
-  const registration =
-    `[[maybe_unused]] static const bool ${cppConstructedThunkName(body.sourceOwner)}_entry = ` +
-    `gea::registerConstructEntry(&${cppThunkName(body.sourceOwner)}, &${cppConstructedThunkName(body.sourceOwner)});`
+  // No registration beside the thunk: every site that mints a value of this
+  // function publishes this construct thunk in the value's entry record
+  // (`emit-context.ts`'s `cppThunkEntryText`). A value that is later viewed
+  // under a type naming its `[[Construct]]` -- `Factory as typeof Factory &
+  // (new (v: number) => T)` -- carries that record and nothing else about its
+  // declaration, so this is what lets the conversion stay a property of the
+  // VALUE rather than a guess about which declaration a cell holds
+  // (`gea::withConstructEntry`, gea_runtime.h). Not keyed by the invoke
+  // pointer: a release link may fold two declarations' identical invoke
+  // thunks into one address.
   return {
     prototype: `${signature};`,
-    definition: `${signature} { ${allocation} ${entry} return ${cppReceiverName}; }\n${registration}`
+    definition: `${signature} { ${allocation} ${entry} return ${cppReceiverName}; }`,
+    publishesConstruct: true
   }
 }
 
@@ -2703,6 +2707,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     return entry === undefined ? [original] : [original, `${signatureOf(body, captures, new Set(), false, entry.formals, entry.name)};`]
   })
   const thunks = new Map<IrBody, RenderedThunk>()
+  // The functions whose minted values publish a `[[Construct]]` entry.
+  const constructEntries = new Set<FunctionId>()
   for (const body of input.bodies) {
     const thunk = thunkOf(
       body,
@@ -2713,6 +2719,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
       taskResultOf(body)
     )
     if (thunk) thunks.set(body, thunk)
+    if (thunk?.publishesConstruct && !isRegionId(body.sourceOwner)) constructEntries.add(body.sourceOwner)
   }
 
   // ONE tag object per source declaration, shared by every monomorphic copy of
@@ -2825,6 +2832,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
         instantiation,
         (callable) => abiByBody.get(String(callable)) ?? null,
         functionFacts,
+        constructEntries,
         hostMethodAliases,
         callableMemberCandidates,
         callableFlowCandidates.get(body.owner) ?? new Map(),

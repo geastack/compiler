@@ -262,7 +262,8 @@ template <typename Tag, typename T, int Lifetime = 0, typename Factory>
 T& realmSlot(Factory factory) {
   // Only the first access in a realm hashes. Audio processing's steady path
   // reads a TLS cache and one identity, without a lock or allocation.
-  static const char key = 0;
+  // Mutable: its address is the slot's identity (see `PayloadTypeTag`).
+  static char key = 0;
   static thread_local std::uint64_t identity = 0;
   static thread_local T* value = nullptr;
   RuntimeRealm& realm = currentRuntimeRealm();
@@ -4444,7 +4445,13 @@ struct RefOperationsFor {
       return +[](const void* object) -> const void* { return static_cast<const T*>(object)->identity(); };
     else return nullptr;
   }
-  static inline const RefOperations table{&RefOperationsFor<T>::destroy, &RefOperationsFor<T>::release, &RefOperationsFor<T>::drop,
+  // Mutable static storage, never written: the table's ADDRESS is the class
+  // identity (`classIdentity`, `classIdentityExtends`), and a linker may merge
+  // identical read-only tables -- link.exe's /OPT:ICF does, address-taken or
+  // not, and two types whose destroy/release/trace code was folded have
+  // identical tables. `PlainObjectOperationsFor<T>`'s table is byte-identical
+  // to a root class's by construction. Writable data is never merged.
+  static inline constinit RefOperations table{&RefOperationsFor<T>::destroy, &RefOperationsFor<T>::release, &RefOperationsFor<T>::drop,
                                          TraceEdges<T>::supported ? &RefOperationsFor<T>::trace : nullptr,
                                          cycleGenerational && TraceEdges<T>::supported ? &RefOperationsFor<T>::holdsTracedEdge : nullptr,
                                          RefOperationsFor<T>::classBase(), inlineKeyOrderOffsetOf<T>(), inlineKeyOrderLayoutOf<T>()
@@ -5667,7 +5674,13 @@ namespace detail {
  */
 template <typename T>
 struct PlainObjectOperationsFor {
-  static inline const RefOperations table{&RefOperationsFor<T>::destroy, &RefOperationsFor<T>::release, &RefOperationsFor<T>::drop,
+  // Mutable static storage, never written: the table's ADDRESS is the class
+  // identity (`classIdentity`, `classIdentityExtends`), and a linker may merge
+  // identical read-only tables -- link.exe's /OPT:ICF does, address-taken or
+  // not, and two types whose destroy/release/trace code was folded have
+  // identical tables. `PlainObjectOperationsFor<T>`'s table is byte-identical
+  // to a root class's by construction. Writable data is never merged.
+  static inline constinit RefOperations table{&RefOperationsFor<T>::destroy, &RefOperationsFor<T>::release, &RefOperationsFor<T>::drop,
                                          TraceEdges<T>::supported ? &RefOperationsFor<T>::trace : nullptr,
                                          cycleGenerational && TraceEdges<T>::supported ? &RefOperationsFor<T>::holdsTracedEdge : nullptr, nullptr,
                                          inlineKeyOrderOffsetOf<T>(), inlineKeyOrderLayoutOf<T>()
@@ -7009,6 +7022,27 @@ struct NativeCallableFrame {
   bool receivesThis = false;
 };
 
+namespace detail {
+/**
+ * One program-wide address per emitted `[[Construct]]` CONVENTION, so a lookup
+ * cannot return an entry of a different signature. Mutable, like every tag
+ * whose address is an identity in this header: a linker may merge identical
+ * READ-ONLY data (link.exe's /OPT:ICF does, address-taken or not), and every
+ * tag is the same zero byte. No linker merges writable data.
+ */
+template <typename Construct>
+struct ConstructEntryTag {
+  static inline char id = 0;
+};
+
+/** One `[[Construct]]` entry a declaration published in its record (`CallableObject::entryWithConstruct`). */
+struct ConstructEntryNode {
+  const void* convention;
+  void* construct;
+  const ConstructEntryNode* next;
+};
+}  // namespace detail
+
 template <typename Result, typename... Arguments>
 struct CallableObject<Result(Arguments...)> {
   friend void geaTraceRefs(const CallableObject& value, detail::RefVisitor& visitor) {
@@ -7021,65 +7055,119 @@ struct CallableObject<Result(Arguments...)> {
   using Invoke = Result (*)(void*, Arguments...);
   using InvokeWithReceiver = Result (*)(void*, const NativeCallReceiver&, Arguments...);
 
-  struct ArgumentFrameRegistration {
-    Invoke entry;
-    NativeCallableFrame frame;
-    NativeCallableFrame (*resolve)(void*);
-    // The declaration's own thunk a framed entry forwards to unchanged, or
-    // null for an adapter whose entry is not one declaration's.
-    Invoke framedEntry;
-    const ArgumentFrameRegistration* next;
-    ArgumentFrameRegistration(Invoke entry_, NativeCallableFrame frame_, NativeCallableFrame (*resolve_)(void*) = nullptr,
-                              Invoke framedEntry_ = nullptr)
-        : entry(entry_), frame(frame_), resolve(resolve_), framedEntry(framedEntry_) {
-      auto& head = argumentFrameRegistrations();
-      next = head.load(std::memory_order_relaxed);
-      while (!head.compare_exchange_weak(next, this, std::memory_order_release, std::memory_order_relaxed)) {}
-    }
+  /**
+   * What `name`, `length` and `Function.prototype.toString` answer for a
+   * function object: ECMA-262's [[Name]] (from the declaration itself, or from
+   * `NamedEvaluation` at the syntax position an anonymous function/arrow
+   * literal was defined), the formal-parameter count `length` reports (leading
+   * parameters up to the first default/rest one, `ExpectedArgumentCount`) and
+   * [[SourceText]]. All three are facts about the SYNTAX, decided once by the
+   * compiler at the allocation site, so they live in the entry's record
+   * (`EntryRecord`) rather than on every `CallableObject` copy.
+   */
+  struct CallableFacts {
+    std::string_view name;
+    std::string_view text;
+    std::size_t length;
   };
-  static std::atomic<const ArgumentFrameRegistration*>& argumentFrameRegistrations() {
-    static std::atomic<const ArgumentFrameRegistration*> head{nullptr};
-    return head;
-  }
-  static NativeCallableFrame argumentFrameFor(Invoke entry, void* environment) {
-    for (auto* frame = argumentFrameRegistrations().load(std::memory_order_acquire); frame; frame = frame->next)
-      if (frame->entry == entry) return frame->resolve ? frame->resolve(environment) : frame->frame;
-    return {};
-  }
-  NativeCallableFrame argumentFrame() const { return argumentFrameFor(invoke, environment); }
-  /** The declaration thunk an `entryWithArgumentFrame` wrapper forwards to,
-   * or `entry` itself. The wrapper only states the argument frame; per-
-   * declaration facts published against the thunk (its `[[Construct]]` entry)
-   * still belong to the value. */
-  static Invoke declarationEntryOf(Invoke entry) {
-    for (auto* frame = argumentFrameRegistrations().load(std::memory_order_acquire); frame; frame = frame->next)
-      if (frame->entry == entry) return frame->framedEntry != nullptr ? frame->framedEntry : entry;
-    return entry;
+
+  /**
+   * Everything the runtime knows about one entry beyond how to call it: its
+   * receiver entry (a method view's logical `this`), its argument frame, its
+   * function facts, the declaration a forwarding wrapper stands for, and the
+   * `[[Construct]]` entries that declaration published.
+   *
+   * A carrier reaches these through `record`, never through `invoke`. The
+   * entry's ADDRESS identifies nothing: a release link folds functions whose
+   * machine code is identical (lld-link and link.exe with /OPT:ICF, ld64's
+   * deduplication, lld with --icf=all), address-taken ones included, so
+   * `callUnboundMethod<Writable>` and `callUnboundMethod<Duplex>` -- one body,
+   * two receiver checks -- may share one address in a shipped binary. A record
+   * is a separate object per entry instantiation (`recordOf<Entry>`), mutable
+   * static storage that no linker folds, so a folded pair still carries two
+   * records and each value keeps its own receiver check, frame and facts. The
+   * call itself may then land in the shared code, which is correct: folding
+   * only merges functions that behave identically.
+   *
+   * Static lifetime, no allocation per value or call. A record's fields are
+   * written once, by the function-local static initializer of the site that
+   * mints the entry, before the first carrier holding the record exists; every
+   * later reader holds such a carrier, so it observes the writes.
+   */
+  struct EntryRecord {
+    InvokeWithReceiver withReceiver = nullptr;
+    NativeCallableFrame frame{};
+    NativeCallableFrame (*resolveFrame)(void*) = nullptr;
+    bool hasFacts = false;
+    std::string_view name{};
+    std::size_t length = 0;
+    std::string_view text{};
+    CallableFacts (*resolveFacts)(void*) = nullptr;
+    // The declaration's own record a forwarding wrapper stands for
+    // (`entryWithArgumentFrame`): facts and `[[Construct]]` entries published
+    // for the declaration still belong to the wrapped value.
+    const EntryRecord* declaration = nullptr;
+    std::atomic<const detail::ConstructEntryNode*> constructs{nullptr};
+  };
+
+  /** One entry's record: one per `Entry` instantiation, distinct even where the linker folded two entries' code. */
+  template <Invoke Entry>
+  static inline constinit EntryRecord recordOf{};
+
+  /** An entry as a minting site stores it: the function to call and its record (null: an entry the runtime knows nothing about). */
+  struct RecordedEntry {
+    Invoke invoke = nullptr;
+    const EntryRecord* record = nullptr;
+    constexpr RecordedEntry() = default;
+    constexpr RecordedEntry(Invoke invoke_, const EntryRecord* record_ = nullptr) : invoke(invoke_), record(record_) {}
+  };
+  template <Invoke Entry>
+  static constexpr RecordedEntry recorded() {
+    return RecordedEntry{Entry, &recordOf<Entry>};
   }
 
+  /** The declaration record `record` stands for: its `declaration` when it is a forwarding wrapper's, else itself. */
+  static const EntryRecord* declarationRecordOf(const EntryRecord* record) {
+    return record != nullptr && record->declaration != nullptr ? record->declaration : record;
+  }
+
+  static NativeCallableFrame argumentFrameFor(const EntryRecord* record, void* environment) {
+    if (record == nullptr) return {};
+    return record->resolveFrame ? record->resolveFrame(environment) : record->frame;
+  }
+  NativeCallableFrame argumentFrame() const { return argumentFrameFor(record, environment); }
+
   template <Invoke Entry, int RestFrom, bool ActualArguments, bool ReceivesThis>
-  static Invoke entryWithArgumentFrame(Invoke actual = Entry, void* environment = nullptr) {
+  static RecordedEntry entryWithArgumentFrame(RecordedEntry actual = recorded<Entry>(), void* environment = nullptr) {
     static_assert(RestFrom == -1 || RestFrom + 1 == sizeof...(Arguments), "a packing frame names the last physical slot");
     static_assert(!ActualArguments || RestFrom >= 0, "an actual-arguments frame requires a native packed slot");
     if constexpr (Entry == nullptr) {
       // A function-pointer adapter's default value is null; only its actual
       // entry can be called. Its existing frame must agree exactly. In
-      // particular, an unregistered pointer cannot acquire a rest/method
+      // particular, an entry without a record cannot acquire a rest/method
       // frame merely because it has the same C++ parameter types.
-      if (actual == nullptr) throw std::runtime_error("a native callable adapter has no entry");
-      const auto frame = argumentFrameFor(actual, environment);
+      if (actual.invoke == nullptr) throw std::runtime_error("a native callable adapter has no entry");
+      const auto frame = argumentFrameFor(actual.record, environment);
       if (frame.restFrom != RestFrom || frame.actualArguments != ActualArguments || frame.receivesThis != ReceivesThis)
         throw std::runtime_error("a native callable adapter has no matching argument frame");
       return actual;
     } else {
-      if (actual != Entry) throw std::runtime_error("a native callable adapter changed its constant entry");
+      // Folding-safe: `actual` was spelled from this same `Entry`, so the two
+      // name one function whether or not its code was folded with another's.
+      if (actual.invoke != Entry) throw std::runtime_error("a native callable adapter changed its constant entry");
       constexpr Invoke framed = &callArgumentFrame<Entry, RestFrom, ActualArguments, ReceivesThis>;
-      static const ArgumentFrameRegistration frame{framed, {RestFrom, ActualArguments, ReceivesThis}, nullptr, Entry};
-      static const SourceRegistration source{framed, {}, 0, {}, +[](void* environment) -> CallableFacts {
-        return factsFor(Entry, environment);
-      }};
-      static const ReceiverRegistration receiver{framed, &callArgumentFrameWithReceiver<Entry, RestFrom, ActualArguments, ReceivesThis>};
-      return framed;
+      // `callArgumentFrame` instantiations that differ only in the frame have
+      // one body each and are folded together, so the frame lives in the
+      // wrapper's own record.
+      static const bool published = [] {
+        auto& record = recordOf<framed>;
+        record.frame = NativeCallableFrame{RestFrom, ActualArguments, ReceivesThis};
+        record.declaration = &recordOf<Entry>;
+        record.withReceiver = &callArgumentFrameWithReceiver<Entry, RestFrom, ActualArguments, ReceivesThis>;
+        return true;
+      }();
+      (void)published;
+      return recorded<framed>();
     }
   }
   template <Invoke Entry, int RestFrom, bool ActualArguments, bool ReceivesThis>
@@ -7088,153 +7176,53 @@ struct CallableObject<Result(Arguments...)> {
   }
   template <Invoke Entry, int RestFrom, bool ActualArguments, bool ReceivesThis>
   static Result callArgumentFrameWithReceiver(void* environment, const NativeCallReceiver& receiver, Arguments... arguments) {
-    return CallableObject{Entry, PackedEnvironment{environment, {}, nullptr}}.callWithReceiver(receiver, std::forward<Arguments>(arguments)...);
+    return CallableObject{recorded<Entry>(), PackedEnvironment{environment, {}, nullptr}}.callWithReceiver(receiver,
+                                                                                                        std::forward<Arguments>(arguments)...);
   }
   template <Invoke Entry, typename Source, int ReceiverSlots = 0>
-  static void registerArgumentFrameAdapter() {
-    static const ArgumentFrameRegistration frame{Entry, {}, +[](void* environment) -> NativeCallableFrame {
+  static RecordedEntry registerArgumentFrameAdapter() {
+    static const bool published = (recordOf<Entry>.resolveFrame = +[](void* environment) -> NativeCallableFrame {
       if constexpr (requires(const Source& source) { source.argumentFrame(); }) {
         auto frame = static_cast<const Source*>(environment)->argumentFrame();
         if (frame.restFrom >= 0) frame.restFrom -= ReceiverSlots;
         if constexpr (ReceiverSlots > 0) frame.receivesThis = false;
         return frame;
       } else return {};
-    }};
+    }, true);
+    (void)published;
+    return recorded<Entry>();
   }
 
-  // Only method views register a second entry. Ordinary callables retain the
-  // same carrier size and invoke path, and ignore logical this as before.
-  struct ReceiverRegistration {
-    Invoke entry;
-    InvokeWithReceiver withReceiver;
-    const ReceiverRegistration* next;
-    ReceiverRegistration(Invoke entry_, InvokeWithReceiver withReceiver_) : entry(entry_), withReceiver(withReceiver_) {
-      auto& head = receiverRegistrations();
-      next = head.load(std::memory_order_relaxed);
-      while (!head.compare_exchange_weak(next, this, std::memory_order_release, std::memory_order_relaxed)) {}
-    }
-  };
-  static std::atomic<const ReceiverRegistration*>& receiverRegistrations() {
-    static std::atomic<const ReceiverRegistration*> head{nullptr};
-    return head;
-  }
-  /** The receiver entry `entry` is registered with, or null. */
-  static InvokeWithReceiver registeredReceiverEntry(Invoke entry) {
-    for (auto* registered = receiverRegistrations().load(std::memory_order_acquire); registered; registered = registered->next)
-      if (registered->entry == entry) return registered->withReceiver;
-    return nullptr;
-  }
-  /**
-   * Whether `entry` is not registered yet. The same entry registered with a
-   * different receiver entry stops the program (failFoldedReceiverEntry): in
-   * the compiled instantiations that call this, nothing but a linker can make
-   * two of them share an entry.
-   */
-  static bool receiverEntryUnregistered(Invoke entry, InvokeWithReceiver withReceiver) {
-    const InvokeWithReceiver registered = registeredReceiverEntry(entry);
-    if (registered != nullptr && registered != withReceiver) failFoldedReceiverEntry();
-    return registered == nullptr;
-  }
-  static void registerRuntimeReceiverEntry(Invoke entry, InvokeWithReceiver withReceiver) {
-    if (entry == nullptr || withReceiver == nullptr) throw std::runtime_error("a native callable receiver adapter has no entry");
-    static std::mutex mutex;
-    std::lock_guard<std::mutex> lock(mutex);
-    // Function pointers handed in at run time can pair one adapter with two
-    // receiver adapters by mistake; that is refused as a catchable error.
-    const InvokeWithReceiver registered = registeredReceiverEntry(entry);
-    if (registered != nullptr && registered != withReceiver)
-      throw std::runtime_error(
-          "a native callable adapter has conflicting receiver entries (two adapters at one address: "
-          "identical-code folding, or one adapter paired with two receiver adapters)");
-    if (registered != nullptr) return;
-    // The registry owns these metadata nodes for the process lifetime, one
-    // per actual entry. They do not allocate a callable environment or retain
-    // a source object, and invocation performs no registration/allocation.
-    (void)new ReceiverRegistration(entry, withReceiver);
-  }
+  // Only method views have a receiver entry. Ordinary callables keep the same
+  // invoke path, and ignore logical this as before.
   template <Invoke Entry, InvokeWithReceiver WithReceiver>
-  static void registerReceiverEntry() {
-    // Checked once per instantiation before its static node joins the
-    // registry (static storage: registering allocates nothing): two
-    // instantiations with different receiver entries at ONE entry address can
-    // only mean the linker folded their entries (failFoldedReceiverEntry).
-    static const bool checked = (receiverEntryUnregistered(Entry, WithReceiver), true);
-    static const ReceiverRegistration registration{Entry, WithReceiver};
-    (void)checked;
-  }
-  /**
-   * One entry address registered with two different receiver entries.
-   *
-   * Callables are told apart by entry address: callWithReceiver finds a
-   * method's receiver check by it. Distinct functions with identical machine
-   * code -- callUnboundMethod<Writable> and callUnboundMethod<Duplex> -- share
-   * an address only when the linker folds them, which lld-link and link.exe do
-   * without /debug (identical-code folding) and ld64 does by default
-   * (deduplication). Dispatch would then run the other type's receiver check,
-   * silently. The program stops here instead, naming the link setting.
-   */
-  [[noreturn]] static void failFoldedReceiverEntry() {
-    std::fputs(
-        "gea runtime: two native callables share one entry address with different receiver entries. The linker "
-        "folded identical functions (identical-code folding): link with /OPT:NOICF (lld-link, link.exe) or "
-        "-Wl,-no_deduplicate (ld64), and without --icf=all (lld, gold).\n",
-        stderr);
-    gea::detail::abortAfterFlush();
+  static RecordedEntry registerReceiverEntry() {
+    static const bool published = (recordOf<Entry>.withReceiver = WithReceiver, true);
+    (void)published;
+    return recorded<Entry>();
   }
 
   /**
-   * The three per-declaration static facts ECMA-262 attaches to a function
-   * object at creation time and never recomputes afterward: [[SourceText]],
-   * [[Name]] (from the declaration itself, or from `NamedEvaluation` at the
-   * syntax position an anonymous function/arrow literal was defined) and the
-   * formal-parameter count `length` reports (leading parameters up to the
-   * first default/rest one, ECMA-262 `ExpectedArgumentCount`). All three are
-   * facts about the SYNTAX, decided once by the compiler at the allocation
-   * site, so they travel through the identical registry `sourceText()`
-   * already used: one static table keyed by the thunk pointer, walked once
-   * per read rather than carried on every `CallableObject` copy.
+   * The record of an adapter handed in at run time as a function pointer,
+   * which has no `recordOf` instantiation of its own: one per distinct
+   * (receiver entry, facts resolver) pair, allocated once and kept for the
+   * process lifetime, never per value or call. Interned by CONTENT, so two
+   * adapters folded into one address simply share a record that is right for
+   * both; nothing here can be confused by folding.
    */
-  struct CallableFacts {
-    std::string_view name;
-    std::string_view text;
-    std::size_t length;
-  };
-
-  // Registrations have static lifetime. Ordinary calls and closure allocations
-  // do no registry work, and the carrier's layout remains unchanged.
-  struct SourceRegistration {
-    Invoke entry;
-    std::string_view name;
-    std::size_t length;
-    std::string_view text;
-    CallableFacts (*resolve)(void*);
-    const SourceRegistration* next;
-    SourceRegistration(Invoke entry_, std::string_view name_, std::size_t length_, std::string_view text_, CallableFacts (*resolve_)(void*))
-        : entry(entry_), name(name_), length(length_), text(text_), resolve(resolve_) {
-      auto& head = sourceRegistrations();
-      next = head.load(std::memory_order_relaxed);
-      while (!head.compare_exchange_weak(next, this, std::memory_order_release, std::memory_order_relaxed)) {}
-    }
-  };
-
-  static std::atomic<const SourceRegistration*>& sourceRegistrations() {
-    static std::atomic<const SourceRegistration*> head{nullptr};
-    return head;
-  }
-  static void registerRuntimeSourceEntry(Invoke entry, CallableFacts (*resolve)(void*)) {
-    if (entry == nullptr || resolve == nullptr) throw std::runtime_error("a native callable source adapter has no entry");
+  static const EntryRecord* runtimeAdapterRecord(InvokeWithReceiver withReceiver, CallableFacts (*resolveFacts)(void*)) {
     static std::mutex mutex;
+    static auto* records = new std::vector<const EntryRecord*>();
     std::lock_guard<std::mutex> lock(mutex);
-    for (auto* registered = sourceRegistrations().load(std::memory_order_acquire); registered; registered = registered->next) {
-      if (registered->entry != entry) continue;
-      if (registered->resolve != resolve)
-        throw std::runtime_error("a native callable adapter has conflicting source entries");
-      return;
-    }
-    // Static-lifetime metadata is allocated once per runtime entry/resolver,
-    // never per invocation or per adapted Source/environment allocation.
-    (void)new SourceRegistration(entry, {}, 0, {}, resolve);
+    for (const EntryRecord* record : *records)
+      if (record->withReceiver == withReceiver && record->resolveFacts == resolveFacts) return record;
+    auto* record = new EntryRecord();
+    record->withReceiver = withReceiver;
+    record->resolveFacts = resolveFacts;
+    records->push_back(record);
+    return record;
   }
+
   template <typename Source>
   static CallableFacts sourceAdapterFacts(void* environment) {
     const auto source = static_cast<const Source*>(environment)->facts();
@@ -7242,17 +7230,18 @@ struct CallableObject<Result(Arguments...)> {
   }
   template <auto Known, typename Source>
   static CallableFacts sourceInPlaceAdapterFacts(void* environment) {
-    const auto source = Source::factsFor(Known, environment);
+    const auto source = Source::factsFor(&Source::template recordOf<Known>, environment);
     return CallableFacts{source.name, source.text, source.length};
   }
 
+  /** Publishes `Entry`'s facts in its record; for a carrier the caller builds from `recorded<Entry>()`. */
   template <Invoke Entry>
   static bool registerSource(std::string_view name, std::size_t length, std::string_view text) {
-    static const SourceRegistration registration{Entry, name, length, text, nullptr};
+    (void)entryWithFacts<Entry>(name, length, text);
     return true;
   }
 
-  // The same registration, performed where a function OBJECT is minted from
+  // The same publication, performed where a function OBJECT is minted from
   // the thunk rather than by a namespace-scope initializer beside the thunk.
   // A namespace-scope registration is a static initializer that takes the
   // thunk's address, and a static initializer with a side effect is a GC
@@ -7260,37 +7249,71 @@ struct CallableObject<Result(Arguments...)> {
   // emitted function -- and its source text -- in the binary whether or not
   // anything reached it. One `EventEmitter` boxing a listener turned the
   // registry on for a whole program, and that pinned every function of the
-  // program. Here the registration is reachable only from a site
+  // program. Here the publication is reachable only from a site
   // that creates the function object, which is the only site that can later
   // observe its `name`/`length`/source. The function-local static is one
   // per `Entry`, so several minting sites of one declaration share a single
-  // registration, and a site costs one guard-variable load per mint.
+  // publication, and a site costs one guard-variable load per mint.
   template <Invoke Entry>
-  static Invoke entryWithFacts(std::string_view name, std::size_t length, std::string_view text) {
-    static const SourceRegistration registration{Entry, name, length, text, nullptr};
-    return Entry;
+  static RecordedEntry entryWithFacts(std::string_view name, std::size_t length, std::string_view text) {
+    static const bool published = [&] {
+      auto& record = recordOf<Entry>;
+      record.name = name;
+      record.length = length;
+      record.text = text;
+      record.hasFacts = true;
+      return true;
+    }();
+    (void)published;
+    return recorded<Entry>();
+  }
+
+  /**
+   * `entry`, minted from `Declaration`'s thunk, with the declaration's
+   * `[[Construct]]` entry `Construct` published in its record
+   * (`gea::withConstructEntry` reads it back). Published at the mint for the
+   * reason `entryWithFacts` is, and once per pair.
+   */
+  template <Invoke Declaration, auto Construct>
+  static RecordedEntry entryWithConstruct(RecordedEntry entry) {
+    static detail::ConstructEntryNode node{&detail::ConstructEntryTag<decltype(Construct)>::id, reinterpret_cast<void*>(Construct), nullptr};
+    static const bool published = [] {
+      auto& head = recordOf<Declaration>.constructs;
+      node.next = head.load(std::memory_order_relaxed);
+      while (!head.compare_exchange_weak(node.next, &node, std::memory_order_release, std::memory_order_relaxed)) {}
+      return true;
+    }();
+    (void)published;
+    if (entry.record == nullptr) entry.record = &recordOf<Declaration>;
+    return entry;
   }
 
   // An adapter (`dropArguments` and its siblings below) shares ONE thunk
-  // pointer across every closure it wraps, so the facts it reports cannot
-  // live in this registration -- they belong to whichever `Source` closure
-  // was actually wrapped, reached back out through the environment exactly as
-  // `sourceText()`'s own resolve already did before `facts()` folded it in.
+  // across every closure it wraps, so the facts it reports cannot live in
+  // its record -- they belong to whichever `Source` closure was actually
+  // wrapped, reached back out through the environment.
   template <Invoke Entry, typename Source>
-  static void registerSourceAdapter() {
-    static const SourceRegistration registration{Entry, {}, 0, {}, +[](void* environment_) -> CallableFacts {
+  static RecordedEntry registerSourceAdapter() {
+    static const bool published = (recordOf<Entry>.resolveFacts = +[](void* environment_) -> CallableFacts {
       const auto source = static_cast<const Source*>(environment_)->facts();
       return CallableFacts{source.name, source.text, source.length};
-    }};
+    }, true);
+    (void)published;
+    return recorded<Entry>();
   }
 
-    template <int RestFrom = -1, bool ActualArguments = false, bool ReceivesThis = false, typename Source, typename Adapter>
+  template <int RestFrom = -1, bool ActualArguments = false, bool ReceivesThis = false, typename Source, typename Adapter>
   static CallableObject adaptSource(Source source, Adapter adapter) {
     CallableObject adapted{+adapter, packEnvironment(std::move(source))};
-    adapted.invoke = entryWithArgumentFrame<+Adapter{}, RestFrom, ActualArguments, ReceivesThis>(+adapter, adapted.environment);
-    if constexpr (std::is_pointer_v<Adapter>) registerRuntimeSourceEntry(+adapter, &sourceAdapterFacts<Source>);
-    else {
-      static const SourceRegistration registration{+adapter, {}, 0, {}, &sourceAdapterFacts<Source>};
+    if constexpr (std::is_pointer_v<Adapter>) {
+      adapted.invoke = entryWithArgumentFrame<nullptr, RestFrom, ActualArguments, ReceivesThis>(+adapter, adapted.environment).invoke;
+      adapted.record = runtimeAdapterRecord(nullptr, &sourceAdapterFacts<Source>);
+    } else {
+      static const bool published = (recordOf<+Adapter{}>.resolveFacts = &sourceAdapterFacts<Source>, true);
+      (void)published;
+      const auto entry = entryWithArgumentFrame<+Adapter{}, RestFrom, ActualArguments, ReceivesThis>(+adapter, adapted.environment);
+      adapted.invoke = entry.invoke;
+      adapted.record = entry.record;
     }
     adapted.shareFunctionObject(*static_cast<const Source*>(adapted.environment));
     return adapted;
@@ -7311,10 +7334,15 @@ struct CallableObject<Result(Arguments...)> {
   template <auto Known, int RestFrom = -1, bool ActualArguments = false, bool ReceivesThis = false, typename Source, typename Adapter>
   static CallableObject adaptSourceInPlace(const Source& source, Adapter adapter) {
     CallableObject adapted{+adapter, PackedEnvironment{source.environment, source.environmentOwner, nullptr}};
-    adapted.invoke = entryWithArgumentFrame<+Adapter{}, RestFrom, ActualArguments, ReceivesThis>(+adapter, adapted.environment);
-    if constexpr (std::is_pointer_v<Adapter>) registerRuntimeSourceEntry(+adapter, &sourceInPlaceAdapterFacts<Known, Source>);
-    else {
-      static const SourceRegistration registration{+adapter, {}, 0, {}, &sourceInPlaceAdapterFacts<Known, Source>};
+    if constexpr (std::is_pointer_v<Adapter>) {
+      adapted.invoke = entryWithArgumentFrame<nullptr, RestFrom, ActualArguments, ReceivesThis>(+adapter, adapted.environment).invoke;
+      adapted.record = runtimeAdapterRecord(nullptr, &sourceInPlaceAdapterFacts<Known, Source>);
+    } else {
+      static const bool published = (recordOf<+Adapter{}>.resolveFacts = &sourceInPlaceAdapterFacts<Known, Source>, true);
+      (void)published;
+      const auto entry = entryWithArgumentFrame<+Adapter{}, RestFrom, ActualArguments, ReceivesThis>(+adapter, adapted.environment);
+      adapted.invoke = entry.invoke;
+      adapted.record = entry.record;
     }
     adapted.shareFunctionObject(source);
     return adapted;
@@ -7323,13 +7351,15 @@ struct CallableObject<Result(Arguments...)> {
   template <int RestFrom = -1, bool ActualArguments = false, bool ReceivesThis = false, typename Source, typename Adapter, typename ReceiverAdapter>
   static CallableObject adaptSourceWithReceiver(Source source, Adapter adapter, ReceiverAdapter receiverAdapter) {
     auto adapted = adaptSource<RestFrom, ActualArguments, ReceivesThis>(std::move(source), adapter);
-    if constexpr (std::is_pointer_v<Adapter> || std::is_pointer_v<ReceiverAdapter>)
-      registerRuntimeReceiverEntry(+adapter, +receiverAdapter);
-    else {
-      // Checked once per instantiation, as registerReceiverEntry is.
-      static const bool checked = (receiverEntryUnregistered(+adapter, +receiverAdapter), true);
-      static const ReceiverRegistration registration{+adapter, +receiverAdapter};
-      (void)checked;
+    if constexpr (std::is_pointer_v<Adapter> || std::is_pointer_v<ReceiverAdapter>) {
+      if (+receiverAdapter == nullptr) throw std::runtime_error("a native callable receiver adapter has no entry");
+      // A record of its own (the pair handed in), whatever wrapper the frame
+      // check returned: the adapter itself is the entry, as in `adaptSource`.
+      adapted.invoke = +adapter;
+      adapted.record = runtimeAdapterRecord(+receiverAdapter, &sourceAdapterFacts<Source>);
+    } else {
+      static const bool published = (recordOf<+Adapter{}>.withReceiver = +ReceiverAdapter{}, true);
+      (void)published;
     }
     return adapted;
   }
@@ -7337,28 +7367,31 @@ struct CallableObject<Result(Arguments...)> {
   template <auto Known, int RestFrom = -1, bool ActualArguments = false, bool ReceivesThis = false, typename Source, typename Adapter, typename ReceiverAdapter>
   static CallableObject adaptSourceInPlaceWithReceiver(const Source& source, Adapter adapter, ReceiverAdapter receiverAdapter) {
     auto adapted = adaptSourceInPlace<Known, RestFrom, ActualArguments, ReceivesThis>(source, adapter);
-    if constexpr (std::is_pointer_v<Adapter> || std::is_pointer_v<ReceiverAdapter>)
-      registerRuntimeReceiverEntry(+adapter, +receiverAdapter);
-    else {
-      // Checked once per instantiation, as registerReceiverEntry is.
-      static const bool checked = (receiverEntryUnregistered(+adapter, +receiverAdapter), true);
-      static const ReceiverRegistration registration{+adapter, +receiverAdapter};
-      (void)checked;
+    if constexpr (std::is_pointer_v<Adapter> || std::is_pointer_v<ReceiverAdapter>) {
+      if (+receiverAdapter == nullptr) throw std::runtime_error("a native callable receiver adapter has no entry");
+      adapted.invoke = +adapter;
+      adapted.record = runtimeAdapterRecord(+receiverAdapter, &sourceInPlaceAdapterFacts<Known, Source>);
+    } else {
+      static const bool published = (recordOf<+Adapter{}>.withReceiver = +ReceiverAdapter{}, true);
+      (void)published;
     }
     return adapted;
   }
 
-  static CallableFacts factsFor(Invoke invoke, void* environment) {
-    for (auto* entry = sourceRegistrations().load(std::memory_order_acquire); entry; entry = entry->next) {
-      if (entry->entry == invoke) return entry->resolve ? entry->resolve(environment) : CallableFacts{entry->name, entry->text, entry->length};
+  static CallableFacts factsFor(const EntryRecord* record, void* environment) {
+    // A forwarding wrapper's record publishes no facts of its own; its
+    // declaration's does.
+    for (; record != nullptr; record = record->declaration) {
+      if (record->resolveFacts) return record->resolveFacts(environment);
+      if (record->hasFacts) return CallableFacts{record->name, record->text, record->length};
     }
     // Runtime-created native builtins carry no ECMAScript [[SourceText]] and
-    // no registered [[Name]]/length either -- reflecting those is a host
+    // no published [[Name]]/length either -- reflecting those is a host
     // built-in's own concern, not this carrier's.
     return CallableFacts{{}, "function () { [native code] }", 0};
   }
 
-  CallableFacts facts() const { return factsFor(invoke, environment); }
+  CallableFacts facts() const { return factsFor(record, environment); }
 
   std::string_view sourceText() const { return facts().text; }
   /** ECMA-262 [[Name]] -- the declared name, or the `NamedEvaluation` name from where an anonymous literal was defined; empty when neither applies. */
@@ -7367,6 +7400,8 @@ struct CallableObject<Result(Arguments...)> {
   std::size_t length() const { return facts().length; }
 
   Invoke invoke = nullptr;
+  /** What the runtime knows about `invoke` (`EntryRecord`), or null for an entry it knows nothing about. */
+  const EntryRecord* record = nullptr;
   void* environment = nullptr;
   /** Empty for a capture-free callable and for an inline environment, which is owned by nothing because it IS `environment`. A heap environment's block, otherwise: see `PackedEnvironment`. */
   Ref<void> environmentOwner;
@@ -7391,6 +7426,10 @@ struct CallableObject<Result(Arguments...)> {
   CallableObject(Invoke invoke_, void* environment_) : invoke(invoke_), environment(environment_) {}
   CallableObject(Invoke invoke_, PackedEnvironment packed)
       : invoke(invoke_), environment(packed.pointer), environmentOwner(std::move(packed.owner)), identityHeader(packed.identityHeader) {}
+  CallableObject(RecordedEntry entry_, void* environment_) : invoke(entry_.invoke), record(entry_.record), environment(environment_) {}
+  CallableObject(RecordedEntry entry_, PackedEnvironment packed)
+      : invoke(entry_.invoke), record(entry_.record), environment(packed.pointer), environmentOwner(std::move(packed.owner)),
+        identityHeader(packed.identityHeader) {}
   // A copy SHARES the identity owner the source already has and mints none:
   // the emitter identifies, at allocation, every callable whose identity the
   // program can observe (`ir/program-facts.ts`'s callable-identity census,
@@ -7407,14 +7446,15 @@ struct CallableObject<Result(Arguments...)> {
   // return slot and a destruction, and each of those touched two handles
   // through an out-of-line call until this.
   [[gnu::always_inline]] CallableObject(const CallableObject& source)
-      : invoke(source.invoke), environment(source.environment), environmentOwner(source.environmentOwner),
+      : invoke(source.invoke), record(source.record), environment(source.environment), environmentOwner(source.environmentOwner),
         functionObject(source.functionObject), identityHeader(source.identityHeader) {}
   [[gnu::always_inline]] CallableObject(CallableObject&& source) noexcept
-      : invoke(source.invoke), environment(source.environment), environmentOwner(std::move(source.environmentOwner)),
+      : invoke(source.invoke), record(source.record), environment(source.environment), environmentOwner(std::move(source.environmentOwner)),
         functionObject(std::move(source.functionObject)), identityHeader(source.identityHeader) {}
   [[gnu::always_inline]] CallableObject& operator=(const CallableObject& source) {
     if (this == &source) return *this;
     invoke = source.invoke;
+    record = source.record;
     environment = source.environment;
     environmentOwner = source.environmentOwner;
     functionObject = source.functionObject;
@@ -7423,6 +7463,7 @@ struct CallableObject<Result(Arguments...)> {
   }
   [[gnu::always_inline]] CallableObject& operator=(CallableObject&& source) noexcept {
     invoke = source.invoke;
+    record = source.record;
     environment = source.environment;
     environmentOwner = std::move(source.environmentOwner);
     functionObject = std::move(source.functionObject);
@@ -7527,7 +7568,7 @@ struct CallableObject<Result(Arguments...)> {
    * carry their environments.
    */
   template <typename Source, typename = std::enable_if_t<std::is_same_v<Source, CallableObject<Result()>> && sizeof...(Arguments) != 0>>
-  CallableObject(const Source& source) : CallableObject(&dropArguments, packEnvironment(source)) {
+  CallableObject(const Source& source) : CallableObject(recorded<&dropArguments>(), packEnvironment(source)) {
     shareFunctionObject(source);
     registerSourceAdapter<&dropArguments, Source>();
     registerReceiverEntry<&dropArguments, &dropArgumentsWithReceiver>();
@@ -7554,7 +7595,7 @@ struct CallableObject<Result(Arguments...)> {
   static CallableObject unboundMethod(const CallableObject<Result(Ref<Held>, Arguments...)>& source) {
     using Source = CallableObject<Result(Ref<Held>, Arguments...)>;
     source.identified();
-    CallableObject value{&callUnboundMethod<Held>, packEnvironment(source)};
+    CallableObject value{recorded<&callUnboundMethod<Held>>(), packEnvironment(source)};
     value.shareFunctionObject(source);
     registerSourceAdapter<&callUnboundMethod<Held>, Source>();
     registerArgumentFrameAdapter<&callUnboundMethod<Held>, Source, 1>();
@@ -7580,7 +7621,7 @@ struct CallableObject<Result(Arguments...)> {
     using Source = CallableObject<Result(Receiver, Arguments...)>;
     static_assert(std::is_empty_v<Resolver>, "native receiver resolution must not capture the object read");
     source.identified();
-    CallableObject value{&callUnboundMethodAs<Receiver, Resolver>, packEnvironment(source)};
+    CallableObject value{recorded<&callUnboundMethodAs<Receiver, Resolver>>(), packEnvironment(source)};
     value.shareFunctionObject(source);
     registerSourceAdapter<&callUnboundMethodAs<Receiver, Resolver>, Source>();
     registerArgumentFrameAdapter<&callUnboundMethodAs<Receiver, Resolver>, Source, 1>();
@@ -7623,7 +7664,7 @@ struct CallableObject<Result(Arguments...)> {
   template <typename Receiver>
   static CallableObject bindReceiver(const CallableObject<Result(Receiver, Arguments...)>& source, Receiver receiver) {
     using Bound = BoundReceiver<Receiver>;
-    CallableObject bound{&callBoundReceiver<Receiver>, packEnvironment(Bound{source, std::move(receiver)})};
+    CallableObject bound{recorded<&callBoundReceiver<Receiver>>(), packEnvironment(Bound{source, std::move(receiver)})};
     bound.shareFunctionObject(source);
     registerSourceAdapter<&callBoundReceiver<Receiver>, Bound>();
     return bound;
@@ -7672,7 +7713,7 @@ struct CallableObject<Result(Arguments...)> {
   template <typename Held>
   static CallableObject bindHolder(const CallableObject<Result(Ref<Held>, Arguments...)>& source, const Ref<Held>& holder) {
     using Bound = HolderReceiver<Held>;
-    CallableObject bound{&callHolder<Held>, packEnvironment(Bound{source, WeakRef<Held>(holder)})};
+    CallableObject bound{recorded<&callHolder<Held>>(), packEnvironment(Bound{source, WeakRef<Held>(holder)})};
     bound.shareFunctionObject(source);
     registerSourceAdapter<&callHolder<Held>, Bound>();
     return bound;
@@ -7712,11 +7753,12 @@ struct CallableObject<Result(Arguments...)> {
 
   template <auto Known, typename Source, typename Held>
   static CallableObject bindHolderInPlace(const Source& source, const Ref<Held>& holder) {
-    static const SourceRegistration registration{&callOwnedHolder<Known, Held>, {}, 0, {}, +[](void*) -> CallableFacts {
-      const auto own = Source::factsFor(Known, nullptr);
+    static const bool published = (recordOf<&callOwnedHolder<Known, Held>>.resolveFacts = +[](void*) -> CallableFacts {
+      const auto own = Source::factsFor(&Source::template recordOf<Known>, nullptr);
       return CallableFacts{own.name, own.text, own.length};
-    }};
-    CallableObject bound{&callOwnedHolder<Known, Held>, packTransientEnvironment(HolderEnvironment<Held>{holder})};
+    }, true);
+    (void)published;
+    CallableObject bound{recorded<&callOwnedHolder<Known, Held>>(), packTransientEnvironment(HolderEnvironment<Held>{holder})};
     bound.shareFunctionObject(source);
     return bound;
   }
@@ -7778,7 +7820,7 @@ struct CallableObject<Result(Arguments...)> {
                                    sizeof...(SourceArguments) < sizeof...(Arguments) &&
                                    IsTypePrefix<std::tuple<SourceArguments...>, std::tuple<Arguments...>>::value>>
   CallableObject(const CallableObject<SourceResult(SourceArguments...)>& source)
-      : CallableObject(&dropTrailingArguments<SourceResult, SourceArguments...>, packEnvironment(source)) {
+      : CallableObject(recorded<&dropTrailingArguments<SourceResult, SourceArguments...>>(), packEnvironment(source)) {
     shareFunctionObject(source);
     registerSourceAdapter<&dropTrailingArguments<SourceResult, SourceArguments...>, CallableObject<SourceResult(SourceArguments...)>>();
     registerReceiverEntry<&dropTrailingArguments<SourceResult, SourceArguments...>, &dropTrailingArgumentsWithReceiver<SourceResult, SourceArguments...>>();
@@ -7841,7 +7883,7 @@ struct CallableObject<Result(Arguments...)> {
                                   RestRebaseAdmits<std::tuple<Arguments...>, std::tuple<SourceArguments...>>::value>,
       typename = void>
   CallableObject(const CallableObject<SourceResult(SourceArguments...)>& source)
-      : CallableObject(&spreadRestOverLeading<SourceResult, SourceArguments...>, packEnvironment(source)) {
+      : CallableObject(recorded<&spreadRestOverLeading<SourceResult, SourceArguments...>>(), packEnvironment(source)) {
     shareFunctionObject(source);
     registerSourceAdapter<&spreadRestOverLeading<SourceResult, SourceArguments...>, CallableObject<SourceResult(SourceArguments...)>>();
     registerReceiverEntry<&spreadRestOverLeading<SourceResult, SourceArguments...>, &spreadRestOverLeadingWithReceiver<SourceResult, SourceArguments...>>();
@@ -8007,7 +8049,7 @@ struct CallableObject<Result(Arguments...)> {
             typename = std::enable_if_t<std::is_void_v<Result> && !std::is_void_v<SourceResult> && sizeof...(Arguments) != 0>,
             typename = void>
   CallableObject(const CallableObject<SourceResult(Arguments...)>& source)
-      : CallableObject(&discardResult<SourceResult>, packEnvironment(source)) {
+      : CallableObject(recorded<&discardResult<SourceResult>>(), packEnvironment(source)) {
     shareFunctionObject(source);
     registerSourceAdapter<&discardResult<SourceResult>, CallableObject<SourceResult(Arguments...)>>();
     registerArgumentFrameAdapter<&discardResult<SourceResult>, CallableObject<SourceResult(Arguments...)>>();
@@ -8047,7 +8089,7 @@ struct CallableObject<Result(Arguments...)> {
             typename = std::enable_if_t<sizeof...(Arguments) != 0 && !std::is_same_v<SourceResult, Result> &&
                                          ResultWidensIntoArm<SourceResult, Result>::value>>
   CallableObject(const CallableObject<SourceResult()>& source)
-      : CallableObject(&dropArgumentsIntoArm<SourceResult>, packEnvironment(source)) {
+      : CallableObject(recorded<&dropArgumentsIntoArm<SourceResult>>(), packEnvironment(source)) {
     shareFunctionObject(source);
     registerSourceAdapter<&dropArgumentsIntoArm<SourceResult>, CallableObject<SourceResult()>>();
     registerReceiverEntry<&dropArgumentsIntoArm<SourceResult>, &dropArgumentsIntoArmWithReceiver<SourceResult>>();
@@ -8110,7 +8152,7 @@ struct CallableObject<Result(Arguments...)> {
                                         ResultWidensIntoArm<SourceResult, Result>::value>,
             typename = void, typename = void>
   CallableObject(const CallableObject<SourceResult(Arguments...)>& source)
-      : CallableObject(&widenResultIntoArm<SourceResult>, packEnvironment(source)) {
+      : CallableObject(recorded<&widenResultIntoArm<SourceResult>>(), packEnvironment(source)) {
     shareFunctionObject(source);
     registerSourceAdapter<&widenResultIntoArm<SourceResult>, CallableObject<SourceResult(Arguments...)>>();
     registerArgumentFrameAdapter<&widenResultIntoArm<SourceResult>, CallableObject<SourceResult(Arguments...)>>();
@@ -8138,8 +8180,8 @@ struct CallableObject<Result(Arguments...)> {
   Result callWithReceiver(const NativeCallReceiver& receiver, Arguments... arguments) const {
     requireCallable();
     const auto keepAlive = environmentOwner;
-    for (auto* entry = receiverRegistrations().load(std::memory_order_acquire); entry; entry = entry->next)
-      if (entry->entry == invoke) return entry->withReceiver(environment, receiver, std::forward<Arguments>(arguments)...);
+    if (record != nullptr && record->withReceiver != nullptr)
+      return record->withReceiver(environment, receiver, std::forward<Arguments>(arguments)...);
     return invoke(environment, std::forward<Arguments>(arguments)...);
   }
   /**
@@ -8155,8 +8197,8 @@ struct CallableObject<Result(Arguments...)> {
   Result callWithLazyReceiver(const MakeReceiver& make, Arguments... arguments) const {
     requireCallable();
     const auto keepAlive = environmentOwner;
-    for (auto* entry = receiverRegistrations().load(std::memory_order_acquire); entry; entry = entry->next)
-      if (entry->entry == invoke) return entry->withReceiver(environment, make(), std::forward<Arguments>(arguments)...);
+    if (record != nullptr && record->withReceiver != nullptr)
+      return record->withReceiver(environment, make(), std::forward<Arguments>(arguments)...);
     return invoke(environment, std::forward<Arguments>(arguments)...);
   }
 
@@ -8187,6 +8229,14 @@ struct CallableObject<Result(Arguments...)> {
   // A runtime identity guard exposes one target to the native inliner without
   // assuming a mutable callable field still holds its initializer. Keeping the
   // ordinary frame and environment root preserves replacement and re-entry.
+  //
+  // The one comparison of entry addresses left in this header, and folding
+  // cannot make it wrong: it only chooses between calling `invoke` and calling
+  // `Known` (or the body `Borrowed` that `Known` forwards to), and when a
+  // linker folded `invoke`'s function into `Known`'s, the two have identical
+  // code -- recursively, to every callee, which is what lets the linker fold
+  // them -- so either branch computes the same thing. Nothing about the VALUE
+  // (its receiver entry, frame or facts) is decided here; those are `record`'s.
   template <auto Known>
   [[gnu::always_inline]] Result callKnown(Arguments... arguments) const {
     requireCallable();
@@ -8467,7 +8517,12 @@ struct CallableConstructorObject<Result(Arguments...), Constructed(ConstructArgu
   using Invoke = Result (*)(void*, Arguments...);
   using Construct = Constructed (*)(void*, ConstructArguments...);
 
+  using CallableView = CallableObject<Result(Arguments...)>;
+  using RecordedEntry = typename CallableView::RecordedEntry;
+
   Invoke invoke = nullptr;
+  /** The `[[Call]]` entry's record, as `CallableObject::record`. */
+  const typename CallableView::EntryRecord* record = nullptr;
   Construct construct_ = nullptr;
   void* environment = nullptr;
   Ref<void> environmentOwner;
@@ -8478,16 +8533,22 @@ struct CallableConstructorObject<Result(Arguments...), Constructed(ConstructArgu
       : invoke(invoke_), construct_(construct__), environment(environment_) {}
   CallableConstructorObject(Invoke invoke_, Construct construct__, PackedEnvironment packed)
       : invoke(invoke_), construct_(construct__), environment(packed.pointer), environmentOwner(std::move(packed.owner)) {}
+  CallableConstructorObject(RecordedEntry entry_, Construct construct__, void* environment_)
+      : invoke(entry_.invoke), record(entry_.record), construct_(construct__), environment(environment_) {}
+  CallableConstructorObject(RecordedEntry entry_, Construct construct__, PackedEnvironment packed)
+      : invoke(entry_.invoke), record(entry_.record), construct_(construct__), environment(packed.pointer),
+        environmentOwner(std::move(packed.owner)) {}
   // Shares, never mints, and forced inline -- see `CallableObject`'s copy constructor for both.
   [[gnu::always_inline]] CallableConstructorObject(const CallableConstructorObject& source)
-      : invoke(source.invoke), construct_(source.construct_), environment(source.environment), environmentOwner(source.environmentOwner),
-        functionObject(source.functionObject) {}
+      : invoke(source.invoke), record(source.record), construct_(source.construct_), environment(source.environment),
+        environmentOwner(source.environmentOwner), functionObject(source.functionObject) {}
   [[gnu::always_inline]] CallableConstructorObject(CallableConstructorObject&& source) noexcept
-      : invoke(source.invoke), construct_(source.construct_), environment(source.environment),
+      : invoke(source.invoke), record(source.record), construct_(source.construct_), environment(source.environment),
         environmentOwner(std::move(source.environmentOwner)), functionObject(std::move(source.functionObject)) {}
   [[gnu::always_inline]] CallableConstructorObject& operator=(const CallableConstructorObject& source) {
     if (this == &source) return *this;
     invoke = source.invoke;
+    record = source.record;
     construct_ = source.construct_;
     environment = source.environment;
     environmentOwner = source.environmentOwner;
@@ -8496,6 +8557,7 @@ struct CallableConstructorObject<Result(Arguments...), Constructed(ConstructArgu
   }
   [[gnu::always_inline]] CallableConstructorObject& operator=(CallableConstructorObject&& source) noexcept {
     invoke = source.invoke;
+    record = source.record;
     construct_ = source.construct_;
     environment = source.environment;
     environmentOwner = std::move(source.environmentOwner);
@@ -8516,9 +8578,8 @@ struct CallableConstructorObject<Result(Arguments...), Constructed(ConstructArgu
   }
 
   static constexpr std::size_t physicalArgumentCount = sizeof...(Arguments);
-  using CallableView = CallableObject<Result(Arguments...)>;
-  NativeCallableFrame argumentFrame() const { return CallableView::argumentFrameFor(invoke, environment); }
-  typename CallableView::CallableFacts facts() const { return CallableView::factsFor(invoke, environment); }
+  NativeCallableFrame argumentFrame() const { return CallableView::argumentFrameFor(record, environment); }
+  typename CallableView::CallableFacts facts() const { return CallableView::factsFor(record, environment); }
   std::string_view sourceText() const { return facts().text; }
   std::string_view name() const { return facts().name; }
   std::size_t length() const { return facts().length; }
@@ -8528,7 +8589,7 @@ struct CallableConstructorObject<Result(Arguments...), Constructed(ConstructArgu
   }
 
   Result callWithReceiver(const NativeCallReceiver& receiver, Arguments... arguments) const {
-    return CallableView{invoke, PackedEnvironment{environment, environmentOwner, nullptr}}.callWithReceiver(
+    return CallableView{RecordedEntry{invoke, record}, PackedEnvironment{environment, environmentOwner, nullptr}}.callWithReceiver(
         receiver, std::forward<Arguments>(arguments)...);
   }
 
@@ -8600,35 +8661,7 @@ namespace detail {
 /** Defined with the other construction failures below; declared here because the widening above it is where the entry can be missing. */
 [[noreturn]] inline void failUnconstructableFunction(const char* function_, const char* why);
 
-/** One program-wide address per emitted `[[Construct]]` CONVENTION, so a lookup cannot return an entry of a different signature. */
-template <typename Construct>
-struct ConstructEntryTag {
-  static constexpr char id = 0;
-};
-
-inline std::map<std::pair<void*, const void*>, void*>& constructEntryTable() {
-  using Table = std::map<std::pair<void*, const void*>, void*>;
-  GEA_REALM_LOCAL(Table, table, {});
-  return table;
-}
 }  // namespace detail
-
-/**
- * A declaration's `[[Construct]]` entry, published beside its `[[Call]]` one.
- *
- * Emitted next to the construct thunk (`translation-unit.ts`), keyed by the
- * INVOKE pointer -- the one thing a function object carries that names its
- * declaration -- exactly as `CallableObject::registerSource` publishes the
- * `name`/`length`/source text of that same declaration against the same key.
- * The signature's own tag is part of the key so a lookup asking for a
- * different construct convention finds nothing rather than a bad cast.
- */
-template <typename Invoke, typename Construct>
-inline bool registerConstructEntry(Invoke invoke, Construct construct) {
-  detail::constructEntryTable()[{reinterpret_cast<void*>(invoke), &detail::ConstructEntryTag<Construct>::id}] =
-      reinterpret_cast<void*>(construct);
-  return true;
-}
 
 /**
  * The [[Construct]] entry added to a function object that already exists.
@@ -8642,27 +8675,34 @@ inline bool registerConstructEntry(Invoke invoke, Construct construct) {
  * owner and, above all, its `FunctionObjectIdentity`, so the two views share
  * ONE own-property table and `f === g` is true of them.
  *
- * The construct pointer cannot come from the source value: `CallableObject`
- * stores one entry, and 10.2.2's "create the object, then enter the body with
- * it" is a different convention from `[[Call]]` at both ends. It is looked up
- * by the source's own invoke pointer, so nothing here has to decide WHICH
- * declaration a cell holds -- the value says. A function whose declaration
- * published no construct entry of this signature refuses by name; it never
- * constructs through some other declaration's body.
+ * The construct pointer cannot come from the source value's entry:
+ * `CallableObject` stores one, and 10.2.2's "create the object, then enter the
+ * body with it" is a different convention from `[[Call]]` at both ends. It is
+ * read from the source's own entry record (`entryWithConstruct` published it at
+ * the mint), so nothing here has to decide WHICH declaration a cell holds --
+ * the value says. A function whose declaration published no construct entry of
+ * this signature refuses by name; it never constructs through some other
+ * declaration's body.
  */
 template <typename Constructor, typename Callable>
 inline Constructor withConstructEntry(const Callable& source) {
-  const auto& table = detail::constructEntryTable();
-  // The entry is published against the declaration's thunk; a value minted
-  // with an argument frame carries the frame's forwarding wrapper instead.
-  auto invoke = source.invoke;
-  if constexpr (requires { Callable::declarationEntryOf(source.invoke); }) invoke = Callable::declarationEntryOf(source.invoke);
-  const auto found = table.find({reinterpret_cast<void*>(invoke), &detail::ConstructEntryTag<typename Constructor::Construct>::id});
-  if (found == table.end()) {
+  void* found = nullptr;
+  // The entry is published in the declaration's record; a value minted with
+  // an argument frame carries the frame's forwarding wrapper's instead.
+  if constexpr (requires { Callable::declarationRecordOf(source.record); }) {
+    if (const auto* record = Callable::declarationRecordOf(source.record))
+      for (auto* node = record->constructs.load(std::memory_order_acquire); node != nullptr; node = node->next)
+        if (node->convention == &detail::ConstructEntryTag<typename Constructor::Construct>::id) {
+          found = node->construct;
+          break;
+        }
+  }
+  if (found == nullptr) {
     detail::failUnconstructableFunction("an asserted construct signature",
                                         "the function object's declaration published no [[Construct]] entry of that convention");
   }
-  Constructor widened{source.invoke, reinterpret_cast<typename Constructor::Construct>(found->second), source.environment};
+  Constructor widened{source.invoke, reinterpret_cast<typename Constructor::Construct>(found), source.environment};
+  widened.record = source.record;
   widened.environmentOwner = source.environmentOwner;
   widened.functionObject = source.functionObject;
   return widened;
@@ -8853,7 +8893,8 @@ struct ArrayExtension {
 
 template <typename Fields>
 inline const void* arrayExtensionTagOf() {
-  static const char tag = 0;
+  // Mutable: its address is the extension's identity (see `PayloadTypeTag`).
+  static char tag = 0;
   return &tag;
 }
 
@@ -19082,10 +19123,14 @@ inline bool nativeCallReceiverIs(const NativeCallReceiver& receiver) {
 /** One byte per boxed payload type, whose ADDRESS is that type's identity -- `typeid` without RTTI, which embedded targets build without. */
 template <typename T>
 struct PayloadTypeTag {
-  static const char id;
+  // Mutable, never written. Every identity tag in this header is: the
+  // address IS the identity, and every tag is the same zero byte, which a
+  // linker may merge as identical read-only data (link.exe's /OPT:ICF does,
+  // whether or not the address is taken). No linker merges writable data.
+  static char id;
 };
 template <typename T>
-const char PayloadTypeTag<T>::id = 0;
+char PayloadTypeTag<T>::id = 0;
 
 template <typename T>
 const void* payloadTypeTagFor() {
@@ -19095,10 +19140,10 @@ const void* payloadTypeTagFor() {
 /** One program-wide address per emitted source declaration. */
 template <auto Declaration>
 struct CallableDeclarationTag {
-  static const char id;
+  static char id;  // mutable: see `PayloadTypeTag`
 };
 template <auto Declaration>
-const char CallableDeclarationTag<Declaration>::id = 0;
+char CallableDeclarationTag<Declaration>::id = 0;
 template <auto Declaration>
 const void* callableDeclarationTagFor() {
   return &CallableDeclarationTag<Declaration>::id;
@@ -21747,7 +21792,7 @@ struct NativeClassMethodState {
 };
 
 template <typename NativeClass>
-inline constexpr char nativeClassMethodDeclaration = 0;
+inline char nativeClassMethodDeclaration = 0;  // mutable: its address is the identity (see `detail::PayloadTypeTag`)
 
 inline Ref<NativeClassMethodState> nativeClassMethodStateFromEnvironment(void* environment) {
   return Ref<NativeClassMethodState>::adopt(static_cast<NativeClassMethodState*>(environment), true);
@@ -21979,7 +22024,7 @@ Callable nativeClassMethodValue(const Ref<NativeClassMethodState>& state, Callab
 }
 
 template <typename Callable>
-inline constexpr char nativeClassMethodCarrier = 0;
+inline char nativeClassMethodCarrier = 0;  // mutable: its address is the identity (see `detail::PayloadTypeTag`)
 
 /** Adapt a prototype body once per class evaluation and target convention.
  * Own replacements bypass this immutable original-body cache. Both the typed
@@ -22020,7 +22065,7 @@ Callable nativeClassAdaptedMethodValue(const Ref<NativeClassMethodState>& state,
  * a view's address is never reused by another record.
  */
 template <typename Record>
-inline constexpr char constructorStaticViewTag = 0;
+inline char constructorStaticViewTag = 0;  // mutable: its address is the identity (see `detail::PayloadTypeTag`)
 
 namespace detail {
 inline std::unordered_map<const void*, Ref<NativeClassMethodState>>& constructorStaticViewOwners() {
@@ -24372,8 +24417,7 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     return value.tag() == Value::Tag::Function && value.payloadType() == payloadTypeTagFor<Self>();
   }
   static Self in(const Value& value, std::size_t position) {
-    Self::template registerReceiverEntry<&adapt, &adaptLogicalReceiver>();
-    return inAs(value, position, false, -1, &adapt);
+    return inAs(value, position, false, -1, Self::template registerReceiverEntry<&adapt, &adaptLogicalReceiver>());
   }
 
   static Self inWithReceiver(const Value& value, std::size_t position) {
@@ -24434,13 +24478,13 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     }
   };
 
-  static Self inAs(const Value& value, std::size_t position, bool targetReceivesThis, int targetRestFrom, typename Self::Invoke entry, bool targetActualArguments = false) {
+  static Self inAs(const Value& value, std::size_t position, bool targetReceivesThis, int targetRestFrom, typename Self::RecordedEntry entry, bool targetActualArguments = false) {
     return inAsWithEnvironment(value, position, targetReceivesThis, targetRestFrom, entry, value, targetActualArguments);
   }
 
   template <typename Environment>
   static Self inAsWithEnvironment(const Value& value, std::size_t position, bool targetReceivesThis, int targetRestFrom,
-                                 typename Self::Invoke entry, const Environment& environment, bool targetActualArguments = false) {
+                                 typename Self::RecordedEntry entry, const Environment& environment, bool targetActualArguments = false) {
     static_assert(supported, "a checked dynamic callable adapter requires an exact carrier for every frame position");
     if (value.tag() == Value::Tag::Undefined) refuseMissingCallArgument(position);
     if (value.tag() != Value::Tag::Function) refusePayloadMismatch("a dynamic call argument");
@@ -30578,7 +30622,8 @@ struct NativeViewOperations {
     trace(object, visitor);
     return walk.probe;
   }
-  static inline const detail::RefOperations table{
+  // Mutable for the reason `RefOperationsFor<T>::table` is.
+  static inline constinit detail::RefOperations table{
     &destroy, &release, &drop, &trace, detail::cycleGenerational ? &holdsTracedEdge : nullptr,
     detail::RefOperationsFor<View>::classBase(), detail::inlineKeyOrderOffsetOf<View>(), detail::inlineKeyOrderLayoutOf<View>()
 #if defined(GEA_PROFILE_ALLOCATIONS)

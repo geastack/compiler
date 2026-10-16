@@ -37,12 +37,6 @@ static void refuses(Work work) {
   assert(refused);
 }
 
-static std::size_t metadataNodes() {
-  std::size_t count = 0;
-  for (auto* node = View::sourceRegistrations().load(std::memory_order_acquire); node; node = node->next) ++count;
-  for (auto* node = View::receiverRegistrations().load(std::memory_order_acquire); node; node = node->next) ++count;
-  return count;
-}
 
 static void distinctEntriesKeepTheirOwnSourceAndReceiver() {
   auto state = gea::makeRef<State>();
@@ -73,11 +67,14 @@ static void distinctEntriesKeepTheirOwnSourceAndReceiver() {
   auto methodRight = View::adaptSourceWithReceiver(second, &secondAdapter, &secondReceiver);
   assert(methodLeft.callWithReceiver(gea::NativeCallReceiver::object(receiver), 3, 2) == 115);
   assert(methodRight.callWithReceiver(gea::NativeCallReceiver::object(receiver), 3, 2) == -79);
-  refuses([&] { View::adaptSourceWithReceiver(first, &firstAdapter, &secondReceiver); });
-  refuses([&] { View::adaptSourceInPlace<&firstSource>(first, &firstAdapter); });
+  // A record belongs to the value, not to the adapter's address: one adapter
+  // paired with another receiver adapter is a value of its own, and the
+  // first pairing is unchanged by it.
+  auto mixed = View::adaptSourceWithReceiver(first, &firstAdapter, &secondReceiver);
+  assert(mixed.callWithReceiver(gea::NativeCallReceiver::object(receiver), 3, 2) == -89);
   assert(methodLeft.callWithReceiver(gea::NativeCallReceiver::object(receiver), 3, 2) == 115);
+  refuses([&] { View::adaptSourceWithReceiver(first, &firstAdapter, static_cast<View::InvokeWithReceiver>(nullptr)); });
 
-  const auto nodes = metadataNodes();
   const auto created = gea::detail::allocationProfile().created;
   for (int index = 0; index < 100; ++index) {
     assert(left.call(3, 2) == 15);
@@ -85,7 +82,6 @@ static void distinctEntriesKeepTheirOwnSourceAndReceiver() {
     assert(left.facts().name == "first");
     assert(methodLeft.callWithReceiver(gea::NativeCallReceiver::object(receiver), 3, 2) == 115);
   }
-  assert(metadataNodes() == nodes);
   assert(gea::detail::allocationProfile().created == created);
 
   const auto before = gea::detail::allocationProfile().created;
@@ -100,7 +96,8 @@ static void distinctEntriesKeepTheirOwnSourceAndReceiver() {
   assert(inPlaceLeft.facts().name == "first" && inPlaceRight.facts().name == "first");
   assert(inPlaceLeft.call(3, 2) == 15 && inPlaceRight.call(3, 2) == 11);
   assert(inPlaceMethod.callWithReceiver(gea::NativeCallReceiver::object(receiver), 3, 2) == 115);
-  refuses([&] { View::adaptSourceInPlace<&secondSource>(second, &firstInPlace); });
+  auto inPlaceSecond = View::adaptSourceInPlace<&secondSource>(second, &firstInPlace);
+  assert(inPlaceSecond.facts().name == "second" && inPlaceLeft.facts().name == "first");
 }
 
 using Argument = gea::TaggedUnion<gea::Undefined, double>;
@@ -111,8 +108,8 @@ static double count(void*, Argument, Argument, Pack arguments) { return argument
 static void runtimePointersRequireAnExistingExactFrame() {
   const auto actual = Packed::entryWithArgumentFrame<&count, 2, true, false>();
   const auto suffix = Packed::entryWithArgumentFrame<&count, 2, false, false>();
-  assert((Packed::entryWithArgumentFrame<nullptr, 2, true, false>(actual) == actual));
-  assert((Packed::entryWithArgumentFrame<nullptr, 2, false, false>(suffix) == suffix));
+  assert((Packed::entryWithArgumentFrame<nullptr, 2, true, false>(actual).record == actual.record));
+  assert((Packed::entryWithArgumentFrame<nullptr, 2, false, false>(suffix).record == suffix.record));
   auto boxed = gea::Value::box(gea::Value::Tag::Function, Packed{actual, nullptr});
   assert(boxed.actualArguments() && boxed.restFrom() == 2);
   assert(boxed.callAsFunction({}).as<double>() == 0);

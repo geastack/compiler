@@ -916,6 +916,9 @@ struct Machine {
         for (std::size_t i = 1; i < tree->children.size(); ++i) args.push_back(eval(tree->children[i]));
         if (tree->kind == Node::Construct) {
           if (callee.tag() != Value::Tag::Function) error("TypeError", "Value is not a constructor");
+          // An entry comparison that folding cannot mislead: a function the
+          // linker folded into this interpreter entry has its code, so it is
+          // an eval closure in every respect this construction relies on.
           if (callee.payloadType() != detail::payloadTypeTagFor<Function>() || callee.as<Function>().invoke != invoke)
             unsupported("Constructing an external callable requires a native construct adapter");
           self = Value::object();

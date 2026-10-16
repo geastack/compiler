@@ -306,7 +306,7 @@ export const hostClassValueText = (representation: Representation, className: st
  * the TypeError the clause specifies. A member this backend has no runtime
  * spelling for, and every non-Date prototype, keeps a throwing invoke, so a
  * call reaching it is an honest refusal at run time rather than a wrong
- * answer. Facts are registered against the invoke pointer so
+ * answer. Facts are published in the entry's record so
  * `Value::box(Tag::Function, ...)` installs the own `name`/`length` the same
  * way it does for a program's own function. `signature` is the `R(A...)`
  * spelling of the read's own ABI when the read is typed, `void()` when the
@@ -329,7 +329,7 @@ export const hostPrototypeMethodValueText = (signature: string, protocol: string
 /**
  * A builtin function object over one `R(A...)` signature whose invoke is
  * `body`, over formals `__gea_a0...`, with its `name`/`length`/source text
- * registered against the invoke pointer so every copy reflects as the builtin.
+ * published in the entry's record so every copy reflects as the builtin.
  */
 const registeredBuiltinFunctionText = (signature: string, name: string, arity: number, body: string): string => {
   const parameters = signature.slice(signature.indexOf('(') + 1, -1)
@@ -340,9 +340,8 @@ const registeredBuiltinFunctionText = (signature: string, name: string, arity: n
   const text = `function ${name}() { [native code] }`
   return (
     `([&]() { static constexpr ${result} (*__gea_invoke)(void*${signatureFormals}) = +[](void*${formals}) -> ${result} { ${body} }; ` +
-    `static const bool __gea_registered = gea::CallableObject<${signature}>::registerSource<__gea_invoke>(` +
-    `${cppStringLiteral(name)}, ${String(arity)}, ${cppStringLiteral(text)}); (void)__gea_registered; ` +
-    `return gea::CallableObject<${signature}>(__gea_invoke, nullptr); })()`
+    `return gea::CallableObject<${signature}>(gea::CallableObject<${signature}>::entryWithFacts<__gea_invoke>(` +
+    `${cppStringLiteral(name)}, ${String(arity)}, ${cppStringLiteral(text)}), nullptr); })()`
   )
 }
 

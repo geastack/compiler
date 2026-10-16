@@ -435,7 +435,7 @@ int main(int argc, char** argv) {
     {
       auto retained = gea::makeRef<Receiver>("function environment");
       weakRetained = gea::WeakRef<Receiver>(retained);
-      const HeldFunction nativeFn{&retainedFunctionSelf, gea::packEnvironment(retained)};
+      const HeldFunction nativeFn{HeldFunction::recorded<&retainedFunctionSelf>(), gea::packEnvironment(retained)};
       const auto logicalFunction = gea::NativeCallReceiver::primitive(nativeFn,
           +[](const HeldFunction& source) -> gea::Value { return gea::detail::DynamicCarrier<HeldFunction>::out(source); });
       auto functionThis = dynamicSelfView.callWithReceiver(logicalFunction);

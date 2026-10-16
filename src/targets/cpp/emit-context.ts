@@ -932,6 +932,12 @@ export interface EmitContext {
    * `cppThunkEntryText`, at the sites that mint a function object.
    */
   readonly functionFacts: ReadonlyMap<FunctionId, CallableFactsSpelling>
+  /**
+   * The functions with a `[[Construct]]` thunk, which every site minting a
+   * value of one publishes in the value's entry record (`cppThunkEntryText`,
+   * read back by `gea::withConstructEntry`).
+   */
+  readonly constructEntries?: ReadonlySet<FunctionId>
   /** The execution context whose frame this body is, so a cell owned elsewhere is recognisable as one. */
   readonly owner: FunctionId | RegionId
   /** See `emit-narrowing.ts`'s `PrinterDrift`; one program-wide list, shared by every body's context. */
@@ -2066,6 +2072,7 @@ export const createEmitContext = (
   instantiation: InstantiationFacts = noInstantiationFacts,
   abiOfCallable: (callable: FunctionId) => CallableAbi | null = () => null,
   functionFacts: ReadonlyMap<FunctionId, CallableFactsSpelling> = new Map(),
+  constructEntries: ReadonlySet<FunctionId> = new Set(),
   hostMethodAliases: ReadonlyMap<DeclarationId, HostMethodAlias> = new Map(),
   callableMemberCandidates: ReadonlyMap<string, FunctionId> = new Map(),
   callableFlowCandidates: ReadonlyMap<IrValueId, CallableFlowCandidate> = new Map(),
@@ -2144,6 +2151,7 @@ export const createEmitContext = (
     abiOfCallable,
     methodEnvironment: (callable, what) => methodEnvironmentText(ctx, callable, what),
     functionFacts,
+    constructEntries,
     owner,
     placements,
     classes,
@@ -2705,9 +2713,9 @@ export const cppThunkName = (functionId: string): string => `${cppBodyName(funct
 
 /**
  * What one function object answers for `name`, `length` and
- * `Function.prototype.toString`, already spelled for the registration call:
+ * `Function.prototype.toString`, already spelled for the publication call:
  * `abiType` is `cppAbiType` of the thunk's own convention, which the
- * registry's `Invoke` template parameter must match exactly.
+ * runtime's `Invoke` template parameter must match exactly.
  */
 export interface CallableFactsSpelling {
   readonly abiType: string
@@ -2717,12 +2725,16 @@ export interface CallableFactsSpelling {
 }
 
 /**
- * The invoke pointer a minting site stores in a callable carrier: `&thunk`,
- * or -- when the program reads function facts -- `&thunk` handed back by
- * `gea::CallableObject<Abi>::entryWithFacts<&thunk>(name, length, text)`,
- * which registers the facts the first time any site mints this function.
+ * The entry a minting site stores in a callable carrier: `&thunk`, or -- when
+ * the program reads function facts -- `&thunk` with its entry record, handed
+ * back by `gea::CallableObject<Abi>::entryWithFacts<&thunk>(name, length,
+ * text)`, which publishes the facts in that record the first time any site
+ * mints this function. A function with a `[[Construct]]` thunk publishes it in
+ * the same record (`entryWithConstruct`). The runtime reads these from the
+ * record, never by the thunk's address, which a release link may share with
+ * another function of identical code.
  *
- * Registration lives HERE, at the mint, and not beside the thunk, because a
+ * Publication lives HERE, at the mint, and not beside the thunk, because a
  * namespace-scope `static const bool ... = registerSource<&thunk>(...)` is a
  * static initializer that takes the thunk's address, and a static initializer
  * with a side effect is a root the linker may not drop. Every emitted
@@ -2757,13 +2769,24 @@ export const cppStaticPrefixCallableText = (
   )
 }
 
-export const cppThunkEntryText = (ctx: Pick<EmitContext, 'functionFacts' | 'abiOfCallable'>, functionId: FunctionId): string => {
+export const cppThunkEntryText = (
+  ctx: Pick<EmitContext, 'functionFacts' | 'abiOfCallable' | 'constructEntries'>,
+  functionId: FunctionId
+): string => {
   const thunk = `&${cppThunkName(functionId)}`
   const abi = ctx.abiOfCallable(functionId)
-  const frame = (entry: string): string =>
-    abi !== null && (abi.restFrom !== null || abi.receiver !== null)
-      ? `gea::CallableObject<${cppAbiType(abi)}>::entryWithArgumentFrame<${thunk}, ${cppCallableFrameArguments(abi)}>(${entry})`
+  // A function with a `[[Construct]]` thunk publishes it in the entry's
+  // record, so a later `gea::withConstructEntry` finds it from the value.
+  const construct = (entry: string): string =>
+    abi !== null && ctx.constructEntries?.has(functionId) === true
+      ? `gea::CallableObject<${cppAbiType(abi)}>::entryWithConstruct<${thunk}, &${cppConstructedThunkName(functionId)}>(${entry})`
       : entry
+  const frame = (entry: string): string =>
+    construct(
+      abi !== null && (abi.restFrom !== null || abi.receiver !== null)
+        ? `gea::CallableObject<${cppAbiType(abi)}>::entryWithArgumentFrame<${thunk}, ${cppCallableFrameArguments(abi)}>(${entry})`
+        : entry
+    )
   const facts = ctx.functionFacts.get(functionId)
   if (facts === undefined) return frame(thunk)
   // The source text is the function's whole declaration, and a function is

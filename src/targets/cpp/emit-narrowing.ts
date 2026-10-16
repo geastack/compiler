@@ -2520,7 +2520,7 @@ const callablePartText = (source: Representation, target: Representation, text: 
   const targetType = cppTypeOf(target)
   return (
     `[](const ${sourceType}& gea_from) { ${targetType} gea_callable{}; ` +
-    `gea_callable.invoke = gea_from.invoke; gea_callable.environment = gea_from.environment; ` +
+    `gea_callable.invoke = gea_from.invoke; gea_callable.record = gea_from.record; gea_callable.environment = gea_from.environment; ` +
     `gea_callable.environmentOwner = gea_from.environmentOwner; gea_callable.functionObject = gea_from.functionObject; return gea_callable; }(${text})`
   )
 }
@@ -4231,9 +4231,9 @@ const callableIdentityText = (source: Representation, target: Representation, te
  * environment, its owner and its `FunctionObjectIdentity` -- one own-property
  * table, one `===` answer. `gea::withConstructEntry` is that one step.
  *
- * The construct entry is looked up at run time by the source's own invoke
- * pointer, published beside the construct thunk
- * (`translation-unit.ts`'s `constructThunkOf`). That keeps the conversion a
+ * The construct entry is read at run time from the source's own entry record,
+ * where every site minting the function published it (`emit-context.ts`'s
+ * `cppThunkEntryText`). That keeps the conversion a
  * property of the VALUE: this step never has to decide which declaration a
  * cell holds, and a function whose declaration published no such entry refuses
  * by name instead of constructing through another body.
