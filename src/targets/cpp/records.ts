@@ -59,6 +59,7 @@ import type { RecordLayoutPolicy } from '../../representation/policies.js'
 import { recordLayoutPolicyOf, recordLayoutOfShapeId } from '../../projection/fields.js'
 import { classIndexProtocolsOf } from '../../projection/index-protocols.js'
 import { nativeAccessorAccessOf } from '../../projection/native-accessor-access.js'
+import { classAccessorShadowedFieldKeysOf } from '../../projection/dispatch.js'
 
 /**
  * The value carrier of a struct's dynamic-property sidecar, plus its key
@@ -1754,7 +1755,14 @@ const renderFieldDispatcher = (
   unaddressableDemands: string[] | undefined = undefined,
   indexProtocol = true,
   dynamicFieldLoad?: DynamicFieldLoad,
-  cellPayloadTypeOf: (field: RecordField) => string | undefined = () => undefined
+  cellPayloadTypeOf: (field: RecordField) => string | undefined = () => undefined,
+  /**
+   * Keys this class's own accessors redeclare over an inherited data field
+   * (`classAccessorShadowedFieldKeysOf`). OrdinaryGet/OrdinarySet on such an
+   * instance reach the prototype accessor, so the base slot answers for none
+   * of its own-property hooks.
+   */
+  shadowedKeys: readonly string[] = []
 ): readonly string[] => {
   // A write through the property protocol that creates a declared field of a
   // record creates its key now, after every key already present, the same
@@ -2639,6 +2647,9 @@ const renderFieldDispatcher = (
     // (the literal's is folded at compile time) before it touches memory: a
     // 134-field options record answered a miss with 134 `strlen`+`memcmp`s.
     body.length > 0 ? ['    const std::string_view gea_name = gea_key.text();'] : []
+  const shadows = shadowedKeys
+    .filter((key) => !cppRecordFieldKeyIsSymbol(key))
+    .map((key) => `    if (gea_name == ${cppStringLiteral(key)}) return false;`)
 
   const accessorDescriptors = descriptors.slice(dataDescriptorCount)
   const accessorReads = reads.slice(dataReadCount)
@@ -2742,14 +2753,16 @@ const renderFieldDispatcher = (
     // This struct's declared fields, as a boxed `gea::Value` reads them. `false` means the struct does not declare the key, which sends it to the box's expando table.
     ...classMember('bool gea_ownFieldPresent(const gea::PropertyKey& gea_key, bool& gea_out) const', [
       ...symbolBranchFor('gea_ownFieldPresent(gea_key, gea_out)', true),
-      ...nameOf(presentFields),
+      ...nameOf([...shadows, ...presentFields]),
+      ...shadows,
       ...viaTable(presentFields, 'if (gea::detail::nativeOwnFieldPresent(*this, gea_name, gea_out)) return true;'),
       ...(base && !base.native ? [`    if (this->${base.structName}::gea_ownFieldPresent(gea_key, gea_out)) return true;`] : []),
       '    return false;'
     ]),
     ...classMember('bool gea_ownFieldEnumerable(const gea::PropertyKey& gea_key, bool& gea_out) const', [
       ...symbolBranchFor('gea_ownFieldEnumerable(gea_key, gea_out)', true),
-      ...nameOf(enumerableFields),
+      ...nameOf([...shadows, ...enumerableFields]),
+      ...shadows,
       ...viaTable(enumerableFields, 'if (gea::detail::nativeOwnFieldEnumerable(*this, gea_name, gea_out)) return true;'),
       ...(base && !base.native ? [`    if (this->${base.structName}::gea_ownFieldEnumerable(gea_key, gea_out)) return true;`] : []),
       '    return false;'
@@ -2766,7 +2779,8 @@ const renderFieldDispatcher = (
     ]),
     ...dynamicMember('bool gea_readOwnField(const gea::PropertyKey& gea_key, gea::Value& gea_out) const', [
       ...symbolBranchFor('gea_readOwnField(gea_key, gea_out)'),
-      ...nameOf(reads),
+      ...nameOf([...shadows, ...reads]),
+      ...shadows,
       ...readGroupBlocks,
       ...ungroupedDataReads,
       ...accessorReads,
@@ -2775,7 +2789,8 @@ const renderFieldDispatcher = (
     ]),
     ...dynamicMember('bool gea_readOwnFieldNative(const gea::PropertyKey& gea_key, gea::NativeFieldRead& gea_out) const', [
       ...symbolBranchFor('gea_readOwnFieldNative(gea_key, gea_out)', true),
-      ...nameOf([...nativeReads, ...accessors.map((accessor) => accessor.key)]),
+      ...nameOf([...shadows, ...nativeReads, ...accessors.map((accessor) => accessor.key)]),
+      ...shadows,
       ...nativeReads,
       // A demand without an actual getter ABI cannot name a native leaf.
       // An accessor still shadows a base data field of the same name.
@@ -2786,7 +2801,8 @@ const renderFieldDispatcher = (
       'bool gea_writeOwnFieldNative(const gea::PropertyKey& gea_key, const gea::NativeFieldWrite& gea_value, bool gea_extensible = true)',
       [
         ...symbolBranchFor('gea_writeOwnFieldNative(gea_key, gea_value, gea_extensible)', true),
-        ...nameOf([...nativeFieldWrites, ...accessors.map((accessor) => accessor.key)]),
+        ...nameOf([...shadows, ...nativeFieldWrites, ...accessors.map((accessor) => accessor.key)]),
+        ...shadows,
         ...nativeFieldWrites,
         ...accessors.map((accessor) => `    if (gea_name == ${cppStringLiteral(accessor.key)}) return false;`),
         ...(base && !base.native
@@ -2799,7 +2815,8 @@ const renderFieldDispatcher = (
       // Descriptor hooks belong to generated bases, just like the text-key chain
       // below. A native base's field reader is not a descriptor hook.
       ...symbolBranchFor('gea_ownFieldDescriptor(gea_key, gea_out)', true),
-      ...nameOf(descriptorsComposed ? [...descriptorAttributes, ...accessorDescriptors] : descriptors),
+      ...nameOf([...shadows, ...(descriptorsComposed ? [...descriptorAttributes, ...accessorDescriptors] : descriptors)]),
+      ...shadows,
       ...(descriptorsComposed
         ? [
             ...(descriptorAttributes.length === 0
@@ -2832,7 +2849,8 @@ const renderFieldDispatcher = (
     // The same, for a write. A declared field is written IN PLACE, so every native read of it sees the change.
     ...dynamicMember('bool gea_writeOwnField(const gea::PropertyKey& gea_key, const gea::Value& gea_value, bool gea_extensible = true)', [
       ...symbolBranchFor('gea_writeOwnField(gea_key, gea_value, gea_extensible)'),
-      ...nameOf(writes),
+      ...nameOf([...shadows, ...writes]),
+      ...shadows,
       ...writes,
       ...baseWrite,
       '    return false;'
@@ -2842,7 +2860,8 @@ const renderFieldDispatcher = (
       'bool gea_defineOwnField(const gea::PropertyKey& gea_key, const gea::PropertyDescriptor& gea_descriptor, bool gea_extensible = true)',
       [
         ...symbolBranchFor('gea_defineOwnField(gea_key, gea_descriptor, gea_extensible)', true),
-        ...nameOf(defines),
+        ...nameOf([...shadows, ...defines]),
+        ...shadows,
         ...defines,
         ...(base && !base.native
           ? [
@@ -2856,7 +2875,8 @@ const renderFieldDispatcher = (
     // A field may be declared by the native layout but currently absent after delete.
     ...nativeIndexMember('bool gea_matchesOwnField(const gea::PropertyKey& gea_key) const', [
       ...symbolBranchFor('gea_matchesOwnField(gea_key)', true),
-      ...nameOf(matches),
+      ...nameOf([...shadows, ...matches]),
+      ...shadows,
       ...viaTable(matches, 'if (gea::detail::nativeOwnFieldMatches(*this, gea_name)) return true;'),
       ...baseMatches,
       '    return false;'
@@ -2870,7 +2890,8 @@ const renderFieldDispatcher = (
     // OrdinaryDelete for one declared data property; false preserves a non-configurable field.
     ...nativeIndexMember('bool gea_deleteOwnField(const gea::PropertyKey& gea_key)', [
       ...symbolBranchFor('gea_deleteOwnField(gea_key)', true),
-      ...nameOf(deletes),
+      ...nameOf([...shadows, ...deletes]),
+      ...shadows,
       ...viaTable(
         deletes,
         'if (const std::optional<bool> gea_deleted = gea::detail::nativeDeleteOwnField(*this, gea_name)) return *gea_deleted;'
@@ -3604,7 +3625,9 @@ const renderStructDefinition = (
    */
   methodStateUntraced = false,
   indexProtocol = true,
-  dynamicFieldLoad?: DynamicFieldLoad
+  dynamicFieldLoad?: DynamicFieldLoad,
+  /** See `renderFieldDispatcher`'s parameter of the same name. */
+  shadowedKeys: readonly string[] = []
 ): string | CppRecordRefusal => {
   const isNarrowed = (field: FieldLike): boolean => narrowedSlots.has(integerStorageSlot(structName, field.key))
   // A class keeps every field inline. Its fields are stored by the
@@ -3848,7 +3871,8 @@ const renderStructDefinition = (
     unaddressableDemands,
     indexProtocol,
     dynamicFieldLoad,
-    (field) => fieldCellPayloadType(field, reactive, celled, isNarrowed(field))
+    (field) => fieldCellPayloadType(field, reactive, celled, isNarrowed(field)),
+    shadowedKeys
   ))
     lines.push(line)
   if (unaddressableDemands.length > 0)
@@ -4284,7 +4308,8 @@ export const cppRecordDeclarations = (
         (shapesByStruct.get(structName)?.size ?? 0) > 0,
       immortalStateRoots.has(structName),
       declaration === undefined ? layout.indexes.length > 0 : classIndexProtocols.get(declaration) !== false,
-      dynamicFieldLoad
+      dynamicFieldLoad,
+      declaration === undefined ? [] : classAccessorShadowedFieldKeysOf(classes, declaration)
     )
   })
   const refused = rendered.filter((entry): entry is CppRecordRefusal => typeof entry !== 'string')

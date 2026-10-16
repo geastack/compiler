@@ -7,7 +7,7 @@ import {
   recordAccessorsOfShape,
   recordFieldsOfShape
 } from '../projection/fields.js'
-import { virtualDispatchKey } from '../projection/dispatch.js'
+import { classFieldAccessorArmsOf, virtualDispatchKey } from '../projection/dispatch.js'
 import { nativeExpandoSidecarOf } from '../projection/native-expando.js'
 import { regexpFieldStorageOf } from '../projection/regexp-fields.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
@@ -93,6 +93,11 @@ export const propertyReadConversionInputsOf = (
       const virtual = leaf.kind === 'class-ref' ? virtualAbis.get(virtualDispatchKey(leaf.declaration, keyText, 'get')) : undefined
       const physical = virtual?.result ?? propertyReadResultRepresentationOf(deriver, classes, abis, leaf, keyText)
       if (physical !== null) add(physical)
+      if (leaf.kind === 'class-ref' && !unionReceiver && operation.spreadSnapshot !== true)
+        for (const { accessor } of classFieldAccessorArmsOf(classes, leaf.declaration, keyText)) {
+          const result = accessor.getter === null ? undefined : abis.get(accessor.getter)?.result
+          if (result !== undefined) add(result)
+        }
       const member = leaf.kind === 'class-ref' ? classMemberOf(classes, leaf.declaration, keyText) : null
       if (unionReceiver && (member === null || member.kind === 'field')) {
         const field = declaredRecordFieldOf(deriver, leaf, keyText, classes)
