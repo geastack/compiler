@@ -104,7 +104,7 @@ nullish-coalescing.ts.cpp 8dbed3ccfda9
 number-format-methods.ts.cpp c156a7b2de1f
 number-index.ts.cpp 540dd0d74ed5
 object-assign-dictionary.ts.cpp 10667228674e
-object-literal-accessors.ts.cpp 80d0d1e00855
+object-literal-accessors.ts.cpp 0228b8c1efbb
 object-members.ts.cpp 8a76c0af88d8
 object-spread-class-source.ts.cpp 7cc764b9ff93
 object-spread-dynamic-source.ts.cpp 505ad66bf9ff
@@ -136,7 +136,7 @@ rest-tuple-argument-pack.ts.cpp d6456c67dae7
 rest.ts.cpp 6820bfd14002
 runtime-built-in-errors.ts.cpp ed3359dad9ef
 spread.ts.cpp e4001a300f93
-standard-collection-receiver-shapes.ts.cpp a84d8903bf94
+standard-collection-receiver-shapes.ts.cpp 359468fba9f8
 string-concatenation.ts.cpp 5103fc49e921
 string.ts.cpp d52b185504bd
 switch-completion.ts.cpp 47aab0e18411
