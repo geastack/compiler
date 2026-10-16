@@ -933,6 +933,7 @@ object-is-over-union-and-optional-carriers.runtime.ts.cpp 199c1035ac10
 object-key-enumeration-requires-native-object.runtime.ts.cpp ca35c32c1e8b
 object-keyed-map-index-matches-node.runtime.ts.cpp ab5c357ecdd6
 object-literal-beside-class-in-or-keeps-its-own-layout.runtime.ts.cpp d86094099c83
+object-literal-empty-array-filled-through-untyped-computed-read.runtime.js.cpp e31523a96f45
 object-literal-es5-method-receiver.runtime.js.cpp e93b403533f4
 object-literal-getter-capture.ts.cpp f63f14f03eef
 object-literal-into-data-only-class-slot-is-a-plain-object.ts.cpp b159b74472e6
