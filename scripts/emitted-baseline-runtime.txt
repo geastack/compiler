@@ -222,7 +222,7 @@ closure-equality-compares-environment-anchors.runtime.ts.cpp 0e854c370edb
 closure-factory-export-never-read.ts.cpp 108c4952a686
 closure-frame-group-and-formals.runtime.ts.cpp fcd747d9b1d3
 closure-frame-no-leak.ts.cpp 6239862ff9ae
-closure-frame-on-data-shape.runtime.ts.cpp 85991a221eae
+closure-frame-on-data-shape.runtime.ts.cpp 8f02f26c4d69
 closure-frame-per-call-cells.ts.cpp 4278e8d32c90
 closure-frame-soundness.runtime.ts.cpp 3f0b8d99e615
 co-return-union-of-value-or-promise-async-arrow.runtime.ts.cpp 3108575fd7f9
@@ -398,7 +398,7 @@ extra-call-arguments.ts.cpp 723e026e0319
 extracted-union-method-keeps-dynamic-receiver.runtime.ts.cpp 809ef3309c5b
 field-census-class-family-narrowing.runtime.js.cpp a70812894294
 filter-under-a-type-guard-narrows-its-element.ts.cpp 56fe38064a9b
-find-with-document-callback-over-typed-statements.runtime.ts.cpp f75eb20d73c6
+find-with-document-callback-over-typed-statements.runtime.ts.cpp 8e5d03d36632
 finite-key-read-off-a-dynamic-receiver-roots-only-its-keys.runtime.ts.cpp 1592b664ceb4
 fixed-data-definition.js.cpp 1bc62dfe90af
 fixed-field-assignment-widening.runtime.js.cpp b4594445e1a9
@@ -675,7 +675,7 @@ keyed-collection-seeded-from-map-and-iterator.ts.cpp c57959536699
 last-transferring-use-moves-after-in-place-reads.runtime.ts.cpp 54126a0d5f96
 lazy-map-in-logical-or-assignment.ts.cpp b75278518c68
 lazy-subclass-accessor-override.ts.cpp cf88d86f15de
-listener-through-any-into-void-slot-discards-its-result.runtime.ts.cpp 2493e94c2f4a
+listener-through-any-into-void-slot-discards-its-result.runtime.ts.cpp 28da92559c77
 literal-into-a-generic-copy-filter-parameter.runtime.ts.cpp 53cce4f3b06f
 literal-into-record-or-class-union-slot-is-the-record.runtime.ts.cpp 359091702ef7
 literal-method-result-instantiates-generic-member.runtime.ts.cpp f029f18c18de
@@ -1215,7 +1215,7 @@ tuple-view-over-json-array-stores-native-entry-in-its-lane.runtime.ts.cpp 846cc6
 type-guard-intersection-of-family-member.ts.cpp bfe34809692c
 type-only-class-reflection.runtime.js.cpp a6a36ec37002
 type-only-specifier-import-does-not-evaluate.runtime.ts.cpp abf3f82ec297
-type-predicate-batch-operations-keep-their-storage.runtime.ts.cpp 2cabfc889c71
+type-predicate-batch-operations-keep-their-storage.runtime.ts.cpp 19f6a53478f2
 type-query-escapes.ts.cpp f2142e269ca4
 type-query-snapshots.ts.cpp b839a9a2aac2
 typed-array-buffer-into-array-buffer-like.ts.cpp 212e4c0498cc
@@ -1294,6 +1294,7 @@ unknown-valued-dictionary-parameter-takes-its-argument-dictionary.runtime.ts.cpp
 untyped-code-writes-forwarding-and-union-methods-into-typed-field.runtime.js.cpp 5f939e611cc6
 untyped-code-writes-method-record-into-object-typed-field.runtime.js.cpp 544759aef980
 untyped-code-writes-method-record-into-typed-field.runtime.ts.cpp 56eba9c79e93
+untyped-listener-through-any-receiver-reads-event-fields.runtime.ts.cpp 11d2bba93f30
 untyped-map-into-document-or-unknown-map-parameter.runtime.ts.cpp e64644b6cf87
 untyped-map-returned-as-typed-map.runtime.ts.cpp 4bd0e98e5eb3
 unused-subclass-is-pruned.ts.cpp 43345a8020e0
