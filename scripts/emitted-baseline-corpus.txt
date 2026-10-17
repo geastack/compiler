@@ -59,7 +59,7 @@ generic-function-in-binding.ts.cpp da35351673c6
 generic-overload-implementation.ts.cpp 0c8b7a853ef7
 generic-two-instantiations.ts.cpp 879bfdd7f77f
 host-binding.ts.cpp 59abbb7c300e
-host-document.ts.cpp bbaed83e2945
+host-document.ts.cpp 0f5aad654d39
 host-generic-return.ts.cpp 9fe2c0b65e50
 host-throw.ts.cpp 49e9601f4496
 host-tonumber.ts.cpp b63e886b715a
@@ -73,11 +73,11 @@ instanceof-constructor-family-repro.ts.cpp e976adc09a55
 intersection-conditional-member.ts.cpp 0bfecd20e00e
 iterable-return-carrier.ts.cpp 8f6761d0ee2d
 json-stringify-fill-aliasing.ts.cpp 712ce240c3a9
-jsx-class-component.tsx.cpp a1713adf36d0
-jsx-class-map.tsx.cpp 20c64e0a7242
-jsx-component.tsx.cpp 1ed18a8f690f
-jsx-element.tsx.cpp 604e13c2b178
-jsx-factory-app.tsx.cpp 08b95aabd655
+jsx-class-component.tsx.cpp 682aff9672c8
+jsx-class-map.tsx.cpp beef6223dc75
+jsx-component.tsx.cpp 4bdd105479f7
+jsx-element.tsx.cpp 22c3465b8803
+jsx-factory-app.tsx.cpp e3e102cbb16c
 jsx-factory-jsx-runtime.ts.cpp 2113abd96988
 jsx-framework.tsx.cpp 7a8118ad5732
 keyed-collection-member-argument.js.cpp ce9e2a88a0af
