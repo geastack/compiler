@@ -664,8 +664,17 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
       const plain = nativeFieldViewOperandContext(ctx, plainOperation)
       let read = plainFieldReadText(plain, plainOperation, key)
       if (source.value.kind === 'scalar') read = `static_cast<${cppTypeOf(source.value)}>(${read})`
-      if (!source.required) read = `(gea_field_receiver->${cppRecordFieldPresenceName(key)} ? ${read} : ${cppTypeOf(source.value)}())`
-      return { source: source.value, text: read }
+      if (source.required) return { source: source.value, text: read }
+      // An absent own key reads undefined. A union spells it as its undefined
+      // arm and a Value or a reference as its own; their default does not.
+      const undefinedText = cppUndefinedIn(source.value)
+      const absent = undefinedText ?? (source.value.kind === 'optional' ? `${cppTypeOf(source.value)}()` : null)
+      if (absent === null) return null
+      return {
+        source: source.value,
+        text: `(gea_field_receiver->${cppRecordFieldPresenceName(key)} ? ${read} : ${absent})`,
+        ...(undefinedText === null ? {} : { absentReadsUndefined: true as const })
+      }
     })
     if (rendered === null) throw new Error('a published field-view read lost its receipt')
     lines.push(`${defineValue(ctx, operation.result)} = ${rendered};`)
