@@ -1154,6 +1154,7 @@ straight-line-char-code-reads-share-one-layout.runtime.ts.cpp 606d587ddb7a
 strict-delete-module-exports.ts.cpp 256f94d0dbc4
 strict-delete.ts.cpp e8e3fe76d41a
 strict-equality-between-tagged-unions.runtime.ts.cpp 5ee46937bfac
+string-and-regexp-walks-over-long-mixed-width-text.runtime.ts.cpp ae752aa6ae64
 string-array-into-set-or-any-array-parameter.runtime.ts.cpp 98daa76c6d15
 string-field-append.ts.cpp 1357f6769fe1
 string-from-char-code-direct.ts.cpp 8619a5e74091
