@@ -34034,6 +34034,26 @@ inline bool isShortBasicLatin(const std::string &s) {
   return size == 0 || (static_cast<unsigned char>(s[0]) & 0x80u) == 0;
 }
 
+// The UTF-8 walks below take eight ASCII bytes (eight code units) per step
+// with this. A per-byte walk past a string's first non-ASCII byte made every
+// `length`/`charAt`/`slice` on a long, mostly-ASCII string -- a shader chunk
+// with one accented comment -- a full byte loop, and three.js's include
+// resolver calls them once per character.
+inline bool isAsciiWord(const unsigned char *bytes) {
+  std::uint64_t word;
+  std::memcpy(&word, bytes, 8);
+  return (word & 0x8080808080808080ull) == 0;
+}
+
+/** How many of the first `limit` bytes (at most `s.size()`) lead `s` as ASCII. */
+inline std::size_t asciiPrefixLength(const std::string &s, std::size_t limit) {
+  const unsigned char *d = reinterpret_cast<const unsigned char *>(s.data());
+  std::size_t i = 0;
+  while (i + 8 <= limit && isAsciiWord(d + i)) i += 8;
+  while (i < limit && !(d[i] & 0x80)) ++i;
+  return i;
+}
+
 inline Utf16Metadata utf16Metadata(const std::string &s) {
   // A short name answers from two loads; `OnDemandDocument.isElementName`
   // takes the metadata of the name it compares once per element.
@@ -34058,12 +34078,17 @@ inline Utf16Metadata utf16Metadata(const std::string &s) {
   std::size_t n = len;
   if (!basicLatin) {
     n = i;  // ASCII prefix: one unit per byte so far
-    for (; i < len; ++i) {
-      unsigned char byte = d[i];
-      if ((byte & 0xC0) == 0x80) continue;
+    const auto count = [&](unsigned char byte) {
+      if ((byte & 0xC0) == 0x80) return;
       if ((byte & 0xF8) == 0xF0) n += 2;
       else n += 1;
+    };
+    // Each byte counts on its own, so whole words can be classified at once.
+    for (; i + 8 <= len; i += 8) {
+      if (isAsciiWord(d + i)) n += 8;
+      else for (std::size_t k = 0; k < 8; ++k) count(d[i + k]);
     }
+    for (; i < len; ++i) count(d[i]);
   }
   return {n, basicLatin, {}};
 }
@@ -34107,9 +34132,15 @@ inline std::uint32_t decodeCodePointAt(const std::string &s, std::size_t i, std:
 /** Map a JavaScript UTF-16 code-unit offset onto this runtime's UTF-8 storage. */
 inline std::size_t byteOffsetFromUtf16(const std::string &s, std::size_t target) {
   if (isShortBasicLatin(s)) return std::min(target, s.size());
+  const unsigned char *d = reinterpret_cast<const unsigned char *>(s.data());
   std::size_t byte = 0;
   std::size_t units = 0;
   while (byte < s.size() && units < target) {
+    if (units + 8 <= target && byte + 8 <= s.size() && isAsciiWord(d + byte)) {
+      byte += 8;
+      units += 8;
+      continue;
+    }
     std::size_t width = 1;
     const std::uint32_t codePoint = decodeCodePointAt(s, byte, width);
     byte += width;
@@ -34121,10 +34152,16 @@ inline std::size_t byteOffsetFromUtf16(const std::string &s, std::size_t target)
 /** Map a matcher byte boundary back to the UTF-16 index ECMAScript exposes. */
 inline std::size_t utf16OffsetFromByte(const std::string &s, std::size_t target) {
   if (isShortBasicLatin(s)) return std::min(target, s.size());
+  const unsigned char *d = reinterpret_cast<const unsigned char *>(s.data());
   std::size_t byte = 0;
   std::size_t units = 0;
   const std::size_t stop = std::min(target, s.size());
   while (byte < stop) {
+    if (byte + 8 <= stop && isAsciiWord(d + byte)) {
+      byte += 8;
+      units += 8;
+      continue;
+    }
     std::size_t width = 1;
     const std::uint32_t codePoint = decodeCodePointAt(s, byte, width);
     byte += width;
@@ -34232,24 +34269,28 @@ inline std::string substringUtf16(const std::string &s, std::size_t startUnit, s
   // ASCII fast path: if every byte up to `endUnit` is ASCII, UTF-16 indices
   // equal byte indices, so the slice is a plain byte substr -- no
   // per-code-point surrogate accounting and no quadratic walk.
-  {
-    const unsigned char *d = reinterpret_cast<const unsigned char *>(s.data());
-    const std::size_t size = s.size();
-    const std::size_t scanLimit = endUnit < size ? endUnit : size;
-    std::size_t i = 0;
-    while (i < scanLimit && !(d[i] & 0x80)) ++i;
-    if (i == scanLimit) {
-      const std::size_t b0 = startUnit < size ? startUnit : size;
-      const std::size_t b1 = endUnit < size ? endUnit : size;
-      if (b0 >= b1) return std::string();
-      return s.substr(b0, b1 - b0);
-    }
+  const std::size_t scanLimit = endUnit < s.size() ? endUnit : s.size();
+  const std::size_t asciiPrefix = asciiPrefixLength(s, scanLimit);
+  if (asciiPrefix == scanLimit) {
+    const std::size_t b0 = startUnit < s.size() ? startUnit : s.size();
+    if (b0 >= scanLimit) return std::string();
+    return s.substr(b0, scanLimit - b0);
   }
+  const unsigned char *d = reinterpret_cast<const unsigned char *>(s.data());
   std::string out;
   out.reserve((endUnit - startUnit) * 2);
-  std::size_t unitPosition = 0;
-  std::size_t i = 0;
+  // The prefix just scanned is one unit per byte: resume the walk there.
+  std::size_t unitPosition = asciiPrefix < startUnit ? asciiPrefix : startUnit;
+  std::size_t i = unitPosition;
   while (i < s.size() && unitPosition < endUnit) {
+    // An ASCII word is eight units: counted wholly before the range, copied wholly inside it.
+    if (i + 8 <= s.size() && (unitPosition + 8 <= startUnit || (unitPosition >= startUnit && unitPosition + 8 <= endUnit)) &&
+        isAsciiWord(d + i)) {
+      if (unitPosition >= startUnit) out.append(s, i, 8);
+      i += 8;
+      unitPosition += 8;
+      continue;
+    }
     unsigned char b = static_cast<unsigned char>(s[i]);
     std::size_t length;
     bool astral = false;
@@ -34457,6 +34498,11 @@ inline std::string charAt(const std::string &s, double position) {
   position = integerPosition(position);
   // The first unit of a string whose first byte is ASCII is that byte, without scanning for its UTF-16 length.
   if (position == 0.0 && !s.empty() && static_cast<unsigned char>(s[0]) < 0x80) return std::string(1, s[0]);
+  // So is any unit inside the ASCII prefix: a scan to it, not the whole string's length.
+  if (position > 0.0 && position < static_cast<double>(s.size())) {
+    const std::size_t index = static_cast<std::size_t>(position);
+    if (asciiPrefixLength(s, index + 1) > index) return std::string(1, s[index]);
+  }
   const std::size_t length = utf16Length(s);
   if (!std::isfinite(position) || position < 0.0 || position >= static_cast<double>(length)) return std::string();
   const std::size_t index = static_cast<std::size_t>(position);
@@ -37903,6 +37949,28 @@ struct Pattern {
     if (startPublicUnits > gea::runtime::string::utf16Length(input)) {
       if (stateful) resetLastIndex();
       return MatchSlice{};
+    }
+    // An ASCII literal (`/NUM_DIR_LIGHTS/g`) is a byte search, as in `test`:
+    // no byte of a multi-byte sequence is ASCII, so the bytes match exactly
+    // where the code units do, and a start inside a surrogate pair cannot
+    // begin a match. Transcoding the whole input for `std::regex` on every
+    // match made each `replace` of three.js's shader constants O(n) per match
+    // on top of libc++'s matcher. Sticky stays below: it must not slide off a
+    // half pair.
+    if (!sticky && !unicode && literalPattern() && !literalUtf8.empty() && gea::runtime::string::asciiOnly(literalUtf8)) {
+      const std::size_t from = gea::runtime::string::byteOffsetFromUtf16(input, startPublicUnits);
+      const std::size_t at = input.find(literalUtf8, from);
+      if (at == std::string::npos) {
+        if (stateful) resetLastIndex();
+        return MatchSlice{};
+      }
+      MatchSlice out;
+      out.matched = true;
+      out.position = gea::runtime::string::utf16OffsetFromByte(input, at);
+      out.length = literalUtf8.size();
+      if (stateful) setLastIndexUnits(out.position + out.length);
+      out.captures.push_back(gea::Optional<std::string>(literalUtf8));
+      return out;
     }
     // A caller may write lastIndex into the middle of a surrogate pair. In
     // Unicode mode CodePointAt sees the trailing surrogate there as a lone
