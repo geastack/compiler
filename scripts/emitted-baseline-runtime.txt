@@ -230,7 +230,7 @@ co-return-union-of-value-or-promise-async-method.runtime.ts.cpp 3df78775208a
 co-return-union-of-value-or-promise-settles-same-tick.runtime.ts.cpp 1167d06bbb48
 codec-table-static-method-dispatch.runtime.ts.cpp b014f6d02d10
 collection-get-native-union.ts.cpp a686abb6b7ab
-composed-field-descriptor.runtime.js.cpp 3ede3a7c9317
+composed-field-descriptor.runtime.js.cpp 8f373cd22f87
 computed-class-prototype-method.ts.cpp 3621b3951dfd
 computed-get-over-literal-key-union.ts.cpp 02d689db8735
 computed-key-bag-passed-as-union-argument.runtime.js.cpp 8720a1013159
@@ -397,6 +397,7 @@ explicit-this-call-guarded-against-boxed-shadow.runtime.ts.cpp 89a6ddaa2a88
 extra-call-arguments.ts.cpp 723e026e0319
 extracted-union-method-keeps-dynamic-receiver.runtime.ts.cpp 809ef3309c5b
 field-census-class-family-narrowing.runtime.js.cpp a70812894294
+field-view-absent-union-or-any-key-of-a-plain-allocation-reads-undefined.runtime.js.cpp 1acdd8e2f2e9
 field-view-key-forwarded-past-its-source-reads-a-plain-allocations-own-slot.runtime.js.cpp c9a56306eaf1
 filter-under-a-type-guard-narrows-its-element.ts.cpp 56fe38064a9b
 find-with-document-callback-over-typed-statements.runtime.ts.cpp 8e5d03d36632
@@ -745,7 +746,7 @@ native-accessor-undefined-completion.runtime.ts.cpp 7f5faa63b415
 native-apply-fixed-tuple.runtime.ts.cpp d712bb100cba
 native-array-descriptor-snapshot.runtime.ts.cpp 8c0b871fcc08
 native-array-isarray-normalization.ts.cpp aaea6a3ec5f3
-native-array-prototype-descriptors.ts.cpp 7c58510bcc71
+native-array-prototype-descriptors.ts.cpp ee52d05e47a2
 native-array-reflection-transport.ts.cpp 822bf4ec52d2
 native-bound-callable-dynamic-input.runtime.ts.cpp 2125b03c8cec
 native-buffer-slice-method-values.runtime.ts.cpp adcc7847c82f
@@ -853,7 +854,7 @@ node-global-is-globalthis.ts.cpp cc750d455cf4
 non-null-element-arithmetic.runtime.ts.cpp 8da2efec56f1
 null-any-into-optional-parameter-reads-absent.runtime.ts.cpp 19dbe7fb7d86
 null-default-nested-reference-union.ts.cpp 1af79c2e2e47
-null-default-slot-holds-the-object-a-copy-stores.runtime.js.cpp 0f98116360fa
+null-default-slot-holds-the-object-a-copy-stores.runtime.js.cpp 8efa8a89be07
 nullable-class-binding-read-narrowed-to-null.runtime.ts.cpp e37b28128e40
 nullable-class-instance-in-template-prints-null.runtime.ts.cpp f786a763174d
 nullable-instance-into-object-or-null-stays-null.runtime.ts.cpp 763a61e3e6c0
@@ -1011,7 +1012,7 @@ property-helper-math-abs.runtime.js.cpp b84dfd903f37
 property-helper-math-sqrt2.runtime.js.cpp ee166f7d7b79
 property-rejection-boundaries.ts.cpp 597ea9efa658
 property-test-over-a-boxed-map.runtime.ts.cpp 6f9a25dda62e
-prototype-constructor-and-number-reflection.runtime.js.cpp 82ffa2a3b239
+prototype-constructor-and-number-reflection.runtime.js.cpp 7fa2364b1153
 prototype-method-own-length.runtime.js.cpp 22320f8423ba
 prototype-method-value-call.runtime.js.cpp 0a71819013b9
 prototype-object-class-typed-instance.ts.cpp e53246f08c16
@@ -1144,12 +1145,12 @@ static-assignment-read-through-this-constructor-view.runtime.ts.cpp 6f6ada411c68
 static-factory-read-through-constructor-type-union.runtime.ts.cpp efdd02356c29
 static-factory-read-through-nullish-default-constructor.runtime.ts.cpp aca08fb49bee
 static-field-without-initializer-reads-undefined-until-written.runtime.ts.cpp 087ef535129d
-static-intrinsic-reflection.runtime.js.cpp 7b7a64d6bc83
+static-intrinsic-reflection.runtime.js.cpp 34f6e7a872f3
 static-method-as-callback-value.ts.cpp 9bfc36f38805
 static-object-has-own-native.runtime.js.cpp efdcfbdd1534
 static-own-assignment-replaces-empty-object-field.runtime.js.cpp 19d7ac8e94cd
 static-predicate-known-callers-takes-native-arm.runtime.ts.cpp 6b14333c25cf
-static-property-descriptors.runtime.js.cpp 2860e1cc646a
+static-property-descriptors.runtime.js.cpp 439ee64f8463
 stored-listener-native-flow.js.cpp ca21c244cd67
 straight-line-char-code-reads-share-one-layout.runtime.ts.cpp 606d587ddb7a
 strict-delete-module-exports.ts.cpp 256f94d0dbc4
@@ -1187,9 +1188,9 @@ symbol-keyed-class-field-declarations.ts.cpp 17a558062aca
 symbol-keyed-method-deletes-symbol-expando.ts.cpp 70daf853607b
 symbol-keyed-this-writes-get-an-absent-native-slot.runtime.ts.cpp 9c078ffdc578
 tail-conversion-never-allocated.ts.cpp 42a0331af439
-target-surface-options-from-a-partial-bag.runtime.js.cpp 3014a050c2b3
-template-strings-array-identity.ts.cpp be8b199a9d03
-template-strings-array-structural.ts.cpp 9bebf40eefec
+target-surface-options-from-a-partial-bag.runtime.js.cpp cb8a18cb25f0
+template-strings-array-identity.ts.cpp c802772193cd
+template-strings-array-structural.ts.cpp 5960c07f4303
 template-strings-readonly-array.ts.cpp 7ed11e4d3e8f
 template-tostring-with-optional-parameter.ts.cpp d097c03d78ed
 then-callback-returns-value-or-promise-union.ts.cpp 1f62a859e3f3

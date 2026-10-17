@@ -92,7 +92,7 @@ export const nativeFieldViewReadForText = (
   ordinaryReadOf: (
     carrier: Representation,
     key: string
-  ) => { readonly source: Representation; readonly text: string; readonly accessor?: true } | null,
+  ) => { readonly source: Representation; readonly text: string; readonly accessor?: true; readonly absentReadsUndefined?: true } | null,
   keyOperand?: IrOperand
 ): string => {
   const result = cppTypeOf(target)
@@ -132,7 +132,7 @@ export const nativeFieldViewReadForText = (
         const concrete = actual ? `static_cast<const ${cppTypeOf(actual.source)}&>(${actual.text})` : ''
         const getterAnswer = ordinary && actual?.accessor === true ? `return ${renderedLeaf(ctx, ordinary.conversion, concrete)};` : null
         const plain =
-          ordinary && actual && actual.source.kind === 'optional'
+          ordinary && actual && (actual.source.kind === 'optional' || actual.absentReadsUndefined === true)
             ? `return ${renderedLeaf(ctx, ordinary.conversion, concrete)};`
             : 'gea::host::throwRuntimeError("TypeError", "a native view receiver has no admitted plain allocation");'
         const property = `${viewKeyText(key)}`
@@ -222,7 +222,7 @@ export const nativeFieldViewReadText = (
   ordinaryReadOf: (
     carrier: Representation,
     key: string
-  ) => { readonly source: Representation; readonly text: string; readonly accessor?: true } | null
+  ) => { readonly source: Representation; readonly text: string; readonly accessor?: true; readonly absentReadsUndefined?: true } | null
 ): string | null =>
   operation.nativeFieldViewRead === undefined
     ? null
