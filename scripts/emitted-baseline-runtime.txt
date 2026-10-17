@@ -66,8 +66,8 @@ asserted-subclass-over-base-class-member-uses-checked-downcast.runtime.ts.cpp 0a
 asserted-union-arm-is-checked-not-read-unchecked.runtime.ts.cpp 31655201bdd1
 asserted-union-of-classes-into-interface-view.runtime.ts.cpp 9ec49e6387d4
 assign-copies-only-keys-the-sources-hold.runtime.ts.cpp 61d6f72d1c97
-assign-defaults-target-passed-to-untyped-helper.runtime.js.cpp dcd81d2c7b70
-assign-defaults-target-reads-keys-only-the-source-states.runtime.js.cpp 80e6b7ccb47d
+assign-defaults-target-passed-to-untyped-helper.runtime.js.cpp 11bcffa8a9bb
+assign-defaults-target-reads-keys-only-the-source-states.runtime.js.cpp f093ba22a78b
 assign-for-in-generic.ts.cpp 06f1ce7152dc
 async-dropped-promise-reactions.runtime.ts.cpp bc4608e2943c
 async-function-throw-rejects.ts.cpp d972f57212e5
@@ -289,7 +289,7 @@ dead-helper-obligations.runtime.js.cpp 2cb43ef9a086
 dead-values.ts.cpp b1670b33a17d
 declared-integer-bindings-hold-their-width.runtime.ts.cpp 913ab0adb521
 decorate-decrypted-document-symbol-keys.runtime.ts.cpp 9cce357949ce
-defaulted-empty-literal-parameter-reads-caller-keys.runtime.js.cpp 4a3f57ba9035
+defaulted-empty-literal-parameter-reads-caller-keys.runtime.js.cpp 8277971d32cd
 define-aspects-over-constructor-family-union.runtime.ts.cpp 5ef073939c06
 define-property-accessor-on-object-and-class-instance.runtime.ts.cpp ea8f8cf57dbf
 define-property-of-an-undeclared-key-keeps-the-class-native.runtime.js.cpp 649e14f66919
@@ -397,11 +397,12 @@ explicit-this-call-guarded-against-boxed-shadow.runtime.ts.cpp 89a6ddaa2a88
 extra-call-arguments.ts.cpp 723e026e0319
 extracted-union-method-keeps-dynamic-receiver.runtime.ts.cpp 809ef3309c5b
 field-census-class-family-narrowing.runtime.js.cpp a70812894294
+field-view-key-forwarded-past-its-source-reads-a-plain-allocations-own-slot.runtime.js.cpp c9a56306eaf1
 filter-under-a-type-guard-narrows-its-element.ts.cpp 56fe38064a9b
 find-with-document-callback-over-typed-statements.runtime.ts.cpp 8e5d03d36632
 finite-key-read-off-a-dynamic-receiver-roots-only-its-keys.runtime.ts.cpp 1592b664ceb4
 fixed-data-definition.js.cpp 1bc62dfe90af
-fixed-field-assignment-widening.runtime.js.cpp b4594445e1a9
+fixed-field-assignment-widening.runtime.js.cpp f3aafaf34df9
 fixed-field-define-property-widening.runtime.js.cpp 76628322ebaa
 fixed-field-define-property.runtime.js.cpp cdb870706f4f
 flat-over-tuples-and-from-entries-of-entries.ts.cpp 8d4f7e7123c7
@@ -583,7 +584,7 @@ instance-reparented-onto-field-less-subclass.ts.cpp b1f89c52e05d
 instance-reparented-onto-mixin-subclass.ts.cpp b9ebb4bb514e
 instanceof-a-generic-class.ts.cpp 5c11037439c5
 instanceof-class-record-string-union.ts.cpp c0626781c5cd
-instanceof-class-union-through-nested-record-views.runtime.ts.cpp 6d654bccca94
+instanceof-class-union-through-nested-record-views.runtime.ts.cpp 786a7e7a88a6
 instanceof-date-over-a-union-of-native-carriers.runtime.ts.cpp 6543d6b77454
 instanceof-derived-class.ts.cpp 526f685a24d1
 instanceof-else-arm-narrowed-to-never-is-not-converted.runtime.ts.cpp bf7dc12bf10d
@@ -1121,7 +1122,7 @@ spread-copy-not-elided-when-source-written-or-copy-escapes.runtime.ts.cpp a99b0f
 spread-excess-keys-into-narrower-record-keep-source-order.runtime.ts.cpp c65683738e31
 spread-index-signature-document-return.ts.cpp 4b74a70fc6d0
 spread-narrowed-unknown-into-literal-in-option-table.runtime.ts.cpp bd07c9bce963
-spread-narrowed-unknown-record-cast-any-into-options.runtime.ts.cpp 12586cbf0e98
+spread-narrowed-unknown-record-cast-any-into-options.runtime.ts.cpp 4e3ac995a2cc
 spread-of-null-class-reference-copies-nothing.runtime.ts.cpp 9223b6b9d2d2
 spread-of-unreflected-record-keeps-creation-order.runtime.ts.cpp 25833b37b1bf
 spread-open-document-into-closed-options.ts.cpp 22536cc2bcbf
@@ -1186,7 +1187,7 @@ symbol-keyed-class-field-declarations.ts.cpp 17a558062aca
 symbol-keyed-method-deletes-symbol-expando.ts.cpp 70daf853607b
 symbol-keyed-this-writes-get-an-absent-native-slot.runtime.ts.cpp 9c078ffdc578
 tail-conversion-never-allocated.ts.cpp 42a0331af439
-target-surface-options-from-a-partial-bag.runtime.js.cpp 2b4847723f3b
+target-surface-options-from-a-partial-bag.runtime.js.cpp 3014a050c2b3
 template-strings-array-identity.ts.cpp be8b199a9d03
 template-strings-array-structural.ts.cpp 9bebf40eefec
 template-strings-readonly-array.ts.cpp 7ed11e4d3e8f

@@ -279,10 +279,11 @@ export const nativeFieldViewDomainsOf = (
       cache.set(identity, null)
       return null
     }
-    const forwarded = new Set(
-      (installed ?? []).flatMap((plan) => plan.fields.flatMap((field) => (field.descriptorForward ? [field.key] : [])))
-    )
-    for (const field of ordinary.fields) if (!forwarded.has(field.key)) add(field.key, { read: field.value, write: field.value })
+    // The ordinary allocation stores every declared key in its own slot, a key
+    // an installed view forwards to its source included: `{ pan, ...opts }`
+    // reaching the parameter a forwarding view of `{ vel }` also reaches is no
+    // view, and its `pan` is that slot.
+    for (const field of ordinary.fields) add(field.key, { read: field.value, write: field.value })
     for (const accessor of ordinary.kind === 'record' ? ordinary.accessors : []) {
       const getter = accessor.getter === null ? null : abiOf(accessor.getter)
       const setter = accessor.setter === null ? null : abiOf(accessor.setter)
