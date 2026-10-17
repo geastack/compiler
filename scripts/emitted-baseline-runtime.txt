@@ -414,6 +414,7 @@ explicit-this-call-guarded-against-boxed-shadow.runtime.ts.cpp db82df95628e
 extra-call-arguments.ts.cpp 723e026e0319
 extracted-union-method-keeps-dynamic-receiver.runtime.ts.cpp d2d69bf92f2c
 field-census-class-family-narrowing.runtime.js.cpp a70812894294
+field-view-key-forwarded-past-its-source-reads-a-plain-allocations-own-slot.runtime.js.cpp c9a56306eaf1
 filled-array-drops-spent-hole-flags.runtime.ts.cpp ab7975aefde3
 filter-under-a-type-guard-narrows-its-element.ts.cpp 56fe38064a9b
 find-with-document-callback-over-typed-statements.runtime.ts.cpp f96b0fd4f35a
