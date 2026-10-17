@@ -1,0 +1,27 @@
+name: Publish
+
+# Merging main into `release` publishes every package whose version is not
+# on npm yet. Tests run locally (release:check) before that merge.
+on:
+  push:
+    branches: [release]
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency: publish
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest
+      - run: node .github/scripts/publish.mjs
+        env:
+          RELEASE_PACKAGES: '[{"dir":".","build":"npm ci --ignore-scripts && npx tsc -p tsconfig.json && node scripts/mark-bins-executable.mjs"}]'
