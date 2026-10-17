@@ -2572,6 +2572,10 @@ export const reflectionExposureOf = (
             promoteFull(operation.receiver.representation, 'spread-expando-key')
           } else if (representationKey(into.value) !== representationKey(field.value)) promoteFull(field.value, 'spread-converted-field')
         }
+        // A live view's slots are inert: the runtime copies a view source by
+        // walking its original's own keys (`copiesThroughNativeView`), never
+        // through the static copy, so that original must list them.
+        demandEnumeratedViewOrigins(operation.source.representation, operation)
         continue
       }
       promoteFull(operation.source.representation, 'dynamic-spread-source')

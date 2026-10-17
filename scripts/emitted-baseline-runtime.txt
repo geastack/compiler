@@ -704,6 +704,7 @@ key-order-unobserved-record-copies-values-and-observed-chain-keeps-order.runtime
 keyed-collection-seeded-from-map-and-iterator.ts.cpp c57959536699
 keyed-table-and-union-array-reads-answer-once.runtime.ts.cpp 4dd45d33cd79
 last-transferring-use-moves-after-in-place-reads.runtime.ts.cpp 1ac765409091
+layout-copied-spread-of-a-live-view-copies-its-originals-fields.runtime.js.cpp e5f54cef8bed
 lazy-map-in-logical-or-assignment.ts.cpp b75278518c68
 lazy-subclass-accessor-override.ts.cpp d249708205e7
 listener-through-any-into-void-slot-discards-its-result.runtime.ts.cpp 0c985fdbe13c
