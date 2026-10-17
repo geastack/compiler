@@ -124,6 +124,10 @@ export const publishNativeFieldViewFacts = (input: PublishNativeFieldViewFactsIn
               ? nativeFieldViewReadOf(operation, key, flow, input.conversions)
               : (nativeFieldViewReadSelectionOf(operation, operation.provenKeyTexts ?? [], flow, input.conversions) ??
                 nativeFieldViewOpenReadOf(operation, flow, input.conversions))
+          if (read === null && key !== undefined && nativeFieldViewOpenDocumentRead(operation, key, targets, documents, flow)) {
+            const { nativeFieldViewRead: previousRead, ...open } = ordinary
+            return open
+          }
           return read === null
             ? ordinary
             : {

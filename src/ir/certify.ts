@@ -1579,7 +1579,8 @@ const nativeFieldViewDemandsOf = (operation: IrOperation, ctx: CertifyContext): 
       operation,
       key,
       ctx.nativeFieldViewTargets ?? new Set(),
-      ctx.nativeFieldViewDocumentTargets ?? new Set()
+      ctx.nativeFieldViewDocumentTargets ?? new Set(),
+      ctx.nativeFieldViews
     )
   )
     return []
