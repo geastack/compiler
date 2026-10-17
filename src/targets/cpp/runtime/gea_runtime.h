@@ -35823,6 +35823,44 @@ struct Pattern {
   // `test`: 0 unknown, 1 compiled, -1 outside the subset.
   mutable signed char simpleState = 0;
   mutable std::shared_ptr<const simple::Program> simpleProgram;
+  // The unit every match must open with, for `matchAt`'s search: -1 unknown,
+  // 0 none.
+  mutable int leadingUnitState = -1;
+
+  /**
+   * The ASCII character a match of `compiledSource` must begin with: its
+   * first atom, when that is a plain character no quantifier can skip and no
+   * top-level `|` routes around -- `/#pragma unroll_loop_start\s+…/`. 0 when
+   * the pattern does not pin one.
+   */
+  int leadingUnit() const {
+    if (leadingUnitState >= 0) return leadingUnitState;
+    leadingUnitState = 0;
+    const std::string &text = compiledSource;
+    if (ignoreCase || unicode || text.empty()) return 0;
+    const unsigned char first = static_cast<unsigned char>(text[0]);
+    if (first == 0 || first >= 0x80 || std::string_view("\\^$.|?*+()[]{}").find(static_cast<char>(first)) != std::string_view::npos) return 0;
+    if (text.size() > 1 && std::string_view("*?{").find(text[1]) != std::string_view::npos) return 0;
+    int depth = 0;
+    bool inClass = false;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+      const char c = text[i];
+      if (c == '\\') {
+        ++i;
+      } else if (inClass) {
+        if (c == ']') inClass = false;
+      } else if (c == '[') {
+        inClass = true;
+      } else if (c == '(') {
+        ++depth;
+      } else if (c == ')') {
+        --depth;
+      } else if (c == '|' && depth == 0) {
+        return 0;
+      }
+    }
+    return leadingUnitState = first;
+  }
 
   const simple::Program *simplePattern() const {
     if (simpleState == 0) {
@@ -36285,11 +36323,30 @@ struct Pattern {
     auto searchBegin = inputUnits.cbegin() + static_cast<std::ptrdiff_t>(startUnits);
     auto searchFlags = std::regex_constants::match_default;
     if (startUnits > 0) searchFlags |= std::regex_constants::match_prev_avail;
-    if (!std::regex_search(searchBegin, inputUnits.cend(), match, compiled, searchFlags)) {
+    bool found = false;
+    if (const int lead = sticky ? 0 : leadingUnit()) {
+      // libc++ allocates and frees its matcher state at every start it tries,
+      // which made one walk over a shader source (`#pragma unroll_loop_start`)
+      // cost milliseconds. A match can only start at `lead`: try only there,
+      // in order, so the first success is still the leftmost match.
+      for (auto at = searchBegin; (at = std::find(at, inputUnits.cend(), static_cast<wchar_t>(lead))) != inputUnits.cend(); ++at) {
+        auto flags = std::regex_constants::match_continuous;
+        if (at != inputUnits.cbegin()) flags |= std::regex_constants::match_prev_avail;
+        if (std::regex_search(at, inputUnits.cend(), match, compiled, flags)) {
+          searchBegin = at;
+          found = true;
+          break;
+        }
+      }
+    } else {
+      found = std::regex_search(searchBegin, inputUnits.cend(), match, compiled, searchFlags);
+    }
+    if (!found) {
       if (stateful) resetLastIndex();
       return MatchSlice{};
     }
-    const std::size_t matchStartUnits = startUnits + static_cast<std::size_t>(match.position(0));
+    const std::size_t matchStartUnits =
+        static_cast<std::size_t>(searchBegin - inputUnits.cbegin()) + static_cast<std::size_t>(match.position(0));
     if (sticky && matchStartUnits != startUnits) {
       resetLastIndex();
       return MatchSlice{};
