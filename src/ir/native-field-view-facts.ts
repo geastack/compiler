@@ -173,18 +173,31 @@ const carrierTargetsAreDocuments = (value: Representation, targets: ReadonlySet<
  * receipt can exist for it, and none is needed: the ordinary native [[Get]]
  * reads the view's original Document entry, and a plain allocation its own
  * slots and sidecar.
+ *
+ * A fixed key that no layout, accessor or installed view of the receiver
+ * names (`parameters.morphAttributeCount` off a record that never declares
+ * it) is the same read once no receipt exists for it. Its only receipt route
+ * claims `undefined` and needs an unescaped allocation
+ * (`originalDescriptorAbsent`); a published record can gain the key in its
+ * sidecar, and the ordinary [[Get]] answers that too.
  */
 export const nativeFieldViewOpenDocumentRead = (
   operation: GetOperation | SetOperation,
   constantKey: string | null | undefined,
   targets: ReadonlySet<string>,
-  documents: ReadonlySet<string>
+  documents: ReadonlySet<string>,
+  flow?: Pick<FieldFlow, 'nativeFieldViewAbsentRoutesOf'>
 ): boolean =>
   operation.kind === 'get' &&
-  (constantKey === null || constantKey === undefined) &&
   operation.provenKeyTexts === undefined &&
   documents.size > 0 &&
-  carrierTargetsAreDocuments(operation.receiver.representation, targets, documents)
+  carrierTargetsAreDocuments(operation.receiver.representation, targets, documents) &&
+  (constantKey === null || constantKey === undefined || keyNamedByNoDescriptor(operation.receiver.value, constantKey, flow))
+
+const keyNamedByNoDescriptor = (receiver: IrValueId, key: string, flow?: Pick<FieldFlow, 'nativeFieldViewAbsentRoutesOf'>): boolean =>
+  flow
+    ?.nativeFieldViewAbsentRoutesOf?.(receiver, key)
+    ?.every((route) => route.originalAbsent === true || route.declaredAnyEntry === true) ?? false
 
 /**
  * A receiver the host census resolved to a namespace PATH is no allocation:

@@ -1311,6 +1311,7 @@ unbound-native-method-receiver-observations.runtime.ts.cpp 2ec6a3681386
 unbox-nullable-union.ts.cpp 30fffd7d50e7
 uncallable-member-slot-call.runtime.js.cpp ffbb78533bfd
 uncertified.txt 538701e7d872
+undeclared-key-read-off-a-record-a-boxed-frame-views.runtime.js.cpp 7f7171d61204
 uniform-table-to-json-calls-method-on-stored-value.runtime.js.cpp fe6afffbff7b
 uniform-tuple-boxed-into-any-is-an-array.runtime.ts.cpp 2102566ee2ec
 uniform-tuple-const-object-indexed-read-in-a-free-function.runtime.ts.cpp 22be9121340b
