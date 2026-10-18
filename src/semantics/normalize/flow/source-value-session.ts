@@ -1467,7 +1467,9 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    * only as the name it is declared or stored under: `value` of a property
    * access reads `slot(root, key)`, and a store into that slot is spelled with
    * the same key, so a callee spelling some OTHER name cannot produce this body
-   * however the graph solves. Three transfers -- a parameter's frame, a
+   * however the graph solves -- unless a cell got it from another cell (`const
+   * g = f`, an argument, an element): the body's closure lists those calls
+   * for `case 'callers'` (`visitUse`). Three transfers -- a parameter's frame, a
    * receiver's frame and a completion's use -- asked anyway, by observing
    * `targets` of EVERY call in the program, per query. That forced the entire
    * program's dispatch graph from each of them and was a large program's compile time:
@@ -1498,6 +1500,17 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    */
   let calleeNames: Map<string, FlowCallSite[]> | null = null
   let unspelledCallees: FlowCallSite[] = []
+  const calleeNameOf = (site: FlowCallSite): string | null => {
+    const own = ts.isCallExpression(site.call) ? candidateOrdinaryOwnCallableOperandsOf(site.call) : null
+    const callee = site.operands ? unwrapErasedExpression(own?.callee ?? site.operands.callee) : null
+    return callee
+      ? ts.isIdentifier(callee)
+        ? callee.text
+        : ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)
+          ? accessKey(callee)
+          : null
+      : null
+  }
   const buildCalleeIndex = (): Map<string, FlowCallSite[]> => {
     if (calleeNames !== null) return calleeNames
     const index = new Map<string, FlowCallSite[]>()
@@ -1507,15 +1520,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       // is a caller frame (`case 'callers'`), which the construction domain
       // never names.
       if (!ts.isCallExpression(site.call) && !ts.isNewExpression(site.call)) continue
-      const own = ts.isCallExpression(site.call) ? candidateOrdinaryOwnCallableOperandsOf(site.call) : null
-      const callee = site.operands ? unwrapErasedExpression(own?.callee ?? site.operands.callee) : null
-      const name = callee
-        ? ts.isIdentifier(callee)
-          ? callee.text
-          : ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)
-            ? accessKey(callee)
-            : null
-        : null
+      const name = calleeNameOf(site)
       if (name === null) unspelled.push(site)
       else {
         let held = index.get(name)
@@ -2890,6 +2895,14 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               return
             }
             if (!isBody(root)) fail('non-callable-use', reference)
+            else if (ts.isCallExpression(parent)) {
+              // A call through a cell none of the body's names spells -- `const g =
+              // f; g()`, a parameter, an element, a destructured binding -- is a
+              // caller `candidateCallersOf` cannot list. Hand it to `case 'callers'`.
+              const site = sites.get(parent)
+              const name = site ? calleeNameOf(site) : null
+              if (!site || (name !== null && namesOf(root)?.includes(name) === false)) facts.add(parent)
+            }
             return
           }
           if (ts.isCallExpression(parent)) {
@@ -3959,10 +3972,11 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           // is paid once per OWNER, not once per (owner, consumer) pair. See
           // `callersOf`'s comment for the shape and the measured cost this
           // replaces.
-          // Discovery by name, soundness by CLOSURE. The spelled calls that
-          // resolve to this owner are its callers only while the owner can
-          // be reached from nowhere else: the body's own closure says where
-          // the callable value goes, and for a class member each instance's
+          // Discovery by name and by CLOSURE, soundness by CLOSURE. The spelled
+          // calls that resolve to this owner are its callers only while the owner
+          // can be reached from nowhere else: the body's own closure says where
+          // the callable value goes -- including each call through an alias no
+          // name of the owner spells, which it lists -- and for a class member each instance's
           // closure says where the receivers go -- an instance handed to
           // unknown code can be called through from there with arguments no
           // site spells. A spelled call whose targets are opaque is then
@@ -3976,7 +3990,12 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           // sites, which `constructionSitesTargeting` names from the
           // construction domain, so it has no closure to read here.
           if (ts.isConstructorDeclaration(owner)) break
-          read(closure(owner))
+          // `const g = f; g()` before this: `callers(f)` was a complete `[]`. Seeded
+          // so `holdersOf` below finds the ones whose targets hold the owner; the
+          // closure's other calls (a bulk assign or definition onto it) never do.
+          const unnamed: ts.CallExpression[] = []
+          for (const use of read(closure(owner))) if (ts.isCallExpression(use)) unnamed.push(use)
+          for (const call of unnamed) seed(targets(call))
           if (ts.isClassElement(owner) && ts.isClassLike(owner.parent)) {
             if ((ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Static) !== 0) fail('static-member-callers-open', owner)
             else for (const instance of familyInstancesOf(owner.parent, 'member-family-open') ?? []) read(closure(instance))
@@ -4018,6 +4037,13 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             // Candidate order, the order the scan this replaces added them in.
             matched.sort((a, b) => a - b)
             for (const position of matched) facts.add(sites.sites[position]!.call)
+          }
+          // The calls through an alias the closure listed: a caller once its
+          // seeded `targets` holds the owner, as for a named candidate above.
+          if (unnamed.length > 0) {
+            const heldTargets = new Set<ts.Node>()
+            for (const holder of holders) if (holder.kind === 'targets') heldTargets.add(holder.node)
+            for (const call of unnamed) if (heldTargets.has(call)) facts.add(call)
           }
           break
         }
