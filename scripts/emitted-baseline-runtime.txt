@@ -694,7 +694,7 @@ logical-and-object-left-falsy-arm.ts.cpp ca4939b1d905
 logical-native-merge.ts.cpp 94dbbaf6ab31
 logical-object-union-falsy-absence.ts.cpp 63a970f4b8cb
 loop-invariant-ref-argument.ts.cpp f9179d1c22f4
-loop-move-single-use.ts.cpp 61c0898643ef
+loop-move-single-use.ts.cpp 3e607b4a2552
 map-callback-any-tuple-rebuilt-into-a-stated-position.runtime.ts.cpp 2845a0ac549d
 map-entries-into-iterable-iterator-frame-field.runtime.ts.cpp 3fe02e76ce1e
 map-into-open-record-or-string-parameter.runtime.ts.cpp 1e4bdbeb54ee
@@ -835,7 +835,7 @@ native-union-inherited-method.ts.cpp 56582ce4a8d8
 native-union-selection.ts.cpp 13a8707dd144
 native-untyped-event-callback.runtime.ts.cpp e832f097ef36
 native-webgl-type-realization.ts.cpp 7c96c0be4d93
-negative-zero-storage.ts.cpp bd880d300166
+negative-zero-storage.ts.cpp bac15a82cd8a
 negative-zero.ts.cpp 9082a4874e1a
 nested-callback-field-initializer.runtime.ts.cpp 89e7bcf41b42
 nested-dynamic-operand-roles.ts.cpp 2193deae107e
@@ -889,7 +889,7 @@ object-assign-native-error-into-class-instance.runtime.ts.cpp 6f6ba5614368
 object-assign-record-into-any-document-field.runtime.ts.cpp 51e74f7a867a
 object-constructor-called-without-a-value.ts.cpp fb909696e067
 object-create-contextual.ts.cpp 6599d39bbe7d
-object-create-null-record-members-start-absent.runtime.ts.cpp 3d0f70530f85
+object-create-null-record-members-start-absent.runtime.ts.cpp 6909291d85d0
 object-destructuring-assignment.ts.cpp 8171dde40eb5
 object-entries-over-optional-fields.ts.cpp 66f94b5d48fc
 object-entries-over-union-with-readonly-array-arm.runtime.ts.cpp afb1958c8ca6
@@ -971,7 +971,7 @@ override-field-with-a-wider-record-keeps-identity.runtime.ts.cpp 78d586fb30a9
 override-field-with-a-wider-record-type-keeps-its-fields.runtime.ts.cpp 67240a0a0f65
 own-keys-declared-order.runtime.js.cpp 916e90e2e8f6
 owned-formal.ts.cpp 0f9fba23f7fe
-owned-string-dynamic-transfer.ts.cpp 1cb170f3eb91
+owned-string-dynamic-transfer.ts.cpp 335b086db906
 parameter-properties.ts.cpp 6a0dbfc6e4da
 partial-record-merge-and-intersection-spread.runtime.ts.cpp 268b7888c079
 pass-through-host-call-unboxes-a-dynamic-argument.runtime.ts.cpp d09c89dd3a96
@@ -1163,6 +1163,7 @@ strict-delete.ts.cpp e8e3fe76d41a
 strict-equality-between-tagged-unions.runtime.ts.cpp 5ee46937bfac
 string-and-regexp-walks-over-long-mixed-width-text.runtime.ts.cpp ae752aa6ae64
 string-array-into-set-or-any-array-parameter.runtime.ts.cpp 98daa76c6d15
+string-cell-store-reads-the-cell-before-adopting-a-moved-head.runtime.js.cpp 44244caa8899
 string-field-append.ts.cpp 1357f6769fe1
 string-from-char-code-direct.ts.cpp 8619a5e74091
 string-from-code-point.runtime.ts.cpp 4ee10229b1b4
@@ -1294,7 +1295,7 @@ unknown-asserted-argument-keeps-its-record-arm.runtime.ts.cpp fe1373c53c8b
 unknown-asserted-to-map-reads-native-entries.runtime.ts.cpp 5635fd8d7f8f
 unknown-callee-argument-key-narrowing.ts.cpp a25e2f7d6c2f
 unknown-narrowed-by-instanceof-class-unboxes-to-class-ref.runtime.ts.cpp d1f1fb8e1234
-unknown-narrowed-by-instanceof-date-unboxes-to-native-date.runtime.ts.cpp ae1189c7352b
+unknown-narrowed-by-instanceof-date-unboxes-to-native-date.runtime.ts.cpp 2dd9018b0e79
 unknown-narrowed-by-instanceof-host-types-unboxes-natively.runtime.ts.cpp 679a057516c7
 unknown-narrowed-by-instanceof-map-unboxes-to-native-map.runtime.ts.cpp ac6df54ee60f
 unknown-narrowed-by-instanceof-regexp-unboxes-to-native-pattern.runtime.ts.cpp e8403cd7f2a1

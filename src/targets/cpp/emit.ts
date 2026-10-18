@@ -824,7 +824,7 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
     const name = defineValue(ctx, operation.result)
     // A deferrable value is reclaimed from its `name = text;` statement, so only storage that stays is built in place.
     const assigned = `${name} = ${rendered.text};`
-    lines.push(ctx.deferrable.has(operation.result.id) ? assigned : stringStoreText(name, rendered.text, assigned))
+    lines.push(ctx.deferrable.has(operation.result.id) ? assigned : stringStoreText(name, rendered.text, assigned, true))
     return
   }
 
@@ -944,7 +944,7 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
     const name = defineValue(ctx, operation.result)
     // A deferrable value is reclaimed from its `name = text;` statement, so only storage that stays is built in place.
     const assigned = `${name} = ${rendered.text};`
-    lines.push(ctx.deferrable.has(operation.result.id) ? assigned : stringStoreText(name, rendered.text, assigned))
+    lines.push(ctx.deferrable.has(operation.result.id) ? assigned : stringStoreText(name, rendered.text, assigned, true))
     return
   }
   // Exactly one side already `dynamic` and the other an ordinary typed

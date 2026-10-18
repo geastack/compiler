@@ -544,10 +544,15 @@ const joinedToStringText = (
  * after: the move reloads the temporary's length and capacity as one 16-byte
  * word the concatenation stored as two, which cannot forward and stalled every
  * template assigned to a local. Anything else keeps `fallback`'s spelling.
+ *
+ * Adopting a moved head into the target before appending stores the target
+ * before the pieces are read. Only a `fresh` target, minted for this result,
+ * is certain to be no piece: a cell is one in `s = t + '\n' + s`, which would
+ * then read `t` where the old `s` belongs.
  */
-export const stringStoreText = (target: string, text: string, fallback: string): string => {
+export const stringStoreText = (target: string, text: string, fallback: string, fresh: boolean): string => {
   const appended = appendedPiecesOf(text)
-  if (appended !== null) {
+  if (appended !== null && (fresh || appended.head === `std::move(${target})`)) {
     const adopt = appended.head === `std::move(${target})` ? '' : `gea::detail::adoptString(${target}, ${appended.head}); `
     return `${adopt}gea::appendStrings(${target}, ${appended.pieces});`
   }

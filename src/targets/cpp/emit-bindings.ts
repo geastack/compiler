@@ -434,7 +434,7 @@ const storeText = (
   // declared as `gea::Value::Tag` (`heldType` below), so only a cell that really is
   // a `std::string` takes the helper.
   held?.kind === 'string' && operation.value.representation.kind === 'string' && !ctx.typeQueryBindings.has(operation.declaration)
-    ? stringStoreText(target, valueText, `gea::detail::assignString(${target}, ${valueText});`)
+    ? stringStoreText(target, valueText, `gea::detail::assignString(${target}, ${valueText});`, false)
     : `${target} = ${valueText};`
 
 export const emitBindingWrite = (ctx: EmitContext, lines: string[], operation: BindingWriteOperation): void => {
