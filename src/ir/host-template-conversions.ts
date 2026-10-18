@@ -178,6 +178,14 @@ export const hostTemplateConversionInputsOf = (
         )
           add('prototype-result', storedCarrier(callback.abi.result), result.element)
       }
+      // `array::sort` hands a comparator whose parameters are `any` both
+      // elements boxed (`DynamicCarrier<E>::out`), and only those.
+      if (member === 'sort') {
+        const comparator = operation.arguments[0]?.representation
+        if (comparator?.kind === 'function-value-dispatch' && comparator.abi.receiver === null)
+          for (const parameter of comparator.abi.parameters.slice(0, 2))
+            if (parameter.value.kind === 'dynamic') add('prototype-callback', element, parameter.value)
+      }
       if (result && ['find', 'findLast', 'at', 'pop', 'shift'].includes(member))
         add('prototype-result', { kind: 'optional', payload: element, absence: 'undefined' }, result)
       if (member === 'filter' && result?.kind === 'array-object') add('prototype-result', element, result.element)

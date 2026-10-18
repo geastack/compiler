@@ -2012,6 +2012,13 @@ export const reflectionExposureOf = (
   }
   for (const operation of operations) {
     currentOperation = operation
+    // A callback the operation hands a value of its own (`map`'s element,
+    // `sort`'s pair) takes it boxed when its parameter is `any`. The box is
+    // made in the printed adapter or in the runtime helper, never by a
+    // `convert`, so the published recipe is the only boundary there is to see.
+    for (const recipe of operation.conversionRecipes ?? [])
+      if (recipe.role === 'prototype-callback' && recipe.target.kind === 'dynamic')
+        promoteLogicalReceiver(recipe.source, 'prototype-callback-to-dynamic')
     if (operation.kind === 'get-iterator' && operation.nativeNextMethodRead)
       promoteIteratorRead(operation.result.representation, operation.nativeNextMethodRead, operation)
     if ((operation.kind === 'iterator-next' || operation.kind === 'iterator-close') && operation.nativeMethodRead)

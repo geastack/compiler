@@ -11,6 +11,7 @@ and-condition-over-optional-string-mode.runtime.ts.cpp aba52138626a
 annotated-generic-function-alias.ts.cpp 3c0a6e6485dd
 any-argument-guard-copy-beside-typed-callers.runtime.ts.cpp c9883f70e581
 any-argument-outside-a-guard-parameter-domain.runtime.ts.cpp 324664fdd163
+any-array-callbacks-read-fields-of-the-native-records-they-are-handed.runtime.js.cpp f369822675a8
 any-array-element-tested-for-presence-keeps-its-absence.runtime.js.cpp ea93c1fa0860
 any-asserted-to-promise-then-dispatches-on-the-box.runtime.ts.cpp 538e2b321713
 any-cast-this-member-call-dispatches-over-the-receiver-classes.runtime.ts.cpp 6630b44e363c
@@ -984,7 +985,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp ba66f3c8919a
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 1529f347bb00
-printer-drift.txt 5cd533718e98
+printer-drift.txt f67d59e18958
 private-names-are-not-own-properties.ts.cpp 5d0e90d41f28
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp 0998df9c0cd5
