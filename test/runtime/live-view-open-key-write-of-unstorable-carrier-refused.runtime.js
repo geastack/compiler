@@ -1,10 +1,13 @@
 // @ts-nocheck
 // The open-key store through a live view keeps the value in its own carrier
-// on the original allocation's expando. A by-value record (`{ inner: 1 }`,
-// carried `owned`) has no storage identity a descriptor could hold without
-// copying it, so no carrier is certified for the store and the write stays
-// refused rather than boxed or guessed. The same program with a storable
-// value certifies (`live-view-open-key-writes-reach-the-original`).
+// on the original allocation's expando, and the write stays refused rather
+// than boxed or guessed while that expando slot cannot hold the record
+// (`native-data-slot`: no complete allocation, writer, absence and storage
+// receipt for it). `{ inner: 1 }` was once also refused as an unstorable
+// carrier (`native-field-view`), being a by-value record with no identity a
+// descriptor could hold; a record stored into a slot no type names is now held
+// by reference, so only the slot's refusal remains. The same program with a
+// storable value certifies (`live-view-open-key-writes-reach-the-original`).
 
 /** @typedef {{ width: number }} Size */
 
@@ -33,4 +36,4 @@ put(original, 'extra')
 put(original, 'more')
 console.log(Object.keys(original).join(','))
 
-//! expect-refusal: property-access:native-record-ref:set:native-field-view
+//! expect-refusal: property-access:native-record-ref:set:native-data-slot

@@ -48,7 +48,10 @@ function churn(): number {
     const tree: TreeNode = { v: i, kids: [], meta: a.outer }
     tree.kids.push({ v: i + 1, kids: [tree], meta: b.outer })
     const callable: WithCallable = { n: i, run: () => callable.n + 1 }
-    const dynamic: WithDynamic = { n: i, any: a.outer }
+    // The dynamic value points into the cyclic garbage through `tags`: a
+    // record put in `unknown` may be written through it unseen, so `a.outer`
+    // here would make `Inner` a reference and no longer a leaf.
+    const dynamic: WithDynamic = { n: i, any: a.outer.tags }
     sum += a.outer.inner.a + b.outer.tags.length + tree.kids[0]!.kids[0]!.v + callable.run() + dynamic.n
   }
   return sum
