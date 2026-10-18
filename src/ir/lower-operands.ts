@@ -542,6 +542,7 @@ export const enter = (
     unproven ??
     assertedUnionEntry(ctx, block, lineage, operation, operand, resolved, answer.representation) ??
     unsharedFreshTableEntry(ctx, block, lineage, operand, resolved, answer.representation) ??
+    unprovenClassEntry(ctx, block, lineage, operand, resolved, answer.representation) ??
     convertTo(ctx, block, lineage, resolved, answer.representation) ??
     familyMemberEntry(ctx, block, lineage, operation, operand, resolved, answer.representation) ??
     assertedArmEntry(ctx, block, lineage, operand, resolved, answer.representation) ??
@@ -927,6 +928,34 @@ export const assertedClassReceiver = (
   const node = ctx.program.conversions.assertedClassDowncastFor(held.representation, target)
   if (node === null) return null
   return { value: ctx.builder.convert(block, lineage, node.id, held, target), representation: target }
+}
+
+/**
+ * A base class handle entering a slot typed at one of its descendants while
+ * the operand's own type is still a class the slot does not accept: no
+ * `instanceof` narrowed it. The checker never matches a call made through an
+ * `any` callee against the body value flow finds for it -- three's
+ * `background.render( scene )` hands an `Object3D` to a `@param {Scene}` --
+ * and the ordinary downcast (`downcastClassRef`) trusts a guard that never
+ * ran, so the body then read a Mesh's bytes as a Scene. An assertion renders
+ * no guard either, and its operand carries the type of what it wraps. The
+ * checked downcast the census already has for `as Derived` receivers is the
+ * value when it is that class and a TypeError otherwise.
+ */
+const unprovenClassEntry = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  operand: SemanticOperand,
+  resolved: IrOperand,
+  slot: Representation
+): IrOperand | null => {
+  if (resolved.representation.kind !== 'class-ref' || slot.kind !== 'class-ref') return null
+  const stated = ctx.constantDeriver.derive(operand.type)
+  if (stated.kind === 'class-ref' && (stated.declaration === slot.declaration || stated.ancestors.includes(slot.declaration))) return null
+  const node = ctx.program.conversions.assertedClassDowncastFor(resolved.representation, slot)
+  if (node === null) return null
+  return { value: ctx.builder.convert(block, lineage, node.id, resolved, slot), representation: slot }
 }
 
 /** Whether a carrier has a `null` state of its own (a class reference's empty `Ref` is read separately). */
