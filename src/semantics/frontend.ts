@@ -889,44 +889,107 @@ const nativeConstructorCandidatesOf = (file: ts.SourceFile): readonly (ts.ClassD
  * compile, through four functions that only read source text. Nothing after
  * the frontend reads the checker.
  *
- * Lazy, because a compilation that reports nothing must not pay for a
- * whole-program walk to name nodes nobody asked about. Keyed by
+ * Eager and tree-free: everything the four answers read -- each node's start
+ * and end, and its declaration name -- is copied out by ordinal when the
+ * frontend returns, so the `ts.SourceFile`s die with it. Answering lazily kept
+ * every AST and its binder symbols (147 MB on a 48K-line app) alive through
+ * the whole backend for a handful of diagnostics. Keyed by
  * `positionKeyOfNode` -- file and ordinal, kind and monomorphization suffix
  * both dropped -- so a monomorphized copy resolves to the root it was cut
  * from, and a DeclarationId, which never carries a kind, resolves through the
- * same index.
+ * same table.
  */
+interface LocatedFile {
+  readonly fileName: string
+  readonly text: string
+  /** Filled on the first location asked of the file. */
+  lineStarts: readonly number[] | null
+  /** `node.getStart()` by ordinal, or -1 for a node with no real position. */
+  readonly starts: Int32Array
+  readonly ends: Int32Array
+  /** The ordinal of the identifier `ts.getNameOfDeclaration` answers, or -1. */
+  readonly names: Int32Array
+  /** A name whose `text` is not its source slice (a unicode escape). */
+  readonly spelledNames: ReadonlyMap<number, string>
+}
+
+const locateFile = (file: ts.SourceFile): LocatedFile => {
+  const ordinals = walkOrdinals(file)
+  let count = 0
+  for (const ordinal of ordinals.values()) count = Math.max(count, ordinal + 1)
+  const starts = new Int32Array(count).fill(-1)
+  const ends = new Int32Array(count)
+  const names = new Int32Array(count).fill(-1)
+  const spelledNames = new Map<number, string>()
+  for (const [node, ordinal] of ordinals) {
+    if (node.pos < 0) continue
+    starts[ordinal] = node.getStart(file)
+    ends[ordinal] = node.end
+    const name = ts.getNameOfDeclaration(node as ts.Declaration)
+    if (!name || !ts.isIdentifier(name)) continue
+    const at = ordinals.get(name)
+    // An escape is always longer than what it spells, so equal length is equal text.
+    if (at !== undefined && name.pos >= 0 && name.end - name.getStart(file) === name.text.length) names[ordinal] = at
+    else spelledNames.set(ordinal, name.text)
+  }
+  return { fileName: file.fileName, text: file.text, lineStarts: null, starts, ends, names, spelledNames }
+}
+
+/** TypeScript's own line breaks (`computeLineStarts`): CR LF, CR, LF, LS and PS. */
+const lineStartsOf = (text: string): readonly number[] => {
+  const starts = [0]
+  for (let at = 0; at < text.length; at++) {
+    const code = text.charCodeAt(at)
+    if (code === 13 && text.charCodeAt(at + 1) === 10) continue
+    if (code === 10 || code === 13 || code === 0x2028 || code === 0x2029) starts.push(at + 1)
+  }
+  return starts
+}
+
+const lineAndCharacterOf = (file: LocatedFile, position: number): { readonly line: number; readonly character: number } => {
+  const starts = (file.lineStarts ??= lineStartsOf(file.text))
+  let low = 0
+  let high = starts.length - 1
+  while (low < high) {
+    const middle = (low + high + 1) >> 1
+    if (starts[middle]! <= position) low = middle
+    else high = middle - 1
+  }
+  return { line: low, character: position - starts[low]! }
+}
+
 const createSourceLocator = (files: readonly (readonly [identity: string, file: ts.SourceFile])[]) => {
-  let nodesByPosition: Map<string, ts.Node> | null = null
-  const positionIndex = (): Map<string, ts.Node> => {
-    if (nodesByPosition === null) {
-      const index = new Map<string, ts.Node>()
-      for (const [identity, file] of files)
-        for (const [node, ordinal] of walkOrdinals(file)) {
-          const key = `${identity}|${ordinal}`
-          if (!index.has(key)) index.set(key, node)
-        }
-      nodesByPosition = index
-    }
-    return nodesByPosition
+  const located = new Map<string, LocatedFile>()
+  for (const [identity, file] of files) if (!located.has(identity)) located.set(identity, locateFile(file))
+  const at = (key: string): { readonly file: LocatedFile; readonly ordinal: number } | null => {
+    const split = key.lastIndexOf('|')
+    const file = split < 0 ? undefined : located.get(key.slice(0, split))
+    const text = key.slice(split + 1)
+    const ordinal = Number(text)
+    if (file === undefined || !Number.isInteger(ordinal) || String(ordinal) !== text || ordinal < 0 || ordinal >= file.starts.length)
+      return null
+    return file.starts[ordinal]! < 0 ? null : { file, ordinal }
   }
-  const sourceNodeOf = (node: NodeId): ts.Node | null => positionIndex().get(positionKeyOfNode(node)) ?? null
-  const sourceNodeOfDeclaration = (declaration: DeclarationId): ts.Node | null =>
-    positionIndex().get(positionKeyOfDeclaration(declaration)) ?? null
-  const locationOfFound = (found: ts.Node | null): DiagnosticLocation | null => {
+  const locationOf = (found: ReturnType<typeof at>): DiagnosticLocation | null => {
     if (!found) return null
-    const file = found.getSourceFile()
-    const { line, character } = file.getLineAndCharacterOfPosition(found.getStart())
-    return { file: file.fileName, line: line + 1, column: character + 1 }
+    const { line, character } = lineAndCharacterOf(found.file, found.file.starts[found.ordinal]!)
+    return { file: found.file.fileName, line: line + 1, column: character + 1 }
   }
+  const textAt = (file: LocatedFile, ordinal: number): string => file.text.substring(file.starts[ordinal]!, file.ends[ordinal]!)
   return {
-    locationOfNode: (node: NodeId): DiagnosticLocation | null => locationOfFound(sourceNodeOf(node)),
-    textOfNode: (node: NodeId): string | null => sourceNodeOf(node)?.getText() ?? null,
-    locationOfDeclaration: (declaration: DeclarationId): DiagnosticLocation | null => locationOfFound(sourceNodeOfDeclaration(declaration)),
+    locationOfNode: (node: NodeId): DiagnosticLocation | null => locationOf(at(positionKeyOfNode(node))),
+    textOfNode: (node: NodeId): string | null => {
+      const found = at(positionKeyOfNode(node))
+      return found ? textAt(found.file, found.ordinal) : null
+    },
+    locationOfDeclaration: (declaration: DeclarationId): DiagnosticLocation | null => locationOf(at(positionKeyOfDeclaration(declaration))),
     nameOfDeclaration: (declaration: DeclarationId): string | null => {
-      const found = sourceNodeOfDeclaration(declaration)
-      const name = found ? ts.getNameOfDeclaration(found as ts.Declaration) : undefined
-      return name && ts.isIdentifier(name) ? name.text : null
+      const found = at(positionKeyOfDeclaration(declaration))
+      if (!found) return null
+      const spelled = found.file.spelledNames.get(found.ordinal)
+      if (spelled !== undefined) return spelled
+      const name = found.file.names[found.ordinal]!
+      return name < 0 ? null : textAt(found.file, name)
     }
   }
 }

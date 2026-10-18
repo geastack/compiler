@@ -94,8 +94,13 @@ export const settleBindingCensus = <Facts>(
     return `${identities.get(type)}:${type.flags}:${type.symbol?.name ?? '-'}`
   }
   for (let rounds = 2; rounds <= limit; rounds += 1) {
-    const reads = new Map<FactQuery, Map<ts.Node, CensusFact>>()
+    // Null once this round's convergence check has its snapshot: the wrapper
+    // stays on the census chain for the whole compile, and recording every
+    // later query into a map nobody reads again grew it through the
+    // structural censuses.
+    let reads: Map<FactQuery, Map<ts.Node, CensusFact>> | null = new Map()
     const read = <T extends CensusFact>(name: FactQuery, node: ts.Node, value: T): T => {
+      if (reads === null) return value
       let nodes = reads.get(name)
       if (!nodes) {
         nodes = new Map()
@@ -134,7 +139,8 @@ export const settleBindingCensus = <Facts>(
     unsettled = changed ? [`boundCount ${previousBoundCount} -> ${next.parameters.boundCount}`] : []
     // Reads may lazily consult earlier views. Snapshot before querying `next`
     // so forwarding to `observed` cannot extend the map during iteration.
-    const pending = [...reads].map(([name, nodes]) => [name, [...nodes]] as const)
+    const pending = [...(reads ?? [])].map(([name, nodes]) => [name, [...nodes]] as const)
+    reads = null
     for (const [name, nodes] of pending) {
       for (const [node, previous] of nodes) {
         const answer = queries[name](next.parameters, node)

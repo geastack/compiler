@@ -123,6 +123,12 @@ const VALUE_CARRYING_KINDS: ReadonlySet<Query['kind']> = new Set<Query['kind']>(
   'constructor-completion'
 ])
 const VALUE_ORIGIN = 'source-value-origin'
+// Shared and never mutated -- consumers compare contents only. A fresh array
+// per seal was about 12 MB of identical one- and zero-element arrays.
+const VALUE_ORIGIN_DOMAIN: readonly string[] = [VALUE_ORIGIN]
+const NO_DOMAINS: readonly string[] = []
+const NO_CAUSES: readonly never[] = []
+const NO_GROUNDING: readonly never[] = []
 // Read once at load, not per value transfer: `process.env` is a native interceptor.
 const noArrayKeys = process.env['GEA_NO_ARRAY_KEYS'] !== undefined
 /**
@@ -3977,11 +3983,12 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           break
         }
       }
-      finalCauses = causes
+      finalCauses = causes.length === 0 ? NO_CAUSES : causes
       // Only the seal reads the grounding edges, and the seal is the last
       // call this query receives; materializing the list on every transfer
       // allocated one object per carried edge per re-evaluation for nothing.
-      if (sealing) finalGrounding = [...grounding].map((dependency) => ({ domain: VALUE_ORIGIN, dependency }))
+      if (sealing)
+        finalGrounding = grounding.size === 0 ? NO_GROUNDING : [...grounding].map((dependency) => ({ domain: VALUE_ORIGIN, dependency }))
       return facts
     }
     const run = (read: Read, observe: Read, holdersOf: DependencyFactHoldersOf<Query, Value>, sealing: boolean): ReadonlySet<Value> => {
@@ -4006,7 +4013,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       // is a wrong answer -- so if this invariant is ever broken again by a
       // NEW transfer, union (not overwrite) is the direction that cannot lie:
       // `both(requirements.get(query), captured.requirements)`.
-      requirements.set(query, captured.requirements)
+      // Absent reads as empty (`?? []` below); one entry per state was a map of
+      // mostly empty arrays.
+      if (captured.requirements.length === 0) requirements.delete(query)
+      else requirements.set(query, captured.requirements)
       return captured.value
     }
     return {
@@ -4017,8 +4027,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         return {
           locallyComplete: finalCauses.length === 0,
           causes: finalCauses,
-          groundingRequirements: carriesValue ? [VALUE_ORIGIN] : [],
-          groundingSeeds: seeded ? [VALUE_ORIGIN] : [],
+          groundingRequirements: carriesValue ? VALUE_ORIGIN_DOMAIN : NO_DOMAINS,
+          groundingSeeds: seeded ? VALUE_ORIGIN_DOMAIN : NO_DOMAINS,
           groundingDependencies: finalGrounding
         }
       }
