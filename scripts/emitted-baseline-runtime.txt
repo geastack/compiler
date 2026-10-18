@@ -11,6 +11,7 @@ and-condition-over-optional-string-mode.runtime.ts.cpp aba52138626a
 annotated-generic-function-alias.ts.cpp 3c0a6e6485dd
 any-argument-guard-copy-beside-typed-callers.runtime.ts.cpp c9883f70e581
 any-argument-outside-a-guard-parameter-domain.runtime.ts.cpp 324664fdd163
+any-array-element-tested-for-presence-keeps-its-absence.runtime.js.cpp ea93c1fa0860
 any-asserted-to-promise-then-dispatches-on-the-box.runtime.ts.cpp 538e2b321713
 any-cast-this-member-call-dispatches-over-the-receiver-classes.runtime.ts.cpp 6630b44e363c
 any-dictionary-into-named-interface.runtime.ts.cpp 9b151cae7014
@@ -267,7 +268,7 @@ constructor-function-array-field-of-pushed-records.runtime.js.cpp 30711b422923
 constructor-function-instance-into-inline-record-param-keeps-identity.runtime.js.cpp b871e39b01e3
 constructor-function-method-field-calls-sibling-through-this.runtime.js.cpp a55160481f05
 constructor-function-omitted-option-dead-byte-guards.runtime.js.cpp 3e7751953a42
-constructor-function-omitted-option-dead-guards.runtime.js.cpp 36f3e3447f38
+constructor-function-omitted-option-dead-guards.runtime.js.cpp 0713ce29b42a
 constructor-function-untyped-buffer-field-stays-native.runtime.js.cpp 47b7b3078256
 constructor-null-default-array-parameter.runtime.js.cpp 2f9be63386b6
 constructor-read-off-instance-into-family.ts.cpp 3b4904e6590c
