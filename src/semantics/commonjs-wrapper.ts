@@ -8,6 +8,9 @@ export type CommonJsGlobal = 'require' | 'exports' | 'module'
 export type CommonJsIdentifierIdentity =
   { readonly kind: 'wrapper'; readonly global: CommonJsGlobal } | { readonly kind: 'provenance-failure' } | { readonly kind: 'ordinary' }
 
+const ordinaryIdentifier: CommonJsIdentifierIdentity = Object.freeze({ kind: 'ordinary' })
+const provenanceFailureIdentifier: CommonJsIdentifierIdentity = Object.freeze({ kind: 'provenance-failure' })
+
 const resolvedSymbolAt = (checker: ts.TypeChecker, node: ts.Node, hostProvided: ReadonlySet<string>): ts.Symbol | null => {
   // One rule for what a name in value position denotes (`valueSymbolAt`),
   // including checked JavaScript's `module`/`exports`, which the checker binds
@@ -250,15 +253,24 @@ export const createCommonJsWrapperIdentity = (
     classified.set(identifier, identity)
     return identity
   }
+  // One answer object per distinct answer: the memo above holds an answer per
+  // identifier the census evaluates (~335K on a 48K-line app), nearly all
+  // `ordinary`, and readers compare answers by field.
+  const wrappers = new Map<CommonJsGlobal, CommonJsIdentifierIdentity>()
+  const wrapper = (global: CommonJsGlobal): CommonJsIdentifierIdentity => {
+    let held = wrappers.get(global)
+    if (held === undefined) wrappers.set(global, (held = { kind: 'wrapper', global }))
+    return held
+  }
   const classifyUncached = (identifier: ts.Identifier): CommonJsIdentifierIdentity => {
     const symbol = resolvedSymbolAt(checker, identifier, hostProvided)
-    if (!symbol) return { kind: 'ordinary' }
+    if (!symbol) return ordinaryIdentifier
     const redeclared = redeclarations.get(symbol)?.get(identifier.getSourceFile())
-    if (redeclared !== undefined) return { kind: 'wrapper', global: redeclared }
+    if (redeclared !== undefined) return wrapper(redeclared)
     const authenticated = authenticatedSymbols.get(symbol)
-    if (authenticated !== undefined) return { kind: 'wrapper', global: authenticated }
-    if (failedSymbols.has(symbol)) return { kind: 'provenance-failure' }
-    return { kind: 'ordinary' }
+    if (authenticated !== undefined) return wrapper(authenticated)
+    if (failedSymbols.has(symbol)) return provenanceFailureIdentifier
+    return ordinaryIdentifier
   }
 
   return {

@@ -225,8 +225,6 @@ interface Mutable {
   readonly byDeclaration: Map<ts.Node, ValueWrite[]>
   readonly fromSymbol: Map<ts.Symbol, ValueWrite[]>
   readonly fromDeclaration: Map<ts.Node, ValueWrite[]>
-  readonly referencesBySymbol: Map<ts.Symbol, ts.Expression[]>
-  readonly referencesByDeclaration: Map<ts.Node, ts.Expression[]>
   readonly allWrites: ValueWrite[]
   readonly edgeCounts: Map<FlowEdgeKind, number>
 }
@@ -329,6 +327,67 @@ export const sameValueFlowContent = (a: ValueFlowIndex, b: ValueFlowIndex): bool
 }
 
 /**
+ * An expression's flow target, kept per checker rather than per index: it is a
+ * function of the checker alone, and each round's index memoized its own copy
+ * (143K targets per index on a 48K-line app, three indices alive at once). No
+ * reader keys or compares targets by identity across indices.
+ */
+const flowTargetsByChecker = new WeakMap<ts.TypeChecker, Map<ts.Expression, FlowTarget | null>>()
+const flowTargetMemoOf = (checker: ts.TypeChecker): Map<ts.Expression, FlowTarget | null> => {
+  let memo = flowTargetsByChecker.get(checker)
+  if (!memo) flowTargetsByChecker.set(checker, (memo = new Map()))
+  return memo
+}
+
+/**
+ * What one index's walk records from syntax and the checker alone: every
+ * census-dependent decision lands in a write or a call site (see
+ * `sameValueFlowContent`), never here. The binding fixpoint builds one index
+ * per round over the same checker, files and reachability, and each rebuilt
+ * these identically -- on a 48K-line app about 600K arrays per index, with
+ * three indices alive at once. The first walk records them; every later index
+ * over the same program shares that record and skips recording it again.
+ */
+interface SyntaxFacts {
+  readonly propertyAccesses: (ts.PropertyAccessExpression | ts.ElementAccessExpression)[]
+  readonly arrayLiterals: ts.ArrayLiteralExpression[]
+  readonly accessorNames: Set<string>
+  hasComputedAccessorName: boolean
+  readonly classDeclarations: SourceClass[]
+  readonly receiverReferences: Map<ts.Node, ReceiverReference[]>
+  readonly receiverOwners: Map<ts.Node, ts.Node>
+  readonly indexedCallableBodies: WeakSet<ts.Node>
+  readonly memberReferences: Map<ts.Symbol, ts.MemberName[]>
+  readonly referencesBySymbol: Map<ts.Symbol, ts.Expression[]>
+  readonly referencesByDeclaration: Map<ts.Node, ts.Expression[]>
+}
+
+const recordedSyntaxFacts = new WeakMap<
+  ts.TypeChecker,
+  WeakMap<ProgramReachability, { readonly files: readonly ts.SourceFile[]; readonly facts: SyntaxFacts }>
+>()
+
+const recordedSyntaxFactsOf = (
+  checker: ts.TypeChecker,
+  reachable: ProgramReachability,
+  files: readonly ts.SourceFile[]
+): SyntaxFacts | null => {
+  const known = recordedSyntaxFacts.get(checker)?.get(reachable)
+  return known && known.files.length === files.length && known.files.every((file, index) => file === files[index]) ? known.facts : null
+}
+
+const rememberSyntaxFacts = (
+  checker: ts.TypeChecker,
+  reachable: ProgramReachability,
+  files: readonly ts.SourceFile[],
+  facts: SyntaxFacts
+): void => {
+  let byReachability = recordedSyntaxFacts.get(checker)
+  if (!byReachability) recordedSyntaxFacts.set(checker, (byReachability = new WeakMap()))
+  byReachability.set(reachable, { files: [...files], facts })
+}
+
+/**
  * Index every write edge in the program.
  *
  * The initial index uses checker identities. Later rounds add receiver and
@@ -365,23 +424,29 @@ export const indexValueFlow = (
   censusExplicitThisAt?: (call: ts.CallExpression) => ExplicitThisCallFrame | null
 ): ValueFlowIndex => {
   const calls: FlowCallSite[] = []
-  const propertyAccesses: (ts.PropertyAccessExpression | ts.ElementAccessExpression)[] = []
   const bindingPatternReads: ts.BindingElement[] = []
-  const arrayLiterals: ts.ArrayLiteralExpression[] = []
-  const accessorNames = new Set<string>()
-  let hasComputedAccessorName = false
-  const classDeclarations: SourceClass[] = []
-  const receiverReferences = new Map<ts.Node, ReceiverReference[]>()
-  const receiverOwners = new Map<ts.Node, ts.Node>()
-  const indexedCallableBodies = new WeakSet<ts.Node>()
-  const memberReferences = new Map<ts.Symbol, ts.MemberName[]>()
+  const recorded = recordedSyntaxFactsOf(checker, reachable, files)
+  const recordSyntax = recorded === null
+  const syntax: SyntaxFacts = recorded ?? {
+    propertyAccesses: [],
+    arrayLiterals: [],
+    accessorNames: new Set(),
+    hasComputedAccessorName: false,
+    classDeclarations: [],
+    receiverReferences: new Map(),
+    receiverOwners: new Map(),
+    indexedCallableBodies: new WeakSet(),
+    memberReferences: new Map(),
+    referencesBySymbol: new Map(),
+    referencesByDeclaration: new Map()
+  }
+  const { propertyAccesses, arrayLiterals, accessorNames, classDeclarations, receiverReferences, receiverOwners } = syntax
+  const { indexedCallableBodies, memberReferences, referencesBySymbol, referencesByDeclaration } = syntax
   const state: Mutable = {
     bySymbol: new Map(),
     byDeclaration: new Map(),
     fromSymbol: new Map(),
     fromDeclaration: new Map(),
-    referencesBySymbol: new Map(),
-    referencesByDeclaration: new Map(),
     allWrites: [],
     edgeCounts: new Map()
   }
@@ -407,7 +472,7 @@ export const indexValueFlow = (
     return operands
   }
 
-  const targetMemo = new Map<ts.Expression, FlowTarget | null>()
+  const targetMemo = flowTargetMemoOf(checker)
   const targetOf = (expression: ts.Expression): FlowTarget | null => {
     const cached = targetMemo.get(expression)
     if (cached !== undefined) return cached
@@ -661,9 +726,9 @@ export const indexValueFlow = (
       aliasDeclaration ||
       (((target.symbol?.flags ?? 0) | (target.nameSymbol?.flags ?? 0)) & (ts.SymbolFlags.Alias | ts.SymbolFlags.Module)) === 0
     ) {
-      if (target.symbol) push(state.referencesBySymbol, target.symbol, expression)
-      if (target.nameSymbol && target.nameSymbol !== target.symbol) push(state.referencesBySymbol, target.nameSymbol, expression)
-      if (target.declaration) push(state.referencesByDeclaration, target.declaration, expression)
+      if (target.symbol) push(referencesBySymbol, target.symbol, expression)
+      if (target.nameSymbol && target.nameSymbol !== target.symbol) push(referencesBySymbol, target.nameSymbol, expression)
+      if (target.declaration) push(referencesByDeclaration, target.declaration, expression)
       return
     }
     const symbols = new Set<ts.Symbol>()
@@ -717,29 +782,30 @@ export const indexValueFlow = (
       }
       for (const symbol of [...symbols]) exposeNamespace(symbol)
     }
-    for (const symbol of symbols) push(state.referencesBySymbol, symbol, expression)
-    for (const declaration of declarations) push(state.referencesByDeclaration, declaration, expression)
+    for (const symbol of symbols) push(referencesBySymbol, symbol, expression)
+    for (const declaration of declarations) push(referencesByDeclaration, declaration, expression)
   }
 
   const visit = (node: ts.Node): void => {
     // Use the same member boundary as normalization: excluded bodies cannot
     // contribute callers or writes to the live program's typing evidence.
     if (reachable.memberIsPruned(node)) return
-    if (ts.isFunctionLike(node) && 'body' in node && node.body) indexedCallableBodies.add(node)
+    if (recordSyntax && ts.isFunctionLike(node) && 'body' in node && node.body) indexedCallableBodies.add(node)
     // A pre-ES6 `function F() { this.x = ... }` is a class -- TypeScript types
     // it as one -- and this enumeration is what every family walk means by
     // "the source classes". Widening the type without widening this made the
     // whole change inert: a constructor-function root reached
     // `owned-class-receivers.ts`'s family test, was not in this list, and was
     // refused as `root-outside-family` exactly as before.
-    if (ts.isClassDeclaration(node) || ts.isClassExpression(node) || isConstructorFunction(node)) classDeclarations.push(node)
-    if (ts.isArrayLiteralExpression(node) && !isAssignmentPattern(node)) arrayLiterals.push(node)
-    if (ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node)) {
+    if (recordSyntax && (ts.isClassDeclaration(node) || ts.isClassExpression(node) || isConstructorFunction(node)))
+      classDeclarations.push(node)
+    if (recordSyntax && ts.isArrayLiteralExpression(node) && !isAssignmentPattern(node)) arrayLiterals.push(node)
+    if (recordSyntax && (ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node))) {
       const name = node.name
       if (ts.isIdentifier(name) || ts.isStringLiteralLike(name) || ts.isNumericLiteral(name)) accessorNames.add(name.text)
-      else hasComputedAccessorName = true
+      else syntax.hasComputedAccessorName = true
     }
-    if (node.kind === ts.SyntaxKind.ThisKeyword || node.kind === ts.SyntaxKind.SuperKeyword) {
+    if (recordSyntax && (node.kind === ts.SyntaxKind.ThisKeyword || node.kind === ts.SyntaxKind.SuperKeyword)) {
       // `super` changes property lookup, not the receiver. Arrows inherit both
       // references from their enclosing frame; ordinary callables, class field
       // initializers and static blocks each introduce their own. Keep the two
@@ -769,7 +835,7 @@ export const indexValueFlow = (
         if (ts.isSourceFile(owner)) break
       }
     }
-    if (ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) {
+    if (recordSyntax && (ts.isIdentifier(node) || ts.isPrivateIdentifier(node))) {
       const symbol = checker.getSymbolAtLocation(node)
       if (symbol) push(memberReferences, symbol, node)
     }
@@ -795,9 +861,10 @@ export const indexValueFlow = (
         checkerDeclaration: resolved
       })
     }
-    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && !isTypePositionReference(node))
+    if (recordSyntax && (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && !isTypePositionReference(node))
       propertyAccesses.push(node)
-    if (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) recordReference(node)
+    if (recordSyntax && (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)))
+      recordReference(node)
     if (ts.isVariableDeclaration(node)) {
       if (ts.isIdentifier(node.name)) {
         if (node.initializer) record(targetOf(node.name), 'declaration-initializer', 'whole', null, node.initializer, node, node.name)
@@ -918,6 +985,7 @@ export const indexValueFlow = (
   }
 
   for (const file of files) forEachReachableStatement(reachable, file, visit)
+  if (recordSyntax) rememberSyntaxFacts(checker, reachable, files, syntax)
 
   const NO_WRITES: readonly ValueWrite[] = []
   const NO_REFERENCES: readonly ts.Expression[] = []
@@ -940,7 +1008,7 @@ export const indexValueFlow = (
     classDeclarations,
     arrayLiterals,
     accessorNames,
-    hasComputedAccessorName,
+    hasComputedAccessorName: syntax.hasComputedAccessorName,
     receiverReferencesToDeclaration: (declaration) => receiverReferences.get(declaration) ?? [],
     receiverOwnerOf: (reference) => receiverOwners.get(reference) ?? null,
     callableBodyIsIndexed: (declaration) => indexedCallableBodies.has(declaration),
@@ -950,8 +1018,8 @@ export const indexValueFlow = (
     writesToDeclaration: (declaration) => state.byDeclaration.get(declaration) ?? NO_WRITES,
     flowsFromSymbol: (symbol) => state.fromSymbol.get(symbol) ?? NO_WRITES,
     flowsFromDeclaration: (declaration) => state.fromDeclaration.get(declaration) ?? NO_WRITES,
-    referencesToSymbol: (symbol) => state.referencesBySymbol.get(symbol) ?? NO_REFERENCES,
-    referencesToDeclaration: (declaration) => state.referencesByDeclaration.get(declaration) ?? NO_REFERENCES,
+    referencesToSymbol: (symbol) => referencesBySymbol.get(symbol) ?? NO_REFERENCES,
+    referencesToDeclaration: (declaration) => referencesByDeclaration.get(declaration) ?? NO_REFERENCES,
     allWrites: state.allWrites,
     edgeCounts: state.edgeCounts,
     writeCount: [...state.edgeCounts.values()].reduce((total, count) => total + count, 0)

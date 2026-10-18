@@ -1540,6 +1540,12 @@ export const censusObjectBagBindings = (
     return bag ? { ...bag, absences: absencesAt(node) } : null
   }
 
+  // The replay inputs are read only above. The closures returned below share
+  // this function's context, so without this every census held its whole
+  // assignment list for as long as any answer was asked (one per round).
+  assignments.length = 0
+  memberAssignments.length = 0
+
   return {
     identity: { roots: new Set(literalsByOwner.keys()), bagOf, returnsBag, conflicted, ungrounded },
     shapeForType: (type) => shapesByType.get(type) ?? null,
