@@ -107,6 +107,7 @@ await-suspends-two-async-functions-interleave.runtime.ts.cpp 44419db34b56
 await-union-of-promises-enters-result-union.runtime.ts.cpp 8f957a5d4137
 await-union-of-value-or-promise-settles-same-tick.runtime.ts.cpp 216fe68d93d8
 await-void-promise-settles-to-undefined.runtime.ts.cpp 5058ec50b786
+base-class-argument-through-any-into-derived-parameter-is-checked.runtime.js.cpp d457407366ff
 base-typed-derived-dynamic-dictionary.ts.cpp c72af9c50e57
 base-typed-derived-dynamic-fields.ts.cpp b5dd6b7b8a2d
 base-typed-read-of-a-field-a-subclass-redeclares-as-an-accessor.runtime.js.cpp 96f0ad809cbf
@@ -501,7 +502,7 @@ generic-class-at-a-top-type-and-a-concrete-type.ts.cpp 7b8c88d44942
 generic-class-conditional-id-type.runtime.ts.cpp afe0af1ca622
 generic-class-const-alias-at-two-instantiations.runtime.ts.cpp 9d6f65a73b80
 generic-class-default-type-parameter-method-value.ts.cpp 854e1150771c
-generic-class-reinterpreted-at-another-instantiation.runtime.ts.cpp fe12dc50fd24
+generic-class-reinterpreted-at-another-instantiation.runtime.ts.cpp f44549abc308
 generic-class-self-typed-field-narrowed-read.ts.cpp a70baa4ca82e
 generic-class-split-carries-its-callback-interface.ts.cpp 73e94779ceba
 generic-class-two-layouts.ts.cpp fbe27fcc1cf2
