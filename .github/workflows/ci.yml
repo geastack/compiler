@@ -32,14 +32,35 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    # The native tests compile against core's headers and drive its geatsc
+    # plugin, from a sibling checkout the way a developer tree lays them out.
+    env:
+      GEA_CORE: ${{ github.workspace }}/core/packages/core
+      GEA_CORE_ROOT: ${{ github.workspace }}/core
     steps:
       - uses: actions/checkout@v7
+        with:
+          path: compiler
+      - name: Check out core, whose headers and plugin the native tests use
+        uses: actions/checkout@v7
+        with:
+          repository: geastack/core
+          token: ${{ secrets.GEA_CI_TOKEN || github.token }}
+          path: core
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
-      - run: npm ci --ignore-scripts
-      - run: npm test
+          cache-dependency-path: |
+            compiler/package-lock.json
+            core/packages/geatsc-plugin-gea/package-lock.json
+      - name: Build core's geatsc plugin
+        working-directory: core/packages/geatsc-plugin-gea
+        run: npm ci --ignore-scripts && npm run build
+      - working-directory: compiler
+        run: npm ci --ignore-scripts
+      - working-directory: compiler
+        run: npm test
 
   hono-hello:
     runs-on: ubuntu-latest
