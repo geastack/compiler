@@ -829,6 +829,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       if (!entries) byKey.set(key, (entries = []))
       entries.push({ access, receiver, key, order: position })
     }
+    // Copied to their exact length, as `writesByBodyValue`'s lists are.
+    for (const byKey of namedReadsByReceiver.values()) for (const [key, entries] of byKey) byKey.set(key, entries.slice())
   }
   /**
    * The read keys that can reach slot `key` of `container`: the key itself,
@@ -1420,6 +1422,9 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         if (!writes) index.set(held, (writes = []))
         writes.push(write)
       }
+      // Kept for the session, and nearly every list holds one write: copied
+      // to its exact length, where a list grown by `push` reserves 17 slots.
+      for (const [held, writes] of index) index.set(held, writes.slice())
       writesByBodyValue = index
     }
     return writesByBodyValue.get(body) ?? []
@@ -1767,12 +1772,24 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     if (cause === undefined) byReason.set(reason, (cause = { reason, node }))
     return cause
   }
-  const define = (query: Query): DependencyFactDefinition<Query, Value, Cause> => {
-    let finalCauses: readonly Cause[] = []
-    let finalGrounding: readonly { readonly domain: string; readonly dependency: Query }[] = []
-    let seeded = false
+  /**
+   * One definition for every node, handed the node it evaluates, rather than a
+   * definition per node: `define` used to mint a transfer, a seal, a `run` and
+   * an `evaluate` over each node's own variables, and the solver kept all four
+   * and their context alive for the life of the session -- ~350 bytes for each
+   * of ~224K nodes on a 48K-line app. What those variables carried is either
+   * one evaluation's own (`seeded`, and the causes and grounding a seal reads
+   * back through `outcome`) or a per-node cache kept in a map below.
+   */
+  const definition = ((): DependencyFactDefinition<Query, Value, Cause> => {
+    /** What a seal reads back from the evaluation it ran. */
+    interface SealOutcome {
+      causes: readonly Cause[]
+      grounding: readonly { readonly domain: string; readonly dependency: Query }[]
+      seeded: boolean
+    }
     /**
-     * Own-key answers, kept across this node's re-evaluations. A for-in head
+     * Own-key answers, kept across a node's re-evaluations. A for-in head
      * over an options-applying `setValues( values )` asks the own keys of every
      * parameter literal the program passes to any constructor in the family, and
      * the transfer re-runs each time any of those roots' closures gains a
@@ -1788,14 +1805,19 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       readonly stamps: readonly (readonly [ReadonlySet<Value>, number])[]
       readonly holderStamps: readonly (readonly [Value, number])[]
     }
-    // Allocated on the first answer: most nodes never ask an own-key question.
-    let ownKeysAnswers: Map<Value, OwnKeysAnswer> | null = null
+    // A node's map is allocated on its first answer: most nodes never ask an
+    // own-key question.
+    const ownKeysAnswersByQuery = new Map<Query, Map<Value, OwnKeysAnswer>>()
     const evaluate = (
+      query: Query,
       required: Read,
       observe: Read,
       holdersOf: DependencyFactHoldersOf<Query, Value>,
-      sealing: boolean
+      sealing: boolean,
+      outcome: SealOutcome | null
     ): ReadonlySet<Value> => {
+      let seeded = false
+      let ownKeysAnswers = ownKeysAnswersByQuery.get(query) ?? null
       const facts = new Set<Value>()
       const causes: Cause[] = []
       const grounding = new Set<Query>()
@@ -1942,7 +1964,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         try {
           const answer = ownKeysUncached(root)
           ownKeys.set(root, answer)
-          ;(ownKeysAnswers ??= new Map()).set(root, { keys: answer, stamps, holderStamps })
+          if (ownKeysAnswers === null) ownKeysAnswersByQuery.set(query, (ownKeysAnswers = new Map()))
+          ownKeysAnswers.set(root, { keys: answer, stamps, holderStamps })
           return answer
         } finally {
           stampLists.pop()
@@ -3983,21 +4006,31 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           break
         }
       }
-      finalCauses = causes.length === 0 ? NO_CAUSES : causes
-      // Only the seal reads the grounding edges, and the seal is the last
-      // call this query receives; materializing the list on every transfer
-      // allocated one object per carried edge per re-evaluation for nothing.
-      if (sealing)
-        finalGrounding = grounding.size === 0 ? NO_GROUNDING : [...grounding].map((dependency) => ({ domain: VALUE_ORIGIN, dependency }))
+      // Only the seal reads the causes and grounding edges, and the seal is
+      // the last call this query receives; materializing the list on every
+      // transfer allocated one object per carried edge per re-evaluation for
+      // nothing.
+      if (outcome !== null) {
+        outcome.causes = causes.length === 0 ? NO_CAUSES : causes
+        outcome.grounding = grounding.size === 0 ? NO_GROUNDING : [...grounding].map((dependency) => ({ domain: VALUE_ORIGIN, dependency }))
+        outcome.seeded = seeded
+      }
       return facts
     }
-    const run = (read: Read, observe: Read, holdersOf: DependencyFactHoldersOf<Query, Value>, sealing: boolean): ReadonlySet<Value> => {
+    const run = (
+      query: Query,
+      read: Read,
+      observe: Read,
+      holdersOf: DependencyFactHoldersOf<Query, Value>,
+      sealing: boolean,
+      outcome: SealOutcome | null
+    ): ReadonlySet<Value> => {
       const ledger = deferredIntrinsicProtocolLedgerOf(flow)
-      if (!ledger) return evaluate(read, observe, holdersOf, sealing)
-      const captured = ledger.capture(() => evaluate(read, observe, holdersOf, sealing))
-      // Overwrite, not union -- like `finalCauses`/`finalGrounding` above,
+      if (!ledger) return evaluate(query, read, observe, holdersOf, sealing, outcome)
+      const captured = ledger.capture(() => evaluate(query, read, observe, holdersOf, sealing, outcome))
+      // Overwrite, not union -- like the seal's causes and grounding above,
       // this is safe ONLY because `evaluate` is monotone: `facts` published to
-      // the solver (`component-solver.ts`'s `state.facts`) accumulate forever
+      // the solver (`component-solver.ts`'s `FactState`) accumulate forever
       // regardless of what any one call returns, so the LAST call for this
       // query (the seal that ends the re-seal loop) is the only one whose
       // `facts` can differ from that accumulated set, and then only by being
@@ -4015,26 +4048,47 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       // `both(requirements.get(query), captured.requirements)`.
       // Absent reads as empty (`?? []` below); one entry per state was a map of
       // mostly empty arrays.
+      // Copied to its exact length: the ledger builds it by `filter`, which
+      // reserves 17 slots for a one-element answer, and this map keeps one
+      // per node for the life of the session.
       if (captured.requirements.length === 0) requirements.delete(query)
-      else requirements.set(query, captured.requirements)
+      else requirements.set(query, captured.requirements.slice())
       return captured.value
     }
+    // The solver keeps every node's last seal for the life of the session and
+    // only reads it, and a seal with no causes and no grounding edges is one
+    // of these four -- ~140K of ~224K seals on a 48K-line app.
+    const plainSeal = (carriesValue: boolean, seeded: boolean): ReturnType<DependencyFactDefinition<Query, Value, Cause>['seal']> =>
+      Object.freeze({
+        locallyComplete: true,
+        causes: NO_CAUSES,
+        groundingRequirements: carriesValue ? VALUE_ORIGIN_DOMAIN : NO_DOMAINS,
+        groundingSeeds: seeded ? VALUE_ORIGIN_DOMAIN : NO_DOMAINS,
+        groundingDependencies: NO_GROUNDING
+      })
+    const plainSeals = [
+      [plainSeal(false, false), plainSeal(false, true)],
+      [plainSeal(true, false), plainSeal(true, true)]
+    ] as const
     return {
-      transfer: (read, observe, holdersOf) => run(read, observe, holdersOf, false),
-      seal: (read, observe, holdersOf) => {
-        run(read, observe, holdersOf, true)
+      transfer: (read, observe, holdersOf, query) => run(query, read, observe, holdersOf, false, null),
+      seal: (read, observe, holdersOf, query) => {
+        const outcome: SealOutcome = { causes: NO_CAUSES, grounding: NO_GROUNDING, seeded: false }
+        run(query, read, observe, holdersOf, true, outcome)
         const carriesValue = VALUE_CARRYING_KINDS.has(query.kind)
+        if (outcome.causes === NO_CAUSES && outcome.grounding === NO_GROUNDING)
+          return plainSeals[carriesValue ? 1 : 0][outcome.seeded ? 1 : 0]
         return {
-          locallyComplete: finalCauses.length === 0,
-          causes: finalCauses,
+          locallyComplete: outcome.causes.length === 0,
+          causes: outcome.causes,
           groundingRequirements: carriesValue ? VALUE_ORIGIN_DOMAIN : NO_DOMAINS,
-          groundingSeeds: seeded ? VALUE_ORIGIN_DOMAIN : NO_DOMAINS,
-          groundingDependencies: finalGrounding
+          groundingSeeds: outcome.seeded ? VALUE_ORIGIN_DOMAIN : NO_DOMAINS,
+          groundingDependencies: outcome.grounding
         }
       }
     }
-  }
-  const { solve, requiredDependenciesOf, seed } = dependencyFactSolver(define, 'grounding-domains')
+  })()
+  const { solve, requiredDependenciesOf, seed } = dependencyFactSolver(definition, 'grounding-domains')
   // `case 'unknown-reads'` now asks `holdersOf` for the receivers that hold a
   // container, instead of `observe`-ing all 968 of them itself -- but a
   // reverse index only finds states that already EXIST and have already run.

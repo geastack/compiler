@@ -1270,7 +1270,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // -- no round ever qualified, because the answers
     // move until the very round that settles, and holding the previous index
     // alive across the boundary raised the peak from 7 GB to 11 GB.
-    const valueFlow =
+    const built =
       upstream && !process.env['GEA_FLOW_CENSUS_OFF']
         ? indexValueFlow(
             compiled.checker,
@@ -1292,12 +1292,22 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // census, while a session depends on nothing but its index
     // (`shareSourceValueSession`). `GEA_SESSION_SHARE_OFF` keeps the
     // rebuild, so the claim stays checkable from one build.
-    const sharedFrom =
+    const contentEqual =
       process.env['GEA_SESSION_SHARE_OFF'] === undefined
-        ? roundFlows.find(
-            (earlier) => earlier !== valueFlow && sameValueFlowContent(earlier, valueFlow) && shareSourceValueSession(earlier, valueFlow)
-          )
+        ? roundFlows.find((earlier) => earlier !== built && sameValueFlowContent(earlier, built))
         : undefined
+    // The settling round's index is a new identity over the earlier index's
+    // tables, not the rebuilt copy of them. The carried session holds the
+    // earlier index -- its solver caches that index's write and call-site
+    // objects as query keys and facts -- so keeping the rebuild left two
+    // content-equal sets of writes, call sites and lookup tables alive to the
+    // end of normalization. A fresh object still keys every per-index cache
+    // afresh, and an index is immutable once built, so sharing its tables is
+    // sharing nothing a round can change; the session and the round's other
+    // consumers now also see one set of write and call-site objects instead
+    // of two that are equal only field by field.
+    const valueFlow: ValueFlowIndex = contentEqual ? { ...contentEqual } : built
+    const sharedFrom = contentEqual && shareSourceValueSession(contentEqual, valueFlow) ? contentEqual : undefined
     // A round's solver is asked nothing once the next round's index replaces
     // it (`retireSourceValueSession`); keeping it cost ~1 GB per round. A
     // solver handed on above is the new round's own, and stays.
