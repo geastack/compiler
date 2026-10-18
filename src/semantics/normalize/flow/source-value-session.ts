@@ -113,6 +113,14 @@ const VALUE_CARRYING_KINDS: ReadonlySet<Query['kind']> = new Set<Query['kind']>(
   'frame-completion'
 ])
 const VALUE_ORIGIN = 'source-value-origin'
+// Every query's seal answers with one of these lists. They are shared rather
+// than built per seal: a session seals every one of its states, and on a large
+// program a fresh pair of one-element lists per seal was a measurable part of
+// the session's heap. The solver compares them by content.
+const VALUE_ORIGIN_DOMAINS: readonly string[] = [VALUE_ORIGIN]
+const NO_DOMAINS: readonly string[] = []
+const NO_CAUSES: readonly Cause[] = []
+const NO_GROUNDING: readonly { readonly domain: string; readonly dependency: Query }[] = []
 // Read once at load, not per value transfer: `process.env` is a native interceptor.
 const noArrayKeys = process.env['GEA_NO_ARRAY_KEYS'] !== undefined
 /**
@@ -1556,8 +1564,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     return cause
   }
   const define = (query: Query): DependencyFactDefinition<Query, Value, Cause> => {
-    let finalCauses: readonly Cause[] = []
-    let finalGrounding: readonly { readonly domain: string; readonly dependency: Query }[] = []
+    let finalCauses = NO_CAUSES
+    let finalGrounding = NO_GROUNDING
     let seeded = false
     /**
      * Own-key answers, kept across this node's re-evaluations. A for-in head
@@ -1576,7 +1584,9 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       readonly stamps: readonly (readonly [ReadonlySet<Value>, number])[]
       readonly holderStamps: readonly (readonly [Value, number])[]
     }
-    const ownKeysAnswers = new Map<Value, OwnKeysAnswer>()
+    // Created on first use: most queries never enumerate own keys, and an empty
+    // Map per query was 184 bytes of every state in the session.
+    let ownKeysAnswers: Map<Value, OwnKeysAnswer> | undefined
     const evaluate = (
       required: Read,
       observe: Read,
@@ -1711,7 +1721,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         // records merged into each other -- names no finite set on the way
         // round; the re-entry is unknown, and only the outer answer is kept.
         if (activeOwnKeys.has(root)) return null
-        const kept = ownKeysAnswers.get(root)
+        const kept = ownKeysAnswers?.get(root)
         if (kept !== undefined && kept.stamps.every(([held, size]) => held.size === size) && holdersUnchanged(kept.holderStamps)) {
           for (const stamps of stampLists) stamps.push(...kept.stamps)
           for (const stamps of holderStampLists) stamps.push(...kept.holderStamps)
@@ -1726,7 +1736,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         try {
           const answer = ownKeysUncached(root)
           ownKeys.set(root, answer)
-          ownKeysAnswers.set(root, { keys: answer, stamps, holderStamps })
+          ;(ownKeysAnswers ??= new Map()).set(root, { keys: answer, stamps, holderStamps })
           return answer
         } finally {
           stampLists.pop()
@@ -3639,11 +3649,12 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           break
         }
       }
-      finalCauses = causes
+      finalCauses = causes.length === 0 ? NO_CAUSES : causes
       // Only the seal reads the grounding edges, and the seal is the last
       // call this query receives; materializing the list on every transfer
       // allocated one object per carried edge per re-evaluation for nothing.
-      if (sealing) finalGrounding = [...grounding].map((dependency) => ({ domain: VALUE_ORIGIN, dependency }))
+      if (sealing)
+        finalGrounding = grounding.size === 0 ? NO_GROUNDING : [...grounding].map((dependency) => ({ domain: VALUE_ORIGIN, dependency }))
       return facts
     }
     const run = (read: Read, observe: Read, holdersOf: DependencyFactHoldersOf<Query, Value>, sealing: boolean): ReadonlySet<Value> => {
@@ -3668,7 +3679,11 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       // is a wrong answer -- so if this invariant is ever broken again by a
       // NEW transfer, union (not overwrite) is the direction that cannot lie:
       // `both(requirements.get(query), captured.requirements)`.
-      requirements.set(query, captured.requirements)
+      // An empty list is not kept: `obligations` reads a missing entry as
+      // empty, and one empty list per query in the session was a map entry and
+      // an array for nothing.
+      if (captured.requirements.length > 0) requirements.set(query, captured.requirements)
+      else requirements.delete(query)
       return captured.value
     }
     return {
@@ -3679,8 +3694,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         return {
           locallyComplete: finalCauses.length === 0,
           causes: finalCauses,
-          groundingRequirements: carriesValue ? [VALUE_ORIGIN] : [],
-          groundingSeeds: seeded ? [VALUE_ORIGIN] : [],
+          groundingRequirements: carriesValue ? VALUE_ORIGIN_DOMAINS : NO_DOMAINS,
+          groundingSeeds: seeded ? VALUE_ORIGIN_DOMAINS : NO_DOMAINS,
           groundingDependencies: finalGrounding
         }
       }
