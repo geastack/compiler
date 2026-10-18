@@ -89,6 +89,126 @@ const selectFrom = (
   return { selected: first.representation, conflict: null }
 }
 
+const EXACT = 1
+const JOINS_CLOSED_FAMILY = 2
+
+/**
+ * The sealed evidence table, held column-wise and handed out row by row.
+ *
+ * Nothing in a compile reads the evidence after selection: it is kept for
+ * diagnostics and for the certificate's plan digest, which walks it once. As
+ * one frozen array of row objects per result it cost about 160 bytes a row
+ * -- some 48 MB on a large application, alive from the representation stage
+ * to the end of the compile -- for rows that are almost always one per result.
+ * The columns keep exactly what a row says, and every read materializes the
+ * same rows, with the same keys in the same order, as the producers published,
+ * so the digest and every consumer see the table they saw before.
+ */
+class SealedEvidence extends Map<SemanticResultId, readonly RepresentationEvidence[]> {
+  readonly #results: readonly SemanticResultId[]
+  /** Exclusive end of each result's rows in the row columns. */
+  readonly #ends: Uint32Array
+  readonly #representations: readonly Representation[]
+  readonly #producers: readonly string[]
+  readonly #flags: Uint8Array
+  #index: Map<SemanticResultId, number> | null = null
+
+  constructor(published: ReadonlyMap<SemanticResultId, readonly RepresentationEvidence[]>) {
+    super()
+    const results: SemanticResultId[] = []
+    const representations: Representation[] = []
+    const producers: string[] = []
+    const flags: number[] = []
+    this.#ends = new Uint32Array(published.size)
+    for (const [result, rows] of published) {
+      for (const row of rows) {
+        representations.push(row.representation)
+        producers.push(row.producer)
+        flags.push((row.strength === 'exact' ? EXACT : 0) | (row.joinsClosedFamily ? JOINS_CLOSED_FAMILY : 0))
+      }
+      this.#ends[results.length] = representations.length
+      results.push(result)
+    }
+    this.#results = results
+    this.#representations = representations
+    this.#producers = producers
+    this.#flags = Uint8Array.from(flags)
+  }
+
+  #rowsAt(at: number): readonly RepresentationEvidence[] {
+    const result = this.#results[at] as SemanticResultId
+    const rows: RepresentationEvidence[] = []
+    for (let row = at === 0 ? 0 : (this.#ends[at - 1] as number); row < (this.#ends[at] as number); row++) {
+      const flags = this.#flags[row] as number
+      rows.push({
+        result,
+        representation: this.#representations[row] as Representation,
+        strength: flags & EXACT ? 'exact' : 'conservative',
+        producer: this.#producers[row] as string,
+        joinsClosedFamily: (flags & JOINS_CLOSED_FAMILY) !== 0
+      })
+    }
+    return Object.freeze(rows)
+  }
+
+  #indexOf(result: SemanticResultId): number | undefined {
+    if (this.#index === null) this.#index = new Map(this.#results.map((key, at) => [key, at]))
+    return this.#index.get(result)
+  }
+
+  override get size(): number {
+    return this.#results.length
+  }
+
+  override get(result: SemanticResultId): readonly RepresentationEvidence[] | undefined {
+    const at = this.#indexOf(result)
+    return at === undefined ? undefined : this.#rowsAt(at)
+  }
+
+  override has(result: SemanticResultId): boolean {
+    return this.#indexOf(result) !== undefined
+  }
+
+  override *entries(): MapIterator<[SemanticResultId, readonly RepresentationEvidence[]]> {
+    for (let at = 0; at < this.#results.length; at++) yield [this.#results[at] as SemanticResultId, this.#rowsAt(at)]
+  }
+
+  override *keys(): MapIterator<SemanticResultId> {
+    yield* this.#results
+  }
+
+  override *values(): MapIterator<readonly RepresentationEvidence[]> {
+    for (let at = 0; at < this.#results.length; at++) yield this.#rowsAt(at)
+  }
+
+  override [Symbol.iterator](): MapIterator<[SemanticResultId, readonly RepresentationEvidence[]]> {
+    return this.entries()
+  }
+
+  override forEach(
+    visit: (
+      rows: readonly RepresentationEvidence[],
+      result: SemanticResultId,
+      map: Map<SemanticResultId, readonly RepresentationEvidence[]>
+    ) => void,
+    thisArg?: unknown
+  ): void {
+    for (const [result, rows] of this.entries()) visit.call(thisArg, rows, result, this)
+  }
+
+  override set(): this {
+    throw new Error('the sealed evidence table is read-only')
+  }
+
+  override delete(): boolean {
+    throw new Error('the sealed evidence table is read-only')
+  }
+
+  override clear(): void {
+    throw new Error('the sealed evidence table is read-only')
+  }
+}
+
 export const createRepresentationPlanBuilder = (): RepresentationPlanBuilder => {
   const evidence = new Map<SemanticResultId, RepresentationEvidence[]>()
   const selected = new Map<SemanticResultId, Representation>()
@@ -128,11 +248,9 @@ export const createRepresentationPlanBuilder = (): RepresentationPlanBuilder => 
 
   const seal = (): SealedRepresentationPlan => {
     sealed = true
-    const frozenEvidence = new Map<SemanticResultId, readonly RepresentationEvidence[]>()
-    for (const [result, rows] of evidence) frozenEvidence.set(result, Object.freeze([...rows]))
     return Object.freeze({
       selected: new Map(selected),
-      evidence: frozenEvidence,
+      evidence: new SealedEvidence(evidence),
       conflicts: Object.freeze([...conflicts])
     })
   }

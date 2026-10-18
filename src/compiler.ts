@@ -106,6 +106,8 @@ import {
 } from './targets/cpp/host/host-members.js'
 import { coreGlobalClasses, coreGlobalFunctions, coreGlobalSingletons, coreNativeTypes } from './targets/cpp/host/core-globals.js'
 import { createCppConversionRegistry } from './targets/cpp/conversions.js'
+import { forgetRecordRecastAnswers } from './targets/cpp/emit-narrowing.js'
+import { forgetRecordViewPlans } from './targets/cpp/emit-record-view.js'
 import type { PrinterDrift } from './targets/cpp/emit-narrowing.js'
 import { recordLayoutPolicyOf } from './projection/fields.js'
 import { nativeClassFieldUsesOf, projectNativeClassStorage } from './projection/class-storage.js'
@@ -1148,6 +1150,8 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     : null
 
   const lowered = loweredProgram && { blocked: loweredProgram.blocked, slotDrift: loweredProgram.slotDrift }
+  forgetRecordViewPlans()
+  forgetRecordRecastAnswers()
   stage('lowering')
   // A partially lowered program renders a partially correct file, which is
   // worse than rendering none: the missing half is invisible in the output.

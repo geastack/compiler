@@ -329,14 +329,8 @@ const buildNarrowingClosure = (source: Representation): readonly Representation[
  * keeps recursive representations finite. This one predicate is shared by
  * graph proposal and backend admission so they cannot disagree.
  */
-// Keyed by the two representation keys in turn rather than by one
-// `${from}->${to}` string: the joined key was a fresh string per pair, which
-// pinned both halves and came to a million and a quarter strings on a large
-// program, for a table whose two keys already exist.
-const reachesMemo = new Map<string, Map<string, boolean>>()
-
 /**
- * Forgets both narrowing memos. "A pure function of the representation" holds
+ * Forgets the narrowing-closure memo. "A pure function of the representation" holds
  * only within one program: `representationKey` names a class by its
  * declaration id (`class-ref(decl|f168|20,...)`), and every single-file program
  * numbers its file the same, so the next compile in this process reads another
@@ -348,19 +342,21 @@ const reachesMemo = new Map<string, Map<string, boolean>>()
  */
 export const resetNarrowingMemos = (): void => {
   narrowingClosures.clear()
-  reachesMemo.clear()
 }
 
 export const narrowingReachesTarget = (source: Representation, target: Representation): boolean => {
   const targetKey = representationKey(target)
   if (narrowingClosureKeysOf(source).has(targetKey)) return true
-  // Module level for the same reason `narrowingClosureOf`'s cache above is:
-  // `reaches(from, to)` is a pure structural question about two immutable
-  // representations, so the answer is the same for every caller, and a memo
-  // minted per call throws away the whole table between questions that
-  // overwhelmingly repeat. `active` stays per call -- it is the cycle guard for
-  // THIS descent, not a fact about the graph, and sharing it would let one
-  // call's in-progress pair read as a settled `false` in another.
+  // Per call, not per compile: on a large application the questions did not
+  // repeat -- 740,400 of 786,717 pair lookups during lowering were misses, and
+  // after lowering the predicate is asked a few dozen times in all -- so a
+  // module-level table held about 40 MB of answers to the end of the compile
+  // that nothing read again. Within one descent the memo still keeps a
+  // recursive sum's repeated sub-pairs from being re-derived. `active` is the
+  // cycle guard for THIS descent, never a settled answer. Keyed by the two
+  // representation keys in turn rather than by one joined string, which
+  // would mint a fresh string per pair for a table whose two keys exist.
+  const reachesMemo = new Map<string, Map<string, boolean>>()
   const active = new Set<string>()
   const reaches = (from: Representation, to: Representation): boolean => {
     const fromKey = representationKey(from)
@@ -976,21 +972,139 @@ const referencedRepresentations = (
   return known
 }
 
+/**
+ * The eager graph's node table: a `Map` from node id to node, stored by the
+ * two carrier keys of each pair rather than by the joined id.
+ *
+ * A string used as a `Map` key is flattened and internalized, so a table keyed
+ * by `${source}->${target}` held one flat copy of every id -- two carrier keys
+ * of a couple of hundred characters each, for every one of a quarter of a
+ * million pairs on a large application, about 60 MB alive to the end of the
+ * compile. Keyed by the parts, which are the memoized carrier keys every
+ * other table already holds, each node's `id` stays the concatenation it was
+ * built as and is only flattened if something looks it up by its text. Reads
+ * and iteration answer exactly what the joined-key `Map` answered, in its
+ * insertion order.
+ */
+class ConversionNodeTable extends Map<ConversionNodeId, ConversionNode> {
+  readonly #order: ConversionNode[] = []
+  readonly #pairs = new Map<string, Map<string, number>>()
+  /** The dynamic-source nodes, keyed by their target alone. */
+  readonly #sole = new Map<string, number>()
+
+  hasPair(sourceKey: string, targetKey: string): boolean {
+    return this.#pairs.get(sourceKey)?.has(targetKey) === true
+  }
+
+  hasSole(targetKey: string): boolean {
+    return this.#sole.has(targetKey)
+  }
+
+  /** Adds the pair's node, or replaces it in place, as `Map.prototype.set` does. */
+  putPair(sourceKey: string, targetKey: string, node: ConversionNode): void {
+    let targets = this.#pairs.get(sourceKey)
+    if (targets === undefined) {
+      targets = new Map()
+      this.#pairs.set(sourceKey, targets)
+    }
+    const at = targets.get(targetKey)
+    if (at !== undefined) {
+      this.#order[at] = node
+      return
+    }
+    targets.set(targetKey, this.#order.length)
+    this.#order.push(node)
+  }
+
+  putSole(targetKey: string, node: ConversionNode): void {
+    const at = this.#sole.get(targetKey)
+    if (at !== undefined) {
+      this.#order[at] = node
+      return
+    }
+    this.#sole.set(targetKey, this.#order.length)
+    this.#order.push(node)
+  }
+
+  *pairKeys(): IterableIterator<readonly [string, string]> {
+    for (const [sourceKey, targets] of this.#pairs) for (const targetKey of targets.keys()) yield [sourceKey, targetKey]
+  }
+
+  // A joined id is split back into its parts at each `->` it contains, left to
+  // right; a carrier key spells `->` only inside its own parentheses, so at
+  // most one split names a stored pair.
+  #indexOf(id: ConversionNodeId): number | undefined {
+    for (let split = id.indexOf('->'); split !== -1; split = id.indexOf('->', split + 2)) {
+      const at = this.#pairs.get(id.slice(0, split))?.get(id.slice(split + 2))
+      if (at !== undefined) return at
+    }
+    return this.#sole.get(id)
+  }
+
+  override get size(): number {
+    return this.#order.length
+  }
+
+  override get(id: ConversionNodeId): ConversionNode | undefined {
+    const at = this.#indexOf(id)
+    return at === undefined ? undefined : this.#order[at]
+  }
+
+  override has(id: ConversionNodeId): boolean {
+    return this.#indexOf(id) !== undefined
+  }
+
+  override *entries(): MapIterator<[ConversionNodeId, ConversionNode]> {
+    for (const node of this.#order) yield [node.id, node]
+  }
+
+  override *keys(): MapIterator<ConversionNodeId> {
+    for (const node of this.#order) yield node.id
+  }
+
+  override *values(): MapIterator<ConversionNode> {
+    yield* this.#order
+  }
+
+  override [Symbol.iterator](): MapIterator<[ConversionNodeId, ConversionNode]> {
+    return this.entries()
+  }
+
+  override forEach(
+    visit: (node: ConversionNode, id: ConversionNodeId, map: Map<ConversionNodeId, ConversionNode>) => void,
+    thisArg?: unknown
+  ): void {
+    for (const node of this.#order) visit.call(thisArg, node, node.id, this)
+  }
+
+  override set(): this {
+    throw new Error('the conversion node table is written only while the graph is built')
+  }
+
+  override delete(): boolean {
+    throw new Error('the conversion node table is read-only')
+  }
+
+  override clear(): void {
+    throw new Error('the conversion node table is read-only')
+  }
+}
+
 export const buildConversionGraph = (
   plan: SealedRepresentationPlan,
   registry: ConversionRuntimeRegistry = emptyConversionRegistry,
   constants: Iterable<Representation> = []
 ): ConversionGraph => {
   const context = createConversionDerivationContext(registry)
-  const nodes = new Map<ConversionNodeId, ConversionNode>()
+  const nodes = new ConversionNodeTable()
   const referenced = referencedRepresentations(plan, constants)
   const genericDynamicSource: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
   const genericDynamicKey = representationKey(genericDynamicSource)
 
   for (const representation of referenced.values()) {
     const id = representationKey(representation)
-    if (nodes.has(id)) continue
-    nodes.set(id, {
+    if (nodes.hasSole(id)) continue
+    nodes.putSole(id, {
       id,
       // Conversion always starts from the dynamic carrier: it is the only
       // source that needs classifying at all. A statically typed value already
@@ -1031,7 +1145,7 @@ export const buildConversionGraph = (
       // native array entry could no longer cite its identity storage).
       if (sourceKey === targetKey || !referencedKeys.has(targetKey)) continue
       const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.narrowing(representation, target)
       // The same order `conversion/nodes.ts`'s `capabilityOf` asks in: an
       // installed narrowing, else an installed widening or recast, else the
@@ -1044,7 +1158,7 @@ export const buildConversionGraph = (
       // would mint for it, which the array rule then refuses.
       const recast = installed ? null : (registry.widening(representation, target) ?? registry.recasting(representation, target))
       const recipe = installed || recast ? null : registry.staticRecipe(representation, target)
-      nodes.set(id, {
+      nodes.putPair(sourceKey, targetKey, {
         id,
         source: representation,
         target,
@@ -1074,10 +1188,10 @@ export const buildConversionGraph = (
       if (representationKey(target.element) !== representationKey(payload.element)) continue
       if (arrayExtensionKey(target.extension) === arrayExtensionKey(payload.extension)) continue
       const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.narrowing(source, target)
       if (!installed) continue
-      nodes.set(id, {
+      nodes.putPair(sourceKey, targetKey, {
         id,
         source,
         target,
@@ -1096,10 +1210,10 @@ export const buildConversionGraph = (
     for (const [targetKey, target] of descendantClassTargets) {
       if (!narrowingReachesTarget(source, target)) continue
       const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.narrowing(source, target)
       if (!installed) continue
-      nodes.set(id, {
+      nodes.putPair(sourceKey, targetKey, {
         id,
         source,
         target,
@@ -1122,10 +1236,10 @@ export const buildConversionGraph = (
       const sourceKey = representationKey(source)
       if (!referencedKeys.has(sourceKey)) continue
       const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
+      nodes.putPair(sourceKey, targetKey, {
         id,
         source,
         target,
@@ -1146,10 +1260,10 @@ export const buildConversionGraph = (
     for (const [sourceKey, source] of sumCarriers) {
       if (sourceKey === targetKey) continue
       const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
+      nodes.putPair(sourceKey, targetKey, {
         id,
         source,
         target,
@@ -1176,10 +1290,10 @@ export const buildConversionGraph = (
     for (const [sourceKey, source] of callableSourcesByAbi.get(abiKey(target.abi)) ?? []) {
       if (sourceKey === targetKey) continue
       const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
+      nodes.putPair(sourceKey, targetKey, {
         id,
         source,
         target,
@@ -1211,10 +1325,10 @@ export const buildConversionGraph = (
     for (const [sourceKey, source] of referencedKeyed) {
       if (sourceKey === targetKey) continue
       const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
+      nodes.putPair(sourceKey, targetKey, {
         id,
         source,
         target,
@@ -1236,10 +1350,10 @@ export const buildConversionGraph = (
     for (const [sourceKey, source] of referencedKeyed) {
       if (sourceKey === targetKey) continue
       const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
+      nodes.putPair(sourceKey, targetKey, {
         id,
         source,
         target,
@@ -1264,7 +1378,7 @@ export const buildConversionGraph = (
     for (const [sourceKey, source] of classRefs) {
       if (sourceKey === targetKey) continue
       const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       // Both directions, from one enumeration. Upcast (a derived class stored
       // where a base is declared) is a widening; DOWNCAST -- a base-declared
       // handle read at a descendant, which is what `instanceof` narrows -- is
@@ -1275,7 +1389,7 @@ export const buildConversionGraph = (
       // `if ( part instanceof Circle )`'s own reads with no node at all.
       const installed = registry.widening(source, target) ?? registry.narrowing(source, target)
       if (!installed) continue
-      nodes.set(id, {
+      nodes.putPair(sourceKey, targetKey, {
         id,
         source,
         target,
@@ -1295,10 +1409,10 @@ export const buildConversionGraph = (
       if (sourceKey === targetKey || source.kind !== 'constructor-family' || source.members.length === 0) continue
       if (!source.members.every((member) => target.members.includes(member))) continue
       const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
+      nodes.putPair(sourceKey, targetKey, {
         id,
         source,
         target,
@@ -1316,10 +1430,10 @@ export const buildConversionGraph = (
   for (const [targetKey, target] of classSumTargets) {
     for (const [sourceKey, source] of classRefs) {
       const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
+      nodes.putPair(sourceKey, targetKey, {
         id,
         source,
         target,
@@ -1349,10 +1463,10 @@ export const buildConversionGraph = (
             target.members.length === 1
       if (!widens) continue
       const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
+      nodes.putPair(sourceKey, targetKey, {
         id,
         source,
         target,
@@ -1453,10 +1567,7 @@ export const buildConversionGraph = (
   // dynamic-materialization nodes above are keyed by their target alone, and
   // the loop would have asked about those pairs before.
   const sourcesWithNodeInto = new Map<string, Set<string>>()
-  for (const node of nodes.values()) {
-    const sourceKey = representationKey(node.source)
-    const targetKey = representationKey(node.target)
-    if (node.id !== `${sourceKey}->${targetKey}`) continue
+  for (const [sourceKey, targetKey] of nodes.pairKeys()) {
     let sources = sourcesWithNodeInto.get(targetKey)
     if (!sources) {
       sources = new Set()
@@ -1471,7 +1582,7 @@ export const buildConversionGraph = (
       const installed = registry.recasting(source, target)
       if (!installed) continue
       const id = `${sourceKey}->${targetKey}`
-      nodes.set(id, {
+      nodes.putPair(sourceKey, targetKey, {
         id,
         source,
         target,
@@ -1492,8 +1603,8 @@ export const buildConversionGraph = (
     if (sourceKey === genericDynamicKey || source.kind !== 'dynamic') continue
     for (const [targetKey, target] of referenced) {
       const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
-      nodes.set(id, {
+      if (nodes.hasPair(sourceKey, targetKey)) continue
+      nodes.putPair(sourceKey, targetKey, {
         id,
         source,
         target,
@@ -1505,6 +1616,6 @@ export const buildConversionGraph = (
   // A graph whose recursive references never close is materializable in each
   // node taken alone and unrunnable taken together; the whole-graph check is
   // the only place that difference is visible.
-  validateConversionGraph([...nodes.values()])
+  validateConversionGraph([...nodes.values()], (id) => nodes.get(id))
   return { nodes }
 }

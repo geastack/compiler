@@ -415,6 +415,48 @@ const indexResults = (
 }
 
 /**
+ * One pass over every authority component, handing each its evaluated rows.
+ * The partition and the per-component result index are rebuilt per pass
+ * rather than captured: the deferred `obligations` getter is the only second
+ * caller, it runs rarely, and keeping both tables reachable from it cost tens
+ * of megabytes through the end of the compile on a large application.
+ */
+const censusComponents = (
+  input: PreflightInput,
+  component: (cid: ComponentId, operationCount: number, evaluated: readonly EvaluatedObligation[]) => void
+): void => {
+  const { semanticGraph, representationPlan, manifest } = input
+  const partition = partitionAuthorityComponents(semanticGraph)
+  const indexed = indexResults(semanticGraph, partition)
+  for (const [componentIndex, memberOperations] of partition.entries()) {
+    const representative = memberOperations[0]
+    if (representative === undefined) continue
+    const cid = componentId(representative)
+    const operationSet = new Set(memberOperations)
+    const componentResults = indexed[componentIndex] ?? []
+    const componentObligations: Obligation[] = []
+
+    for (const operationId of operationSet) {
+      const operation = semanticGraph.operations.get(operationId)
+      if (!operation) continue
+      appendAll(componentObligations, buildCallAbiObligations(cid, operation, manifest))
+    }
+
+    for (const [resultId, operationId] of componentResults) {
+      if (!operationSet.has(operationId)) continue
+      const operation = semanticGraph.operations.get(operationId)
+      if (!operation) continue
+      appendAll(componentObligations, buildCarrierObligations(cid, resultId, operation, representationPlan, manifest))
+      const representation = representationPlan.selected.get(resultId)
+      if (representation) appendAll(componentObligations, buildNativeBoundaryObligation(cid, resultId, representation, manifest))
+      appendAll(componentObligations, buildExternalBindingObligation(cid, resultId, operation, manifest))
+    }
+
+    component(cid, memberOperations.length, closeBlockedByUpstream(componentObligations, semanticGraph))
+  }
+}
+
+/**
  * The census keeps its tallies and its failing rows, and rebuilds the full row
  * list only when a caller asks for it. A compile reads nothing but the failing
  * rows (the diagnostic sweep), yet holding every satisfied row from here to
@@ -424,44 +466,12 @@ const indexResults = (
  * and answers the same rows in the same order.
  */
 export const runPreflight = (input: PreflightInput): PreflightReport => {
-  const { semanticGraph, representationPlan, manifest } = input
-  const partition = partitionAuthorityComponents(semanticGraph)
-  const indexed = indexResults(semanticGraph, partition)
-  const census = (component: (cid: ComponentId, operationCount: number, evaluated: readonly EvaluatedObligation[]) => void): void => {
-    for (const [componentIndex, memberOperations] of partition.entries()) {
-      const representative = memberOperations[0]
-      if (representative === undefined) continue
-      const cid = componentId(representative)
-      const operationSet = new Set(memberOperations)
-      const componentResults = indexed[componentIndex] ?? []
-      const componentObligations: Obligation[] = []
-
-      for (const operationId of operationSet) {
-        const operation = semanticGraph.operations.get(operationId)
-        if (!operation) continue
-        appendAll(componentObligations, buildCallAbiObligations(cid, operation, manifest))
-      }
-
-      for (const [resultId, operationId] of componentResults) {
-        if (!operationSet.has(operationId)) continue
-        const operation = semanticGraph.operations.get(operationId)
-        if (!operation) continue
-        appendAll(componentObligations, buildCarrierObligations(cid, resultId, operation, representationPlan, manifest))
-        const representation = representationPlan.selected.get(resultId)
-        if (representation) appendAll(componentObligations, buildNativeBoundaryObligation(cid, resultId, representation, manifest))
-        appendAll(componentObligations, buildExternalBindingObligation(cid, resultId, operation, manifest))
-      }
-
-      component(cid, memberOperations.length, closeBlockedByUpstream(componentObligations, semanticGraph))
-    }
-  }
-
   const components: ComponentId[] = []
   const componentSummaries: PreflightComponentSummary[] = []
   const failing: EvaluatedObligation[] = []
   const mandatory = emptyTally()
   const optional = emptyTally()
-  census((cid, operationCount, evaluated) => {
+  censusComponents(input, (cid, operationCount, evaluated) => {
     components.push(cid)
     for (const obligation of evaluated) {
       countInto(obligation.optional ? optional : mandatory, obligation)
@@ -485,7 +495,7 @@ export const runPreflight = (input: PreflightInput): PreflightReport => {
     get obligations(): readonly EvaluatedObligation[] {
       if (obligations === null) {
         const all: EvaluatedObligation[] = []
-        census((_cid, _count, evaluated) => appendAll(all, evaluated))
+        censusComponents(input, (_cid, _count, evaluated) => appendAll(all, evaluated))
         obligations = Object.freeze(all)
       }
       return obligations

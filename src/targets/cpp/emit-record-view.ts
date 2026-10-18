@@ -86,7 +86,19 @@ import {
  * different policy for the same pair, at the cost of one more miss, not a
  * wrong answer.
  */
-const recordViewPlans = new WeakMap<RecordLayoutPolicy, WeakMap<Representation, WeakMap<Representation, RecordViewPlan | null>>>()
+let recordViewPlans = new WeakMap<RecordLayoutPolicy, WeakMap<Representation, WeakMap<Representation, RecordViewPlan | null>>>()
+
+/**
+ * Drops every remembered plan. Called once lowering is done: the eager
+ * conversion graph asks for tens of thousands of pairs while it is built and
+ * almost never the same pair twice (55,251 misses in 55,261 asks on a large
+ * application), and later stages ask for a handful. Keeping the table from
+ * there to the end of the compile held some 70 MB of plans and nested tables
+ * nothing read again; a later ask plans its pair afresh, the same pure answer.
+ */
+export const forgetRecordViewPlans = (): void => {
+  recordViewPlans = new WeakMap()
+}
 
 export const viewPlanFor = (layouts: RecordLayoutPolicy, source: Representation, target: Representation): RecordViewPlan | null => {
   let bySource = recordViewPlans.get(layouts)
