@@ -102,6 +102,7 @@ await-suspends-two-async-functions-interleave.runtime.ts.cpp 44419db34b56
 await-union-of-promises-enters-result-union.runtime.ts.cpp ef82db2e33c2
 await-union-of-value-or-promise-settles-same-tick.runtime.ts.cpp 216fe68d93d8
 await-void-promise-settles-to-undefined.runtime.ts.cpp b6196cf1ab99
+base-class-argument-through-any-into-derived-parameter-is-checked.runtime.js.cpp d457407366ff
 base-typed-derived-dynamic-dictionary.ts.cpp fadd155aba36
 base-typed-derived-dynamic-fields.ts.cpp fe949e7b629b
 base-typed-read-of-a-field-a-subclass-redeclares-as-an-accessor.runtime.js.cpp 96f0ad809cbf
@@ -213,7 +214,7 @@ client-options-record-into-optional-write-concern-source.runtime.ts.cpp 061023c7
 clone-idiom-family-dispatch.runtime.js.cpp 25e14923cc4e
 clone-idiom-override-narrows-copy-source.runtime.js.cpp b1fc4a1f7982
 clone-idiom-unallocated-base-override-narrows-copy-source.runtime.js.cpp 449350d114ba
-clone-through-each-subclass-copy-override.runtime.js.cpp 8a1cb289a95f
+clone-through-each-subclass-copy-override.runtime.js.cpp 522338d28e13
 closed-literal-absent-key-push.runtime.js.cpp 26cb270747d2
 closed-object-method-forwarding.runtime.ts.cpp cae7fab39dec
 closed-object-parameter-in-record.runtime.ts.cpp 55944679c4d9
@@ -300,7 +301,7 @@ delete-optional-field-narrowed-to-never-by-intersection.runtime.ts.cpp 800c13904
 delete-symbol-expando-on-class-through-interface.ts.cpp 2d830903c871
 derived-class-extends-instantiated-generic-base.ts.cpp 6e4ec403a1e3
 derived-class-reads-base-private-method-in-closure.ts.cpp 22e6eaddac98
-derived-class-splits-with-its-base.runtime.ts.cpp ebf4d0db708b
+derived-class-splits-with-its-base.runtime.ts.cpp 354e8126b628
 derived-constructor-completion.runtime.js.cpp ec615538e745
 descriptor-array-splice.js.cpp da01ddf3b77a
 descriptor-function-this-is-the-lookup-receiver.ts.cpp 5890edf8d0fa
@@ -479,7 +480,7 @@ generic-class-at-a-top-type-and-a-concrete-type.ts.cpp 7c20e32ec5d0
 generic-class-conditional-id-type.runtime.ts.cpp 68a93827498c
 generic-class-const-alias-at-two-instantiations.runtime.ts.cpp 3f4d668ebd8a
 generic-class-default-type-parameter-method-value.ts.cpp 062187e38077
-generic-class-reinterpreted-at-another-instantiation.runtime.ts.cpp fe12dc50fd24
+generic-class-reinterpreted-at-another-instantiation.runtime.ts.cpp f44549abc308
 generic-class-self-typed-field-narrowed-read.ts.cpp 99fcb79e03b8
 generic-class-split-carries-its-callback-interface.ts.cpp 1e2bb85aa239
 generic-class-two-layouts.ts.cpp e89521c573ff
