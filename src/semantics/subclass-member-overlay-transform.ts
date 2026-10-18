@@ -928,9 +928,43 @@ const scanOf = (filePath: string, text: string): PackageFileScan => {
   const digest = createHash('sha1').update(text).digest('base64')
   const held = fileScans.get(filePath)
   if (held !== undefined && held.digest === digest) return held.scan
-  const scan = structuredClone(scanPackageFile(filePath, text))
+  const scan = compactScan(structuredClone(scanPackageFile(filePath, text)))
   fileScans.set(filePath, { digest, scan })
   return scan
+}
+
+/**
+ * A scan as the index reads it. On a 48K-line app the cache holds ~11K files,
+ * about half of which found nothing, and every file listed each property name
+ * it reads once per read -- the same few thousand names cloned into thousands
+ * of arrays, ~10 MB held for the life of the process. The index only asks
+ * `externallyReadNames.has(name)`, so a file's names are kept once each, as
+ * one shared string per spelling, and an empty scan is one shared object.
+ */
+const EMPTY_SCAN: PackageFileScan = Object.freeze({
+  untrustedClassNames: [],
+  externallyReadNames: [],
+  unresolvedHeritageTexts: [],
+  constants: [],
+  classes: []
+})
+const scannedNames = new Map<string, string>()
+const sharedName = (name: string): string => {
+  const known = scannedNames.get(name)
+  if (known !== undefined) return known
+  scannedNames.set(name, name)
+  return name
+}
+const compactScan = (scan: PackageFileScan): PackageFileScan => {
+  if (
+    scan.untrustedClassNames.length === 0 &&
+    scan.externallyReadNames.length === 0 &&
+    scan.unresolvedHeritageTexts.length === 0 &&
+    scan.constants.length === 0 &&
+    scan.classes.length === 0
+  )
+    return EMPTY_SCAN
+  return { ...scan, externallyReadNames: [...new Set(scan.externallyReadNames)].map(sharedName) }
 }
 
 const buildPackageIndex = (root: string, read: DeclarerReader, neverSkip: ReadonlySet<string>): PackageIndex => {

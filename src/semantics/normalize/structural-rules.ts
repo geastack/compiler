@@ -103,6 +103,17 @@ export interface StructuralRuleSet {
   readonly formViolations: readonly StructuralFormViolation[]
 }
 
+const formLists = new Map<string, readonly ts.SyntaxKind[]>()
+const sharedForms = (forms: readonly ts.SyntaxKind[] | null): readonly ts.SyntaxKind[] | null => {
+  if (forms === null) return null
+  const key = forms.join(',')
+  const known = formLists.get(key)
+  if (known) return known
+  const held = Object.freeze([...forms])
+  formLists.set(key, held)
+  return held
+}
+
 /**
  * Prepare a rule set for dispatch.
  *
@@ -116,7 +127,13 @@ export interface StructuralRuleSet {
  * Order within a form is the order the rules were declared in, which is the
  * order the chain asked them, so preparing changes no answer.
  */
-export const prepareStructuralRules = (rules: readonly StructuralRule[]): StructuralRuleSet => {
+export const prepareStructuralRules = (declared: readonly StructuralRule[]): StructuralRuleSet => {
+  // Every structural view (909 on a 48K-line app) declares the same rule list
+  // with its own `forms` literals, and the list stays reachable through
+  // `resolve` for the life of the view: ~72 small arrays per view, about 4 MB
+  // in all, holding the same few dozen kind lists. The prepared set keeps one
+  // shared list per spelling; the declared objects are released.
+  const rules = declared.map((rule): StructuralRule => ({ name: rule.name, forms: sharedForms(rule.forms), resolve: rule.resolve }))
   // Decided once, when the set is prepared: an audit asks every rule for every
   // node, so the selection below is bypassed rather than rebuilt.
   const auditing = structuralFormAuditEnabled()
