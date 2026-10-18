@@ -1212,6 +1212,7 @@ strict-delete.ts.cpp ef9ca218f404
 strict-equality-between-tagged-unions.runtime.ts.cpp 5ee46937bfac
 string-and-regexp-walks-over-long-mixed-width-text.runtime.ts.cpp ae752aa6ae64
 string-array-into-set-or-any-array-parameter.runtime.ts.cpp 98daa76c6d15
+string-cell-store-reads-the-cell-before-adopting-a-moved-head.runtime.js.cpp 44244caa8899
 string-field-append.ts.cpp 1357f6769fe1
 string-from-char-code-direct.ts.cpp f5bcbe9862c3
 string-from-code-point.runtime.ts.cpp 48ea2f24835c
