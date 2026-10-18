@@ -18,12 +18,17 @@ export interface OrdinalCounter {
 }
 
 export const createOrdinalCounter = (): OrdinalCounter => {
-  const used = new Map<string, number>()
+  // By family, then by node: a node id is a string the census already holds,
+  // while a joined `${source}|${family}` key was a fresh string per operation
+  // (~30 MB on a 48K-line app). A family name holds no `|`, so the joined key
+  // was injective and this counts exactly the same pairs.
+  const used = new Map<OperationFamily, Map<NodeId, number>>()
   return {
     next: (source, family) => {
-      const key = `${source}|${family}`
-      const ordinal = used.get(key) ?? 0
-      used.set(key, ordinal + 1)
+      let bySource = used.get(family)
+      if (!bySource) used.set(family, (bySource = new Map()))
+      const ordinal = bySource.get(source) ?? 0
+      bySource.set(source, ordinal + 1)
       return ordinal
     }
   }
@@ -64,12 +69,15 @@ export const mintResult = (operation: OperationId, role: ResultRole, type: Struc
   type
 })
 
+/** Shared: an operand's evaluation is read and never written, and nearly every operand is `runtime`. */
+const runtimeEvaluation: OperandEvaluation = Object.freeze({ kind: 'runtime' })
+
 export const operand = (
   role: string,
   ordinal: number,
   source: OperandSource,
   type: StructuralTypeId,
-  evaluation: OperandEvaluation = { kind: 'runtime' }
+  evaluation: OperandEvaluation = runtimeEvaluation
 ): SemanticOperand => ({ role, ordinal, source, type, evaluation })
 
 /**

@@ -924,9 +924,11 @@ export const indexValueFlow = (
   const callSites = new Map(calls.map((site) => [site.call, site]))
   const writesBySite = new Map<ts.Node, ValueWrite[]>()
   for (const write of state.allWrites) {
-    let entries = writesBySite.get(write.site)
-    if (!entries) writesBySite.set(write.site, (entries = []))
-    entries.push(write)
+    // A site's first write as a one-element literal: `[]` grown by `push`
+    // reserves 17 slots, and almost every site has one write (~7 MB per index).
+    const entries = writesBySite.get(write.site)
+    if (entries) entries.push(write)
+    else writesBySite.set(write.site, [write])
   }
   return {
     buildIsStrict,

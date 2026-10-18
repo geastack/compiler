@@ -603,6 +603,18 @@ export const censusProgram = (
 ): ProgramCensus => {
   const candidates: CensusCandidate[] = []
   const regions = new Map<string, SemanticRegion>()
+  // One caller object per function or region, not per node: every candidate,
+  // and every operation published for it, holds its caller for the whole
+  // compile (~200K objects and their id strings on a 48K-line app). Readers
+  // compare callers by field, never by identity.
+  const callers = new Map<string, SemanticCaller>()
+  const sharedCaller = (caller: SemanticCaller): SemanticCaller => {
+    const key = callerKey(caller)
+    const known = callers.get(key)
+    if (known) return known
+    callers.set(key, caller)
+    return caller
+  }
   const ordinals = new Map<string, number>()
   const nextOrdinal = (caller: SemanticCaller): number => {
     const key = callerKey(caller)
@@ -623,7 +635,7 @@ export const censusProgram = (
     const record = (node: ts.Node, callerPath: SpecializationPath, path: SpecializationPath): void => {
       const families = familiesOf(node, namespacePaths)
       if (families.length === 0) return
-      const caller = callerOf(node, identities, regions, callerPath)
+      const caller = sharedCaller(callerOf(node, identities, regions, callerPath))
       const owner = ts.isClassDeclaration(node) ? node : ts.isClassDeclaration(node.parent) ? node.parent : null
       for (const family of families) {
         candidates.push({

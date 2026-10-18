@@ -3111,8 +3111,14 @@ const absentRoutesReaderOf =
  */
 const rememberedFlows = new WeakMap<ReadonlyMap<DeclarationId, ClassLayout>, RememberedCallableFlow[]>()
 let rememberedClasses: WeakRef<ReadonlyMap<DeclarationId, ClassLayout>> | null = null
-/** Callers alternate between asking with and without program conversions, so one remembered answer per class map was always the other kind. */
-const REMEMBERED_FLOWS = 2
+/**
+ * Callers alternate between asking with and without program conversions, so
+ * one answer is kept per kind: a single remembered answer was always the
+ * other kind. A newer answer of the same kind replaces the older one, which
+ * was solved over an earlier body generation and is only ever a worse match.
+ */
+const flowKindOf = (programConversions: unknown, constructionTopology: unknown): number =>
+  (programConversions == null ? 0 : 1) + (constructionTopology == null ? 0 : 2)
 
 export const nativeCallableFlowOf = (...args: Parameters<typeof computeNativeCallableFlow>): NativeCallableFlow => {
   const [bodies, placements, classes, conversions, trace, deriver, programConversions, constructionTopology] = args
@@ -3127,6 +3133,9 @@ export const nativeCallableFlowOf = (...args: Parameters<typeof computeNativeCal
   const entries = held
   const remember = (flow: NativeCallableFlow, replaced: number): NativeCallableFlow => {
     if (replaced !== -1) entries.splice(replaced, 1)
+    const kind = flowKindOf(programConversions, constructionTopology)
+    for (let index = entries.length - 1; index >= 0; index--)
+      if (flowKindOf(entries[index]!.programConversions, entries[index]!.constructionTopology) === kind) entries.splice(index, 1)
     entries.unshift({
       bodies,
       placements,
@@ -3136,7 +3145,6 @@ export const nativeCallableFlowOf = (...args: Parameters<typeof computeNativeCal
       constructionTopology: constructionTopology ?? null,
       flow
     })
-    entries.length = Math.min(entries.length, REMEMBERED_FLOWS)
     return flow
   }
   const sameContext = (entry: RememberedCallableFlow): boolean =>

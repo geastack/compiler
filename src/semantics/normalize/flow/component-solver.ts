@@ -62,6 +62,23 @@ export const dependencyComponentSolver = <K, R>(
   mode: DependencyComponentMode
 ): ((key: K) => DependencyComponentResult<K, R>) => invalidatableComponentSolver(expand, mode).solve
 
+// The four answers a solved node can have, shared: a fresh pair per node was
+// ~200K objects on a 48K-line app, and every reader only reads them.
+const componentAnswers = {
+  completeGrounded: Object.freeze({ status: 'complete', grounded: true }),
+  complete: Object.freeze({ status: 'complete', grounded: false }),
+  refusedGrounded: Object.freeze({ status: 'refused', grounded: true }),
+  refused: Object.freeze({ status: 'refused', grounded: false })
+} as const
+const componentAnswer = (complete: boolean, grounded: boolean): { readonly status: 'complete' | 'refused'; readonly grounded: boolean } =>
+  complete
+    ? grounded
+      ? componentAnswers.completeGrounded
+      : componentAnswers.complete
+    : grounded
+      ? componentAnswers.refusedGrounded
+      : componentAnswers.refused
+
 /**
  * The same solver, plus eviction for a graph that keeps growing underneath it.
  * `invalidate` forgets every cached answer that could have read a changed
@@ -347,13 +364,17 @@ const invalidatableComponentSolver = <K, R>(
       low.set(key, lowest)
       if (lowest !== index) return
 
-      const members: K[] = []
+      let members: K[] = []
       let member: K
       do {
         member = stack.pop()!
         active.delete(member)
         members.push(member)
       } while (member !== key)
+      // Kept for the life of the solver by the component below. An empty array
+      // grown by one `push` reserves 17 slots, and nearly every component is a
+      // singleton: ~25 MB of empty slots on a 48K-line app.
+      if (members.length === 1) members = [key]
       // A singleton component's only member is `key` itself, so membership is
       // an identity test. Most components are singletons, and building a Set to
       // ask one question about one element is the allocation that shows up.
@@ -402,7 +423,7 @@ const invalidatableComponentSolver = <K, R>(
           : { members, unseededCycle, unseededDomains, unmet }
       for (const current of members) {
         componentOf.set(current, component)
-        results.set(current, { status: complete ? 'complete' : 'refused', grounded })
+        results.set(current, componentAnswer(complete, grounded))
       }
     }
 

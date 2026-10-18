@@ -1122,7 +1122,14 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // Lowering runs on the plan's verdict alone. An uncertified program lowers
   // too, so its refusals are rows beside preflight's rather than a stage that
   // never ran; only emission waits for the certificate (see the header).
-  const lowered = diagnostics.planClean
+  // Every pass from here to certification rebuilds the bodies it is handed, so
+  // each generation is a whole copy of the program's IR. `compile` runs in one
+  // interpreted frame, which keeps every local it names until it returns, so a
+  // generation held by a `const` lived through every later stage: nine copies
+  // at certification on a large program. Each generation is therefore a `let`,
+  // dropped once the next one is built, and the long-lived results (`lowered`,
+  // `shaken`) keep only their facts, not their bodies.
+  let loweredProgram = diagnostics.planClean
     ? lowerToIr({
         graph: frontend.graph,
         plan: representations.plan,
@@ -1140,6 +1147,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
       })
     : null
 
+  const lowered = loweredProgram && { blocked: loweredProgram.blocked, slotDrift: loweredProgram.slotDrift }
   stage('lowering')
   // A partially lowered program renders a partially correct file, which is
   // worse than rendering none: the missing half is invisible in the output.
@@ -1155,9 +1163,11 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // consumers of the body list, so the shaker and the emitter agree on which
   // bodies -- and which placements, since a bridged cell mints its own -- the
   // program actually has.
-  const split = complete && lowered ? splitGeneratorBodies(lowered.bodies, placements) : null
-  const splitBodies = split?.bodies ?? lowered?.bodies ?? new Map()
+  let split = complete && loweredProgram ? splitGeneratorBodies(loweredProgram.bodies, placements) : null
+  let splitBodies: ReadonlyMap<PhysicalBodyId, IrBody> | null = split?.bodies ?? loweredProgram?.bodies ?? new Map()
   const splitPlacements = split?.placements ?? placements
+  loweredProgram = null
+  split = null
   // Pruning is per body, and a body lowering blocked on is absent rather than
   // half built, so an incomplete program is pruned too. Gating it on
   // `complete` certified the proven-dead arms of every OTHER body whenever one
@@ -1166,47 +1176,47 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // while an unrelated file's lowering was blocked, and vanished whenever it
   // was not.
   stage('generator-split')
-  const provenPruned = lowered
+  let provenPruned: { bodies: ReadonlyMap<PhysicalBodyId, IrBody>; slotDrift: readonly SlotDrift[] } | null = lowered
     ? pruneProvenBranches(splitBodies, frontend.graph, lowered.slotDrift)
     : { bodies: splitBodies, slotDrift: [] }
+  splitBodies = null
+  const prunedSlotDrift = provenPruned.slotDrift
   // Run after the set rewrite so a body it left alone is still judged on its own;
   // the copy elision needs the placements to prove its cell is frame-local.
-  const pruned = {
-    ...provenPruned,
-    bodies: publishLogicalReceivers(
-      publishNativeHostMethodReads(
-        publishNativeCallableDataSlots({
-          bodies: publishNativeCallablePrivateSlots({
-            bodies: elideReadOnlySpreadCopies(
-              rewriteLiteralSetMembership(threadShortCircuitJoins(provenPruned.bodies)),
-              splitPlacements,
-              representations.deriver
-            ),
-            placements: splitPlacements,
-            conversions: conversionCensus,
-            deriver: representations.deriver,
-            classes,
-            graph: frontend.graph
-          }),
+  let prunedBodies: ReadonlyMap<PhysicalBodyId, IrBody> | null = publishLogicalReceivers(
+    publishNativeHostMethodReads(
+      publishNativeCallableDataSlots({
+        bodies: publishNativeCallablePrivateSlots({
+          bodies: elideReadOnlySpreadCopies(
+            rewriteLiteralSetMembership(threadShortCircuitJoins(provenPruned.bodies)),
+            splitPlacements,
+            representations.deriver
+          ),
           placements: splitPlacements,
           conversions: conversionCensus,
           deriver: representations.deriver,
           classes,
-          calleeRendering: slotsForClasses(classes).input,
-          graph: frontend.graph,
-          nativeCallableData: representations.nativeCallableData,
-          programConversions: null
+          graph: frontend.graph
         }),
-        slotsForClasses(classes).input,
-        hosts.members
-      ),
-      splitPlacements,
-      classes,
-      conversionCensus,
-      representations.deriver,
-      hosts
-    )
-  }
+        placements: splitPlacements,
+        conversions: conversionCensus,
+        deriver: representations.deriver,
+        classes,
+        calleeRendering: slotsForClasses(classes).input,
+        graph: frontend.graph,
+        nativeCallableData: representations.nativeCallableData,
+        programConversions: null
+      }),
+      slotsForClasses(classes).input,
+      hosts.members
+    ),
+    splitPlacements,
+    classes,
+    conversionCensus,
+    representations.deriver,
+    hosts
+  )
+  provenPruned = null
   stage('prune')
   // What the entry can reach, computed once over the whole lowered program.
   //
@@ -1217,10 +1227,10 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // thunks all read the body list, and two of them disagreeing about it is a
   // symbol declared and never defined. See `ir/shake.ts` for the rules and for
   // why the cut is after lowering rather than before it.
-  const shaken =
+  let shakeResult =
     complete && lowered
       ? shakeProgram({
-          bodies: pruned.bodies,
+          bodies: prunedBodies,
           placements: splitPlacements,
           classes,
           conversions: conversionCensus,
@@ -1243,6 +1253,11 @@ export const compile = (request: CompilationRequest): CompilationResult => {
           }
         })
       : null
+  // An incomplete program has no shaken list, so it certifies the pruned one.
+  if (shakeResult) prunedBodies = null
+  let shakenBodies = shakeResult?.bodies ?? null
+  const shaken = shakeResult && { ...shakeResult, bodies: null }
+  shakeResult = null
   stage('shake')
   // Which cells a closure captures, and whether a captured cell is boxed
   // (a program fact, so it belongs to the IR), computed once here from the
@@ -1252,9 +1267,9 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // `targets/cpp/captures.ts` used to compute from this same, already-shaken
   // list at render time. `renderTranslationUnit` reads the published fact
   // off each body instead of re-deriving it from a fresh walk.
-  const captureFacts = shaken
+  let captureFacts = shakenBodies
     ? publishCaptureFacts(
-        shaken.bodies,
+        shakenBodies,
         splitPlacements,
         recordAccessorBodiesOf([...representations.plan.selected.values()], representations.deriver)
       )
@@ -1388,6 +1403,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
           conversionCensus
         )
       : captureFacts
+  captureFacts = null
   stage('call-dispatch')
   // Physical emission dependencies come from the final program. The sealed
   // plan stays intact as carrier authority and as the incomplete-shake fallback.
@@ -1398,7 +1414,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   )
   let emissionRepresentations = shaken
     ? publishEmissionRepresentationsOf({
-        bodies: dispatchedBodies ?? shaken.bodies,
+        bodies: dispatchedBodies ?? shakenBodies!,
         placements: splitPlacements,
         classes: shaken.classes,
         resolveClassRef,
@@ -1413,7 +1429,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // Candidate native reads become executable only after the one reflection
   // census proves their layouts stay closed across the reachable program.
   let reflection = shaken
-    ? reflectionExposureOf([...(dispatchedBodies ?? shaken.bodies).values()], shaken.classes, representations.deriver, {
+    ? reflectionExposureOf([...(dispatchedBodies ?? shakenBodies!).values()], shaken.classes, representations.deriver, {
         representations: emissionRepresentations?.representations ?? [...representations.plan.selected.values()],
         wellKnownSymbols: frontend.wellKnownSymbols,
         physicalClasses: physicalClassLayoutsOf(
@@ -1501,11 +1517,13 @@ export const compile = (request: CompilationRequest): CompilationResult => {
       })
     }
   }
-  const finalizedReads =
+  let finalizedReads =
     shaken && reflection
-      ? finalizeTypedComputedReads(confirmUnboxedMethodBinds(dispatchedBodies ?? shaken.bodies, reflection, shaken.classes), reflection)
+      ? finalizeTypedComputedReads(confirmUnboxedMethodBinds(dispatchedBodies ?? shakenBodies!, reflection, shaken.classes), reflection)
       : null
-  const fieldOwnership =
+  dispatchedBodies = null
+  shakenBodies = null
+  let fieldOwnership =
     shaken && reflection && finalizedReads
       ? finalizeNativeFieldOwnership(finalizedReads, shaken.classes, representations.deriver, conversionCensus, reflection, (reads) =>
           nativeClassFieldUsesOf(frontend.graph, representations.plan, representations.deriver, classes, slotsForClasses(classes), reads)
@@ -1525,13 +1543,17 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // Exact callable identities are available only after the call/reflection
   // fixed point. A closed body's actual normal return can now prove an edge
   // impossible without treating its declared return type as a runtime fact.
-  const normalResultPruned = (() => {
-    const bodies = fieldOwnership?.bodies ?? finalizedReads
-    return bodies
-      ? pruneProvenBranches(bodies, frontend.graph, pruned.slotDrift, { conversions: conversionCensus, placements: splitPlacements })
-      : { bodies: null, slotDrift: pruned.slotDrift }
-  })()
-  const finalizedBodies = normalResultPruned.bodies ? withPresenceChecks(normalResultPruned.bodies, readsUnchecked) : null
+  let normalResultPruned: { bodies: ReadonlyMap<PhysicalBodyId, IrBody> | null; slotDrift: readonly SlotDrift[] } | null =
+    fieldOwnership || finalizedReads
+      ? pruneProvenBranches(fieldOwnership?.bodies ?? finalizedReads!, frontend.graph, prunedSlotDrift, {
+          conversions: conversionCensus,
+          placements: splitPlacements
+        })
+      : { bodies: null, slotDrift: prunedSlotDrift }
+  const normalResultSlotDrift = normalResultPruned.slotDrift
+  let finalizedBodies = normalResultPruned.bodies ? withPresenceChecks(normalResultPruned.bodies, readsUnchecked) : null
+  normalResultPruned = null
+  finalizedReads = null
   const executableClasses = fieldOwnership?.classes ?? shaken?.classes ?? classes
   if (shaken && fieldOwnership && fieldOwnership.classes !== shaken.classes) {
     // Relocation preserves every lowered field carrier, but changes which
@@ -1548,15 +1570,17 @@ export const compile = (request: CompilationRequest): CompilationResult => {
       fallbackRoots: [...representations.plan.selected.values()]
     })
   }
+  fieldOwnership = null
   const physicalClasses =
     shaken && emissionRepresentations ? physicalClassLayoutsOf(executableClasses, emissionRepresentations.representations) : undefined
   if (reflection && physicalClasses) reflection = closePhysicalClassReflection(reflection, physicalClasses.layouts)
   // A union read's class arm that provably lacks the key reads `undefined`;
   // only the CLOSED exposure can say its class never gained a dynamic protocol.
-  const absentArmBodies =
+  let absentArmBodies =
     finalizedBodies && reflection ? finalizeAbsentClassArms(finalizedBodies, reflection, executableClasses) : finalizedBodies
+  finalizedBodies = null
   // Last, so the call targets it follows into a callee are the final ones.
-  const sharedEmptyBodies = absentArmBodies
+  let sharedEmptyBodies = absentArmBodies
     ? shareReadOnlyEmptyRecords(absentArmBodies, {
         placements: splitPlacements,
         declaresField: (shapeId, key) => {
@@ -1569,9 +1593,11 @@ export const compile = (request: CompilationRequest): CompilationResult => {
         }
       })
     : absentArmBodies
+  absentArmBodies = null
   // Before the recipes and certification that read the final operation list:
   // a selection an `instanceof` no longer reads (`call-dispatch.ts`) goes.
-  const emittedBodies = sharedEmptyBodies ? dropUnreadPureConversions(sharedEmptyBodies, conversionCensus) : sharedEmptyBodies
+  let emittedBodies = sharedEmptyBodies ? dropUnreadPureConversions(sharedEmptyBodies, conversionCensus) : sharedEmptyBodies
+  sharedEmptyBodies = null
   stage('reflection')
   // Certification is a walk of the IR lowering actually built
   // (one question, one census): every capability the printer
@@ -1587,7 +1613,9 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // incomplete program has no shaken list at all, so it certifies the bodies
   // lowering did build: its refusals are the point of running at all, and
   // dropping them would hide why it did not lower.
-  const unsealedBodies = emittedBodies ?? (lowered ? pruned.bodies : null)
+  let unsealedBodies = emittedBodies ?? (lowered ? prunedBodies : null)
+  emittedBodies = null
+  prunedBodies = null
   nativeProgramConversions = unsealedBodies
     ? publishProgramConversionRecipes({
         bodies: unsealedBodies.values(),
@@ -1598,7 +1626,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
         ...(reflection ? { reflection } : {})
       })
     : undefined
-  const operationBodies = unsealedBodies
+  let operationBodies = unsealedBodies
     ? publishNativeOperationFacts(
         publishConversionRecipes({
           calleeRendering: slotsForClasses(executableClasses).input,
@@ -1614,7 +1642,8 @@ export const compile = (request: CompilationRequest): CompilationResult => {
         executableClasses
       )
     : null
-  const finalRecipeBodies = operationBodies
+  unsealedBodies = null
+  let finalRecipeBodies = operationBodies
     ? publishConversionRecipes({
         calleeRendering: slotsForClasses(executableClasses).input,
         wellKnownSymbols: frontend.wellKnownSymbols,
@@ -1627,9 +1656,11 @@ export const compile = (request: CompilationRequest): CompilationResult => {
         hosts
       })
     : null
+  operationBodies = null
   const certifiedBodies = finalRecipeBodies
     ? new Map([...finalRecipeBodies].map(([id, body]) => [id, publishDenseLoopPlan(body, splitPlacements, conversionCensus)]))
     : null
+  finalRecipeBodies = null
   const programConversionRecipes = certifiedBodies
     ? publishProgramConversionRecipes({
         bodies: certifiedBodies.values(),
@@ -1651,7 +1682,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
           programConversionRecipes,
           representations: emissionRepresentations?.representations ?? [...representations.plan.selected.values()],
           placements: splitPlacements,
-          slotDrift: normalResultPruned.slotDrift,
+          slotDrift: normalResultSlotDrift,
           blocked: lowered.blocked,
           manifest: certificationManifest,
           conversions: conversionCensus,
@@ -1788,7 +1819,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
       certification?.refusals ?? [],
       rendered?.refused ?? []
     ),
-    slotDrift: normalResultPruned.slotDrift,
+    slotDrift: normalResultSlotDrift,
     printerDrift: rendered?.printerDrift ?? [],
     abiBlockers: abis.blocked,
     emissionRefusals: rendered?.refused ?? [],

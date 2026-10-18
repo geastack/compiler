@@ -73,6 +73,12 @@ const memberNameOf = (member: ts.ClassElement | ts.TypeElement): string | null =
   return null
 }
 
+const isDefaultLibraryReference = (reference: ts.TypeReference): boolean => {
+  if ((reference.objectFlags & ts.ObjectFlags.Reference) === 0) return false
+  const declarations = reference.target.getSymbol()?.declarations ?? []
+  return declarations.length > 0 && declarations.every((declaration) => declaration.getSourceFile().hasNoDefaultLib)
+}
+
 const isStatic = (member: ts.Node): boolean =>
   ts.canHaveModifiers(member) && (ts.getModifiers(member)?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword) ?? false)
 
@@ -450,6 +456,14 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
           if (one && other) yield* pair(one, other, into, depth + 1, seen, owner)
         }
       }
+      // A default-library generic (`Array`, `Map`, `Promise`, the iterators)
+      // is its arguments: every member is the declared member instantiated
+      // with them, which `structural.ts` translates part by part once the
+      // arguments above have images. Walking the members anyway paired each
+      // method of `U[]` against `Item[]` six levels deep -- 553 of the 556
+      // entries in each of 165 copies of `Array.prototype.map` on a 48K-line
+      // app, never asked, and 300 MB of instantiations the checker keeps.
+      if (isDefaultLibraryReference(openReference)) return
     }
     // Members BY NAME. A record's own fields are where the remaining holes sit
     // once the signature positions are paired -- a `Query<T>` that is a mapped
