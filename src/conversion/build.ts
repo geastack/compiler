@@ -367,6 +367,12 @@ export const narrowingReachesTarget = (source: Representation, target: Represent
     const toKey = representationKey(to)
     if (fromKey === toKey) return true
     if (narrowingClosureKeysOf(from).has(toKey)) return true
+    // Only an optional or a tagged union recurses; any other source answers
+    // directly, and memoizing those answers was most of the table.
+    if (from.kind !== 'optional' && from.kind !== 'tagged-union')
+      return (
+        from.kind === 'class-ref' && to.kind === 'class-ref' && from.ownership === to.ownership && to.ancestors.includes(from.declaration)
+      )
     let fromAnswers = reachesMemo.get(fromKey)
     if (fromAnswers === undefined) reachesMemo.set(fromKey, (fromAnswers = new Map()))
     const known = fromAnswers.get(toKey)
@@ -374,9 +380,8 @@ export const narrowingReachesTarget = (source: Representation, target: Represent
     const pair = `${fromKey}->${toKey}`
     if (active.has(pair)) return false
     active.add(pair)
-    let result =
-      from.kind === 'class-ref' && to.kind === 'class-ref' && from.ownership === to.ownership && to.ancestors.includes(from.declaration)
-    if (!result && from.kind === 'optional') {
+    let result = false
+    if (from.kind === 'optional') {
       result = to.kind === 'optional' && from.absence === to.absence ? reaches(from.payload, to.payload) : reaches(from.payload, to)
     }
     if (!result && from.kind === 'tagged-union') {

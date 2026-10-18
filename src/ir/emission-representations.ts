@@ -38,7 +38,7 @@ export interface EmissionRepresentationReason {
   readonly detail: string
 }
 
-/** One carrier in the readonly closure, with all provenance that retained it. */
+/** One carrier in the readonly closure, with the first reason of each kind that retained it. */
 export interface EmissionRepresentationEntry {
   readonly representation: Representation
   readonly reasons: readonly EmissionRepresentationReason[]
@@ -74,7 +74,7 @@ export interface EmissionRepresentationPublication {
   readonly roots: readonly EmissionRepresentationEntry[]
   /** Closure entries keyed by representationKey plus recursive role where needed, including root reasons. */
   readonly closure: ReadonlyMap<string, EmissionRepresentationEntry>
-  /** Every reason a carrier was retained, keyed by the closure key. */
+  /** The first reason of each kind a carrier was retained for, keyed by the closure key. */
   readonly reasons: ReadonlyMap<string, readonly EmissionRepresentationReason[]>
   /** Final class declarations reached from retained carriers or retained member bodies. */
   readonly retainedClasses: ReadonlySet<DeclarationId>
@@ -140,7 +140,11 @@ export const publishEmissionRepresentationsOf = (input: EmissionRepresentationIn
   const missingConversions = new Set<ConversionNodeId>()
   const missingDefinitions = new Set<string>()
 
-  const reasonKeyOf = (reason: EmissionRepresentationReason): string => `${reason.kind}|${reason.owner}|${reason.detail}`
+  // One reason of each kind per carrier, the first found: provenance for a
+  // reader asking why a carrier is retained. Keeping every reason kept one
+  // per operation, body and conversion that named the carrier -- 1.1 million
+  // on a large app, alive to the end of the compile for no consumer.
+  const reasonKeyOf = (reason: EmissionRepresentationReason): string => reason.kind
 
   const addReason = (table: Map<string, MutableEntry>, representation: Representation, reason: EmissionRepresentationReason): void => {
     const key = closureKeyOf(representation)
@@ -149,7 +153,7 @@ export const publishEmissionRepresentationsOf = (input: EmissionRepresentationIn
       table.set(key, { representation, reasons: new Map([[reasonKeyOf(reason), reason]]) })
       return
     }
-    existing.reasons.set(reasonKeyOf(reason), reason)
+    if (!existing.reasons.has(reasonKeyOf(reason))) existing.reasons.set(reasonKeyOf(reason), reason)
   }
 
   const enqueue = (representation: Representation, reason: EmissionRepresentationReason, root = false): void => {
@@ -465,7 +469,8 @@ export const publishEmissionRepresentationsOf = (input: EmissionRepresentationIn
       continue
     }
     const unique = new Map<string, EmissionRepresentationReason>()
-    for (const reason of [...(nested?.reasons.values() ?? []), ...(direct?.reasons.values() ?? [])]) unique.set(reasonKeyOf(reason), reason)
+    for (const reason of [...(nested?.reasons.values() ?? []), ...(direct?.reasons.values() ?? [])])
+      if (!unique.has(reasonKeyOf(reason))) unique.set(reasonKeyOf(reason), reason)
     closure.set(key, { representation: nested?.representation ?? direct!.representation, reasons: Object.freeze([...unique.values()]) })
   }
   const reasons = new Map<string, readonly EmissionRepresentationReason[]>()

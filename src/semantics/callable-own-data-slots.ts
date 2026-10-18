@@ -92,7 +92,13 @@ export interface CallableOwnDataOwner {
   readonly allocations: readonly AllocationOperation[]
   readonly writes: readonly CallableWriteTarget[]
   readonly observations: readonly CallableOwnDataObservation[]
+  /** This owner's own blockers; with `sharedBlockers`, the whole set. */
   readonly blockers: readonly CallableOwnDataBlocker[]
+  /** The blockers every owner of one census carries: each write whose target
+   * the inventory cannot isolate, and each write to a prototype. One list per
+   * census, not one per owner -- copied into every owner it was the bulk of
+   * the inventory, 22 million entries over 9,394 owners on a large app. */
+  readonly sharedBlockers: readonly CallableOwnDataBlocker[]
 }
 
 /** Additional exact origin families from a sealed native value-flow census.
@@ -218,7 +224,11 @@ export const refineCallableOwnDataCensus = (
         actual.writes.map((write) => write.operation)
       )
     )
-      owners.set(functionId, { ...owner, blockers: unionOf(owner.blockers, actual?.blockers ?? []) })
+      owners.set(functionId, {
+        ...owner,
+        blockers: unionOf(owner.blockers, actual?.blockers ?? []),
+        sharedBlockers: unionOf(owner.sharedBlockers, actual?.sharedBlockers ?? [])
+      })
   }
   const schemas = new Map(refined.schemas)
   for (const [functionId, keys] of census.schemas) {
@@ -529,16 +539,25 @@ const inventoryOf = (graph: SemanticGraph, native: CallableOwnDataOriginInput | 
     schemas.set(functionId, perKey)
   }
   const owners = new Map<FunctionId, CallableOwnDataOwner>()
+  // The owner-independent half of each shared write's blockers, in `writes`
+  // order; `inherited-chain` joins it only where the target is unknown, and
+  // `unknown-key` needs ownership, so both stay per owner otherwise.
+  const shared = blockerList()
+  for (const index of sharedWriteIndexes) {
+    const write = writes[index]!
+    if (unknownTargetWriteSet.has(write)) shared.add(write.operation, 'unknown-target')
+    if (prototypeWriteSet.has(write)) shared.add(write.operation, 'prototype-mutation')
+    if (write.key === '__proto__' && (write.kind === 'set' || write.kind === 'reflect-set') && unknownTargetWriteSet.has(write))
+      shared.add(write.operation, 'inherited-chain')
+  }
+  const sharedBlockers = shared.list()
   for (const functionId of new Set([...allocations.keys(), ...[...origins.values()].flat()])) {
     const blockers = blockerList()
     const add = blockers.add
-    for (const index of blockingWritesOf(functionId)) {
+    for (const index of ownWriteIndexes.get(functionId) ?? []) {
       const write = writes[index]!
-      const own = ownsWrite(functionId, index)
-      if (own && write.key === null) add(write.operation, 'unknown-key')
-      if (unknownTargetWriteSet.has(write)) add(write.operation, 'unknown-target')
-      if (prototypeWriteSet.has(write)) add(write.operation, 'prototype-mutation')
-      if (write.key === '__proto__' && (write.kind === 'set' || write.kind === 'reflect-set') && (own || unknownTargetWriteSet.has(write)))
+      if (write.key === null) add(write.operation, 'unknown-key')
+      if (write.key === '__proto__' && (write.kind === 'set' || write.kind === 'reflect-set') && !unknownTargetWriteSet.has(write))
         add(write.operation, 'inherited-chain')
     }
     for (const operation of exposures.get(functionId) ?? [])
@@ -550,7 +569,8 @@ const inventoryOf = (graph: SemanticGraph, native: CallableOwnDataOriginInput | 
       allocations: allocations.get(functionId) ?? [],
       writes: (ownWriteIndexes.get(functionId) ?? []).map((index) => writes[index]!),
       observations: observations.get(functionId) ?? [],
-      blockers: blockers.list()
+      blockers: blockers.list(),
+      sharedBlockers
     })
   }
   return { owners, schemas, unknownTargetWrites, prototypeWrites }
