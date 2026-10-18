@@ -15982,6 +15982,15 @@ struct ArrayObjectElementOf<ArrayObject<Element>> {
 };
 
 namespace detail {
+template <typename Element>
+ArrayObject<Element> arrayObjectBaseProbe(const ArrayObject<Element>&);
+template <typename T>
+using ArrayObjectBaseOf = decltype(arrayObjectBaseProbe(std::declval<const T&>()));
+template <typename T>
+concept DerivedArrayObject = !IsArrayObjectStruct<T>::value && requires { typename ArrayObjectBaseOf<T>; };
+}
+
+namespace detail {
 template <typename T>
 struct DynamicCarrier;
 }  // namespace detail
@@ -32639,6 +32648,26 @@ bool assignOwnPropertiesUnorderedWith(const gea::Ref<T>& source, const gea::Ref<
 }
 
 /** Array exotic own enumerable string keys, followed by enumerable expandos. */
+template <typename Element>
+std::vector<std::string> arrayOwnEnumerableKeys(const gea::Ref<ArrayObject<Element>>& array);
+template <typename Element>
+bool arrayHasOwnEnumerableKey(const gea::Ref<ArrayObject<Element>>& array, const std::string& key);
+template <typename Element>
+std::vector<std::string> arrayOwnPropertyNames(const gea::Ref<ArrayObject<Element>>& array);
+
+template <detail::DerivedArrayObject Array>
+std::vector<std::string> arrayOwnEnumerableKeys(const gea::Ref<Array>& array) {
+  return arrayOwnEnumerableKeys(gea::Ref<detail::ArrayObjectBaseOf<Array>>(array));
+}
+template <detail::DerivedArrayObject Array>
+bool arrayHasOwnEnumerableKey(const gea::Ref<Array>& array, const std::string& key) {
+  return arrayHasOwnEnumerableKey(gea::Ref<detail::ArrayObjectBaseOf<Array>>(array), key);
+}
+template <detail::DerivedArrayObject Array>
+std::vector<std::string> arrayOwnPropertyNames(const gea::Ref<Array>& array) {
+  return arrayOwnPropertyNames(gea::Ref<detail::ArrayObjectBaseOf<Array>>(array));
+}
+
 template <typename Element>
 std::vector<std::string> arrayOwnEnumerableKeys(const gea::Ref<ArrayObject<Element>>& array) {
   std::vector<std::string> keys;

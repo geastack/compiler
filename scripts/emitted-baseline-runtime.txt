@@ -946,6 +946,7 @@ object-integrity-uses-physical-index-protocol.runtime.ts.cpp 23551c4185ed
 object-is-over-union-and-optional-carriers.runtime.ts.cpp 199c1035ac10
 object-key-enumeration-requires-native-object.runtime.ts.cpp f6c110078688
 object-keyed-map-index-matches-node.runtime.ts.cpp ab5c357ecdd6
+object-keys-over-recursive-dictionary-or-array-union.runtime.ts.cpp 061e846e55a7
 object-literal-beside-class-in-or-keeps-its-own-layout.runtime.ts.cpp d86094099c83
 object-literal-empty-array-filled-through-untyped-computed-read.runtime.js.cpp d13b67ac0d25
 object-literal-es5-method-receiver.runtime.js.cpp 4c1c19bfe47a
