@@ -546,6 +546,43 @@ if (sample !== undefined) {
   }
 }
 
+// `--holders=<Name{a,b}>`: every object of one `--shapes` shape grouped by its
+// chain of named holders (`--depth` levels, element and Map-table hops elided),
+// which tells apart several live copies of one structure -- the same IR block
+// held by the lowered, pruned and shaken body sets is three groups.
+const holdersShape = process.argv.find((arg) => arg.startsWith('--holders='))?.slice(10)
+if (holdersShape !== undefined) {
+  const property = edgeTypes.indexOf('property')
+  const shapeKey = (node) => {
+    const names = []
+    for (let edge = firstEdge[node]; edge < firstEdge[node + 1] && names.length < 6; edge++)
+      if (edges[edge * EF + edgeTypeAt] === property) names.push(strings[edges[edge * EF + edgeNameAt]])
+    return `${nodeName(node)}{${names.join(',')}}`
+  }
+  const groups = new Map()
+  let total = 0
+  for (let node = 1; node < nodeCount; node++) {
+    if (shapeKey(node) !== holdersShape) continue
+    total++
+    const chain = []
+    let at = node
+    for (let hop = 0; hop < 40 && chain.length < depth; hop++) {
+      if (predecessorStart[at] === predecessorStart[at + 1]) break
+      const edge = predecessorEdges[predecessorStart[at]]
+      at = predecessors[predecessorStart[at]]
+      const type = edges[edge * EF + edgeTypeAt]
+      if (indexed.has(type)) continue
+      const name = edgeName(edge)
+      if (name === '.table' || name === '.elements' || /^\.\d+$/.test(name) || name.includes('part of key')) continue
+      chain.push(name.length > 40 ? name.slice(0, 40) : name)
+    }
+    const key = chain.join(' < ')
+    groups.set(key, (groups.get(key) ?? 0) + 1)
+  }
+  console.log(`--- ${total} objects of ${holdersShape} by holder chain`)
+  for (const [key, count] of [...groups].sort((left, right) => right[1] - left[1]).slice(0, top)) console.log(`  ${String(count).padStart(9)}  ${key}`)
+}
+
 // `--strings`: string memory by node type, the longest distinct strings, and
 // how much of it is the same text held more than once.
 if (process.argv.includes('--strings')) {

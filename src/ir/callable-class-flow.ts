@@ -2980,7 +2980,10 @@ const flowOverCopy = (flow: NativeCallableFlow, pairs: ReadonlyMap<object, objec
 
 type AbsentRoutesReader = NonNullable<NativeCallableFlow['nativeFieldViewAbsentRoutesOf']>
 /** The solved reader and the one pairing a re-pointed reader applies to its answers. */
-const repointedReaders = new WeakMap<AbsentRoutesReader, { readonly base: AbsentRoutesReader; readonly pairs: ReadonlyMap<object, object> }>()
+const repointedReaders = new WeakMap<
+  AbsentRoutesReader,
+  { readonly base: AbsentRoutesReader; readonly pairs: ReadonlyMap<object, object> }
+>()
 
 /**
  * Outside `flowOverCopy` for the reason `expandoStoredReaderOf` states: an
@@ -2998,18 +3001,47 @@ const repointedReaders = new WeakMap<AbsentRoutesReader, { readonly base: Absent
 const repointedAbsentRoutesOf = (absentRoutesOf: AbsentRoutesReader, pairs: ReadonlyMap<object, object>): AbsentRoutesReader => {
   const earlier = repointedReaders.get(absentRoutesOf)
   const base = earlier?.base ?? absentRoutesOf
-  let composed: ReadonlyMap<object, object> = pairs
+  let composed: ReadonlyMap<object, object> = answerReachablePairsOf(pairs)
   if (earlier !== undefined) {
     const seen = new Map<object, unknown>()
     const unreached = { objects: new Set<object>(), reached: false }
     const both = new Map<object, object>()
     for (const [old, partner] of earlier.pairs) both.set(old, repointed(partner, pairs, seen, unreached) as object)
-    for (const [old, partner] of pairs) if (!both.has(old)) both.set(old, partner)
+    for (const [old, partner] of composed) if (!both.has(old)) both.set(old, partner)
     composed = both
   }
   const reader = absentRoutesReaderOver(base, composed)
   repointedReaders.set(reader, { base, pairs: composed })
   return reader
+}
+
+/**
+ * The part of a pairing an absent-routes answer can reach. An answer holds
+ * storage domains over representations and conversion nodes, and none of those
+ * ever holds an IR operation, block or body, or a container of one. So the
+ * pairing's entries for the program's own structure are never consulted when
+ * an answer is re-pointed. Kept whole, a reader pinned both programs it paired
+ * -- every block, operation and operand list, up to a million entries per
+ * reader on a large app -- for the rest of the compile.
+ */
+const answerReachablePairsOf = (pairs: ReadonlyMap<object, object>): ReadonlyMap<object, object> => {
+  const structural = new Map<object, boolean>()
+  const isStructure = (value: unknown): boolean => {
+    if (typeof value !== 'object' || value === null) return false
+    const known = structural.get(value)
+    if (known !== undefined) return known
+    structural.set(value, false)
+    let answer: boolean
+    if (Array.isArray(value)) answer = value.some(isStructure)
+    else if (value instanceof Map) answer = [...value.values()].some(isStructure) || [...value.keys()].some(isStructure)
+    else if (value instanceof Set) answer = [...value].some(isStructure)
+    else answer = 'lineage' in value || ('operations' in value && 'terminator' in value) || ('blocks' in value && 'sourceOwner' in value)
+    structural.set(value, answer)
+    return answer
+  }
+  const kept = new Map<object, object>()
+  for (const [old, partner] of pairs) if (!isStructure(old)) kept.set(old, partner)
+  return kept
 }
 
 const absentRoutesReaderOver =
