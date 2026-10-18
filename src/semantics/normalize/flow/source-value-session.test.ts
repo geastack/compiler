@@ -1643,3 +1643,38 @@ test('open intrinsic own installations cannot borrow the original library callee
     assert.ok(checked.ledger.capture(() => checked.session.invocationTargetsOf(call)).value === null, preparation)
   }
 })
+
+test('a body stored on a property finds its callers by which call targets hold it', () => {
+  // `api.render = render` leaves the body's names unenumerable, so every call
+  // in the program is a candidate; only the call whose targets come to hold
+  // the body, through the alias and the factory's completion, is a caller.
+  const { file, session } = inspect(`
+    function Renderer() {
+      function render(scene) { return scene; }
+      function idle() { return 0; }
+      const api = {};
+      api.render = render;
+      api.idle = idle;
+      return api;
+    }
+    const renderer = Renderer();
+    const alias = renderer;
+    alias.render(7);
+    Math.max(1, 2);
+  `)
+  const declared = (name: string): ts.FunctionDeclaration => {
+    let found: ts.FunctionDeclaration | undefined
+    const visit = (node: ts.Node): void => {
+      if (ts.isFunctionDeclaration(node) && node.name?.text === name) found = node
+      ts.forEachChild(node, visit)
+    }
+    visit(file)
+    assert.ok(found, name)
+    return found
+  }
+  assert.deepEqual(
+    session.callerSitesOf(declared('render'))?.map((call) => call.getText(file)),
+    ['alias.render(7)']
+  )
+  assert.deepEqual(session.callerSitesOf(declared('idle')), [])
+})
