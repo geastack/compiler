@@ -1,5 +1,6 @@
 import { operationOfResult, type SemanticResultId } from '../identity/ids.js'
 import { carriesUndefined, representationKey, type Representation } from '../representation/model.js'
+import { edgesOfKind } from '../semantics/model/edges.js'
 import { operandOf, type SemanticOperand } from '../semantics/model/operands.js'
 import { IrLoweringBlockedError } from './lower-graph.js'
 import type { FlowController } from './lower-flow.js'
@@ -64,8 +65,8 @@ import type { IrBlockId, IrOperand } from './model.js'
  */
 
 const chainSuccessorOf = (graph: LoweringContext['graph'], id: DestructuringOperation['id']): DestructuringOperation['id'] | null => {
-  for (const edge of graph.edges) {
-    if (edge.kind === 'evaluation' && edge.from === id) return edge.to
+  for (const edge of edgesOfKind(graph.edges, 'evaluation')) {
+    if (edge.from === id) return edge.to
   }
   return null
 }

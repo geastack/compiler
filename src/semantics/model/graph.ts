@@ -1,6 +1,6 @@
 import type { OperationFamily, OperationId, RegionId, SemanticResultId, StructuralTypeId } from '../../identity/ids.js'
 import { operationOfResult } from '../../identity/ids.js'
-import type { SemanticEdge } from './edges.js'
+import type { SemanticEdges } from './edges.js'
 import { edgeSource } from './edges.js'
 import type { FamilyReport } from './coverage.js'
 import { validateFamilyReport } from './coverage.js'
@@ -30,10 +30,66 @@ export interface SemanticGraph {
   readonly regions: ReadonlyMap<RegionId, SemanticRegion>
   readonly structuralTypes: ReadonlyMap<StructuralTypeId, StructuralType>
   readonly operations: ReadonlyMap<OperationId, SemanticOperation>
-  readonly edges: readonly SemanticEdge[]
+  readonly edges: SemanticEdges
   readonly coverage: ReadonlyMap<OperationFamily, FamilyReport>
   /** Every published result, so a consumer never re-derives one from an operation. */
   readonly results: ReadonlyMap<SemanticResultId, OperationId>
+}
+
+/**
+ * The sealed graph's result index, read off its operation table.
+ *
+ * A result's identity names its operation (`semanticResultId`), so the
+ * operation table already answers "who publishes this result" -- a second
+ * map from every result to its operation was 14 MB for a 48K-line app, held
+ * from normalization to certification to repeat what the identities say.
+ * Only a result whose identity does not name its own publisher is kept
+ * explicitly. Iteration visits operations in table order and each one's
+ * results in its own order: exactly the order the results were registered in.
+ */
+export class PublishedResults implements ReadonlyMap<SemanticResultId, OperationId> {
+  readonly size: number
+
+  constructor(
+    private readonly operations: ReadonlyMap<OperationId, SemanticOperation>,
+    private readonly foreign: ReadonlyMap<SemanticResultId, OperationId>,
+    size: number
+  ) {
+    this.size = size
+  }
+
+  get(result: SemanticResultId): OperationId | undefined {
+    const operation = this.operations.get(operationOfResult(result))
+    if (operation !== undefined) for (const published of operation.results) if (published.id === result) return operation.id
+    return this.foreign.get(result)
+  }
+
+  has(result: SemanticResultId): boolean {
+    return this.get(result) !== undefined
+  }
+
+  *entries(): MapIterator<[SemanticResultId, OperationId]> {
+    for (const operation of this.operations.values()) for (const result of operation.results) yield [result.id, operation.id]
+  }
+
+  *keys(): MapIterator<SemanticResultId> {
+    for (const operation of this.operations.values()) for (const result of operation.results) yield result.id
+  }
+
+  *values(): MapIterator<OperationId> {
+    for (const operation of this.operations.values()) for (let index = 0; index < operation.results.length; index++) yield operation.id
+  }
+
+  [Symbol.iterator](): MapIterator<[SemanticResultId, OperationId]> {
+    return this.entries()
+  }
+
+  forEach(
+    callback: (value: OperationId, key: SemanticResultId, map: ReadonlyMap<SemanticResultId, OperationId>) => void,
+    thisArg?: unknown
+  ): void {
+    for (const [key, value] of this.entries()) callback.call(thisArg, value, key, this)
+  }
 }
 
 /** Adjacency built once from the edge table, for authority-connected traversal. */

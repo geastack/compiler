@@ -4,6 +4,7 @@ import { withoutSpecialization } from '../../identity/ids.js'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import type { RepresentationDeriver } from '../../representation/derive.js'
 import type { SealedRepresentationPlan } from '../../representation/plan.js'
+import { producerEdges } from '../../semantics/model/edges.js'
 import type { SemanticGraph } from '../../semantics/model/graph.js'
 import { operandOf } from '../../semantics/model/operands.js'
 import type { SemanticOperation } from '../../semantics/model/operations.js'
@@ -262,7 +263,7 @@ export const isDirectCallableBuiltinRead = (
   const result = operation.results.find((candidate) => candidate.role === 'value')
   if (!result) return false
   let calls = 0
-  for (const edge of graph.edges) {
+  for (const edge of producerEdges(graph.edges)) {
     if (edge.kind !== 'value' || edge.result !== result.id) continue
     const user = graph.operations.get(edge.to)
     if (edge.role !== 'callee' || user?.family !== 'invocation' || user.internalMethod !== 'call' || user.optionalChain) return false

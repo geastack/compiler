@@ -1,9 +1,11 @@
 import type { OperationFamily, OperationId, RegionId, SemanticResultId } from '../../identity/ids.js'
 import { operationFamilies } from '../../identity/ids.js'
-import type { SemanticEdge } from '../model/edges.js'
-import { edgeSource } from '../model/edges.js'
+import { operationOfResult } from '../../identity/ids.js'
+import type { GatedOperations, GateLink, GateScope, SemanticEdge } from '../model/edges.js'
+import { compactStatedEdges, edgeSource, gateScopeSealer, SemanticEdgeTable } from '../model/edges.js'
 import type { SemanticGraph, SemanticRegion } from '../model/graph.js'
-import { validateGraph } from '../model/graph.js'
+import { PublishedResults, validateGraph } from '../model/graph.js'
+import { internedText, internSealedFacts } from '../model/sealed-facts.js'
 import type { SemanticOperation } from '../model/operations.js'
 import type { StructuralTypeTable } from '../model/structural-type-table.js'
 import type { ProgramCensus } from './census.js'
@@ -51,9 +53,10 @@ export interface NormalizationInput {
   /**
    * The conditional edges no single producer can state, computed once every
    * operation exists. Kept as a callback so this driver still cannot see an
-   * AST: it hands over the published operations and receives edges back.
+   * AST: it hands over the published operations and receives each gated
+   * operation's chain of scopes back -- one edge per link, stated once per chain.
    */
-  readonly gates: (operations: ReadonlyMap<OperationId, SemanticOperation>) => readonly SemanticEdge[]
+  readonly gates: (operations: ReadonlyMap<OperationId, SemanticOperation>) => GatedOperations
 }
 
 export interface NormalizationResult {
@@ -78,17 +81,38 @@ export const normalizeProgram = (input: NormalizationInput): NormalizationResult
   const published = publishProgram(operationFamilies, producersFor, input.census.byFamily)
 
   const operations = new Map<OperationId, SemanticOperation>()
-  const results = new Map<SemanticResultId, OperationId>()
+  // Only a result whose identity does not name its own operation needs an
+  // entry of its own; every other one is answered by the operation table.
+  const foreignResults = new Map<SemanticResultId, OperationId>()
+  let resultCount = 0
+  const intern = internSealedFacts()
   for (const operation of published.operations) {
     if (operations.has(operation.id)) {
       throw new Error(`operation ${operation.id} was published twice; one source operation must mint one identity`)
     }
+    intern(operation)
     operations.set(operation.id, operation)
-    for (const result of operation.results) {
-      if (results.has(result.id)) throw new Error(`result ${result.id} was published twice`)
-      results.set(result.id, operation.id)
+  }
+  for (const operation of operations.values()) {
+    const { results } = operation
+    for (let index = 0; index < results.length; index++) {
+      const result = results[index]!
+      // Two results share an identity only within one operation, or when one
+      // of them does not name its own publisher.
+      for (let earlier = 0; earlier < index; earlier++)
+        if (results[earlier]!.id === result.id) throw new Error(`result ${result.id} was published twice`)
+      const named = operations.get(operationOfResult(result.id))
+      if (named === operation) {
+        if (foreignResults.has(result.id)) throw new Error(`result ${result.id} was published twice`)
+      } else {
+        if (foreignResults.has(result.id) || named?.results.some((other) => other.id === result.id))
+          throw new Error(`result ${result.id} was published twice`)
+        foreignResults.set(result.id, operation.id)
+      }
+      resultCount++
     }
   }
+  const results = new PublishedResults(operations, foreignResults, resultCount)
 
   const regions = new Map<RegionId, SemanticRegion>()
   for (const region of input.census.regions.values()) regions.set(region.id, region)
@@ -105,12 +129,52 @@ export const normalizeProgram = (input: NormalizationInput): NormalizationResult
     return operations.has(edgeSource(edge, (result) => results.get(result) ?? ('' as OperationId)))
   }
 
+  // The gating walk's links pass the same filter its materialized edges did,
+  // decided once per shared chain rather than once per operation inside it.
+  const linkReaches = (link: GateLink): boolean => {
+    if (link.kind === 'guard') return results.has(link.guard)
+    return operations.has(link.kind === 'region' ? link.region : link.loop)
+  }
+  const gated = input.gates(operations)
+  const sealChain = gateScopeSealer()
+  const sealedChains = new Map<readonly GateLink[], GateScope | null>()
+  const gatedOperations: OperationId[] = []
+  const innermostScopes: GateScope[] = []
+  for (let index = 0; index < gated.operations.length; index++) {
+    const chain = gated.chains[index]!
+    // An operation that was withheld would be every edge's dangling `to`.
+    const to = operations.get(gated.operations[index]!)?.id
+    if (to === undefined) continue
+    let innermost = sealedChains.get(chain)
+    if (innermost === undefined) {
+      const reaching = chain.filter(linkReaches)
+      for (const link of reaching)
+        if (link.kind === 'guard' && !Object.isFrozen(link)) (link as { guard: SemanticResultId }).guard = internedText(link.guard)
+      innermost = sealChain(reaching)
+      sealedChains.set(chain, innermost)
+    }
+    if (innermost === null) continue
+    gatedOperations.push(to)
+    innermostScopes.push(innermost)
+  }
+
   const graph: SemanticGraph = {
     regions,
     structuralTypes: input.types.seal(),
     operations,
-    edges: [...published.edges, ...input.gates(operations)].filter(reaches),
-    coverage: published.reports,
+    edges: new SemanticEdgeTable(compactStatedEdges(published.edges.filter(reaches), operations), {
+      operations: gatedOperations,
+      innermost: innermostScopes
+    }),
+    // A report lists its operations by the identities they were published
+    // under, before sealing interned them; naming the sealed copies instead
+    // lets the pre-seal strings go.
+    coverage: new Map(
+      [...published.reports].map(([family, report]) => [
+        family,
+        { ...report, operations: report.operations.map((id) => operations.get(id)?.id ?? id) }
+      ])
+    ),
     results
   }
 

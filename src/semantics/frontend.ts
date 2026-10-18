@@ -922,14 +922,13 @@ const locateFile = (file: ts.SourceFile): LocatedFile => {
   const names = new Int32Array(count).fill(-1)
   const spelledNames = new Map<number, string>()
   for (const [node, ordinal] of ordinals) {
-    if (node.pos < 0) continue
     starts[ordinal] = node.getStart(file)
     ends[ordinal] = node.end
     const name = ts.getNameOfDeclaration(node as ts.Declaration)
     if (!name || !ts.isIdentifier(name)) continue
     const at = ordinals.get(name)
     // An escape is always longer than what it spells, so equal length is equal text.
-    if (at !== undefined && name.pos >= 0 && name.end - name.getStart(file) === name.text.length) names[ordinal] = at
+    if (at !== undefined && name.end - name.getStart(file) === name.text.length) names[ordinal] = at
     else spelledNames.set(ordinal, name.text)
   }
   return { fileName: file.fileName, text: file.text, lineStarts: null, starts, ends, names, spelledNames }
