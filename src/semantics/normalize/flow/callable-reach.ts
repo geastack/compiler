@@ -249,8 +249,16 @@ const ownedConstructionReceiverTypeAt = (checker: ts.TypeChecker, flow: ValueFlo
   return wrapped
 }
 
+/**
+ * Keyed by the index's call list, not the index: the settling round's index is
+ * a new object over the previous round's tables (`frontend.ts`), and the
+ * carried source-value session keeps asking with the previous object, so a
+ * per-object key built these identical lookups twice (~10 MB on a 48K-line
+ * app). Every answer here is a function of `calls` and `allWrites`, which
+ * such indices share by identity and no other two indices do.
+ */
 const callLookups = new WeakMap<
-  ValueFlowIndex,
+  readonly FlowCallSite[],
   {
     readonly sites: ReadonlyMap<ts.Node, FlowCallSite>
     readonly declarations: ReadonlyMap<ts.SignatureDeclaration | ts.JSDocSignature, readonly FlowCallSite[]>
@@ -298,7 +306,7 @@ const omittedArgumentOf = (call: ts.Node, position: number): ts.Expression => {
 }
 
 const callsOf = (flow: ValueFlowIndex) => {
-  const cached = callLookups.get(flow)
+  const cached = callLookups.get(flow.calls)
   if (cached) return cached
   const sites = new Map<ts.Node, FlowCallSite>()
   const declarations = new Map<ts.SignatureDeclaration | ts.JSDocSignature, FlowCallSite[]>()
@@ -325,7 +333,7 @@ const callsOf = (flow: ValueFlowIndex) => {
     }
   }
   const result = { sites, declarations, callees, writes, writeReceivers }
-  callLookups.set(flow, result)
+  callLookups.set(flow.calls, result)
   return result
 }
 

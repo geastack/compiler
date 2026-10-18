@@ -362,9 +362,18 @@ interface SyntaxFacts {
   readonly referencesByDeclaration: Map<ts.Node, ts.Expression[]>
 }
 
+/**
+ * The most recent record per checker, not one per reachability: reachability's
+ * own constructor questions build a whole-program index (`frontend.ts`) before
+ * the program's reachability exists, and that view is a module-level constant,
+ * so a record keyed on it outlived the index it was made for by the whole
+ * compile -- about 24 MB on a 48K-line app, never read again. Every later
+ * index is built over the one reachability the rounds share, so holding only
+ * the newest record keeps every hit and drops the orphan.
+ */
 const recordedSyntaxFacts = new WeakMap<
   ts.TypeChecker,
-  WeakMap<ProgramReachability, { readonly files: readonly ts.SourceFile[]; readonly facts: SyntaxFacts }>
+  { readonly reachable: ProgramReachability; readonly files: readonly ts.SourceFile[]; readonly facts: SyntaxFacts }
 >()
 
 const recordedSyntaxFactsOf = (
@@ -372,8 +381,13 @@ const recordedSyntaxFactsOf = (
   reachable: ProgramReachability,
   files: readonly ts.SourceFile[]
 ): SyntaxFacts | null => {
-  const known = recordedSyntaxFacts.get(checker)?.get(reachable)
-  return known && known.files.length === files.length && known.files.every((file, index) => file === files[index]) ? known.facts : null
+  const known = recordedSyntaxFacts.get(checker)
+  return known &&
+    known.reachable === reachable &&
+    known.files.length === files.length &&
+    known.files.every((file, index) => file === files[index])
+    ? known.facts
+    : null
 }
 
 const rememberSyntaxFacts = (
@@ -382,9 +396,7 @@ const rememberSyntaxFacts = (
   files: readonly ts.SourceFile[],
   facts: SyntaxFacts
 ): void => {
-  let byReachability = recordedSyntaxFacts.get(checker)
-  if (!byReachability) recordedSyntaxFacts.set(checker, (byReachability = new WeakMap()))
-  byReachability.set(reachable, { files: [...files], facts })
+  recordedSyntaxFacts.set(checker, { reachable, files: [...files], facts })
 }
 
 /**

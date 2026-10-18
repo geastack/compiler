@@ -130,6 +130,18 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
  * - a rest parameter, a destructured parameter, and any argument whose own type
  *   is still `any` -- propagating `any` is what this exists to stop.
  */
+/**
+ * How many `statedTypeAt` calls up the stack are a later round asking its
+ * `upstream` for an inherited answer. Each round's published view memoizes
+ * its answers, and a later round's question used to land in every earlier
+ * round's memo on its way down the chain: on a 48K-line app the three rounds
+ * alive at the end held three equal maps of ~7 MB. The asking round memoizes
+ * the answer itself, so an earlier round keeps only what it was asked
+ * directly. A memo is a cache of a settled answer, so where it is kept changes
+ * no answer.
+ */
+const inheritedStatedLookups = { depth: 0 }
+
 export interface ParameterBindingCensus {
   /** Known executable destinations, including aliases and overrides. Positive evidence, not a proof that no opaque target exists. */
   readonly callTargetsAt?: (call: ts.CallExpression | ts.NewExpression) => readonly ts.SignatureDeclaration[] | null
@@ -3974,7 +3986,13 @@ export const censusParameterBindings = (
     // own doc above names: it is why the object this function returns keeps
     // every earlier round's `ValueFlowIndex` (and `source-value-session.ts`'s
     // ~1 GB solver session for it) reachable for the rest of the compile.
-    const inherited = upstream.statedTypeAt(node)
+    inheritedStatedLookups.depth++
+    let inherited: ts.Type | null
+    try {
+      inherited = upstream.statedTypeAt(node)
+    } finally {
+      inheritedStatedLookups.depth--
+    }
     if (inherited) return inherited
     if (ts.isParameter(node)) return statedBindings.size === 0 ? null : (statedBindings.get(node) ?? null)
     if (!ts.isIdentifier(node)) return null
@@ -4334,7 +4352,7 @@ export const censusParameterBindings = (
       const remembered = statedTypes.get(node)
       if (remembered !== undefined) return remembered
       const answer = computeStatedTypeAt(node)
-      statedTypes.set(node, answer)
+      if (inheritedStatedLookups.depth === 0) statedTypes.set(node, answer)
       return answer
     },
     // A parameter and every UNNARROWED read of it are one storage cell. A

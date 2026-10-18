@@ -175,10 +175,47 @@ export const createCommonJsWrapperIdentity = (
   files: readonly ts.SourceFile[],
   globals: ReadonlyMap<string, CommonJsWrapperDeclaration>,
   hostProvided: ReadonlySet<string> = noHostProvidedNames
-): {
+): CommonJsWrapperIdentity => {
+  // One identity per input, not per caller: the module-record census, the
+  // require census it builds and the frontend's own require census each built
+  // one over the same checker, files and globals, and each memoized a
+  // classification for every identifier it evaluated (~13 MB across the three
+  // on a 48K-line app). Its answers are a function of exactly these inputs.
+  let byGlobals = wrapperIdentities.get(checker)
+  if (!byGlobals) wrapperIdentities.set(checker, (byGlobals = new WeakMap()))
+  let built = byGlobals.get(globals)
+  if (!built) byGlobals.set(globals, (built = []))
+  const known = built.find(
+    (entry) =>
+      entry.hostProvided === hostProvided &&
+      entry.files.length === files.length &&
+      entry.files.every((file, index) => file === files[index])
+  )
+  if (known) return known.identity
+  const identity = buildCommonJsWrapperIdentity(checker, files, globals, hostProvided)
+  built.push({ files: [...files], hostProvided, identity })
+  return identity
+}
+
+export interface CommonJsWrapperIdentity {
   readonly classify: (identifier: ts.Identifier) => CommonJsIdentifierIdentity
   readonly globalOfDeclaration: (declaration: ts.Declaration) => CommonJsGlobal | null
-} => {
+}
+
+const wrapperIdentities = new WeakMap<
+  ts.TypeChecker,
+  WeakMap<
+    ReadonlyMap<string, CommonJsWrapperDeclaration>,
+    { readonly files: readonly ts.SourceFile[]; readonly hostProvided: ReadonlySet<string>; readonly identity: CommonJsWrapperIdentity }[]
+  >
+>()
+
+const buildCommonJsWrapperIdentity = (
+  checker: ts.TypeChecker,
+  files: readonly ts.SourceFile[],
+  globals: ReadonlyMap<string, CommonJsWrapperDeclaration>,
+  hostProvided: ReadonlySet<string>
+): CommonJsWrapperIdentity => {
   const configuredByName = new Map<string, CommonJsWrapperDeclaration>()
   for (const [name, configured] of globals) {
     if (name === configured.declarationName && name === configured.global) configuredByName.set(name, configured)
