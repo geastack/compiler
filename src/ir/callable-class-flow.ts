@@ -31,6 +31,7 @@ import { nativeRecordProductsOf } from '../conversion/native-record-products.js'
 import { nativeFieldViewCarrierNeedsReceipt, nativeFieldViewBodyCitationsOf } from './native-field-view-facts.js'
 import {
   nativeFieldViewDomainsOf,
+  type NativeFieldViewDomains,
   nativeFieldViewOpenWriteHomesOf,
   nativeFieldViewForwardedWriteKey,
   nativeFieldViewPlansByTargetOf,
@@ -67,27 +68,61 @@ import { observesNativeCarrierOnly, operandsOfIrOperation, resultOfIrOperation }
 import type { ProgramConversionRecipe } from './program-conversions.js'
 import { nativeCallablePrimitiveDataWritePreservesOwner } from './native-callable-data-flow.js'
 
+/**
+ * The collections an origin cell starts with. There is one cell per IR value
+ * and binding, and most of their eleven collections never receive an entry:
+ * allocating them eagerly held gigabytes of empty `Set`s and `Map`s on a large
+ * program and ran it out of memory. Every cell shares these until its first
+ * write installs its own (`ownSet`/`ownMap`/`ownList`), and they throw on
+ * mutation, so a write that bypasses the installers fails instead of
+ * corrupting every other cell.
+ */
+const sharedEmpty = (): never => {
+  throw new Error('a shared empty origin-cell collection was written in place')
+}
+const emptySet: Set<never> = Object.assign(new Set<never>(), { add: sharedEmpty, delete: sharedEmpty, clear: sharedEmpty })
+const emptyMap: Map<never, never> = Object.assign(new Map<never, never>(), { set: sharedEmpty, delete: sharedEmpty, clear: sharedEmpty })
+const emptyList: never[] = Object.freeze([]) as unknown as never[]
+const ownSet = <T>(current: Set<T>, install: (own: Set<T>) => void): Set<T> => {
+  if (current !== emptySet) return current
+  const own = new Set<T>()
+  install(own)
+  return own
+}
+const ownMap = <K, V>(current: Map<K, V>, install: (own: Map<K, V>) => void): Map<K, V> => {
+  if (current !== emptyMap) return current
+  const own = new Map<K, V>()
+  install(own)
+  return own
+}
+const ownList = <T>(current: T[], install: (own: T[]) => void): T[] => {
+  if (current !== emptyList) return current
+  const own: T[] = []
+  install(own)
+  return own
+}
+
 interface OriginCell {
   readonly index: number
-  readonly incoming: Set<OriginCell>
+  incoming: Set<OriginCell>
   queued: boolean
-  readonly functions: Set<FunctionId>
-  readonly heaps: Set<NativeHeap>
+  functions: Set<FunctionId>
+  heaps: Set<NativeHeap>
   /** Null transfers every origin; native selection can exclude incompatible heaps. */
-  readonly edges: Map<OriginCell, readonly NativeHeap[] | null>
-  readonly documents: Map<string, Representation>
+  edges: Map<OriginCell, readonly NativeHeap[] | null>
+  documents: Map<string, Representation>
   /** Possible installed array callbacks survive unknown/mixed aliases too. */
-  readonly arrayViews: Set<string>
-  readonly descriptorSnapshots: Set<IrValueId>
+  arrayViews: Set<string>
+  descriptorSnapshots: Set<IrValueId>
   /** Installed readers can retain an allocation while changing its access protocol. */
-  readonly fieldViews: Set<ConversionNodeId>
+  fieldViews: Set<ConversionNodeId>
   documentInstalled: boolean
   documentBlocked: boolean
   unknown: boolean
   /** Null is unrestricted; a canonical checked sum can bound its unknown normal destinations. */
   unknownHeaps: Set<NativeHeap> | null
   escaped: boolean
-  readonly escapeSources: Set<IrOperation | null>
+  escapeSources: Set<IrOperation | null>
   /**
    * How many of each escaped alias target's `escapeSources` this cell has
    * already absorbed. The set only grows, so an unchanged size means nothing
@@ -96,7 +131,7 @@ interface OriginCell {
    */
   escapeAbsorbed?: Map<OriginCell, number>
   /** `escapeSources` in insertion order, so an absorber can resume where it stopped. */
-  readonly escapeSourceList: (IrOperation | null)[]
+  escapeSourceList: (IrOperation | null)[]
   logicalReceiver: boolean
   dynamicReceiver: boolean
   ignoresLogicalReceiver: boolean
@@ -248,12 +283,12 @@ const computeNativeCallableFlow = (
       changed(cell)
     }
     if (cell.functions.has(id)) return
-    cell.functions.add(id)
+    ownSet(cell.functions, (own) => (cell.functions = own)).add(id)
     changed(cell)
   }
   const addHeap = (cell: OriginCell, heap: NativeHeap): void => {
     if (cell.heaps.has(heap)) return
-    cell.heaps.add(heap)
+    ownSet(cell.heaps, (own) => (cell.heaps = own)).add(heap)
     changed(cell)
   }
   const markUnknown = (cell: OriginCell, reason?: string, admitted?: readonly NativeHeap[], installedDocumentSource = false): void => {
@@ -285,8 +320,8 @@ const computeNativeCallableFlow = (
     cell.escaped = true
     for (const source of sources)
       if (!cell.escapeSources.has(source)) {
-        cell.escapeSources.add(source)
-        cell.escapeSourceList.push(source)
+        ownSet(cell.escapeSources, (own) => (cell.escapeSources = own)).add(source)
+        ownList(cell.escapeSourceList, (own) => (cell.escapeSourceList = own)).push(source)
         grew = true
       }
     if (grew) {
@@ -327,8 +362,8 @@ const computeNativeCallableFlow = (
     for (let at = from; at < list.length; at++) {
       const source = list[at]!
       if (!cell.escapeSources.has(source)) {
-        cell.escapeSources.add(source)
-        cell.escapeSourceList.push(source)
+        ownSet(cell.escapeSources, (own) => (cell.escapeSources = own)).add(source)
+        ownList(cell.escapeSourceList, (own) => (cell.escapeSourceList = own)).push(source)
         grew = true
       }
     }
@@ -358,22 +393,22 @@ const computeNativeCallableFlow = (
   const fresh = (): OriginCell => {
     const cell: OriginCell = {
       index: cells.length,
-      incoming: new Set(),
+      incoming: emptySet,
       queued: false,
-      functions: new Set(),
-      heaps: new Set(),
-      edges: new Map(),
-      documents: new Map(),
-      arrayViews: new Set(),
-      descriptorSnapshots: new Set(),
-      fieldViews: new Set(),
+      functions: emptySet,
+      heaps: emptySet,
+      edges: emptyMap,
+      documents: emptyMap,
+      arrayViews: emptySet,
+      descriptorSnapshots: emptySet,
+      fieldViews: emptySet,
       documentInstalled: false,
       documentBlocked: false,
       unknown: false,
-      unknownHeaps: new Set(),
+      unknownHeaps: emptySet,
       escaped: false,
-      escapeSources: new Set(),
-      escapeSourceList: [],
+      escapeSources: emptySet,
+      escapeSourceList: emptyList,
       version: 0,
       logicalReceiver: false,
       dynamicReceiver: false,
@@ -841,8 +876,8 @@ const computeNativeCallableFlow = (
   }
   const link = (from: OriginCell, to: OriginCell): void => {
     if (from.edges.get(to) === null) return
-    from.edges.set(to, null)
-    to.incoming.add(from)
+    ownMap(from.edges, (own) => (from.edges = own)).set(to, null)
+    ownSet(to.incoming, (own) => (to.incoming = own)).add(from)
     changed(from)
   }
   const linkPayload = (from: OriginCell, to: OriginCell, representations: readonly Representation[]): void => {
@@ -852,11 +887,11 @@ const computeNativeCallableFlow = (
     // they never create an origin for an allocation not present in the input.
     if (references.some((reference) => !reference.complete) || from.edges.has(to)) link(from, to)
     else {
-      from.edges.set(
+      ownMap(from.edges, (own) => (from.edges = own)).set(
         to,
         references.flatMap((reference) => reference.heaps)
       )
-      to.incoming.add(from)
+      ownSet(to.incoming, (own) => (to.incoming = own)).add(from)
       changed(from)
     }
   }
@@ -1830,7 +1865,7 @@ const computeNativeCallableFlow = (
         ) {
           const cell = value(operation.result.id)
           if (!cell.fieldViews.has(node.id)) {
-            cell.fieldViews.add(node.id)
+            ownSet(cell.fieldViews, (own) => (cell.fieldViews = own)).add(node.id)
             changed(cell)
           }
         } else if (node && (to.kind === 'optional' || to.kind === 'borrowed-ref')) {
@@ -1855,7 +1890,7 @@ const computeNativeCallableFlow = (
               representationKey(child.target) === representationKey(payload) &&
               !cell.fieldViews.has(child.id)
             ) {
-              cell.fieldViews.add(child.id)
+              ownSet(cell.fieldViews, (own) => (cell.fieldViews = own)).add(child.id)
               changed(cell)
             }
         }
@@ -1871,7 +1906,7 @@ const computeNativeCallableFlow = (
           cell.documentInstalled = true
           cell.documentBlocked = false
           if (!cell.documents.has(node.id)) {
-            cell.documents.set(node.id, document)
+            ownMap(cell.documents, (own) => (cell.documents = own)).set(node.id, document)
             changed(cell)
           }
         }
@@ -1885,7 +1920,7 @@ const computeNativeCallableFlow = (
           if (conversions && nativeArrayRootViewPlansOf(node, conversions.nodeById).length > 0) {
             const cell = value(operation.result.id)
             if (!cell.arrayViews.has(node.id)) {
-              cell.arrayViews.add(node.id)
+              ownSet(cell.arrayViews, (own) => (cell.arrayViews = own)).add(node.id)
               changed(cell)
             }
           }
@@ -2041,7 +2076,7 @@ const computeNativeCallableFlow = (
             representationKey(node.target) === representationKey(operation.result.representation)
           ) {
             const snapshot = value(operation.result.id)
-            snapshot.descriptorSnapshots.add(operation.result.id)
+            ownSet(snapshot.descriptorSnapshots, (own) => (snapshot.descriptorSnapshots = own)).add(operation.result.id)
             changed(snapshot)
             break
           }
@@ -2178,17 +2213,17 @@ const computeNativeCallableFlow = (
         for (const [target, allowed] of cell.edges) {
           for (const id of cell.fieldViews)
             if (!target.fieldViews.has(id)) {
-              target.fieldViews.add(id)
+              ownSet(target.fieldViews, (own) => (target.fieldViews = own)).add(id)
               changed(target)
             }
           for (const id of cell.descriptorSnapshots)
             if (!target.descriptorSnapshots.has(id)) {
-              target.descriptorSnapshots.add(id)
+              ownSet(target.descriptorSnapshots, (own) => (target.descriptorSnapshots = own)).add(id)
               changed(target)
             }
           for (const id of cell.arrayViews)
             if (!target.arrayViews.has(id)) {
-              target.arrayViews.add(id)
+              ownSet(target.arrayViews, (own) => (target.arrayViews = own)).add(id)
               changed(target)
             }
           if (!target.documentInstalled) {
@@ -2198,7 +2233,7 @@ const computeNativeCallableFlow = (
             }
             for (const [id, entry] of cell.documents)
               if (!target.documents.has(id)) {
-                target.documents.set(id, entry)
+                ownMap(target.documents, (own) => (target.documents = own)).set(id, entry)
                 changed(target)
               }
           }
@@ -2490,18 +2525,37 @@ const computeNativeCallableFlow = (
     IrValueId,
     ReadonlyMap<string, readonly { read: Representation; write: Representation | null }[]>
   >()
+  // The fields every heap of a value has in common are a function of the heap
+  // set alone, and most values share theirs with many others: one table per
+  // distinct set, not per value, which was half a million tables on a large
+  // program for a few thousand distinct answers.
+  const heapNumbers = new Map<object, number>()
+  const commonByHeaps = new Map<string, ReadonlyMap<string, readonly Representation[]>>()
+  const accessorsByHeaps = new Map<string, Map<string, { read: Representation; write: Representation | null }[]>>()
   for (const [id, cell] of values) {
     if (cell.unknown || cell.heaps.size === 0 || [...cell.heaps].some((heap) => !heap.valid || heap.proxy)) continue
-    const common = new Map<string, Representation[]>()
-    for (const heap of cell.heaps) {
-      for (const [key, slot] of heap.fields) {
-        const members = common.get(key) ?? []
-        if (!members.some((member) => representationKey(member) === representationKey(slot.representation)))
-          members.push(slot.representation)
-        common.set(key, members)
+    const heapsKey = [...cell.heaps]
+      .map((heap) => {
+        let number = heapNumbers.get(heap)
+        if (number === undefined) heapNumbers.set(heap, (number = heapNumbers.size))
+        return number
+      })
+      .sort((left, right) => left - right)
+      .join(',')
+    let common = commonByHeaps.get(heapsKey)
+    if (common === undefined) {
+      const fields = new Map<string, Representation[]>()
+      for (const heap of cell.heaps) {
+        for (const [key, slot] of heap.fields) {
+          const members = fields.get(key) ?? []
+          if (!members.some((member) => representationKey(member) === representationKey(slot.representation)))
+            members.push(slot.representation)
+          fields.set(key, members)
+        }
       }
+      for (const key of [...fields.keys()]) if ([...cell.heaps].some((heap) => !heap.fields.has(key))) fields.delete(key)
+      commonByHeaps.set(heapsKey, (common = fields))
     }
-    for (const key of [...common.keys()]) if ([...cell.heaps].some((heap) => !heap.fields.has(key))) common.delete(key)
     nativeFieldStorageValues.set(id, common)
     const carrier = valueCarriers.get(id)
     const methods = carrier && 'shapeId' in carrier ? viewMethodFields.get(carrier.shapeId) : undefined
@@ -2512,31 +2566,35 @@ const computeNativeCallableFlow = (
           admitted.delete(key)
       nativeFieldMethodValues.set(id, admitted)
     }
-    const accessors = new Map<string, { read: Representation; write: Representation | null }[]>()
-    for (const heap of cell.heaps) {
-      if (heap.declaration === null) continue
-      const seen = new Set<DeclarationId>()
-      for (
-        let current: DeclarationId | null = heap.declaration;
-        current !== null && !seen.has(current);
-        current = classes.get(current)?.base ?? null
-      ) {
-        seen.add(current)
-        for (const accessor of classes.get(current)?.accessors ?? []) {
-          const selected = classMemberOf(classes, heap.declaration, accessor.key)
-          if (selected?.kind !== 'accessor' || selected.owner !== current) continue
-          const getter = accessor.getter === null ? null : bodyById.get(accessor.getter)?.abi
-          const setter = accessor.setter === null ? null : bodyById.get(accessor.setter)?.abi
-          if (!getter) continue
-          const entries = accessors.get(accessor.key) ?? []
-          entries.push({ read: getter.result, write: setter?.parameters[0]?.value ?? null })
-          accessors.set(accessor.key, entries)
+    let accessors = accessorsByHeaps.get(heapsKey)
+    if (accessors === undefined) {
+      const built = new Map<string, { read: Representation; write: Representation | null }[]>()
+      for (const heap of cell.heaps) {
+        if (heap.declaration === null) continue
+        const seen = new Set<DeclarationId>()
+        for (
+          let current: DeclarationId | null = heap.declaration;
+          current !== null && !seen.has(current);
+          current = classes.get(current)?.base ?? null
+        ) {
+          seen.add(current)
+          for (const accessor of classes.get(current)?.accessors ?? []) {
+            const selected = classMemberOf(classes, heap.declaration, accessor.key)
+            if (selected?.kind !== 'accessor' || selected.owner !== current) continue
+            const getter = accessor.getter === null ? null : bodyById.get(accessor.getter)?.abi
+            const setter = accessor.setter === null ? null : bodyById.get(accessor.setter)?.abi
+            if (!getter) continue
+            const entries = built.get(accessor.key) ?? []
+            entries.push({ read: getter.result, write: setter?.parameters[0]?.value ?? null })
+            built.set(accessor.key, entries)
+          }
         }
       }
+      for (const key of [...built.keys()])
+        if ([...cell.heaps].some((heap) => heap.declaration === null || classMemberOf(classes, heap.declaration, key)?.kind !== 'accessor'))
+          built.delete(key)
+      accessorsByHeaps.set(heapsKey, (accessors = built))
     }
-    for (const key of [...accessors.keys()])
-      if ([...cell.heaps].some((heap) => heap.declaration === null || classMemberOf(classes, heap.declaration, key)?.kind !== 'accessor'))
-        accessors.delete(key)
     nativeAccessorStorageValues.set(id, accessors)
   }
   // What a spread's copy left natively in an allocation's expando, by the
@@ -2612,22 +2670,9 @@ const computeNativeCallableFlow = (
       for (const home of open.homes)
         for (const key of extending ? keys : forwardedKeys) storeExpando(home, key, operation.value.representation)
     }
-  const expandoStoredOf = (shapeId: string, key: string | null): readonly Representation[] => {
-    const byKey = expandoStored.get(shapeId)
-    if (byKey === undefined) return []
-    // `null`: whatever any key may hold -- an open runtime key reads them all.
-    if (key === null) {
-      const all: Representation[] = []
-      for (const values of byKey.values())
-        for (const value of values) if (!all.some((one) => representationKey(one) === representationKey(value))) all.push(value)
-      return all
-    }
-    const keyed = byKey.get(key) ?? []
-    const any = byKey.get(null) ?? []
-    return [...keyed, ...any.filter((value) => !keyed.some((one) => representationKey(one) === representationKey(value)))]
-  }
+  const expandoStoredOf = expandoStoredReaderOf(expandoStored)
   const nativeFieldViewStorageValues = new Map<IrValueId, ReadonlyMap<string, readonly NativeFieldStorageDomain[]>>()
-  const descriptorDomainsOf = nativeFieldViewDomainsOf(viewNodes, deriver, (id) => bodyById.get(id)?.abi ?? null, classes, expandoStoredOf)
+  const descriptorDomainsOf = descriptorDomainsOver(viewNodes, deriver, bodyById, classes, expandoStored)
   for (const [id, carrier] of valueCarriers) {
     const fields = descriptorDomainsOf(carrier)
     if (fields !== null) nativeFieldViewStorageValues.set(id, fields)
@@ -2802,10 +2847,7 @@ const computeNativeCallableFlow = (
     nativeFieldViewStorageValues,
     nativeFieldViewOpenWriteValues,
     nativeFieldViewForwardedWrites,
-    nativeFieldViewAbsentRoutesOf: (receiver: IrValueId, key: string | null) => {
-      const carrier = valueCarriers.get(receiver)
-      return carrier === undefined ? null : descriptorDomainsOf.absentRoutesOf(carrier, key)
-    },
+    nativeFieldViewAbsentRoutesOf: absentRoutesReaderOf(valueCarriers, descriptorDomainsOf),
     nativeFieldStorageValues,
     nativeFieldMethodValues,
     nativeAccessorStorageValues,
@@ -2933,19 +2975,92 @@ const flowOverCopy = (flow: NativeCallableFlow, pairs: ReadonlyMap<object, objec
   if (fresh.reached) return null
   const answer = { ...moved, callables: callees }
   if (absentRoutesOf === undefined) return answer
-  return {
-    ...answer,
-    nativeFieldViewAbsentRoutesOf: (receiver, key) =>
-      repointed(absentRoutesOf(receiver, key), pairs, new Map(), { objects: new Set(), reached: false }) as ReturnType<
-        typeof absentRoutesOf
-      >
-  }
+  return { ...answer, nativeFieldViewAbsentRoutesOf: repointedAbsentRoutesOf(absentRoutesOf, pairs) }
 }
+
+type AbsentRoutesReader = NonNullable<NativeCallableFlow['nativeFieldViewAbsentRoutesOf']>
+/** The solved reader and the one pairing a re-pointed reader applies to its answers. */
+const repointedReaders = new WeakMap<AbsentRoutesReader, { readonly base: AbsentRoutesReader; readonly pairs: ReadonlyMap<object, object> }>()
+
+/**
+ * Outside `flowOverCopy` for the reason `expandoStoredReaderOf` states: an
+ * arrow made there shared its context with `seen` and `fresh`, every object of
+ * both programs.
+ *
+ * A reader re-pointed again is not wrapped again: the two pairings are
+ * composed into one over the solved reader's own program. Wrapping kept every
+ * intermediate copy's pairing -- and through it every intermediate program --
+ * alive for as long as the newest flow was remembered. Composing is exact:
+ * re-pointing through the first pairing and then the second is re-pointing
+ * each first-pairing partner through the second, and leaving every object the
+ * first did not pair to the second.
+ */
+const repointedAbsentRoutesOf = (absentRoutesOf: AbsentRoutesReader, pairs: ReadonlyMap<object, object>): AbsentRoutesReader => {
+  const earlier = repointedReaders.get(absentRoutesOf)
+  const base = earlier?.base ?? absentRoutesOf
+  let composed: ReadonlyMap<object, object> = pairs
+  if (earlier !== undefined) {
+    const seen = new Map<object, unknown>()
+    const unreached = { objects: new Set<object>(), reached: false }
+    const both = new Map<object, object>()
+    for (const [old, partner] of earlier.pairs) both.set(old, repointed(partner, pairs, seen, unreached) as object)
+    for (const [old, partner] of pairs) if (!both.has(old)) both.set(old, partner)
+    composed = both
+  }
+  const reader = absentRoutesReaderOver(base, composed)
+  repointedReaders.set(reader, { base, pairs: composed })
+  return reader
+}
+
+const absentRoutesReaderOver =
+  (base: AbsentRoutesReader, pairs: ReadonlyMap<object, object>): AbsentRoutesReader =>
+  (receiver, key) =>
+    repointed(base(receiver, key), pairs, new Map(), { objects: new Set(), reached: false }) as ReturnType<AbsentRoutesReader>
+
+/**
+ * The readers a flow hands back are built here, outside the solve, because V8
+ * gives every closure one function creates a single shared context: an arrow
+ * made inside `computeNativeCallableFlow` kept its whole scope -- every origin
+ * cell, value and heap -- alive for as long as the remembered flow was, which
+ * held gigabytes on a large program. Each captures only what it reads.
+ */
+const expandoStoredReaderOf =
+  (expandoStored: ReadonlyMap<string, ReadonlyMap<string | null, readonly Representation[]>>) =>
+  (shapeId: string, key: string | null): readonly Representation[] => {
+    const byKey = expandoStored.get(shapeId)
+    if (byKey === undefined) return []
+    // `null`: whatever any key may hold -- an open runtime key reads them all.
+    if (key === null) {
+      const all: Representation[] = []
+      for (const values of byKey.values())
+        for (const value of values) if (!all.some((one) => representationKey(one) === representationKey(value))) all.push(value)
+      return all
+    }
+    const keyed = byKey.get(key) ?? []
+    const any = byKey.get(null) ?? []
+    return [...keyed, ...any.filter((value) => !keyed.some((one) => representationKey(one) === representationKey(value)))]
+  }
+
+const descriptorDomainsOver = (
+  viewNodes: Iterable<ConversionNode>,
+  deriver: Pick<RepresentationDeriver, 'layoutOf'> | null | undefined,
+  bodyById: ReadonlyMap<FunctionId, IrBody | null>,
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  expandoStored: ReadonlyMap<string, ReadonlyMap<string | null, readonly Representation[]>>
+): NativeFieldViewDomains =>
+  nativeFieldViewDomainsOf(viewNodes, deriver, (id) => bodyById.get(id)?.abi ?? null, classes, expandoStoredReaderOf(expandoStored))
+
+const absentRoutesReaderOf =
+  (valueCarriers: ReadonlyMap<IrValueId, Representation>, domains: NativeFieldViewDomains) =>
+  (receiver: IrValueId, key: string | null): readonly NativeFieldStorageDomain[] | null => {
+    const carrier = valueCarriers.get(receiver)
+    return carrier === undefined ? null : domains.absentRoutesOf(carrier, key)
+  }
 
 /**
  * The flow's answer is a function of its inputs' data -- the conversion census
  * it consults is append-only and `nodeFor` is idempotent per pair -- so a
- * recent answer per class map is reused when every input is the same. The
+ * recent answer for the class map is reused when every input is the same. The
  * same objects reuse it directly. The publish passes between two solves
  * rebuild every body and operation even when they change nothing, so an input
  * that is the same DATA reuses the answer re-pointed at the new objects, since
@@ -2955,14 +3070,26 @@ const flowOverCopy = (flow: NativeCallableFlow, pairs: ReadonlyMap<object, objec
  * differ in what the flow reads (`logicalReceiver`, `closedCallable`,
  * `presence`, recipe lists). A traced run reports reads as it solves and is
  * always solved.
+ *
+ * Only the class map asked last keeps answers. Each answer holds its flow and
+ * the body generation it was solved over, a few hundred megabytes on a large
+ * program, and the pipeline moves to a new class map without returning to
+ * the old one: kept per map, a dead map's answers stayed for the rest of the
+ * compile. Held weakly, so nothing outlives the class map it answers.
  */
 const rememberedFlows = new WeakMap<ReadonlyMap<DeclarationId, ClassLayout>, RememberedCallableFlow[]>()
+let rememberedClasses: WeakRef<ReadonlyMap<DeclarationId, ClassLayout>> | null = null
 /** Callers alternate between asking with and without program conversions, so one remembered answer per class map was always the other kind. */
-const REMEMBERED_FLOWS = 3
+const REMEMBERED_FLOWS = 2
 
 export const nativeCallableFlowOf = (...args: Parameters<typeof computeNativeCallableFlow>): NativeCallableFlow => {
   const [bodies, placements, classes, conversions, trace, deriver, programConversions, constructionTopology] = args
   if (trace !== undefined) return computeNativeCallableFlow(...args)
+  const previous = rememberedClasses?.deref()
+  if (previous !== classes) {
+    if (previous !== undefined) rememberedFlows.delete(previous)
+    rememberedClasses = new WeakRef(classes)
+  }
   let held = rememberedFlows.get(classes)
   if (held === undefined) rememberedFlows.set(classes, (held = []))
   const entries = held

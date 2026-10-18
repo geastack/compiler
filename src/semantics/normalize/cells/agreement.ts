@@ -1,6 +1,6 @@
 import type { StructuralTypeId } from '../../../identity/ids.js'
 import type { StructuralMapper } from '../structural.js'
-import type { CellFactsTable } from './model.js'
+import type { CellFactsTable, CellOwnerClaim, CellRefusal } from './model.js'
 
 /**
  * The instrument phase 4.1 asks for: per program, how many declarations the
@@ -49,6 +49,32 @@ export interface CellFactsPublication {
 export const publishCellFacts = (table: CellFactsTable, types: StructuralMapper, measure: boolean): CellFactsPublication => ({
   table,
   agreement: measure ? cellFactsAgreementOf(table, types) : null
+})
+
+/**
+ * What the frontend publishes of the table once it is done: the collisions,
+ * their refusals and the agreement, without the facts themselves. Every fact
+ * holds its declaration node and checker types, and one checker type is
+ * enough to keep the whole program and its checker alive for the rest of a
+ * compile that never reads them again -- over half a gigabyte on a large
+ * program.
+ */
+export interface CellFactsSummary {
+  readonly table: {
+    readonly declarations: number
+    readonly twoOwnerClaims: readonly CellOwnerClaim[]
+    readonly refusals: readonly CellRefusal[]
+  }
+  readonly agreement: CellFactsAgreement | null
+}
+
+export const cellFactsSummaryOf = (publication: CellFactsPublication): CellFactsSummary => ({
+  table: {
+    declarations: publication.table.all.length,
+    twoOwnerClaims: publication.table.twoOwnerClaims,
+    refusals: publication.table.refusals
+  },
+  agreement: publication.agreement
 })
 
 export const cellFactsAgreementOf = (table: CellFactsTable, types: StructuralMapper): CellFactsAgreement => {

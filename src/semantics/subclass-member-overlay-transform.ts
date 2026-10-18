@@ -1,4 +1,5 @@
 import ts from 'typescript'
+import { createHash } from 'crypto'
 import { existsSync, readdirSync, type Dirent } from 'fs'
 import { dirname, join, relative, resolve, sep } from 'path'
 
@@ -902,7 +903,7 @@ const scanPackageFile = (filePath: string, text: string): PackageFileScan => {
 }
 
 /**
- * Per-file scans, kept for the life of the process and validated by TEXT.
+ * Per-file scans, kept for the life of the process and validated by the text's digest.
  *
  * The package index is rebuilt per compile (its own caches are per reader, and
  * two readers can see two texts for one path), yet a package's files do not
@@ -914,13 +915,21 @@ const scanPackageFile = (filePath: string, text: string): PackageFileScan => {
  * every file, which is the cheap part. Process-wide state on purpose: the
  * scan is a pure function of (path, text), so nothing here can differ between
  * compiles.
+ *
+ * Neither the text nor anything sliced out of it is kept. Holding the text to
+ * compare against pinned every package file's contents for the life of the
+ * process (a large app's tree held 0.1 GB of one generated file's copies),
+ * and a scan's names and type texts are `getText()` slices that pin the same
+ * text through their parent. The entry keeps a digest, and the scan is
+ * structured-cloned, which copies every string out of its parent.
  */
-const fileScans = new Map<string, { readonly text: string; readonly scan: PackageFileScan }>()
+const fileScans = new Map<string, { readonly digest: string; readonly scan: PackageFileScan }>()
 const scanOf = (filePath: string, text: string): PackageFileScan => {
+  const digest = createHash('sha1').update(text).digest('base64')
   const held = fileScans.get(filePath)
-  if (held !== undefined && held.text === text) return held.scan
-  const scan = scanPackageFile(filePath, text)
-  fileScans.set(filePath, { text, scan })
+  if (held !== undefined && held.digest === digest) return held.scan
+  const scan = structuredClone(scanPackageFile(filePath, text))
+  fileScans.set(filePath, { digest, scan })
   return scan
 }
 

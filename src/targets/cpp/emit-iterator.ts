@@ -11,6 +11,7 @@ import type {
 } from '../../ir/model.js'
 import { representationKey, type CallableAbi, type RecordField, type Representation, type Ownership } from '../../representation/model.js'
 import { nativeEnumerationPlanOf, type NativeEnumerationPlan } from '../../ir/native-enumeration.js'
+import { tuplePositionArmsOf } from '../../ir/certify/carrier-keys.js'
 import type { LazySplit } from '../../ir/lazy-splits.js'
 import { createCppEmitBlockedError, defineValue, operandText, paddedArguments, suspendsInPlace, type EmitContext } from './emit-context.js'
 import { receiverArgumentText } from './emit-callable.js'
@@ -177,12 +178,13 @@ const emitStaticEnumerateIterator = (
  * picking the wrong one would compile cleanly and yield `"0", "1", "2"` where
  * the program asked for its elements.
  *
- * Every field must be positional, required, and carried identically -- one
- * cursor has one element type. `preflight/runtime-helper-key.ts`'s
- * `isUniformTupleRecord` already keeps a heterogeneous tuple off the claimed
- * `record(tuple-values)` key, so the checks here are fail-closed re-checks of
- * that guarantee rather than a first opinion, the same posture every other
- * source in this file takes.
+ * Every field must be positional and required, and one cursor has one
+ * element type: either every position is carried identically, or the element
+ * is a sum with exactly one arm per position carrier (`tuplePositionArmsOf`),
+ * and each step is tagged with its position's arm. Certification keys the
+ * `record(tuple-values)` claim on the same two tests, so the checks here are
+ * fail-closed re-checks of that guarantee rather than a first opinion, the
+ * same posture every other source in this file takes.
  */
 const emitStaticTupleIterator = (
   ctx: EmitContext,
@@ -196,7 +198,10 @@ const emitStaticTupleIterator = (
   const positional = target.fields.every((field, position) => field.key === String(position) && field.required)
   if (!positional) return false
   const uniform = target.fields.every((field) => cppTypeOf(field.value) === elementType)
-  if (!uniform) {
+  // A tuple whose positions differ steps through the element sum instead, each
+  // position tagged with the one arm `tuplePositionArmsOf` proved carries it.
+  const arms = uniform ? null : tuplePositionArmsOf(target, element)
+  if (!uniform && arms === null) {
     throw createCppEmitBlockedError(
       'runtime-helper:protocol:iterator:get-iterator:record(tuple-values)',
       `iterates a tuple whose positions do not share one carrier, so the single "${elementType}" element type its cursor would ` +
@@ -207,7 +212,11 @@ const emitStaticTupleIterator = (
   const receiver = operandText(ctx, operation.receiver)
   const name = defineValue(ctx, operation.result)
   const cases = target.fields
-    .map((field, position) => `case ${position}: gea_out = gea_receiver${accessor}${cppRecordFieldName(field.key)}; return true;`)
+    .map((field, position) => {
+      const slot = `gea_receiver${accessor}${cppRecordFieldName(field.key)}`
+      const arm = arms?.[position]
+      return `case ${position}: gea_out = ${arm === undefined ? slot : `${elementType}::ofArm<${arm}>(${slot})`}; return true;`
+    })
     .join(' ')
   lines.push(
     `${name} = ${cppTypeOf(operation.result.representation)}(std::function<bool(std::size_t, ${elementType}&)>(` +
@@ -1905,11 +1914,12 @@ export const dynamicIteratorHelperClaims: readonly string[] = [
  * method is called, because the position count is a compile-time fact and
  * `emitStaticTupleIterator` above unrolls it.
  *
- * `record(tuple-values)` is `preflight/runtime-helper-key.ts`'s refinement of
- * a positional "record" receiver whose positions all share one carrier -- the
- * sibling of the deliberately unclaimed `record(no-iterator-method)` a
- * heterogeneous tuple keeps, which refuses at preflight rather than reaching
- * an emitter with one `gea::Iterator<E>` to build and two different `E`s.
+ * `record(tuple-values)` is the refinement of a positional "record" receiver
+ * whose positions all share one carrier, or whose element sum carries each
+ * position in an arm of its own -- the sibling of the deliberately unclaimed
+ * `record(no-iterator-method)` any other heterogeneous tuple keeps, which
+ * refuses at certification rather than reaching an emitter with one
+ * `gea::Iterator<E>` to build and two different `E`s.
  *
  * There is no `get-method` row: the producer takes this source down the native
  * fast path (`producers/shared.ts`'s `hasNativeIterationCursor`), which mints

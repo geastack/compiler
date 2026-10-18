@@ -50,11 +50,6 @@ import { sourceCommonJsExportUsesOf, sourceCommonJsExportValueOf } from './sourc
 
 type Access = ts.PropertyAccessExpression | ts.ElementAccessExpression
 type Value = ts.Expression | ts.SignatureDeclaration
-/** A site that can call a body; `call` is null for a `new F(...)` that enters F's frame unconditionally. */
-interface CallerCandidate {
-  readonly site: FlowCallSite
-  readonly call: ts.CallExpression | null
-}
 type ObjectRoot = ts.CallExpression | ts.NewExpression | ts.ObjectLiteralExpression | ts.ArrayLiteralExpression | SourceCallableObject
 type Query =
   | { readonly kind: 'value'; readonly node: ts.Expression }
@@ -1475,17 +1470,19 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     if ((stated.flags & ts.TypeFlags.Object) === 0) return false
     return checker.isTypeAssignableTo(instance, stated)
   }
-  const candidateCallersOf = (body: ts.SignatureDeclaration): readonly FlowCallSite[] => {
+  /**
+   * The sites that may call `body`, in site order, as the whole-program lists
+   * they come from: every call for a body no name reaches, else the calls no
+   * name spells followed by those spelling one of its names. Kept as parts so
+   * a whole-program part is indexed once and shared, not copied per body.
+   */
+  const candidateCallerPartsOf = (body: ts.SignatureDeclaration): readonly (readonly FlowCallSite[])[] => {
     const index = buildCalleeIndex()
     const names = namesOf(body)
-    if (names === null) return flow.calls
-    // `unspelledCallees` is a whole-program list and this runs once per
-    // TRANSFER, not once per program -- `[...unspelledCallees]` copied it on
-    // every call just to push a handful of named matches on top. `both`
-    // hands it back by reference when there is nothing to add.
+    if (names === null) return [flow.calls]
     const named: FlowCallSite[] = []
     for (const name of names) for (const site of index.get(name) ?? []) named.push(site)
-    return both(unspelledCallees, named)
+    return [unspelledCallees, named].filter((part) => part.length > 0)
   }
   /**
    * The calls that actually target this body -- the same question
@@ -1522,58 +1519,65 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   let valueIterationWrites: readonly (typeof flow.allWrites)[number][] | null = null
   /**
    * The part of `case 'callers'` that no fact can move: which candidate sites
-   * are syntax-and-checker matches for `owner`. The transfer re-ran it on
-   * every re-evaluation, asking the checker for each member receiver's type and
-   * its assignability to the owner's class each time; on a large program that
-   * was the session's heaviest transfer. Kept in site order, so the facts the
-   * transfer adds keep their order.
+   * are syntax-and-checker matches for `owner`. `new Factory( state )` on a
+   * plain function enters the function's own argument frame exactly as a call
+   * would; the construction domain names no class for it, so it is a caller
+   * unconditionally. A member call is a candidate only where its receiver's
+   * stated type admits the owner's class.
    */
-  const callerCandidates = new Map<ts.SignatureDeclaration, readonly CallerCandidate[]>()
-  const callerCandidatesOf = (owner: ts.SignatureDeclaration): readonly CallerCandidate[] => {
-    const known = callerCandidates.get(owner)
-    if (known !== undefined) return known
-    const ownerType = ownerInstanceTypeOf(owner)
-    const answer: CallerCandidate[] = []
-    for (const site of candidateCallersOf(owner)) {
-      // `new Factory( state )` on a plain function enters the
-      // function's own argument frame exactly as a call would; the
-      // construction domain names no class for it, so it is a caller.
-      if (ts.isNewExpression(site.call)) {
-        if (ts.isFunctionDeclaration(owner) && constructorFunctionCalleeOf(site.call) === owner) answer.push({ site, call: null })
-        continue
-      }
-      if (!ts.isCallExpression(site.call)) continue
-      if (ownerType !== null && !site.explicitThis && site.operands.dispatch.kind === 'member' && site.operands.receiver !== null) {
-        if (!statedTypeAdmits(checker.getTypeAtLocation(site.operands.receiver), ownerType)) continue
-      }
-      answer.push({ site, call: site.call })
-    }
-    callerCandidates.set(owner, answer)
-    return answer
+  const unconditionalCaller = (owner: ts.SignatureDeclaration, site: FlowCallSite): boolean =>
+    ts.isNewExpression(site.call) && ts.isFunctionDeclaration(owner) && constructorFunctionCalleeOf(site.call) === owner
+  const conditionalCaller = (ownerType: ts.Type | null, site: FlowCallSite): boolean => {
+    if (!ts.isCallExpression(site.call)) return false
+    if (ownerType === null || site.explicitThis || site.operands.dispatch.kind !== 'member' || site.operands.receiver === null) return true
+    return statedTypeAdmits(checker.getTypeAtLocation(site.operands.receiver), ownerType)
   }
-  /** `callerCandidatesOf` indexed for `case 'callers'`: each call's position,
-   * and the positions that are callers unconditionally (`new F( ... )`). */
-  interface CallerCandidateIndex {
-    readonly list: readonly CallerCandidate[]
+  /**
+   * A list of candidate sites indexed once: each call's first position. A body
+   * handed to a host callee is a candidate of every call in the program, and
+   * the unspelled part of every named body's candidates is another
+   * whole-program list. Filtering those per owner into their own lists held one
+   * entry per (owner, call) pair -- 30 million on a large app, most of the
+   * frontend's peak -- so owners share this index and apply their filter only
+   * to the positions `holdersOf` actually names.
+   */
+  interface CallerSites {
+    readonly sites: readonly FlowCallSite[]
     readonly positions: ReadonlyMap<ts.Node, number>
-    readonly unconditional: readonly number[]
-    /** Every candidate's `targets` state is seeded, so `holdersOf` sees it. */
+    /** The owner-independent candidates' `targets` states are seeded. */
     seeded: boolean
   }
-  const callerCandidateIndexes = new Map<ts.SignatureDeclaration, CallerCandidateIndex>()
-  const callerCandidateIndexOf = (owner: ts.SignatureDeclaration): CallerCandidateIndex => {
-    const known = callerCandidateIndexes.get(owner)
+  const callerSites = new WeakMap<readonly FlowCallSite[], CallerSites>()
+  const indexedCallerSitesOf = (sites: readonly FlowCallSite[]): CallerSites => {
+    const known = callerSites.get(sites)
     if (known !== undefined) return known
-    const list = callerCandidatesOf(owner)
     const positions = new Map<ts.Node, number>()
-    const unconditional: number[] = []
-    list.forEach((candidate, position) => {
-      if (candidate.call === null) unconditional.push(position)
-      else if (!positions.has(candidate.call)) positions.set(candidate.call, position)
+    sites.forEach((site, position) => {
+      if (ts.isCallExpression(site.call) && !positions.has(site.call)) positions.set(site.call, position)
     })
-    const index: CallerCandidateIndex = { list, positions, unconditional, seeded: false }
-    callerCandidateIndexes.set(owner, index)
-    return index
+    const built: CallerSites = { sites, positions, seeded: false }
+    callerSites.set(sites, built)
+    return built
+  }
+  /** One run of an owner's candidate sites, in site order. */
+  interface CallerSegment {
+    readonly sites: CallerSites
+    readonly ownerType: ts.Type | null
+    /** Positions that are callers unconditionally (`new F( ... )`); null until seeded. */
+    unconditional: readonly number[] | null
+  }
+  const callerSegments = new Map<ts.SignatureDeclaration, readonly CallerSegment[]>()
+  const callerSegmentsOf = (owner: ts.SignatureDeclaration): readonly CallerSegment[] => {
+    const known = callerSegments.get(owner)
+    if (known !== undefined) return known
+    const ownerType = ownerInstanceTypeOf(owner)
+    const segments = candidateCallerPartsOf(owner).map((sites): CallerSegment => ({
+      sites: indexedCallerSitesOf(sites),
+      ownerType,
+      unconditional: null
+    }))
+    callerSegments.set(owner, segments)
+    return segments
   }
   let constructionsByOwner: Map<ts.Node, ts.NewExpression[]> | null = null
   /**
@@ -3775,21 +3779,37 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           // candidate) pair -- for a body reached by name or handed to a host
           // callee, every same-named or unspelled call in the program -- and
           // that was the second-largest share of a large program's edges.
-          const candidates = callerCandidateIndexOf(owner)
-          if (!candidates.seeded) {
-            candidates.seeded = true
-            for (const candidate of candidates.list) if (candidate.call !== null) seed(targets(candidate.call))
+          const segments = callerSegmentsOf(owner)
+          for (const segment of segments) {
+            if (segment.unconditional !== null) continue
+            const { sites } = segment
+            const unconditional: number[] = []
+            // Without a receiver type or a `new F()` frame the candidates are
+            // the same for every owner, and so is seeding them.
+            const independent = segment.ownerType === null && !ts.isFunctionDeclaration(owner)
+            if (!independent || !sites.seeded) {
+              sites.sites.forEach((site, position) => {
+                if (unconditionalCaller(owner, site)) unconditional.push(position)
+                else if (conditionalCaller(segment.ownerType, site)) seed(targets(site.call as ts.CallExpression))
+              })
+              if (independent) sites.seeded = true
+            }
+            segment.unconditional = unconditional
           }
-          const matched: number[] = []
-          for (const holder of holdersOf(owner)) {
-            if (holder.kind !== 'targets') continue
-            const position = candidates.positions.get(holder.node)
-            if (position !== undefined) matched.push(position)
+          const holders = [...holdersOf(owner)]
+          for (const segment of segments) {
+            const { sites } = segment
+            const matched: number[] = []
+            for (const holder of holders) {
+              if (holder.kind !== 'targets') continue
+              const position = sites.positions.get(holder.node)
+              if (position !== undefined && conditionalCaller(segment.ownerType, sites.sites[position]!)) matched.push(position)
+            }
+            for (const position of segment.unconditional ?? []) matched.push(position)
+            // Candidate order, the order the scan this replaces added them in.
+            matched.sort((a, b) => a - b)
+            for (const position of matched) facts.add(sites.sites[position]!.call)
           }
-          for (const position of candidates.unconditional) matched.push(position)
-          // Candidate order, the order the scan this replaces added them in.
-          matched.sort((a, b) => a - b)
-          for (const position of matched) facts.add(candidates.list[position]!.site.call)
           break
         }
         case 'closure': {

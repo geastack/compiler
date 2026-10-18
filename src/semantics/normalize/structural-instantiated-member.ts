@@ -143,6 +143,26 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     const reference = type as ts.TypeReference
     if (reference.target !== undefined) {
       for (const argument of checker.getTypeArguments(reference)) if (isOpen(argument, depth + 1, seen, owner)) return true
+      if (closedReference(reference, owner)) return false
+      if (onlyEnclosingMembersCanBeOpen(reference)) {
+        // Those members can name a hole only through a generic function
+        // between the declaration and the copy; with none, the answer needs
+        // no member at all, and reading even one resolves them all.
+        if (!genericFunctionBetween(owner, reference.target.getSymbol()?.declarations ?? [])) return false
+        const enclosing = (declaration: ts.Declaration | undefined): boolean => declaration !== undefined && encloses(declaration, owner)
+        for (const property of type.getProperties()) {
+          const at = property.valueDeclaration ?? property.declarations?.[0]
+          if (enclosing(at) && isOpen(checker.getTypeOfSymbolAtLocation(property, at!), depth + 1, seen, owner)) return true
+        }
+        return false
+      }
+    } else if (type.isClassOrInterface()) {
+      // A class or interface that is not a reference has no parameters of its
+      // own and none from outside (the checker makes one nested in a generic
+      // function a reference over those), so the same rule holds.
+      const declarations = type.getSymbol()?.declarations ?? []
+      if (declarations.length > 0 && !declarations.some((declaration) => encloses(declaration, owner))) return false
+      if (declarations.length > 0 && !genericFunctionBetween(owner, declarations)) return false
     }
     for (const property of type.getProperties()) {
       const at = property.valueDeclaration ?? property.declarations?.[0]
@@ -156,6 +176,64 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
         if (at && isOpen(checker.getTypeOfSymbolAtLocation(parameter, at), depth + 1, seen, owner)) return true
       }
     }
+    return false
+  }
+
+  /**
+   * Whether a class, interface or tuple reference whose arguments are all
+   * closed is closed itself, without reading its members.
+   *
+   * Its members can mention only the parameters its arguments fill -- outer
+   * parameters of a declaration nested in a generic function among them --
+   * and parameters of its own methods. A method's parameter is a hole of this
+   * copy only when the copy sits inside that method, which needs the
+   * reference's own declaration to enclose the copy. Anywhere else the walk
+   * below could find nothing, yet reading the members of `Array<Row>`,
+   * `Promise<Session>` and every other closed instantiation the members
+   * mention made the checker instantiate each of them, six levels down, for
+   * an answer the arguments already gave.
+   */
+  const closedReference = (reference: ts.TypeReference, owner: ts.Declaration): boolean => {
+    if ((reference.objectFlags & ts.ObjectFlags.Reference) === 0) return false
+    const declarations = reference.target.getSymbol()?.declarations
+    if (declarations === undefined) return true
+    for (let ancestor: ts.Node | undefined = owner; ancestor !== undefined; ancestor = ancestor.parent)
+      if (declarations.includes(ancestor as ts.Declaration)) return false
+    return true
+  }
+
+  /**
+   * Whether, of a reference whose declaration encloses the copy (one
+   * `closedReference` could not settle), only the members enclosing the copy
+   * can name a hole. Its arguments are already walked, so what is left is a
+   * parameter of a method the copy sits in -- in scope in that method alone --
+   * or of a function enclosing the declaration itself. With no such function,
+   * every other member is closed, and reading them all made a method's copy
+   * instantiate its whole class, member by member, six levels down: 6.9
+   * million member reads on a large app, most of the checker's growth.
+   */
+  const onlyEnclosingMembersCanBeOpen = (reference: ts.TypeReference): boolean => {
+    // An instantiated mapped or anonymous type also has a `target`, but its
+    // holes live in its mapper, not in arguments the walk above has read.
+    if ((reference.objectFlags & ts.ObjectFlags.Reference) === 0) return false
+    const declarations = reference.target.getSymbol()?.declarations ?? []
+    return (
+      declarations.length > 0 &&
+      declarations.every((declaration) => {
+        for (let ancestor = declaration.parent; ancestor !== undefined; ancestor = ancestor.parent)
+          if (ts.isFunctionLike(ancestor)) return false
+        return true
+      })
+    )
+  }
+  const genericFunctionBetween = (owner: ts.Node, declarations: readonly ts.Node[]): boolean => {
+    for (let ancestor: ts.Node | undefined = owner; ancestor !== undefined && !declarations.includes(ancestor); ancestor = ancestor.parent)
+      if (ts.isFunctionLike(ancestor) && (ancestor.typeParameters?.length ?? 0) > 0) return true
+    return false
+  }
+  const encloses = (declaration: ts.Node, owner: ts.Node): boolean => {
+    for (let ancestor: ts.Node | undefined = owner; ancestor !== undefined; ancestor = ancestor.parent)
+      if (ancestor === declaration) return true
     return false
   }
 

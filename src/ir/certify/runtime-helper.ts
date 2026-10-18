@@ -96,10 +96,11 @@ const ownKindDemandsOf = (operation: IrOperation, ctx: CertifyContext): readonly
       const semantic = ctx.semanticOperationOf(operation.lineage)
       if (semantic?.family === 'protocol') {
         const receiver = operation.receiver.representation
+        const result = operation.result.representation
         const carrier =
           operation.protocol === 'enumerate'
             ? enumerateGetIteratorCarrierKeyOf(receiver.kind, receiver)
-            : iteratorMethodCarrierKeyOf(receiver.kind, receiver, ctx.deriver)
+            : iteratorMethodCarrierKeyOf(receiver.kind, receiver, ctx.deriver, result.kind === 'iterator' ? result.element : undefined)
         return [helper(`protocol:${operation.protocol}:get-iterator:${carrier}`)]
       }
       // The array-pattern SOURCE step's own Set/string snapshot and dynamic

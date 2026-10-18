@@ -38,17 +38,18 @@ export interface SourceInvocationFrameLayout {
     | { readonly kind: 'spread'; readonly values: readonly ts.Expression[] }
 }
 
-const layouts = new WeakMap<
-  ValueFlowIndex,
-  WeakMap<ts.CallExpression | ts.NewExpression, WeakMap<ts.SignatureDeclaration, SourceInvocationFrameLayout | null>>
->()
-const ownLayouts = new WeakMap<
-  ValueFlowIndex,
-  WeakMap<
-    ts.CallExpression | ts.NewExpression,
-    WeakMap<FlowInvocationOperands, WeakMap<ts.SignatureDeclaration, SourceInvocationFrameLayout | null>>
-  >
->()
+/**
+ * Answers per call site, as a short list rather than nested WeakMaps: a call
+ * meets one or two bodies and at most a few own-operand views, and a WeakMap
+ * per call node (plus one per operand view) cost more than every answer it
+ * held -- tens of thousands of them on a large program.
+ */
+interface FrameLayoutAnswer {
+  readonly operands: FlowInvocationOperands | undefined
+  readonly body: ts.SignatureDeclaration
+  readonly layout: SourceInvocationFrameLayout | null
+}
+const layouts = new WeakMap<ValueFlowIndex, WeakMap<ts.CallExpression | ts.NewExpression, FrameLayoutAnswer[]>>()
 
 const unwrapped = (expression: ts.Expression): ts.Expression => {
   let current = unwrapErasedExpression(expression)
@@ -98,28 +99,18 @@ export const sourceInvocationFrameLayoutOf = (
   ordinaryOwnOperands?: FlowInvocationOperands
 ): SourceInvocationFrameLayout | null => {
   if (ordinaryOwnOperands !== undefined && !ordinaryOwnInvocationOperandsMatch(call, ordinaryOwnOperands)) return null
-  let bodies: WeakMap<ts.SignatureDeclaration, SourceInvocationFrameLayout | null>
-  if (ordinaryOwnOperands !== undefined) {
-    let calls = ownLayouts.get(flow)
-    if (!calls) ownLayouts.set(flow, (calls = new WeakMap()))
-    let entries = calls.get(call)
-    if (!entries) calls.set(call, (entries = new WeakMap()))
-    const known = entries.get(ordinaryOwnOperands)
-    bodies = known ?? new WeakMap()
-    if (!known) entries.set(ordinaryOwnOperands, bodies)
-  } else {
-    let calls = layouts.get(flow)
-    if (!calls) layouts.set(flow, (calls = new WeakMap()))
-    const known = calls.get(call)
-    bodies = known ?? new WeakMap()
-    if (!known) calls.set(call, bodies)
+  let calls = layouts.get(flow)
+  if (!calls) layouts.set(flow, (calls = new WeakMap()))
+  let answers = calls.get(call)
+  if (!answers) calls.set(call, (answers = []))
+  for (const answer of answers) if (answer.body === body && answer.operands === ordinaryOwnOperands) return answer.layout
+  const held = answers
+  const remember = (layout: SourceInvocationFrameLayout | null): SourceInvocationFrameLayout | null => {
+    held.push({ operands: ordinaryOwnOperands, body, layout })
+    return layout
   }
-  if (bodies.has(body)) return bodies.get(body)!
   const site = flow.callSiteOf(call)
-  if (!site || !flow.callableBodyIsIndexed(body)) {
-    bodies.set(body, null)
-    return null
-  }
+  if (!site || !flow.callableBodyIsIndexed(body)) return remember(null)
   const parameters = runtimeParametersOf(body)
   const operands = ordinaryOwnOperands ?? site.operands
   const args = operands.args
@@ -143,6 +134,5 @@ export const sourceInvocationFrameLayoutOf = (
     parameters,
     arguments: args.some(ts.isSpreadElement) ? { kind: 'spread', values: args } : { kind: 'positional', slots }
   }
-  bodies.set(body, layout)
-  return layout
+  return remember(layout)
 }

@@ -995,7 +995,8 @@ type ArgumentsUsesAtFn = (declaration: ts.SignatureDeclaration) => readonly ts.I
  */
 interface ValueModeBuckets {
   readonly named: Map<string | undefined, ProofAnswer[]>
-  readonly fresh: WeakMap<ClosedValueMode, ProofAnswer[]>
+  /** Created on the first unkeyed mode: most buckets only ever see named ones. */
+  fresh: WeakMap<ClosedValueMode, ProofAnswer[]> | undefined
 }
 type ProofAnswerIndex = WeakMap<
   ValueFlowIndex,
@@ -1264,14 +1265,14 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
   let byValueMode = byArgumentsUsesAt.get(argumentsUsesAt)
   if (!byValueMode) {
     proofStats.argumentFns++
-    byArgumentsUsesAt.set(argumentsUsesAt, (byValueMode = { named: new Map(), fresh: new WeakMap() }))
+    byArgumentsUsesAt.set(argumentsUsesAt, (byValueMode = { named: new Map(), fresh: undefined }))
   }
   const modeKey = valueMode?.identity
-  let answers = valueMode !== undefined && modeKey === undefined ? byValueMode.fresh.get(valueMode) : byValueMode.named.get(modeKey)
+  let answers = valueMode !== undefined && modeKey === undefined ? byValueMode.fresh?.get(valueMode) : byValueMode.named.get(modeKey)
   if (!answers) {
     proofStats.valueModes++
     answers = []
-    if (valueMode !== undefined && modeKey === undefined) byValueMode.fresh.set(valueMode, answers)
+    if (valueMode !== undefined && modeKey === undefined) (byValueMode.fresh ??= new WeakMap()).set(valueMode, answers)
     else byValueMode.named.set(modeKey, answers)
   }
   if (!nested) proofStats.topLevelEntries++

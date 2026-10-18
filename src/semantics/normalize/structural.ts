@@ -430,6 +430,18 @@ export const createStructuralMapper = (
   // answers are the same from every view. `classCopyKeys` is what
   // `classCopies` publishes to the deriver.
   const classCopyKeys = new Map<DeclarationId, Map<number, ClassCopyKey>>()
+  // One layout-type resolver per copy, not per view. Its answers read the
+  // checker, the copy's parameter census and the absent-global census, and
+  // views that differ only in what they bind share all three -- yet each built
+  // its own, so every node's layout type was resolved once per view: 909
+  // views on a large program, each memo holding its own answers.
+  const layoutResolvers = new Map<string, (node: ts.Node) => ts.Type>()
+  const layoutTypeAtFor = (path: SpecializationPath, copyParameters: ParameterBindingCensus): ((node: ts.Node) => ts.Type) => {
+    const key = identities.copyKeyOf(path)
+    let resolver = layoutResolvers.get(key)
+    if (!resolver) layoutResolvers.set(key, (resolver = createLayoutTypeResolver(checker, copyParameters, absent, nativeClassAliasTypeAt)))
+    return resolver
+  }
   const views = new Map<string, StructuralMapper>()
   const mapperFor = (path: SpecializationPath, bindingPath: SpecializationPath = path): StructuralMapper => {
     // Keyed by the copy, owner included, never by the ordinals alone: `copyKeyOf` (identities.ts) says why.
@@ -473,7 +485,8 @@ export const createStructuralMapper = (
       symbolSlots,
       ordinaryOwnCallableSourceAt,
       accessorDescriptorAt,
-      nativeClassAliasTypeAt
+      nativeClassAliasTypeAt,
+      layoutTypeAtFor
     )
     views.set(key, built)
     return built
@@ -515,7 +528,8 @@ const buildMapper = (
   symbolSlots: SymbolKeyedThisSlotCensus,
   ordinaryOwnCallableSourceAt: ((call: ts.CallExpression) => SourceCallableObject | null) | undefined,
   accessorDescriptorAt: ((call: ts.CallExpression) => SourceAccessorDescriptor | null) | undefined,
-  nativeClassAliasTypeAt: ((node: ts.Node) => ts.Type | null) | undefined
+  nativeClassAliasTypeAt: ((node: ts.Node) => ts.Type | null) | undefined,
+  layoutTypeAtFor: (path: SpecializationPath, parameters: ParameterBindingCensus) => (node: ts.Node) => ts.Type
 ): StructuralMapper => {
   const {
     boundByPath,
@@ -3166,7 +3180,7 @@ const buildMapper = (
     return id
   }
 
-  const layoutTypeAt = createLayoutTypeResolver(checker, parameters, absent, nativeClassAliasTypeAt)
+  const layoutTypeAt = layoutTypeAtFor(path, parameters)
 
   /**
    * The type at a node, with an absent host type collapsed -- and with that

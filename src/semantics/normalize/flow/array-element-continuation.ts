@@ -2,7 +2,7 @@ import ts from 'typescript'
 import { outermostErasureOf, unwrapErasedExpression } from '../producers/erasure.js'
 import { isGlobalObjectConstructor, isStandardGlobalValue, literalMemberNameOf } from '../derived-expression-type.js'
 import { isAssignmentPattern } from '../assignment-patterns.js'
-import { createPropertyKeyDomains } from '../property-key-domain.js'
+import { createPropertyKeyDomains, everyWriteReachable } from '../property-key-domain.js'
 import { isClassSpelledSourceClass, type SourceClass, type ValueFlowIndex, type ValueWrite } from './model.js'
 import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from '../deferred-intrinsic-protocols.js'
 import { invocationValueUsesOf } from './invocation-facts.js'
@@ -892,7 +892,7 @@ const computeFieldFacts = (
     }
   }
   const state = fieldStateOf(flow)
-  const keys = (state.keys ??= createPropertyKeyDomains(checker, flow, () => true))
+  const keys = (state.keys ??= createPropertyKeyDomains(checker, flow, everyWriteReachable))
   const keyMayName = (expression: ts.Expression | undefined): boolean => {
     if (expression === undefined || ts.isSpreadElement(expression)) return true
     if (numericType(checker, expression) || !keys.mayName(keys.of(expression), cell.key)) return false

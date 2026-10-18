@@ -77,7 +77,8 @@ const generatedSharedObjectCarrier = (carrier: Representation): boolean => {
 
 /** A shared compiler-emitted record can answer a runtime string key without losing its native carrier. */
 const generatedSharedRecordCarrier = (carrier: Representation): boolean =>
-  (carrier.kind === 'record' || carrier.kind === 'record-with-index') && carrier.ownership === 'shared-refcount'
+  ((carrier.kind === 'record' || carrier.kind === 'record-with-index') && carrier.ownership === 'shared-refcount') ||
+  (carrier.kind === 'native-record-ref' && carrier.native === null && carrier.ownership === 'shared-refcount')
 
 /** Whether this carrier has ordinary Object.prototype semantics, independent of whether it can own expandos. */
 const generatedObjectCarrier = (carrier: Representation): boolean =>

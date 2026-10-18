@@ -2,6 +2,8 @@ import { mergeNativeIterableProviders } from './plugins/native-iterable-provider
 import type { NativeDebugInfo } from './targets/cpp/native-debug-source.js'
 import { nodeOfOperation, operationOfResult } from './identity/ids.js'
 import { readFileSync } from 'fs'
+import { join } from 'path'
+import { writeHeapSnapshot } from 'v8'
 import type { PackageSource } from './semantics/package-sources.js'
 import { projectAbis, type AbiProjectionBlocker } from './projection/abi.js'
 import { publishConversionRecipes } from './ir/publish-conversion-recipes.js'
@@ -64,7 +66,7 @@ import { borrowedBuiltinCallBindSourceTransformWithProtocols } from './semantics
 import type { SourceTransform } from './semantics/source-transform-protocol.js'
 import { borrowedMethodReceiverCopySourceTransform } from './semantics/borrowed-method-receiver-copy-source-transform.js'
 import { runFrontend, type CensusAccounting } from './semantics/frontend.js'
-import type { CellFactsPublication } from './semantics/normalize/cells/index.js'
+import type { CellFactsSummary } from './semantics/normalize/cells/index.js'
 import type { DiagnosticSourcePreparationAudit } from './semantics/diagnostic-source-preparation.js'
 import type { SemanticGraph } from './semantics/model/graph.js'
 import { installedProducers } from './semantics/normalize/producers/installed.js'
@@ -191,6 +193,13 @@ export interface CompilationRequest {
   readonly realmStorage?: boolean
   /** Retain final IR in the result for diagnostics. Off by default so normal builds can release it. */
   readonly includeIr?: boolean
+  /**
+   * Return as soon as no translation unit can be emitted -- a diagnostic sweep
+   * that is not clean, or a lowering with blocked bodies -- instead of running
+   * the later stages to collect the certification's refusals as well. What a
+   * build wants; a coverage or refusal census leaves it off.
+   */
+  readonly stopWhenUnemittable?: boolean
   /** Publish native DWARF-to-original-source display mappings. */
   readonly debugSource?: boolean
   /**
@@ -236,12 +245,12 @@ export interface CompilationResult {
   /** What each write-discovery census bound and why it refused the rest -- see `FrontendOutput.censusAccounting`. */
   readonly censusAccounting: ReadonlyMap<string, CensusAccounting>
   /**
-   * The frontend's per-cell fact table, forwarded verbatim (`FrontendResult.cellFacts`).
+   * The frontend's per-cell fact summary, forwarded verbatim (`FrontendResult.cellFacts`).
    * Exposed so a caller can ask `cellFacts.table.twoOwnerClaims` -- the cells two
    * independent write-discovery censuses both claimed -- without threading a new
    * field through every stage that already forwards `frontend.graph` the same way.
    */
-  readonly cellFacts: CellFactsPublication
+  readonly cellFacts: CellFactsSummary
   /**
    * The derived conversion graph, keyed by carrier.
    *
@@ -459,8 +468,24 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   const stage = (name: string): void => {
     if (stageStartedAt) {
       const now = performance.now()
-      process.stderr.write(`[STAGE] ${name.padEnd(16)} ${(now - stageStartedAt.at).toFixed(0)}ms\n`)
+      // Heap beside time: a compile that runs out of memory names the stage
+      // that grew, which a time column alone never could.
+      // `GEA_STAGE_TIMING=gc` (with `node --expose-gc`) collects first, so the
+      // heap column is what the stage RETAINS rather than what it left behind.
+      const collect = (globalThis as { gc?: () => void }).gc
+      if (process.env['GEA_STAGE_TIMING'] === 'gc' && collect) collect()
+      const { heapUsed, rss } = process.memoryUsage()
+      const gb = (bytes: number): string => (bytes / 1073741824).toFixed(2)
+      process.stderr.write(`[STAGE] ${name.padEnd(16)} ${(now - stageStartedAt.at).toFixed(0)}ms heap ${gb(heapUsed)}GB rss ${gb(rss)}GB\n`)
       stageStartedAt.at = now
+    }
+    // `GEA_HEAP_SNAPSHOT_AFTER=<name>` writes a V8 heap snapshot (into
+    // `GEA_HEAP_SNAPSHOT_DIR`, default the working directory) once that stage
+    // finishes: what a stage RETAINS, and through which references, is a
+    // question only the retainer graph answers.
+    if (process.env['GEA_HEAP_SNAPSHOT_AFTER'] === name) {
+      const directory = process.env['GEA_HEAP_SNAPSHOT_DIR'] ?? process.cwd()
+      process.stderr.write(`[STAGE] heap snapshot ${writeHeapSnapshot(join(directory, `after-${name}.heapsnapshot`))}\n`)
     }
     if (stopAfterStage === name) process.exit(0)
   }
@@ -1038,6 +1063,62 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     })()
   )
   const conversionCensus = createConversionNodes({ registry: conversionRegistry, nodes: conversions.nodes })
+  // A build stops here once no translation unit can come out of it
+  // (`CompilationRequest.stopWhenUnemittable`): a sweep that is not clean
+  // mints no certificate, and a blocked body leaves the program incomplete,
+  // so every later stage -- minutes and most of the heap on a large program --
+  // could only add rows to a report the build already fails on.
+  const unemittable = (loweringBlockers: readonly IrLoweringBlocker[]): CompilationResult => {
+    stage('stopped')
+    return {
+      dynamicFallback: {
+        enabled: request.dynamicFallback ?? false,
+        valueCount: [...representations.plan.selected.values()].filter(
+          (value) => value.kind === 'dynamic' && value.reason === 'opt-in-fallback'
+        ).length
+      },
+      locationOfNode: frontend.locationOfNode,
+      locationOfDeclaration: frontend.locationOfDeclaration,
+      textOfNode: frontend.textOfNode,
+      graph: frontend.graph,
+      sourceFileNames: frontend.sourceFileNames,
+      sourcePreparations: frontend.sourcePreparations,
+      representations,
+      manifest,
+      preflight,
+      certificate: null,
+      diagnostics,
+      uninstalledFamilies: frontend.uninstalledFamilies,
+      censusAccounting: frontend.censusAccounting,
+      cellFacts: frontend.cellFacts,
+      conversionNodes: conversions.nodes,
+      conversionCensus,
+      source: null,
+      units: [],
+      loweringBlockers,
+      certification: null,
+      refusals: refusalsOf(frontend.censusRefusals, abis.blocked, loweringBlockers, [], []),
+      slotDrift: [],
+      printerDrift: [],
+      abiBlockers: abis.blocked,
+      emissionRefusals: [],
+      artifacts: plugins.flatMap((plugin) => (plugin.writeArtifacts ? [plugin.writeArtifacts] : [])),
+      generatedSupportIncludes: [...new Set(plugins.flatMap((plugin) => plugin.capabilities.generatedSupportIncludes))].sort(),
+      projection: {
+        abis: abis.abis,
+        constructs: abis.constructs,
+        callableOrigins: abis.callableOrigins,
+        classes,
+        placements,
+        slotHooks: plugins.flatMap((plugin) => (plugin.slotOf ? [plugin.slotOf] : []))
+      },
+      emissionRepresentations: null,
+      reflection: null,
+      irBodies: null,
+      physicalClasses: null
+    }
+  }
+  if (request.stopWhenUnemittable && !diagnostics.clean) return unemittable([])
   // Lowering runs on the plan's verdict alone. An uncertified program lowers
   // too, so its refusals are rows beside preflight's rather than a stage that
   // never ran; only emission waits for the certificate (see the header).
@@ -1065,6 +1146,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // So text is produced only when every body lowered, and the blockers travel
   // back either way so the caller can say which ones did not.
   const complete = lowered !== null && lowered.blocked.length === 0
+  if (request.stopWhenUnemittable && !complete) return unemittable(lowered?.blocked ?? [])
   // A generator whose formals need real work (a default, or a destructured
   // pattern) was lowered as one body with a marker `ir/lower.ts` left on it
   // (`IrBody.generatorPrologueBoundary`); this carves that one body into the
@@ -1392,6 +1474,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
       )
       const nextCount = closedFactsOf(next.values())
       dispatchedBodies = next
+      stage('reflection-round')
       if (nextCount <= count && !programChanged) break
       count = nextCount
       emissionRepresentations = publishEmissionRepresentationsOf({

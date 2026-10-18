@@ -211,7 +211,7 @@ interface JsDocCarrier {
  * moves. Determinism is unaffected -- the second pass repeats the first pass's
  * order and visits each node's tags in source order.
  */
-const walkOrdinals = (file: ts.SourceFile): Map<ts.Node, number> => {
+export const walkOrdinals = (file: ts.SourceFile): Map<ts.Node, number> => {
   const known = ordinalWalks.get(file)
   if (known !== undefined) return known
   const walked = computeOrdinals(file)

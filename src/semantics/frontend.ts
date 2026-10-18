@@ -24,7 +24,7 @@ import type { SemanticGraph } from './model/graph.js'
 import { createStructuralTypeTable } from './model/structural-type-table.js'
 import { censusProgram } from './normalize/census.js'
 import type { FamilyProducer } from './normalize/contribution.js'
-import { createIdentityTable, rootSpecialization, type IdentityTable } from './normalize/identities.js'
+import { createIdentityTable, rootSpecialization, walkOrdinals, type IdentityTable } from './normalize/identities.js'
 import { censusDeclaredIntegers, type DeclaredIntegerWidth } from './declared-integers.js'
 import { gatingEdges } from './normalize/gating.js'
 import { normalizeProgram } from './normalize/normalize.js'
@@ -88,8 +88,14 @@ import { indexValueFlow, sameValueFlowContent } from './normalize/flow/value-flo
 import type { ValueFlowIndex } from './normalize/flow/model.js'
 import { attachClosedScriptScope, attachStatedModuleSet, type ClosedScriptScope, type StatedModuleSet } from './normalize/flow/targets.js'
 import { censusRefusalCounts, type CensusRefusal } from './normalize/census-refusal.js'
-import { createCellPolicyRegistry, defaultCellEvidencePolicies, buildCellFactsTable, publishCellFacts } from './normalize/cells/index.js'
-import type { CellFactsPublication } from './normalize/cells/index.js'
+import {
+  createCellPolicyRegistry,
+  defaultCellEvidencePolicies,
+  buildCellFactsTable,
+  cellFactsSummaryOf,
+  publishCellFacts
+} from './normalize/cells/index.js'
+import type { CellFactsSummary } from './normalize/cells/index.js'
 import type { StructuralDisagreement, StructuralFormViolation } from './normalize/structural-rules.js'
 import { settleBindingCensus, type RoundCensus } from './normalize/binding-fixpoint.js'
 import { withJsDocTypeNames } from './normalize/jsdoc-type-names.js'
@@ -609,7 +615,7 @@ export interface FrontendResult {
    * `twoOwnerClaims` row as a typed `CellRefusal` (`normalize/cells/model.ts`)
    * -- still read by nothing downstream, same as the rest of this table.
    */
-  readonly cellFacts: CellFactsPublication
+  readonly cellFacts: CellFactsSummary
   /**
    * Nodes for which two of `normalize/structural.ts`'s rules both had an
    * answer -- the frontend's own finding channel.
@@ -872,6 +878,59 @@ const nativeConstructorCandidatesOf = (file: ts.SourceFile): readonly (ts.ClassD
   return found
 }
 
+/**
+ * `FrontendResult.locationOfNode` and its three twins, built from the source
+ * files and their identities alone.
+ *
+ * Module level, not written inside `runFrontend`, because V8 gives every
+ * closure a function creates one shared context: an arrow written there kept
+ * the whole frontend -- the program and its checker, every census, every
+ * value-flow index, every specialization view -- alive for the rest of the
+ * compile, through four functions that only read source text. Nothing after
+ * the frontend reads the checker.
+ *
+ * Lazy, because a compilation that reports nothing must not pay for a
+ * whole-program walk to name nodes nobody asked about. Keyed by
+ * `positionKeyOfNode` -- file and ordinal, kind and monomorphization suffix
+ * both dropped -- so a monomorphized copy resolves to the root it was cut
+ * from, and a DeclarationId, which never carries a kind, resolves through the
+ * same index.
+ */
+const createSourceLocator = (files: readonly (readonly [identity: string, file: ts.SourceFile])[]) => {
+  let nodesByPosition: Map<string, ts.Node> | null = null
+  const positionIndex = (): Map<string, ts.Node> => {
+    if (nodesByPosition === null) {
+      const index = new Map<string, ts.Node>()
+      for (const [identity, file] of files)
+        for (const [node, ordinal] of walkOrdinals(file)) {
+          const key = `${identity}|${ordinal}`
+          if (!index.has(key)) index.set(key, node)
+        }
+      nodesByPosition = index
+    }
+    return nodesByPosition
+  }
+  const sourceNodeOf = (node: NodeId): ts.Node | null => positionIndex().get(positionKeyOfNode(node)) ?? null
+  const sourceNodeOfDeclaration = (declaration: DeclarationId): ts.Node | null =>
+    positionIndex().get(positionKeyOfDeclaration(declaration)) ?? null
+  const locationOfFound = (found: ts.Node | null): DiagnosticLocation | null => {
+    if (!found) return null
+    const file = found.getSourceFile()
+    const { line, character } = file.getLineAndCharacterOfPosition(found.getStart())
+    return { file: file.fileName, line: line + 1, column: character + 1 }
+  }
+  return {
+    locationOfNode: (node: NodeId): DiagnosticLocation | null => locationOfFound(sourceNodeOf(node)),
+    textOfNode: (node: NodeId): string | null => sourceNodeOf(node)?.getText() ?? null,
+    locationOfDeclaration: (declaration: DeclarationId): DiagnosticLocation | null => locationOfFound(sourceNodeOfDeclaration(declaration)),
+    nameOfDeclaration: (declaration: DeclarationId): string | null => {
+      const found = sourceNodeOfDeclaration(declaration)
+      const name = found ? ts.getNameOfDeclaration(found as ts.Declaration) : undefined
+      return name && ts.isIdentifier(name) ? name.text : null
+    }
+  }
+}
+
 export const runFrontend = (input: FrontendInput): FrontendResult => {
   const timing = createFrontendTiming('phases')
   const compiled = createProgram({
@@ -929,6 +988,9 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     verbatimModuleSyntax: compiled.program.getCompilerOptions().verbatimModuleSyntax === true,
     ...(input.hostReachedMemberKeys ? { hostReachedMemberKeys: input.hostReachedMemberKeys } : {})
   })
+  // The whole-program index exists only to answer reachability's constructor
+  // questions, all asked by now; held, it stayed live through every phase below.
+  constructionFlow = undefined
   // Instantiations are censused before anything is normalized, because the
   // answer is whole-program: which type a generic is instantiated at is decided
   // by every call site together, and a walk that learned it as it went would
@@ -2153,6 +2215,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
 
   timing.mark('normalization')
   timing.report()
+  const fileIdentities = new Map([...identities.sourceFileNames].map(([identity, fileName]) => [fileName, identity]))
   // See `FrontendResult.locationOfNode`. Lazy, because a compilation that
   // reports nothing must not pay for a whole-program walk to name nodes
   // nobody asked about.
@@ -2165,47 +2228,13 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // resolve a DeclarationId -- which never carries one -- through this SAME
   // index instead of a second one built to answer the identical question in a
   // different identity currency.
-  let nodesByPosition: Map<string, ts.Node> | null = null
-  const positionIndex = (): Map<string, ts.Node> => {
-    if (nodesByPosition === null) {
-      const index = new Map<string, ts.Node>()
-      for (const file of compiled.sourceFiles) {
-        if (file.isDeclarationFile) continue
-        const walk = (current: ts.Node): void => {
-          let key: string | null = null
-          try {
-            key = positionKeyOfNode(identities.nodeIdOf(current))
-          } catch {
-            key = null
-          }
-          if (key !== null && !index.has(key)) index.set(key, current)
-          ts.forEachChild(current, walk)
-        }
-        walk(file)
-      }
-      nodesByPosition = index
-    }
-    return nodesByPosition
-  }
-  const sourceNodeOf = (node: NodeId): ts.Node | null => positionIndex().get(positionKeyOfNode(node)) ?? null
-  const sourceNodeOfDeclaration = (declaration: DeclarationId): ts.Node | null =>
-    positionIndex().get(positionKeyOfDeclaration(declaration)) ?? null
-  const locationOfFound = (found: ts.Node | null): DiagnosticLocation | null => {
-    if (!found) return null
-    const file = found.getSourceFile()
-    const { line, character } = file.getLineAndCharacterOfPosition(found.getStart())
-    return { file: file.fileName, line: line + 1, column: character + 1 }
-  }
-  const locationOfNode = (node: NodeId): DiagnosticLocation | null => locationOfFound(sourceNodeOf(node))
-  const textOfNode = (node: NodeId): string | null => sourceNodeOf(node)?.getText() ?? null
-  /** `locationOfNode`'s twin for a DeclarationId -- see `FrontendResult.locationOfDeclaration`. */
-  const locationOfDeclaration = (declaration: DeclarationId): DiagnosticLocation | null =>
-    locationOfFound(sourceNodeOfDeclaration(declaration))
-  const nameOfDeclaration = (declaration: DeclarationId): string | null => {
-    const found = sourceNodeOfDeclaration(declaration)
-    const name = found ? ts.getNameOfDeclaration(found as ts.Declaration) : undefined
-    return name && ts.isIdentifier(name) ? name.text : null
-  }
+  const { locationOfNode, textOfNode, locationOfDeclaration, nameOfDeclaration } = createSourceLocator(
+    compiled.sourceFiles.flatMap((file) => {
+      if (file.isDeclarationFile) return []
+      const identity = fileIdentities.get(file.fileName)
+      return identity === undefined ? [] : [[identity, file] as const]
+    })
+  )
 
   for (const flow of roundFlows) retireSourceValueSession(flow)
 
@@ -2295,7 +2324,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
       ['bags', { bound: bags.boundCount, refusals: censusRefusalCounts(bags.refusals) }]
     ]),
     censusRefusals: [...parameters.refusals, ...collections.refusals, ...bags.refusals],
-    cellFacts,
+    cellFacts: cellFactsSummaryOf(cellFacts),
     structuralDisagreements: types.structuralDisagreements,
     structuralFormViolations: types.structuralFormViolations,
     classCopies: types.classCopies()

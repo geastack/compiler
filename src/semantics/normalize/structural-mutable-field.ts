@@ -28,6 +28,28 @@ const openType = (checker: ts.TypeChecker, type: ts.Type): boolean =>
   (type.isUnionOrIntersection() && type.types.some((member) => openType(checker, member)))
 
 /** Actual alias writes size a native data slot; a covariant public annotation does not. */
+const NO_WRITES: ReadonlyMap<string, readonly Access[]> = new Map()
+// Every structural copy builds its own resolver, and the alias writes it sizes
+// slots from are the program's, not the copy's: indexed per copy, the same
+// whole-program table was rebuilt and held once per copy.
+const writesByKey = new WeakMap<ValueFlowIndex, ReadonlyMap<string, readonly Access[]>>()
+const writesByKeyOf = (flow: ValueFlowIndex): ReadonlyMap<string, readonly Access[]> => {
+  const known = writesByKey.get(flow)
+  if (known !== undefined) return known
+  const writes = new Map<string, Access[]>()
+  for (const write of flow.allWrites) {
+    const access = write.propertyAccess
+    if (!access || write.value === null) continue
+    const key = keyOf(access)
+    if (key === null) continue
+    const entries = writes.get(key) ?? []
+    if (!entries.includes(access)) entries.push(access)
+    writes.set(key, entries)
+  }
+  writesByKey.set(flow, writes)
+  return writes
+}
+
 export const createMutableFieldResolver = (
   checker: ts.TypeChecker,
   table: StructuralTypeTable,
@@ -39,16 +61,7 @@ export const createMutableFieldResolver = (
   readonly readTypeAt: (node: ts.Node) => StructuralTypeId | null
 } => {
   const session = flow && sourceValueSessionOf(checker, flow)
-  const writes = new Map<string, Access[]>()
-  for (const write of flow?.allWrites ?? []) {
-    const access = write.propertyAccess
-    if (!access || write.value === null) continue
-    const key = keyOf(access)
-    if (key === null) continue
-    const entries = writes.get(key) ?? []
-    if (!entries.includes(access)) entries.push(access)
-    writes.set(key, entries)
-  }
+  const writes = flow === undefined ? NO_WRITES : writesByKeyOf(flow)
   const pending = new Set<DataDeclaration>()
   const cache = new Map<DataDeclaration, Map<StructuralTypeId, StructuralTypeId | null>>()
   const join = (values: readonly StructuralTypeId[]): StructuralTypeId => {

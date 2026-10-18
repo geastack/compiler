@@ -4537,6 +4537,14 @@ export const censusGlobalHostMutations = (
       const { selector, term } = pendingSelections[pendingSelectionIndex++]!
       expandSelector(selector, term)
     }
+    // Every entry is behind its read index now. The census's answers outlive
+    // the solve through the closures this function returns, and so would two
+    // queues of nothing but spent entries -- most of a million on a large
+    // program.
+    pendingTerms.length = 0
+    pendingIndex = 0
+    pendingSelections.length = 0
+    pendingSelectionIndex = 0
   }
   assertGraphFrozen()
   for (const selector of selectors)
@@ -4577,6 +4585,19 @@ export const censusGlobalHostMutations = (
     }
     solve()
     assertGraphFrozen()
+    // The census is closed: nothing adds a selector or a flow after this, so
+    // the solver's own indexes and the copy graph's edges are spent. Only the
+    // terms are read again, through the node-to-component map.
+    expandedSelections.clear()
+    selectorTargets.clear()
+    selectorTargetsByKey.clear()
+    dynamicOut.clear()
+    for (const node of allValueNodes) {
+      node.out.clear()
+      node.incoming.clear()
+      node.seeds.clear()
+    }
+    for (const component of components) component.out.clear()
     for (const component of components) {
       let global = false
       let opaque = false

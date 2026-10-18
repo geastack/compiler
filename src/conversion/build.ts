@@ -329,7 +329,11 @@ const buildNarrowingClosure = (source: Representation): readonly Representation[
  * keeps recursive representations finite. This one predicate is shared by
  * graph proposal and backend admission so they cannot disagree.
  */
-const reachesMemo = new Map<string, boolean>()
+// Keyed by the two representation keys in turn rather than by one
+// `${from}->${to}` string: the joined key was a fresh string per pair, which
+// pinned both halves and came to a million and a quarter strings on a large
+// program, for a table whose two keys already exist.
+const reachesMemo = new Map<string, Map<string, boolean>>()
 
 /**
  * Forgets both narrowing memos. "A pure function of the representation" holds
@@ -363,9 +367,11 @@ export const narrowingReachesTarget = (source: Representation, target: Represent
     const toKey = representationKey(to)
     if (fromKey === toKey) return true
     if (narrowingClosureKeysOf(from).has(toKey)) return true
-    const pair = `${fromKey}->${toKey}`
-    const known = reachesMemo.get(pair)
+    let fromAnswers = reachesMemo.get(fromKey)
+    if (fromAnswers === undefined) reachesMemo.set(fromKey, (fromAnswers = new Map()))
+    const known = fromAnswers.get(toKey)
     if (known !== undefined) return known
+    const pair = `${fromKey}->${toKey}`
     if (active.has(pair)) return false
     active.add(pair)
     let result =
@@ -382,7 +388,7 @@ export const narrowingReachesTarget = (source: Representation, target: Represent
           : from.arms.some((arm) => reaches(arm.value, to))
     }
     active.delete(pair)
-    reachesMemo.set(pair, result)
+    fromAnswers.set(toKey, result)
     return result
   }
   return reaches(source, target)

@@ -9,7 +9,7 @@ import {
   isStandardGlobalValue,
   isUnusableEvidence
 } from '../derived-expression-type.js'
-import { createPropertyKeyDomains, type PropertyKeyDomain } from '../property-key-domain.js'
+import { createPropertyKeyDomains, everyWriteReachable, type PropertyKeyDomain } from '../property-key-domain.js'
 import { objectPrototypeMemberNames } from '../../../representation/record-fields.js'
 import {
   deferredIntrinsicProtocolLedgerOf,
@@ -418,7 +418,7 @@ const writeInventoryOf = (checker: ts.TypeChecker, flow: ValueFlowIndex): Family
   }
   // Every write this index holds is already reachable: the flow walk prunes
   // unreachable members before it records anything.
-  const keys = createPropertyKeyDomains(checker, flow, () => true)
+  const keys = createPropertyKeyDomains(checker, flow, everyWriteReachable)
   // A spread-free object literal is the only source that can be shown not to
   // carry `key`; anything else (a variable, a call result, a spread) may.
   const literalMayNameKey = (expression: ts.Expression | undefined, key: string): boolean => {

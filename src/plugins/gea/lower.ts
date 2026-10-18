@@ -166,7 +166,13 @@ const lowerClassComponent = (
     )
   }
   const built = render.parameters.map((parameter) => buildPropsRecord(ctx, block, operation, keys, children, parameter.value))
-  requireEveryAttributeConsumed(keys, children, built)
+  // A render declaring no parameter is `template()` handed `template(props)`:
+  // the attributes were evaluated as operands above and, exactly as an extra
+  // argument to any JavaScript function, nothing can read them. The checker
+  // accepted them against the class's own `Props`, and a native class has no
+  // `props` field for them to reach some other way. Only a render that DOES
+  // take props can leave one with nowhere to go.
+  if (render.parameters.length > 0) requireEveryAttributeConsumed(keys, children, built)
   const created = ctx.builder.construct(
     block,
     lineage,

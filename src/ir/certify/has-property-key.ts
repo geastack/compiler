@@ -83,9 +83,16 @@ export const generatedSharedObjectCarrier = (representation: Representation): bo
  * key is only known at runtime.  Classes deliberately stay out of this
  * predicate: an arbitrary string can name an inherited program method, and
  * that prototype question is not recoverable from the record sidecar.
+ *
+ * A NAMED record (`native-record-ref` with no host name) is the same generated
+ * struct behind the same handle, so `gea::nativeDynamicHasProperty` answers it
+ * identically: its own slots, its index, its expando, a live view's original,
+ * and the ordinary prototype. An interface narrowed out of `unknown` by a type
+ * guard and probed with `key in value` is that receiver.
  */
 export const generatedSharedRecordCarrier = (representation: Representation): boolean =>
-  (representation.kind === 'record' || representation.kind === 'record-with-index') && representation.ownership === 'shared-refcount'
+  ((representation.kind === 'record' || representation.kind === 'record-with-index') && representation.ownership === 'shared-refcount') ||
+  (representation.kind === 'native-record-ref' && representation.native === null && representation.ownership === 'shared-refcount')
 
 /** Any compiler-owned ordinary object carrier, including by-value records with no expando identity. */
 export const generatedObjectCarrier = (representation: Representation): boolean =>
