@@ -5030,10 +5030,18 @@ struct Ref : detail::RefStorage {
    * construction installs and every later one only confirms. A parallel region
    * can make two tasks the first at once, so the confirmation is an acquire
    * load and the install happens once, under a lock.
+   *
+   * Only the confirmation is inline. With the lock in the same body it was a
+   * call per construction -- 5% of a binary-tree build that confirmed the
+   * same pointer 52 million times.
    */
-  static void installShared(Ref& slot, T* object) {
+  [[gnu::always_inline]] static void installShared(Ref& slot, T* object) {
+    if (std::atomic_ref<void*>(slot.erased_).load(std::memory_order_acquire) == object) [[likely]] return;
+    installSharedSlow(slot, object);
+  }
+
+  [[gnu::noinline]] static void installSharedSlow(Ref& slot, T* object) {
     std::atomic_ref<void*> cell(slot.erased_);
-    if (cell.load(std::memory_order_acquire) == object) return;
     static std::mutex mutex;
     std::lock_guard<std::mutex> lock(mutex);
     if (cell.load(std::memory_order_relaxed) == object) return;

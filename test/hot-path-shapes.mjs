@@ -258,6 +258,18 @@ run('hot-path-borrowed-tree', {
   epilogue: budget('candidates', 64)
 })
 
+// `const left = node.left` over a construction-only field of a borrowed
+// formal names the field: the cell and its copy are gone
+// (`ir/construction-only-fields.ts`'s `stableFieldCellsOf`).
+run('hot-path-stable-field-cell', {
+  source: (source) => {
+    const count = source.match(/^double gea_body_fn_decl_\w+\(const gea::Ref<gea_class_decl_\w+>& gea_arg_0\) \{$[\s\S]*?^\}$/m)?.[0]
+    assert.ok(count, 'count(node) must borrow its handle')
+    assert.match(count, /std::as_const\(gea_arg_0->left\)/, 'the const names the field it was read from')
+    assert.doesNotMatch(count, /^gea::Ref<gea_class_decl_\w+> b\d+;$/m, 'no cell holds a copy of a child')
+  }
+})
+
 // A row offset `(cell + 1) * pitch + 1` over a grid sized at run time, used
 // through a power-of-two mask in the inner loop. Both factors are `| 0`
 // int32s, so the product is under 2^62 and the carrier holds it; the mask must

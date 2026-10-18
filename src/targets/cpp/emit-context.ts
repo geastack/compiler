@@ -763,6 +763,8 @@ export interface EmitBodyFacts {
   readonly stableCellReads: ReadonlySet<IrValueId>
   /** See `EmitContext.stableFieldReads`. */
   readonly stableFieldReads: ReadonlySet<IrValueId>
+  /** See `EmitContext.stableFieldCells`. */
+  readonly stableFieldCells: ReadonlySet<DeclarationId>
   /** See `EmitContext.constructorOf`. */
   readonly constructorOf: { readonly layout: ClassLayout; readonly derived: boolean; readonly callsSuper: boolean } | null
   /** See `EmitContext.ownedDyingValues`. */
@@ -1588,6 +1590,17 @@ export interface EmitContext {
    * so the read renders as the field itself rather than a counted copy.
    */
   readonly stableFieldReads: ReadonlySet<IrValueId>
+  /**
+   * Cells written once with a stable field read and read only after it
+   * (`ir/construction-only-fields.ts`'s `stableFieldCellsOf`). When that read
+   * did render as the field (`aliasedStableFieldReads`), the write stores
+   * nothing and every read names the field (`stableFieldCellTexts`).
+   */
+  readonly stableFieldCells: ReadonlySet<DeclarationId>
+  /** The stable field reads that rendered as the field itself. Filled as the body renders. */
+  readonly aliasedStableFieldReads: Set<IrValueId>
+  /** The field text each admitted cell names, set by its one write before any read renders. */
+  readonly stableFieldCellTexts: Map<DeclarationId, string>
   /** Dominating native length results, selected by the IR reuse proof. Settled the same way as `hoistedResults`. */
   readonly reusedStringLengths: ReadonlyMap<IrValueId, IrOperand>
   /** Withheld values whose single reader is a call, and which therefore reach exactly one operand position -- see `emit.ts`'s `consumedByCall`. Settled the same way as `hoistedResults`. */
@@ -2250,6 +2263,9 @@ export const createEmitContext = (
     deferrable,
     stableCellReads: bodyFacts.stableCellReads,
     stableFieldReads: bodyFacts.stableFieldReads,
+    stableFieldCells: bodyFacts.stableFieldCells,
+    aliasedStableFieldReads: new Set(),
+    stableFieldCellTexts: new Map(),
     reusedStringLengths,
     callArgumentOnly,
     classTableRoots: bodyFacts.classTableRoots,
@@ -3192,6 +3208,12 @@ const renderMutableEmitContextFields: ReadonlySet<string> = new Set([
   // The local that GetIterator names for its once-only Get(next). IteratorNext
   // reads that name; method identity and frame remain the certified IR's facts.
   'protocolNextMethods',
+  // Text again, by the same test: WHICH cells may name their field is the
+  // prepass's `stableFieldCells`. Whether the one write's value printed as the
+  // field itself is decided where `emitGet` spells it, so the write records
+  // that, and the field text its later reads print in place of the cell.
+  'aliasedStableFieldReads',
+  'stableFieldCellTexts',
   // A wrapped dense window's subscript companion, minted and declared beside
   // the read that needed it (`denseRemainderCompanion`). WHICH accesses a
   // window admits is `admitDenseWindows`' prepass answer; this is only what

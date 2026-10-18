@@ -1,8 +1,9 @@
 import type { DeclarationId, FunctionId, IrValueId } from '../identity/ids.js'
-import type { Representation } from '../representation/model.js'
+import { representationKey, type Representation } from '../representation/model.js'
 import { stringConstantsOf } from './dead-values.js'
+import { dominatorTreeOf } from './dominance.js'
 import type { ClassConstruction } from './instantiation.js'
-import type { IrBlockId, IrBody, IrOperation } from './model.js'
+import { allOperationsOf, type IrBlockId, type IrBody, type IrOperation } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import type { ReflectionDemand, ReflectionFieldOperation } from './reflection-demand.js'
 
@@ -338,4 +339,104 @@ export const stableFieldReadsOf = (
     }
   }
   return suspensionFreeReadsOf(body, candidates)
+}
+
+/**
+ * Cells that may name the stable field read they are initialized with,
+ * instead of holding a counted copy of it.
+ *
+ * `const left = node.left` stores the read into `left`'s cell, and the store
+ * is the retain the alias of the read itself (`stableFieldReadsOf`) was there
+ * to avoid: `count(node)` paid a retain and a release per child per node
+ * walked, a quarter of a binary-tree run. The field holds one value for the
+ * whole call, so when the cell does too, every read of the cell may spell the
+ * field.
+ *
+ * The cell holds one value when the body writes it exactly once, with that
+ * read, and that write comes before every read of the cell -- dominating it,
+ * and earlier in `blockOrder`, so the writer has decided before any reader
+ * renders. Nothing else may name the cell (`admits`: a cell another frame or a
+ * closure reaches is read by code this body does not render), and each read
+ * must want the field's own carrier. A body with exception or iterator-close
+ * regions keeps its cells: the dominator tree does not carry those edges. A
+ * suspending body keeps them too, for the reason `suspensionFreeReadsOf` gives.
+ */
+export const stableFieldCellsOf = (
+  body: IrBody,
+  stableReads: ReadonlySet<IrValueId>,
+  admits: (declaration: DeclarationId) => boolean
+): ReadonlySet<DeclarationId> => {
+  if (stableReads.size === 0 || body.tryRegions.length > 0 || (body.iteratorCloseRegions?.length ?? 0) > 0) return new Set()
+  type Site = { readonly block: IrBlockId; readonly index: number }
+  const writes = new Map<DeclarationId, (Site & { readonly value: IrValueId; readonly representation: Representation })[]>()
+  const reads = new Map<DeclarationId, (Site & { readonly representation: Representation })[]>()
+  const refused = new Set<DeclarationId>()
+  for (const [block, contents] of body.blocks) {
+    for (const [index, operation] of allOperationsOf(contents).entries()) {
+      if (operation.kind === 'await' || operation.kind === 'yield') return new Set()
+      if (operation.kind === 'binding-write') {
+        const sites = writes.get(operation.declaration) ?? []
+        sites.push({ block, index, value: operation.value.value, representation: operation.value.representation })
+        writes.set(operation.declaration, sites)
+      } else if (operation.kind === 'binding-read') {
+        const sites = reads.get(operation.declaration) ?? []
+        sites.push({ block, index, representation: operation.result.representation })
+        reads.set(operation.declaration, sites)
+      } else if ('declaration' in operation && typeof operation.declaration === 'string') {
+        refused.add(operation.declaration as DeclarationId)
+      }
+    }
+  }
+  const order = new Map(body.blockOrder.map((block, position) => [block, position]))
+  const dominance = dominatorTreeOf(body)
+  const cells = new Set<DeclarationId>()
+  for (const [declaration, sites] of writes) {
+    const write = sites[0]
+    if (sites.length !== 1 || write === undefined || refused.has(declaration) || !stableReads.has(write.value)) continue
+    if (!admits(declaration)) continue
+    const key = representationKey(write.representation)
+    const writeOrder = order.get(write.block)
+    if (writeOrder === undefined) continue
+    const before = (read: Site): boolean => {
+      if (read.block === write.block) return write.index < read.index
+      const readOrder = order.get(read.block)
+      return readOrder !== undefined && writeOrder < readOrder && dominance.dominates(write.block, read.block)
+    }
+    if ((reads.get(declaration) ?? []).every((read) => before(read) && representationKey(read.representation) === key))
+      cells.add(declaration)
+  }
+  return cells
+}
+
+/**
+ * `stableFieldReadsOf` and `stableFieldCellsOf` together. A read whose one use
+ * is the write into its cell is dying -- the write moves it in -- and so is no
+ * stable read on its own; it becomes one when that cell is admitted, because
+ * an admitted cell's write stores nothing and the move never happens.
+ */
+export const stableFieldReadsAndCellsOf = (
+  body: IrBody,
+  receivers: ReadonlySet<IrValueId>,
+  fields: ConstructionOnlyFields,
+  integrity: { readonly restricts: (representation: Representation) => boolean },
+  dying: ReadonlySet<IrValueId>,
+  admits: (declaration: DeclarationId) => boolean
+): { readonly reads: ReadonlySet<IrValueId>; readonly cells: ReadonlySet<DeclarationId> } => {
+  const reads = stableFieldReadsOf(body, receivers, fields, integrity, dying)
+  const uses = new Map<IrValueId, number>()
+  const written = new Map<IrValueId, DeclarationId>()
+  for (const block of body.blocks.values())
+    for (const operation of allOperationsOf(block)) {
+      for (const operand of operandsOfIrOperation(operation)) uses.set(operand.value, (uses.get(operand.value) ?? 0) + 1)
+      if (operation.kind === 'binding-write') written.set(operation.value.value, operation.declaration)
+    }
+  const intoCell = (value: IrValueId): boolean => written.has(value) && uses.get(value) === 1
+  const candidates = stableFieldReadsOf(body, receivers, fields, integrity, new Set([...dying].filter((value) => !intoCell(value))))
+  const cells = stableFieldCellsOf(body, candidates, admits)
+  const all = new Set(reads)
+  for (const value of candidates) {
+    const declaration = written.get(value)
+    if (declaration !== undefined && intoCell(value) && cells.has(declaration)) all.add(value)
+  }
+  return { reads: all, cells }
 }

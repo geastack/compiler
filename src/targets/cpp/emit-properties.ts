@@ -1168,6 +1168,7 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
     read === plainFieldReadText(ctx, operation, fieldName)
   ) {
     defineValueAlias(ctx, operation.result, read)
+    ctx.aliasedStableFieldReads.add(operation.result.id)
     return
   }
   const name = defineValue(ctx, operation.result)
@@ -1376,6 +1377,13 @@ const fixedFieldPresenceText = (ctx: EmitContext, receiver: IrOperand, fieldName
     representation.kind !== 'class-ref'
   )
     return null
+  // A required field's bit is a `static` that is always `true` when nothing in
+  // the program can delete, freeze or redefine a field (`records.ts`, on
+  // `ctx.fixedFieldStateConstant`), so testing it only turns a member load into
+  // a fresh value, which a stable field read may not alias. The per-carrier
+  // proof is not enough here: its bit is an instance member a decoder may
+  // leave unset.
+  if (field.required && ctx.fixedFieldStateConstant) return null
   return `${constructorViewReceiverText(ctx, receiver, fieldName, operandText(ctx, receiver))}${memberAccessOperator(representation.ownership)}${cppRecordFieldPresenceName(fieldName)}`
 }
 

@@ -18,7 +18,7 @@ import { boxedValueText } from './emit-dynamic-properties.js'
 import { stableCellReadsOf } from '../../ir/stable-cell-reads.js'
 import {
   noConstructionOnlyFields,
-  stableFieldReadsOf,
+  stableFieldReadsAndCellsOf,
   stableReceiversOf,
   type ConstructionOnlyFields
 } from '../../ir/construction-only-fields.js'
@@ -2989,6 +2989,22 @@ export const emitBody = (
   // fields below, whose collectors genuinely do need one.
   const functionSources = functionSourceReadsOf(origins.staticKeyTexts, body)
   const directCalleeFacts = directCalleesOf(body, abiOfCallable)
+  // Only a counted handle: a cell of any other carrier is read by renderers
+  // (string appends, array and JSON fills) that name its storage directly.
+  const { reads: stableFieldReads, cells: stableFieldCells } = stableFieldReadsAndCellsOf(
+    body,
+    stableReceiversOf(body, receiverValues, borrowedFormals, bindingWriteCounts, (declaration) => captures.isBoxed(declaration)),
+    constructionOnlyFields,
+    nativeIntegrityRestricted,
+    bodyDyingArguments,
+    (declaration) => {
+      const placement = placements.get(declaration)
+      if (placement?.storage.kind !== 'local' || placement.storage.owner !== body.sourceOwner) return false
+      if (captures.isBoxed(declaration) || captures.isCaptured(declaration)) return false
+      const held = placement.representation
+      return held?.kind === 'class-ref' || (held?.kind === 'optional' && held.payload.kind === 'class-ref')
+    }
+  )
   const bodyFacts: EmitBodyFacts = {
     generatorBody: body.generator === true,
     asyncCoroutineBody: isAsyncCoroutineBody(body),
@@ -2996,13 +3012,8 @@ export const emitBody = (
     receiverValues,
     bindingWriteCounts,
     stableCellReads: stableCellReadsOf(body, (declaration) => placements.get(declaration)?.storage.kind === 'local'),
-    stableFieldReads: stableFieldReadsOf(
-      body,
-      stableReceiversOf(body, receiverValues, borrowedFormals, bindingWriteCounts, (declaration) => captures.isBoxed(declaration)),
-      constructionOnlyFields,
-      nativeIntegrityRestricted,
-      bodyDyingArguments
-    ),
+    stableFieldReads,
+    stableFieldCells,
     constructorOf,
     ownedDyingValues,
     transferDyingValues,

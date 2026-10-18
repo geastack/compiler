@@ -126,6 +126,13 @@ const structuralUnionLoadText = (ctx: EmitContext, held: Representation, read: R
  * knows is wrong.
  */
 export const emitBindingRead = (ctx: EmitContext, lines: string[], operation: BindingReadOperation): void => {
+  // A cell that names a stable field (`EmitContext.stableFieldCells`). Const,
+  // so a consumer that moves from it copies instead of emptying the field.
+  const fieldCell = ctx.stableFieldCellTexts.get(operation.declaration)
+  if (fieldCell !== undefined) {
+    defineValueAlias(ctx, operation.result, `std::as_const(${fieldCell})`)
+    return
+  }
   // A char-code buffer is read by naming the string, never by copying it: a push appends to the cell itself.
   if (ctx.charCodeBuffers.reads.has(operation.result.id)) {
     defineValueAlias(ctx, operation.result, cellValueText(bindingReference(ctx, operation.declaration, 'a char-code buffer read')))
@@ -451,6 +458,12 @@ export const emitBindingWrite = (ctx: EmitContext, lines: string[], operation: B
   // already in the storage the cell now names (`EmitContext.formalCells`), and
   // `gea_arg_0 = gea_arg_0` is the copy this exists to remove.
   if (ctx.formalCells.has(operation.declaration)) return
+  // The one write of a cell that names a stable field stores nothing: the
+  // field already holds the value for every read that follows.
+  if (ctx.stableFieldCells.has(operation.declaration) && ctx.aliasedStableFieldReads.has(operation.value.value)) {
+    ctx.stableFieldCellTexts.set(operation.declaration, operandText(ctx, operation.value))
+    return
+  }
   // The one write that makes a cell a host-method alias stores nothing: the
   // value is a host member with no C++ spelling of its own, and every read of
   // the cell names that member directly (`emitBindingRead`).

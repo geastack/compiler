@@ -22,7 +22,7 @@ class-inheritance.ts.cpp cfcc34bc3169
 class-intersection-ancestor.ts.cpp 61654a30a468
 class-named-only-by-type-instance.ts.cpp 1a47c4500b4b
 class-named-only-by-type.ts.cpp 55c2d63f7f83
-class-static-assignment.ts.cpp bc2e4e7502b5
+class-static-assignment.ts.cpp 758cdb4fdeb2
 class-static-block-identity.ts.cpp d4f2fa878fae
 class-upcast-merge.ts.cpp d653e02d08b8
 collection-literal-arguments.ts.cpp 26906e86908e
@@ -34,7 +34,7 @@ counted-push-fill-loop.ts.cpp f1339423be3a
 declaration-constant-rival.js.cpp 6d2ff867a266
 declaration-constant-values.js.cpp 6d2ff867a266
 declared-dictionary.ts.cpp 21641fec2d0b
-default-parameter-patterns.ts.cpp 35a2dd13a67d
+default-parameter-patterns.ts.cpp 0e6f954ae6bd
 destructure-array-param.ts.cpp dcc02af96285
 destructure-param.ts.cpp 0af6b8777196
 dictionary-access.ts.cpp e0e269813db0
@@ -48,7 +48,7 @@ embedded-null-string.ts.cpp f7f5d62a0e55
 explicit-void-this.ts.cpp 9b9a6b7db59a
 expression-carrier-repro.ts.cpp e7a4916a313a
 fn.ts.cpp 748a85b07306
-for-in-narrowed-optional-field.ts.cpp abcbc9de7999
+for-in-narrowed-optional-field.ts.cpp 0500c0722619
 function-call-rewrite.ts.cpp 6bf57a961ac7
 function-typed-value.ts.cpp 98a0ec93058a
 function-value-dispatch-get-repro.ts.cpp 0b7426b2b77c
@@ -84,9 +84,9 @@ keyed-collection-member-argument.js.cpp ce9e2a88a0af
 keyed-collection-member-argument.ts.cpp 7dfa9dd579ff
 language.ts.cpp 7f13764b63eb
 literal-receiver-properties.ts.cpp 6e3eedab5e8b
-logical-guard-optional-instance.ts.cpp afb5019b8713
+logical-guard-optional-instance.ts.cpp 89a513dfff49
 logical-merge-boolean-left.ts.cpp 1b706cab96b0
-logical-merge-nullable-reference.ts.cpp f789391e3036
+logical-merge-nullable-reference.ts.cpp a807f569a103
 logical.ts.cpp f9b3a5edd223
 loop-iteration-helper-repro.ts.cpp f126b9ba7159
 merge-array-materialization.ts.cpp 03a7af77396c
@@ -98,8 +98,8 @@ namespace-qualified-paths.ts.cpp 94329ee91cb1
 narrowed-read.ts.cpp 4861ae5f9f8d
 narrowed-union-read.ts.cpp 3cc2e44d518a
 native-instanceof.ts.cpp 35f9c7719b00
-native-optional-field-read-closed.ts.cpp 9e06c0a023b5
-nullable-union-guard.ts.cpp 1ef8c1b703b2
+native-optional-field-read-closed.ts.cpp ecb23f437da1
+nullable-union-guard.ts.cpp c3ab7ab9cbd7
 nullish-coalescing.ts.cpp 8dbed3ccfda9
 number-format-methods.ts.cpp c156a7b2de1f
 number-index.ts.cpp 540dd0d74ed5
@@ -115,8 +115,8 @@ optional-call-sequence.ts.cpp b3e2f0d6d44b
 optional-call.ts.cpp 8cc038999bc8
 optional-callable-prefix.ts.cpp e3164ac553d8
 optional-chain-as-guard.ts.cpp dd1abc3c406e
-optional-chain-boundaries.ts.cpp 85611c00b9f1
-optional-chain-tails.ts.cpp b06fe200294f
+optional-chain-boundaries.ts.cpp 28e4cd451926
+optional-chain-tails.ts.cpp 793ef1bffb2b
 optional-chain.ts.cpp c9101a95fc1f
 optional-collection-cell.ts.cpp 90ecfa53a431
 optional-slot-holds-null.ts.cpp 2a532bb1d133
@@ -159,11 +159,11 @@ typed-array-pcm-map.ts.cpp 89932eb1d3ff
 typeof-narrowed-union-field-store.js.cpp af58aadd50a7
 typeof-narrowed-union-field-store.ts.cpp 06954d6cddbb
 uncertified.txt 41fdd419c43e
-uniform-value-union.ts.cpp 9f25536ee6bc
+uniform-value-union.ts.cpp 06662f567e76
 uninhabited-intersection-branch.ts.cpp bc07d1b5ac40
 uninstantiated-generic.ts.cpp 1621e1aebca3
 union-absent-class-arm.js.cpp aadf2f25f69e
 union-no-discriminant.ts.cpp 32fc8cb9202c
 update.ts.cpp 88298f76044f
-user-collection-method-names.ts.cpp 82b1fa0cf96a
+user-collection-method-names.ts.cpp 4cdd229be6aa
 valueless-return.ts.cpp 8bd46d745b66
