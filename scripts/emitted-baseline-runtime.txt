@@ -11,6 +11,7 @@ and-condition-over-optional-string-mode.runtime.ts.cpp b7254e4d5b42
 annotated-generic-function-alias.ts.cpp 28d0e6eac09c
 any-argument-guard-copy-beside-typed-callers.runtime.ts.cpp 0751780b0533
 any-argument-outside-a-guard-parameter-domain.runtime.ts.cpp 324664fdd163
+any-array-element-tested-for-presence-keeps-its-absence.runtime.js.cpp ea93c1fa0860
 any-asserted-to-promise-then-dispatches-on-the-box.runtime.ts.cpp 538e2b321713
 any-cast-this-member-call-dispatches-over-the-receiver-classes.runtime.ts.cpp b28d099d7c05
 any-dictionary-into-named-interface.runtime.ts.cpp 83c5a5f1e126
