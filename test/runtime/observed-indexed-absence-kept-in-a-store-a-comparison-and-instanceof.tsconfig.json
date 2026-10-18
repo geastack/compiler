@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "strict": false, "strictNullChecks": true, "noUncheckedIndexedAccess": false, "types": [] },
+  "files": ["observed-indexed-absence-kept-in-a-store-a-comparison-and-instanceof.runtime.js"]
+}
