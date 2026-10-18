@@ -121,6 +121,73 @@ const VALUE_ORIGIN_DOMAINS: readonly string[] = [VALUE_ORIGIN]
 const NO_DOMAINS: readonly string[] = []
 const NO_CAUSES: readonly Cause[] = []
 const NO_GROUNDING: readonly { readonly domain: string; readonly dependency: Query }[] = []
+/**
+ * Own-key answers, kept across a node's re-evaluations. A for-in head
+ * over an options-applying `setValues( values )` asks the own keys of every
+ * parameter literal the program passes to any constructor in the family, and
+ * the transfer re-runs each time any of those roots' closures gains a
+ * value -- rescanning every root, on a large program the second-largest self-time
+ * entry of the compile. Facts only grow, so a fact set of the same SIZE as
+ * when the answer was computed is the same set: each answer stamps every
+ * set it read, and a re-evaluation replays it while the stamps hold. The
+ * edges those reads registered persist on this node's state, so a replay
+ * still wakes this node when any of them moves.
+ *
+ * The stamps live as long as the session, so each list is flat and
+ * exact-size: `stamps` holds each fact set followed by the size it had,
+ * `holderStamps` each root followed by how many holders it had. A list of
+ * two-element arrays, push-grown, was several times that.
+ */
+interface OwnKeysAnswer {
+  readonly keys: readonly string[] | null
+  readonly stamps: readonly (ReadonlySet<Value> | number)[]
+  readonly holderStamps: readonly (Value | number)[]
+}
+/** A query's evaluation in its session (`createSession`'s `run`). */
+type QueryRun = (
+  own: QueryDefinition,
+  read: Read,
+  observe: Read,
+  holdersOf: DependencyFactHoldersOf<Query, Value>,
+  sealing: boolean
+) => ReadonlySet<Value>
+/**
+ * One query's node in its session's solver: the query, what its last
+ * evaluation concluded for the seal to report, and its kept own-key answers.
+ * A record whose `transfer` and `seal` are shared methods, where it used to be
+ * a scope of closures minted per query -- about 290 bytes more for every state
+ * of a session. One class for every session, so the solver's hottest property
+ * reads see one shape whichever session they serve.
+ */
+class QueryDefinition implements DependencyFactDefinition<Query, Value, Cause> {
+  finalCauses = NO_CAUSES
+  finalGrounding = NO_GROUNDING
+  seeded = false
+  // Created on first use: most queries never enumerate own keys.
+  ownKeysAnswers: Map<Value, OwnKeysAnswer> | undefined = undefined
+  constructor(
+    readonly query: Query,
+    private readonly run: QueryRun
+  ) {}
+  transfer(read: Read, observe: Read, holdersOf: DependencyFactHoldersOf<Query, Value>): ReadonlySet<Value> {
+    return this.run(this, read, observe, holdersOf, false)
+  }
+  seal(
+    read: Read,
+    observe: Read,
+    holdersOf: DependencyFactHoldersOf<Query, Value>
+  ): ReturnType<DependencyFactDefinition<Query, Value, Cause>['seal']> {
+    this.run(this, read, observe, holdersOf, true)
+    const carriesValue = VALUE_CARRYING_KINDS.has(this.query.kind)
+    return {
+      locallyComplete: this.finalCauses.length === 0,
+      causes: this.finalCauses,
+      groundingRequirements: carriesValue ? VALUE_ORIGIN_DOMAINS : NO_DOMAINS,
+      groundingSeeds: this.seeded ? VALUE_ORIGIN_DOMAINS : NO_DOMAINS,
+      groundingDependencies: this.finalGrounding
+    }
+  }
+}
 // Read once at load, not per value transfer: `process.env` is a native interceptor.
 const noArrayKeys = process.env['GEA_NO_ARRAY_KEYS'] !== undefined
 /**
@@ -1563,1298 +1630,1756 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     if (cause === undefined) byReason.set(reason, (cause = { reason, node }))
     return cause
   }
-  const define = (query: Query): DependencyFactDefinition<Query, Value, Cause> => {
-    let finalCauses = NO_CAUSES
-    let finalGrounding = NO_GROUNDING
+  const evaluate = (
+    own: QueryDefinition,
+    required: Read,
+    observe: Read,
+    holdersOf: DependencyFactHoldersOf<Query, Value>,
+    sealing: boolean
+  ): ReadonlySet<Value> => {
+    const query = own.query
+    // What the seal reports as this query's seeds; set during the evaluation
+    // and handed to `own` at its end.
     let seeded = false
-    /**
-     * Own-key answers, kept across this node's re-evaluations. A for-in head
-     * over an options-applying `setValues( values )` asks the own keys of every
-     * parameter literal the program passes to any constructor in the family, and
-     * the transfer re-runs each time any of those roots' closures gains a
-     * value -- rescanning every root, on a large program the second-largest self-time
-     * entry of the compile. Facts only grow, so a fact set of the same SIZE as
-     * when the answer was computed is the same set: each answer stamps every
-     * set it read, and a re-evaluation replays it while the stamps hold. The
-     * edges those reads registered persist on this node's state, so a replay
-     * still wakes this node when any of them moves.
-     */
-    interface OwnKeysAnswer {
-      readonly keys: readonly string[] | null
-      readonly stamps: readonly (readonly [ReadonlySet<Value>, number])[]
-      readonly holderStamps: readonly (readonly [Value, number])[]
+    const facts = new Set<Value>()
+    const causes: Cause[] = []
+    const grounding = new Set<Query>()
+    const fail = (reason: string, node: ts.Node = query.node): void => {
+      causes.push(causeOf(reason, node))
+      if (refusalDebug) {
+        const file = node.getSourceFile()
+        const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
+        const text = node.getText(file).replace(/\s+/g, ' ')
+        console.error(`[SESSION-REFUSAL] ${reason} ${query.kind} ${file.fileName.split('/').pop()}:${line + 1} ${text.slice(0, 90)}`)
+      }
     }
-    // Created on first use: most queries never enumerate own keys, and an empty
-    // Map per query was 184 bytes of every state in the session.
-    let ownKeysAnswers: Map<Value, OwnKeysAnswer> | undefined
-    const evaluate = (
-      required: Read,
-      observe: Read,
-      holdersOf: DependencyFactHoldersOf<Query, Value>,
-      sealing: boolean
-    ): ReadonlySet<Value> => {
-      const facts = new Set<Value>()
-      const causes: Cause[] = []
-      const grounding = new Set<Query>()
-      const fail = (reason: string, node: ts.Node = query.node): void => {
-        causes.push(causeOf(reason, node))
-        if (refusalDebug) {
-          const file = node.getSourceFile()
-          const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
-          const text = node.getText(file).replace(/\s+/g, ' ')
-          console.error(`[SESSION-REFUSAL] ${reason} ${query.kind} ${file.fileName.split('/').pop()}:${line + 1} ${text.slice(0, 90)}`)
+    // No edge ledger of our own: the solver records every required edge, and
+    // `obligations` walks its copy. Keeping a second one cost a map lookup
+    // and a set insert on every edge read in the program -- the largest
+    // single self-time entry in a large program's profile once the state lookup
+    // beside it was gone -- and a duplicate of the whole proof graph in a
+    // solve that was already running out of heap.
+    const read: Read = required
+    const carry = (dependency: Query): ReadonlySet<Value> => {
+      grounding.add(dependency)
+      return read(dependency)
+    }
+    const add = (values: Iterable<Value>): void => {
+      for (const held of values) facts.add(held)
+    }
+    /**
+     * A member call whose receiver holds nothing but `null`/`undefined`
+     * throws at the lookup: no target, no frame, no completion -- and no
+     * refusal, since the throw is the program's own answer. A `copy( source )`
+     * method running `source.attachment.clone()` under a guard this graph
+     * does not read, where every value `attachment` holds is `null`, is the
+     * shape.
+     */
+    const lookupThrows = (call: ts.CallExpression): boolean => {
+      const site = sites.get(call)
+      const operands = candidateOrdinaryOwnCallableOperandsOf(call) ?? site?.operands
+      if (!operands || operands.explicitThis || operands.dispatch.kind !== 'member' || operands.receiver === null) return false
+      const held = read(value(operands.receiver))
+      return held.size > 0 && [...held].every(isNullish)
+    }
+    /**
+     * The keys a named write through a root adds to it.
+     *
+     * `const values = { mode: 1, flip: false }; values.wrap = w` --
+     * an options literal extended after creation. The literal SPELLS two keys and the program
+     * gives it a third, so the spelling is not the key set. `case 'slot'`
+     * already reads those writes; without them in the descriptor the very
+     * slot they write was refused before it could be read -- the descriptor
+     * answering about the LITERAL when it was asked about the OBJECT.
+     *
+     * Only literals are asked. A class instance's absent keys are a chain
+     * proof rather than a spelling, and `this[ key ] = v` inside a method
+     * would otherwise leave every instance's key set unknown.
+     */
+    /**
+     * The keys a named write through a root adds to it.
+     *
+     * `const values = { mode: 1, flip: false }; values.wrap = w` --
+     * an options literal extended after creation. The literal SPELLS two keys and the program
+     * gives it a third, so the spelling is not the key set. `case 'slot'`
+     * already reads those writes; without them in the descriptor the very
+     * slot they write was refused before it could be read -- the descriptor
+     * answering about the LITERAL when it was asked about the OBJECT.
+     *
+     * Only literals are asked. A class instance's absent keys are a chain
+     * proof rather than a spelling, and `this[ key ] = v` inside a method
+     * would otherwise leave every instance's key set unknown.
+     *
+     * This scan is asked about ONE key's writes, or about the computed ones,
+     * and stays here for that reason. Routing it through `written-keys` was
+     * measured and reverted: that query depends on every named write in the
+     * program, so a per-key descriptor question -- asked about most roots in
+     * the program, not just the enumerated ones -- pulled a whole-program
+     * dependency set into each of them and put a large program into GC death
+     * after minutes. A whole-program walk becomes a query only where the consumer
+     * genuinely wants the whole program, which here is enumeration alone.
+     */
+    const writesTo = (root: ObjectRoot, edges: readonly { readonly receiver: Query }[]): boolean =>
+      edges.some((edge) => observe(edge.receiver).has(root))
+    /**
+     * A write under a key this graph cannot name leaves the key set unknown
+     * -- reported as unknown, never as a smaller set. Asked in reverse:
+     * which states hold this root, and is any of them a computed write's
+     * receiver -- one lookup per root instead of observing all of the program's
+     * computed-write receivers per root per re-evaluation. `holdersOf`
+     * subscribes this node to the root's future holders exactly as the
+     * observe edges did, and the receivers are seeded below so each exists.
+     */
+    const unknownKeys = new Map<ObjectRoot, boolean>()
+    const holderStampLists: (Value | number)[][] = []
+    const hasUnnamedWrite = (root: ObjectRoot): boolean => {
+      const known = unknownKeys.get(root)
+      if (known !== undefined) return known
+      let found = false
+      let count = 0
+      for (const holder of holdersOf(root)) {
+        count++
+        for (const write of computedWriteEdgesByReceiver.get(holder) ?? []) if (keysOf(write.access).length === 0) found = true
+      }
+      for (const stamps of holderStampLists) stamps.push(root, count)
+      unknownKeys.set(root, found)
+      return found
+    }
+    /** Every cell a root has: what it spells, plus what was written into it. */
+    const ownKeys = new Map<Value, readonly string[] | null>()
+    const activeOwnKeys = new Set<Value>()
+    const stampLists: (ReadonlySet<Value> | number)[][] = []
+    const watched = (dependency: Query): ReadonlySet<Value> => {
+      const held = observe(dependency)
+      for (const stamps of stampLists) stamps.push(held, held.size)
+      return held
+    }
+    // Even slots of a kept stamp list hold the set or root, odd slots its count (`OwnKeysAnswer`).
+    const factsUnchanged = (stamps: readonly (ReadonlySet<Value> | number)[]): boolean => {
+      for (let index = 0; index < stamps.length; index += 2)
+        if ((stamps[index] as ReadonlySet<Value>).size !== stamps[index + 1]) return false
+      return true
+    }
+    const holdersUnchanged = (stamps: readonly (Value | number)[]): boolean => {
+      for (let index = 0; index < stamps.length; index += 2) {
+        let now = 0
+        for (const _holder of holdersOf(stamps[index] as Value)) now++
+        if (now !== stamps[index + 1]) return false
+      }
+      return true
+    }
+    const ownKeysOf = (root: Value): readonly string[] | null => {
+      const known = ownKeys.get(root)
+      if (known !== undefined) return known
+      // A bulk assign whose source's keys come back to this root -- two
+      // records merged into each other -- names no finite set on the way
+      // round; the re-entry is unknown, and only the outer answer is kept.
+      if (activeOwnKeys.has(root)) return null
+      const kept = own.ownKeysAnswers?.get(root)
+      if (kept !== undefined && factsUnchanged(kept.stamps) && holdersUnchanged(kept.holderStamps)) {
+        for (const stamps of stampLists) for (const entry of kept.stamps) stamps.push(entry)
+        for (const stamps of holderStampLists) for (const entry of kept.holderStamps) stamps.push(entry)
+        ownKeys.set(root, kept.keys)
+        return kept.keys
+      }
+      activeOwnKeys.add(root)
+      const stamps: (ReadonlySet<Value> | number)[] = []
+      const holderStamps: (Value | number)[] = []
+      stampLists.push(stamps)
+      holderStampLists.push(holderStamps)
+      try {
+        const answer = ownKeysUncached(root)
+        ownKeys.set(root, answer)
+        // `push` leaves spare capacity behind; the lists kept are exact copies.
+        ;(own.ownKeysAnswers ??= new Map()).set(root, { keys: answer, stamps: stamps.slice(), holderStamps: holderStamps.slice() })
+        return answer
+      } finally {
+        stampLists.pop()
+        holderStampLists.pop()
+        activeOwnKeys.delete(root)
+      }
+    }
+    const ownKeysUncached = (root: Value): readonly string[] | null => {
+      const spelled = literalSpelledKeys(root)
+      if (spelled === null || !isObjectRoot(root)) return spelled
+      if (hasUnnamedWrite(root)) return null
+      const keys = new Set(spelled)
+      for (const stored of watched(closure(root))) {
+        if (ts.isCallExpression(stored) && definitionPlans.has(stored)) {
+          if (watched(value(stored.arguments[0]!)).has(root)) for (const key of definitionPlans.get(stored)!.keys) keys.add(key)
+          continue
+        }
+        if (ts.isCallExpression(stored)) {
+          // A bulk assign onto this root gives it every key its sources have.
+          const bulk = bulkAssignOf(stored)
+          if (bulk === null || !watched(value(bulk.target)).has(root)) continue
+          for (const source of bulk.sources)
+            for (const held of watched(value(source))) {
+              if (held === undefinedValue || held.kind === ts.SyntaxKind.NullKeyword || ts.isVoidExpression(held)) continue
+              const sourceKeys = ownKeysOf(held)
+              if (sourceKeys === null) return null
+              for (const written of sourceKeys) keys.add(written)
+            }
+          continue
+        }
+        if (!ts.isPropertyAccessExpression(stored) && !ts.isElementAccessExpression(stored)) continue
+        for (const written of keysOf(stored)) keys.add(written)
+      }
+      return [...keys]
+    }
+    const descriptorOf = (root: ObjectRoot, key: string): boolean =>
+      descriptor(root, key) ||
+      (isSourceCallableObject(root) && sourceCallableOwnDataWriteOf(checker, flow, root, key) !== null) ||
+      ((ts.isObjectLiteralExpression(root) || isFreshOrdinaryObject(root)) && writesTo(root, namedWriteReceivers.get(key) ?? [])) ||
+      ((ts.isObjectLiteralExpression(root) || isFreshOrdinaryObject(root)) &&
+        [...holdersOf(root)].some((holder) =>
+          (computedWriteEdgesByReceiver.get(holder) ?? []).some((edge) => keysOf(edge.access).includes(key))
+        )) ||
+      writesTo(root, definitionReceivers.get(key) ?? [])
+
+    /**
+     * Every element key of the arrays an access could be reaching.
+     *
+     * `this.items[ i ]` -- every loop over a field array. The index is a counter no value bounds, so asking what
+     * `i` HOLDS correctly answers nothing; but the access still names some
+     * element, and an array literal spells all of them. Their union is a
+     * true superset where a single key is not available. `length` is not an
+     * element and is not in it, and nothing is inferred from list order --
+     * the keys are the positions the literal actually has.
+     *
+     * The container is read WITHOUT requiring it: the caller requires it
+     * anyway, and a bounded index must stay exact rather than widening to
+     * the whole array, so this answers only where no key is available.
+     */
+    const numericIndex = (index: ts.Expression): boolean => {
+      const numeric = (type: ts.Type): boolean =>
+        type.isUnion() ? type.types.every(numeric) : (type.flags & ts.TypeFlags.NumberLike) !== 0 && !type.isNumberLiteral()
+      return numeric(checker.getTypeAtLocation(index))
+    }
+    const arrayElementKeys = (access: ts.ElementAccessExpression): readonly string[] | null => {
+      const roots = observe(value(access.expression))
+      if (roots.size === 0) return null
+      for (const root of roots) if (!ts.isArrayLiteralExpression(root) || root.elements.some(ts.isSpreadElement)) return null
+      const bounded = observe(value(access.argumentExpression))
+      if (bounded.size > 0 && [...bounded].every((candidate) => ts.isStringLiteralLike(candidate) || ts.isNumericLiteral(candidate)))
+        return null
+      // `bounded` empty is ambiguous: on the FIRST transfer of any node it
+      // means the index's own state was only just created and has not been
+      // transferred yet, not that no bound exists -- `enumeratedKeysOf` and
+      // `keysOf`'s own `unresolved-property-key` meet the identical shape
+      // and both defer the empty-vs-opaque call to `sealing` for that
+      // reason. Widening here before the fixpoint published a PERMANENT
+      // fact per element (`case 'value'` -> `carry(slot(root, key))`) that
+      // the index's later, exact resolution to a single literal could never
+      // retract: `arr[k]` read every element forever because pass one saw
+      // `k` before its own value had transferred. Defer instead of guessing
+      // -- returning null falls through to `keysOf`'s own index read, which
+      // already requires the argument and applies the same `sealing` gate.
+      if (!sealing && bounded.size === 0) return null
+      return [ELEMENT_KEY]
+    }
+    const keysOf = (access: Access): readonly string[] => {
+      const direct = accessKey(access)
+      if (direct !== null) return [direct]
+      if (!ts.isElementAccessExpression(access)) return []
+      const enumerated = enumerationHeadOf(access.argumentExpression)
+      if (enumerated !== null) return enumeratedKeysOf(access, enumerated, read, fail, sealing, ownKeysOf)
+      const keyReference = unwrapErasedExpression(access.argumentExpression)
+      const keyDeclaration = ts.isIdentifier(keyReference) ? flow.targetOf(keyReference)?.declaration : undefined
+      if (keyDeclaration && ts.isVariableDeclaration(keyDeclaration)) {
+        const writes = flow.writesToDeclaration(keyDeclaration).filter((write) => write.slot === 'whole')
+        if (writes.length > 0 && writes.every((write) => write.edge === 'iteration-binding' && write.iterationOrigin?.mode === 'values')) {
+          const keys = new Set<string>()
+          let complete = true
+          for (const write of writes) {
+            const source = write.iterationOrigin?.source
+            const call = source && unwrapErasedExpression(source)
+            const query = call && ts.isCallExpression(call) ? intrinsicOwnKeyQueryOf(checker, call.expression) : null
+            if (
+              !call ||
+              !ts.isCallExpression(call) ||
+              write.iterationOrigin?.asynchronous ||
+              call.arguments.length !== 1 ||
+              query?.owner !== 'Object' ||
+              !['keys', 'getOwnPropertyNames'].includes(query.member) ||
+              deferredIntrinsicProtocolLedgerOf(flow)?.requireMember(query.owner, query.member, call) !== true
+            ) {
+              complete = false
+              break
+            }
+            const roots = read(value(call.arguments[0]!))
+            if (sealing && roots.size === 0) fail('unresolved-key-enumeration-owner', call)
+            for (const root of roots) {
+              if (!isObjectRoot(root)) {
+                fail('unmodelled-key-enumeration-owner', call)
+                continue
+              }
+              for (const key of read(nodeQuery('own-keys', root))) {
+                if (ts.isStringLiteral(key)) keys.add(key.text)
+                else fail('unmodelled-own-key-value', call)
+              }
+            }
+          }
+          if (complete) return [...keys]
         }
       }
-      // No edge ledger of our own: the solver records every required edge, and
-      // `obligations` walks its copy. Keeping a second one cost a map lookup
-      // and a set insert on every edge read in the program -- the largest
-      // single self-time entry in a large program's profile once the state lookup
-      // beside it was gone -- and a duplicate of the whole proof graph in a
-      // solve that was already running out of heap.
-      const read: Read = required
-      const carry = (dependency: Query): ReadonlySet<Value> => {
-        grounding.add(dependency)
-        return read(dependency)
+      // A counter names a POSITION, never a key: `this.items[ i ]` with
+      // a `let i` loop counter. The checker calls it `number`, and
+      // asking what the counter holds only ever refused (`i++` is no value
+      // this graph states) and made the access opaque; the element slot is
+      // the answer, and it is a superset whatever the counter holds.
+      if (numericIndex(access.argumentExpression)) return [ELEMENT_KEY]
+      const elements = noArrayKeys ? null : arrayElementKeys(access)
+      if (elements !== null) return elements
+      const keys = new Set<string>()
+      const keyQuery = value(access.argumentExpression)
+      watched(keyQuery)
+      const candidates = read(keyQuery)
+      for (const candidate of candidates) {
+        if (ts.isStringLiteralLike(candidate) || ts.isNumericLiteral(candidate)) keys.add(candidate.text)
+        else fail('coercing-or-unbounded-property-key', access)
       }
-      const add = (values: Iterable<Value>): void => {
-        for (const held of values) facts.add(held)
-      }
-      /**
-       * A member call whose receiver holds nothing but `null`/`undefined`
-       * throws at the lookup: no target, no frame, no completion -- and no
-       * refusal, since the throw is the program's own answer. A `copy( source )`
-       * method running `source.attachment.clone()` under a guard this graph
-       * does not read, where every value `attachment` holds is `null`, is the
-       * shape.
-       */
-      const lookupThrows = (call: ts.CallExpression): boolean => {
-        const site = sites.get(call)
-        const operands = candidateOrdinaryOwnCallableOperandsOf(call) ?? site?.operands
-        if (!operands || operands.explicitThis || operands.dispatch.kind !== 'member' || operands.receiver === null) return false
-        const held = read(value(operands.receiver))
-        return held.size > 0 && [...held].every(isNullish)
-      }
-      /**
-       * The keys a named write through a root adds to it.
-       *
-       * `const values = { mode: 1, flip: false }; values.wrap = w` --
-       * an options literal extended after creation. The literal SPELLS two keys and the program
-       * gives it a third, so the spelling is not the key set. `case 'slot'`
-       * already reads those writes; without them in the descriptor the very
-       * slot they write was refused before it could be read -- the descriptor
-       * answering about the LITERAL when it was asked about the OBJECT.
-       *
-       * Only literals are asked. A class instance's absent keys are a chain
-       * proof rather than a spelling, and `this[ key ] = v` inside a method
-       * would otherwise leave every instance's key set unknown.
-       */
-      /**
-       * The keys a named write through a root adds to it.
-       *
-       * `const values = { mode: 1, flip: false }; values.wrap = w` --
-       * an options literal extended after creation. The literal SPELLS two keys and the program
-       * gives it a third, so the spelling is not the key set. `case 'slot'`
-       * already reads those writes; without them in the descriptor the very
-       * slot they write was refused before it could be read -- the descriptor
-       * answering about the LITERAL when it was asked about the OBJECT.
-       *
-       * Only literals are asked. A class instance's absent keys are a chain
-       * proof rather than a spelling, and `this[ key ] = v` inside a method
-       * would otherwise leave every instance's key set unknown.
-       *
-       * This scan is asked about ONE key's writes, or about the computed ones,
-       * and stays here for that reason. Routing it through `written-keys` was
-       * measured and reverted: that query depends on every named write in the
-       * program, so a per-key descriptor question -- asked about most roots in
-       * the program, not just the enumerated ones -- pulled a whole-program
-       * dependency set into each of them and put a large program into GC death
-       * after minutes. A whole-program walk becomes a query only where the consumer
-       * genuinely wants the whole program, which here is enumeration alone.
-       */
-      const writesTo = (root: ObjectRoot, edges: readonly { readonly receiver: Query }[]): boolean =>
-        edges.some((edge) => observe(edge.receiver).has(root))
-      /**
-       * A write under a key this graph cannot name leaves the key set unknown
-       * -- reported as unknown, never as a smaller set. Asked in reverse:
-       * which states hold this root, and is any of them a computed write's
-       * receiver -- one lookup per root instead of observing all of the program's
-       * computed-write receivers per root per re-evaluation. `holdersOf`
-       * subscribes this node to the root's future holders exactly as the
-       * observe edges did, and the receivers are seeded below so each exists.
-       */
-      const unknownKeys = new Map<ObjectRoot, boolean>()
-      const holderStampLists: (readonly [Value, number])[][] = []
-      const hasUnnamedWrite = (root: ObjectRoot): boolean => {
-        const known = unknownKeys.get(root)
-        if (known !== undefined) return known
-        let found = false
-        let count = 0
-        for (const holder of holdersOf(root)) {
-          count++
-          for (const write of computedWriteEdgesByReceiver.get(holder) ?? []) if (keysOf(write.access).length === 0) found = true
+      if (sealing && candidates.size === 0) fail('unresolved-property-key', access)
+      return [...keys]
+    }
+    // A root this lane cannot read refuses the binding, and the literal
+    // roots' entries are still returned. The solver keeps every fact a
+    // transfer ever published, so answering null once such a root arrived
+    // kept whatever entries had been read before it, and how many depended
+    // on the schedule (sakura 55269dd's `for (const m of mats)`, where
+    // `mats` also holds `o.material` itself). `readers` observes the
+    // refused cell without requiring it, so a missing entry there was a
+    // missing reader.
+    const iterationValuesAt = (source: ts.Expression): readonly ts.Expression[] => {
+      const elements: ts.Expression[] = []
+      for (const root of read(value(source))) {
+        if (
+          !ts.isArrayLiteralExpression(root) ||
+          root.elements.some((element) => ts.isSpreadElement(element) || ts.isOmittedExpression(element)) ||
+          deferredIntrinsicProtocolLedgerOf(flow)?.require('Array', source) !== true
+        ) {
+          fail('unmodelled-iteration-source', source)
+          continue
         }
-        for (const stamps of holderStampLists) stamps.push([root, count])
-        unknownKeys.set(root, found)
-        return found
+        // This bounded lane transports the original literal's entries.
+        // Mutating its contents/length needs the full indexed storage plan.
+        for (const use of read(closure(root)))
+          if ((ts.isPropertyAccessExpression(use) || ts.isElementAccessExpression(use)) && writeEdgeByAccess.has(use))
+            fail('unmodelled-iteration-source', use)
+        for (const element of root.elements) if (!ts.isSpreadElement(element) && !ts.isOmittedExpression(element)) elements.push(element)
       }
-      /** Every cell a root has: what it spells, plus what was written into it. */
-      const ownKeys = new Map<Value, readonly string[] | null>()
-      const activeOwnKeys = new Set<Value>()
-      const stampLists: (readonly [ReadonlySet<Value>, number])[][] = []
-      const watched = (dependency: Query): ReadonlySet<Value> => {
-        const held = observe(dependency)
-        for (const stamps of stampLists) stamps.push([held, held.size])
-        return held
+      return elements
+    }
+    /**
+     * Mentions of an exported cell in the modules that import it, or null
+     * when the set of modules that can read it is not enumerable.
+     *
+     * `export const taurus = new TaurusStore()` -- taurus-display's entire
+     * store, and the receiver of every `this.<method>()` in it. An export
+     * was refused outright unless NOTHING imported it, which reads "someone
+     * imports this" as "this escaped". It is not an escape while every
+     * module that can read the name is enumerated: the importers' mentions
+     * are then simply more uses of the same cell. They are also mentions
+     * `referencesToDeclaration` does not carry -- an importing file's
+     * identifier resolves to the import specifier, not to the declaration --
+     * so a caller that widens the predicate must walk these too, or it has
+     * called a cell closed on the strength of uses it never looked at.
+     */
+    const importerMentions = (declaration: ts.Declaration): readonly ts.Expression[] | null =>
+      !isModuleExportedDeclaration(checker, declaration, null) ? [] : inProgramImportReferencesOf(checker, flow, declaration)
+    /** The refusal a cell earns, or null when it is closed -- named, because
+     * "exposed" covered three different facts and each has its own fix. */
+    const bindingClosed = (declaration: ts.VariableDeclaration): string | null => {
+      if (!sourceBindingWritesAreComplete(checker, flow, declaration)) return 'binding-writes-incomplete'
+      if (!isModuleExportedDeclaration(checker, declaration, null)) return null
+      if (exportIsUnimported(checker, flow, declaration)) return null
+      return importerMentions(declaration) !== null ? null : 'export-importers-unenumerable'
+    }
+    const refs = (root: Value, declaration: ts.Declaration): void => {
+      for (const reference of flow.referencesToDeclaration(declaration)) {
+        if (reference === ts.getNameOfDeclaration(declaration) || isTypePositionReference(reference)) continue
+        // Past an unconditional rebinding the cell holds only what a write
+        // after entry stored; a root none of those writes stores is no
+        // longer reachable through it.
+        if (
+          ts.isParameter(declaration) &&
+          readsAfterRebinding(declaration, reference) &&
+          parameterRebindingsOf(declaration).every((write) => write.value !== null && !read(value(write.value)).has(root))
+        )
+          continue
+        add(read(use(root, reference)))
       }
-      const holdersUnchanged = (stamps: readonly (readonly [Value, number])[]): boolean => {
-        for (const [root, count] of stamps) {
-          let now = 0
-          for (const _holder of holdersOf(root)) now++
-          if (now !== count) return false
+      for (const reference of importerMentions(declaration) ?? []) add(read(use(root, reference)))
+    }
+    /**
+     * A binding pattern taken apart over this value: every element reads one
+     * slot and nothing reads the object itself.
+     *
+     * Destructuring is a property READ, and `visitUse` already states that a
+     * property read of a tracked object is not a publication of it. Refusing
+     * the pattern spelling made the two disagree -- `p.app.go()` proved its
+     * receiver and `const { app } = p; app.go()` did not, though the object
+     * never left the program either way. A rest element stays refused: it
+     * builds a FRESH object out of whatever keys nothing else took, and that
+     * object is not modelled here.
+     */
+    const patternReadsSlots = (root: Value, pattern: ts.BindingPattern): void => {
+      if (!isObjectRoot(root)) {
+        fail('non-object-destructured-container', pattern)
+        return
+      }
+      for (const element of pattern.elements) {
+        if (ts.isOmittedExpression(element)) continue
+        const key = bindingElementKey(element)
+        if (element.dotDotDotToken) fail('rest-binding-element', element)
+        else if (key === null) fail('computed-binding-element', element)
+        else if (
+          isSourceCallableObject(root) &&
+          key !== 'name' &&
+          key !== 'length' &&
+          sourceCallableOwnDataWriteOf(checker, flow, root, key, element) === null
+        )
+          fail('unproven-callable-data-read', element)
+        else if (!descriptorOf(root, key)) fail('unmodelled-descriptor', element)
+      }
+    }
+    /**
+     * The complete set of source setters a plain store to `key` executes.
+     *
+     * `class Base { constructor() { this.type = 'Base' } }` with a subclass
+     * declaring `get type` / `set type`: the base constructor's plain store
+     * runs the SUBCLASS's setter. The plan already names every setter such
+     * a store can reach, or says the effects are opaque -- this only has to
+     * put the receiver into each of those bodies, which is what a member
+     * call does with its own frame.
+     */
+    const storeRunsSetters = (root: ObjectRoot, key: string): boolean => {
+      if (!ts.isNewExpression(root)) return false
+      const bodies = settersOf(root, key)
+      if (bodies === null) return false
+      for (const setter of bodies) for (const reference of flow.receiverReferencesToDeclaration(setter)) add(read(use(root, reference)))
+      return true
+    }
+    /**
+     * Every value a setter's parameter receives: the right-hand side of each
+     * store that runs the setter -- a store to its key on a construction of
+     * its class's family. A setter has no call sites, so `callersOf` names
+     * nothing for it and the parameter was an unindexed frame: a class's
+     * `set attachment( current )`. The family is by
+     * heritage; a descendant's own override is over-counted, which only
+     * widens the answer. A bulk `Object.assign` onto one of ours names no
+     * key to compare and refuses.
+     */
+    /**
+     * Every instance a class member can run on: the constructions of its
+     * heritage family, refused when the family is open or when a `new`
+     * naming a family class could not be placed.
+     */
+    // The instances and the opaque constructions naming a family are fixed
+    // facts of the program, but this runs inside every re-evaluation of every
+    // query on a class member: recomputing them was a walk of the construction
+    // index and of every opaque `new` each time. Only `fail` is per-evaluation.
+    const familyInstances = new Map<
+      SourceClass,
+      { readonly instances: readonly ts.NewExpression[]; readonly opaque: readonly ts.NewExpression[] } | null
+    >()
+    const familyInstancesOf = (holder: SourceClass, reason: string): readonly ts.NewExpression[] | null => {
+      let known = familyInstances.get(holder)
+      if (known === undefined) {
+        const family = sourceClassFamilyOf(checker, flow, new Set([holder]))
+        if (family === null) known = null
+        else {
+          const instances = new Set<ts.NewExpression>()
+          for (const owner of family.keys()) for (const instance of constructionsOf(owner)) instances.add(instance)
+          const opaque: ts.NewExpression[] = []
+          for (const call of opaqueConstructionsOf()) {
+            const declarations = checker.getTypeAtLocation(call).getSymbol()?.declarations ?? []
+            if (declarations.some((declaration) => family.has(declaration as SourceClass))) opaque.push(call)
+          }
+          known = { instances: [...instances], opaque }
         }
-        return true
+        familyInstances.set(holder, known)
       }
-      const ownKeysOf = (root: Value): readonly string[] | null => {
-        const known = ownKeys.get(root)
-        if (known !== undefined) return known
-        // A bulk assign whose source's keys come back to this root -- two
-        // records merged into each other -- names no finite set on the way
-        // round; the re-entry is unknown, and only the outer answer is kept.
-        if (activeOwnKeys.has(root)) return null
-        const kept = ownKeysAnswers?.get(root)
-        if (kept !== undefined && kept.stamps.every(([held, size]) => held.size === size) && holdersUnchanged(kept.holderStamps)) {
-          for (const stamps of stampLists) stamps.push(...kept.stamps)
-          for (const stamps of holderStampLists) stamps.push(...kept.holderStamps)
-          ownKeys.set(root, kept.keys)
-          return kept.keys
+      if (known === null) {
+        fail(reason, holder)
+        return null
+      }
+      for (const call of known.opaque) fail('opaque-construction', call)
+      return known.instances
+    }
+    /**
+     * A value a getter returns is used wherever the getter is READ: every
+     * access spelling its key on one of its class family's constructions,
+     * from the instances outward like `setterStores`. A getter has no call
+     * sites, so `callersOf` names nothing for it; a class whose
+     * `get item()` returns `this.items[ 0 ]` has the element used
+     * at every `target.item` in the program. A descendant's override is
+     * over-counted, which only widens.
+     */
+    const getterReturns = (root: Value, getter: ts.GetAccessorDeclaration): void => {
+      const holder = getter.parent
+      if (
+        (!ts.isClassDeclaration(holder) && !ts.isClassExpression(holder)) ||
+        (ts.getCombinedModifierFlags(getter) & ts.ModifierFlags.Static) !== 0
+      ) {
+        fail('unmodelled-getter-owner', getter)
+        return
+      }
+      const key = declarationKey(getter.name)
+      if (key === null) {
+        fail('computed-getter-key', getter)
+        return
+      }
+      const instances = familyInstancesOf(holder, 'getter-family-open')
+      if (instances === null) return
+      for (const instance of instances)
+        for (const fact of read(closure(instance))) {
+          if (!ts.isPropertyAccessExpression(fact) && !ts.isElementAccessExpression(fact)) continue
+          if (writeEdgeByAccess.has(fact) || !keysOf(fact).includes(key)) continue
+          add(read(use(root, fact)))
         }
-        activeOwnKeys.add(root)
-        const stamps: (readonly [ReadonlySet<Value>, number])[] = []
-        const holderStamps: (readonly [Value, number])[] = []
-        stampLists.push(stamps)
-        holderStampLists.push(holderStamps)
-        try {
-          const answer = ownKeysUncached(root)
-          ownKeys.set(root, answer)
-          ;(ownKeysAnswers ??= new Map()).set(root, { keys: answer, stamps, holderStamps })
-          return answer
-        } finally {
-          stampLists.pop()
-          holderStampLists.pop()
-          activeOwnKeys.delete(root)
+    }
+    const setterStores = (setter: ts.SetAccessorDeclaration): void => {
+      const holder = setter.parent
+      if (
+        (!ts.isClassDeclaration(holder) && !ts.isClassExpression(holder)) ||
+        (ts.getCombinedModifierFlags(setter) & ts.ModifierFlags.Static) !== 0
+      ) {
+        fail('unmodelled-setter-owner', setter)
+        return
+      }
+      const key = declarationKey(setter.name)
+      if (key === null) {
+        fail('computed-setter-key', setter)
+        return
+      }
+      const instances = familyInstancesOf(holder, 'setter-family-open')
+      if (instances === null) return
+      // From the instances outward, never from every write inward. The
+      // stores that can run this setter go through one of the family's
+      // constructions, and a construction's closure already lists every
+      // store through it (`case 'slot'` reads the same facts). Placing the
+      // receiver of every write naming the key instead read cells that
+      // had nothing to do with this family -- an event-dispatcher base's
+      // `listeners[ type ] = []` resolves `this._listeners` on every
+      // dispatcher in the program, this family's included, and this family's
+      // computed stores hang on the very `setValues` parameter this
+      // question is part of establishing. Their opacity became this
+      // parameter's.
+      for (const root of instances)
+        for (const stored of read(closure(root))) {
+          if (ts.isCallExpression(stored)) {
+            if (bulkAssignOf(stored) !== null && read(value(stored.arguments[0]!)).has(root)) fail('bulk-assign-runs-setter', stored)
+            continue
+          }
+          if (!ts.isPropertyAccessExpression(stored) && !ts.isElementAccessExpression(stored)) continue
+          const edge = writeEdgeByAccess.get(stored)
+          if (edge === undefined || !keysOf(stored).includes(key)) continue
+          const write = edge.write
+          if (write.value === null || !['property-assignment', 'index-assignment', 'logical-assignment'].includes(write.edge))
+            fail('unmodelled-setter-store', write.site)
+          else add(carry(value(write.value)))
+        }
+    }
+    /**
+     * Every read of an argument through the `arguments` object.
+     *
+     * A scene-graph style `Node.add( object )` that walks its own `arguments`
+     * to add several children at once receives a value at a
+     * PARAMETER and, on some index, at `arguments[ i ]` as well. Refusing
+     * the whole frame for that gave up on the entire node family --
+     * every callback parameter reached through those nodes hung on this one
+     * refusal.
+     *
+     * The index is not resolved and does not need to be: one that names any
+     * position means every argument reaches every read, which is the
+     * superset. `arguments.length` is a number and carries nothing. Any
+     * other mention -- a spread, the object handed on whole -- is a use this
+     * graph cannot follow, and stays a refusal.
+     */
+    const argumentsReads = (body: ts.SignatureDeclaration): readonly ts.Expression[] | null => {
+      const reads: ts.Expression[] = []
+      for (const mention of argumentsUsesAt(body) ?? []) {
+        const parent = mention.parent
+        if (ts.isPropertyAccessExpression(parent) && parent.expression === mention && parent.name.text === 'length') continue
+        if (ts.isElementAccessExpression(parent) && parent.expression === mention) reads.push(parent)
+        else return null
+      }
+      return reads
+    }
+    const forward = (root: Value, site: FlowCallSite, receiver: boolean, position: number): void => {
+      if (ts.isNewExpression(site.call) || site.operands.dispatch.kind === 'super-constructor') {
+        for (const body of read(nodeQuery('construct-targets', site.call))) {
+          if (!ts.isConstructorDeclaration(body) && !isBody(body)) {
+            fail('non-constructor-target', body)
+            continue
+          }
+          const spread = argumentsReads(body)
+          if (spread === null) {
+            fail('arguments-object-frame', body)
+            continue
+          }
+          for (const mention of spread) add(read(use(root, mention)))
+          const parameter = runtimeParametersOf(body)[position]
+          if (parameter?.dotDotDotToken) fail('rest-frame', parameter)
+          else if (parameter && objectEntersPrimitive(root, parameter)) continue
+          else if (parameter && ts.isIdentifier(parameter.name)) refs(root, parameter)
+          else if (parameter) patternReadsSlots(root, parameter.name as ts.BindingPattern)
+        }
+        return
+      }
+      const selected = read(targets(site.call))
+      if (sealing && selected.size === 0) fail('no-source-call-target', site.call)
+      for (const body of selected) {
+        if (!isCallableValue(body)) {
+          fail('non-callable-target', body)
+          continue
+        }
+        if (receiver) {
+          // `arguments` never holds the receiver, so an arguments-using body
+          // says nothing about where `this` goes.
+          if (!ts.isArrowFunction(body)) for (const reference of flow.receiverReferencesToDeclaration(body)) add(read(use(root, reference)))
+        } else {
+          const mentions = argumentsReads(body)
+          if (mentions === null) {
+            fail('arguments-object-frame', body)
+            continue
+          }
+          for (const mention of mentions) add(read(use(root, mention)))
+          const parameter = runtimeParametersOf(body)[position]
+          if (parameter?.dotDotDotToken) fail('rest-frame', parameter)
+          else if (parameter && objectEntersPrimitive(root, parameter)) continue
+          else if (parameter && ts.isIdentifier(parameter.name)) refs(root, parameter)
+          else if (parameter) patternReadsSlots(root, parameter.name as ts.BindingPattern)
         }
       }
-      const ownKeysUncached = (root: Value): readonly string[] | null => {
-        const spelled = literalSpelledKeys(root)
-        if (spelled === null || !isObjectRoot(root)) return spelled
-        if (hasUnnamedWrite(root)) return null
-        const keys = new Set(spelled)
-        for (const stored of watched(closure(root))) {
+    }
+    const visitUse = (root: Value, reference: ts.Expression): void => {
+      if (isTypePositionReference(reference)) return
+      const parent = reference.parent
+      if (!parent) {
+        fail('unindexed-use', reference)
+        return
+      }
+      const positioned = outermostErasureOf(reference)
+      if (positioned !== reference) {
+        if (ts.isExpression(positioned)) add(read(use(root, positioned)))
+        else fail('unindexed-use', positioned)
+        return
+      }
+      if (ts.isVariableDeclaration(parent) || ts.isParameter(parent)) {
+        if (parent.name === reference) return
+        if (parent.initializer !== reference) {
+          fail('binding-pattern', parent)
+          return
+        }
+        if (!ts.isIdentifier(parent.name)) {
+          patternReadsSlots(root, parent.name)
+          return
+        }
+        const exposure = ts.isVariableDeclaration(parent) ? bindingClosed(parent) : null
+        if (exposure !== null) {
+          fail(`exposed-binding:${exposure}`, parent)
+          return
+        }
+        refs(root, parent)
+        return
+      }
+      if (ts.isBinaryExpression(parent)) {
+        if (parent.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+          if (parent.left === reference) return
+          const moduleUses = sourceCommonJsExportUsesOf(flow, parent)
+          if (moduleUses !== null) {
+            if (parent.right !== reference) fail('unmatched-commonjs-export', reference)
+            else for (const alias of moduleUses) add(read(use(root, alias)))
+            return
+          }
+          const left = unwrapNaming(parent.left)
+          if (ts.isIdentifier(left)) {
+            const declaration = flow.targetOf(left)?.declaration
+            if (!declaration || (!ts.isVariableDeclaration(declaration) && !ts.isParameter(declaration))) {
+              fail('external-binding-store', left)
+              return
+            }
+            // `bindingClosed` names the REFUSAL, null when the cell is closed
+            // (its other reader above spells the same test). Read as a boolean
+            // it refused every store into a closed local and admitted every
+            // store into an exposed one -- `entry = makeRecord()` inside a
+            // closed factory was the 'exposed-binding' that kept the cache
+            // `.get()` receiver from ever being proven.
+            const exposure = ts.isVariableDeclaration(declaration) ? bindingClosed(declaration) : null
+            if (exposure !== null) {
+              fail(`exposed-binding:${exposure}`, declaration)
+              return
+            }
+            refs(root, declaration)
+          } else if (ts.isPropertyAccessExpression(left) || ts.isElementAccessExpression(left)) {
+            if (sourceIntrinsicMemberMayBeWrittenOf(checker, flow, left)) {
+              const installed = sourceIntrinsicMemberDataWriteOf(checker, flow, left)
+              if (installed === null || installed.site !== parent || sourceCallableObjectOf(checker, flow, reference) !== installed.body)
+                fail('unproven-intrinsic-member-installation', left)
+              else for (const access of installed.reads) add(read(use(root, access)))
+              add(read(use(root, parent)))
+              return
+            }
+            if (objectLikeRoot(root) && primitiveDeclaredField(left)) return
+            const keys = keysOf(left)
+            const containers = read(value(left.expression))
+            if (sealing && containers.size === 0) fail('unresolved-container', left)
+            const frameMatched = frameMatchedContainers(root, reference, left, read)
+            for (const container of containers) {
+              if (frameMatched !== null && !frameMatched.has(container)) continue
+              // A store on `null`/`undefined` throws before it lands: an
+              // element slot read through a counter carries `undefined` for
+              // the positions never written (`this.items[ i ]` filled in a
+              // loop), and that is no container.
+              if (container === undefinedValue || container.kind === ts.SyntaxKind.NullKeyword || ts.isVoidExpression(container)) continue
+              if (!isObjectRoot(container)) {
+                fail('opaque-container-store', left)
+                continue
+              }
+              for (const key of keys) {
+                if (descriptorOf(container, key)) {
+                  add(read(publication(root, container, key)))
+                  continue
+                }
+                // A store to an accessor key hands the value to the
+                // SETTER's parameter, never to a slot of the container.
+                if (ts.isNewExpression(container) && dataStoreOf(container, key)) {
+                  add(read(publication(root, container, key)))
+                  continue
+                }
+                const setters = ts.isNewExpression(container) ? settersOf(container, key) : null
+                if (setters === null) fail('opaque-container-store', left)
+                else
+                  for (const setter of setters) {
+                    const parameter = setter.parameters[0]
+                    if (!parameter || !ts.isIdentifier(parameter.name)) fail('unmodelled-setter-parameter', setter)
+                    else refs(root, parameter)
+                  }
+              }
+            }
+          } else fail('unmodelled-store', left)
+          add(read(use(root, parent)))
+          return
+        }
+        if (
+          parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
+          parent.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+          parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
+          parent.operatorToken.kind === ts.SyntaxKind.CommaToken
+        ) {
+          add(read(use(root, parent)))
+          return
+        }
+        if (
+          parent.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+          parent.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken
+        )
+          return
+        if (parent.operatorToken.kind === ts.SyntaxKind.InKeyword && parent.right === reference) return
+        // OrdinaryHasInstance only walks the left operand's prototype chain:
+        // it reads no own key and runs no hook on it. A custom @@hasInstance
+        // would receive it, which the ordinary-instance proof rules out.
+        if (
+          parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword &&
+          parent.left === reference &&
+          ordinarySourceClassInstanceTestOf(checker, flow, parent)
+        )
+          return
+        fail('coercing-value-use', parent)
+        return
+      }
+      if (ts.isConditionalExpression(parent)) {
+        if (parent.condition !== reference) add(read(use(root, parent)))
+        return
+      }
+      if (ts.isPropertyAssignment(parent) && parent.initializer === reference) {
+        const key = declarationKey(parent.name)
+        if (key === null || key === '__proto__') fail('computed-publication', parent)
+        else add(read(publication(root, parent.parent, key)))
+        return
+      }
+      if (ts.isSpreadAssignment(parent) && parent.expression === reference && ts.isObjectLiteralExpression(root)) {
+        // CopyDataProperties observes own data slots without retaining the
+        // source owner. Copied identities continue through publication below;
+        // the same complete key/storage queries still reject opaque readers.
+        for (const key of read(nodeQuery('own-keys', root))) {
+          if (!ts.isStringLiteral(key)) fail('unmodelled-own-key-value', root)
+          else read(storedSlot(root, key.text))
+        }
+        facts.add(reference)
+        return
+      }
+      if (ts.isShorthandPropertyAssignment(parent)) {
+        add(read(publication(root, parent.parent, parent.name.text)))
+        return
+      }
+      if (ts.isPropertyDeclaration(parent) && parent.initializer === reference) {
+        const key = declarationKey(parent.name)
+        if (key === null || (ts.getCombinedModifierFlags(parent) & ts.ModifierFlags.Static) !== 0) {
+          fail('static-or-computed-publication', parent)
+          return
+        }
+        for (const construction of constructionsOf(parent)) add(read(publication(root, construction, key)))
+        return
+      }
+      if (ts.isArrayLiteralExpression(parent)) {
+        if (parent.elements.some(ts.isSpreadElement)) fail('spread-publication', parent)
+        else add(read(publication(root, parent, String(parent.elements.indexOf(reference)))))
+        return
+      }
+      if (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) {
+        if (parent.expression !== reference) {
+          // The reference is the access's NAME, not its object: `a.go`
+          // MENTIONS the method `go`, and `flow.referencesToDeclaration`
+          // hands that mention back when the tracked value is the method's
+          // own declaration. What is used is the access's result. Without
+          // this branch every class method's closure proof read its own call
+          // sites as a key coercion, so `this.run()` had no callable slot at
+          // all -- the one place a member name is not a key being coerced.
+          if (ts.isPropertyAccessExpression(parent) && parent.name === reference) {
+            add(read(use(root, parent)))
+            return
+          }
+          fail('coercing-property-key', reference)
+          return
+        }
+        const keys = keysOf(parent)
+        // `new ( /** @type {new (...args: any[]) => this} */ ( this.constructor ) )()`
+        // -- a common JS spelling of the clone idiom wherever a library
+        // JSDoc-casts the read --
+        // sits a ParenthesizedExpression between the access and the `new` that
+        // actually invokes it, purely to anchor the cast comment. Plain
+        // `parent.parent` lands on that paren, not the `new`, so the
+        // `constructor-slot-read` exception below never matched and every
+        // family member's `copy` override the census could not otherwise index
+        // came back an unmodelled frame. `outermostErasureOf` is the same
+        // erasure-aware "which node occupies the syntactic position" walk this
+        // graph already uses for `use`/`visitUse`; for the unparenthesized
+        // spelling it is a no-op (`parent.parent` unchanged).
+        const positioned = outermostErasureOf(parent)
+        const invocation = positioned.parent
+        const callee = ts.isCallExpression(invocation) && invocation.expression === positioned
+        const stored =
+          ts.isBinaryExpression(invocation) && invocation.operatorToken.kind === ts.SyntaxKind.EqualsToken && invocation.left === positioned
+        // `delete holder.field`, `holder.n += 1`, `holder.n++`, `holder.f ??=
+        // g`: the slot is rewritten without a plain `=`. Reading these as
+        // mere mentions of the slot left every one of them invisible to the
+        // slot's own value set -- a deleted field still "held" its
+        // initializer. They are stores; the slot decides what each edge
+        // means, and refuses the ones it cannot model.
+        const mutated =
+          (ts.isDeleteExpression(invocation) && invocation.expression === positioned) ||
+          (ts.isBinaryExpression(invocation) &&
+            invocation.left === positioned &&
+            invocation.operatorToken.kind !== ts.SyntaxKind.EqualsToken &&
+            invocation.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+            invocation.operatorToken.kind <= ts.SyntaxKind.LastAssignment) ||
+          ((ts.isPrefixUnaryExpression(invocation) || ts.isPostfixUnaryExpression(invocation)) &&
+            (invocation.operator === ts.SyntaxKind.PlusPlusToken || invocation.operator === ts.SyntaxKind.MinusMinusToken))
+        if (mutated && !writeEdgeByAccess.has(parent)) {
+          fail('unmodelled-property-write', parent)
+          return
+        }
+        // A store through this root is a key the root gains, and THIS walk is
+        // where the program says so. Asking the write index instead -- "of
+        // every write in the program, which ones reach this root" -- is the
+        // same fact derived a second way, at O(all writes) per re-evaluation
+        // instead of O(uses of the root); on a large program that was the compile.
+        // `enumeratedKeysOf` already requires this closure, so the key set
+        // costs it no dependency it was not already holding.
+        if (stored || mutated) facts.add(parent)
+        /**
+         * Whether this graph can say what reaching `key` through this root
+         * does. A declared cell it can. A key proven absent from the chain
+         * it can -- except in a CALLEE position, where absence names no
+         * callable. And a plain store to a key the family declares as an
+         * accessor it can, because the store runs that accessor's SETTER:
+         * a frame, not an unmodelled descriptor. The getter is never
+         * evaluated -- a store does not read -- so a getter that hands its
+         * receiver out says nothing about this store.
+         */
+        const modelled = (held: ObjectRoot, key: string): boolean => {
+          if (isSourceCallableObject(held)) {
+            if ((key === 'name' || key === 'length') && !stored && !mutated) return true
+            if (stored) return !mutated && sourceCallableDataWriteProtocolOf(checker, flow, key, parent)
+            return !mutated && sourceCallableOwnDataWriteOf(checker, flow, held, key, parent) !== null
+          }
+          if (descriptorOf(held, key)) return true
+          if (callee) return false
+          if (stored && storeRunsSetters(held, key)) return true
+          if (ts.isNewExpression(held)) {
+            if (!stored && !mutated && familyReadOf(held, key) !== null) return true
+            if (stored && dataStoreOf(held, key)) return true
+          }
+          return absentOwnKey(held, key, parent, descriptorOf, hasUnnamedWrite)
+        }
+        // `instance.constructor` READS the class object off the prototype
+        // -- a value this graph does not carry, and one whose escape opens
+        // the family: `unknown( value.constructor )` can construct and
+        // retarget Base from anywhere. Only `new this.constructor()` is a
+        // modelled use of it (`case 'value'` places the construction).
+        if (
+          ts.isNewExpression(root) &&
+          keys.includes('constructor') &&
+          !stored &&
+          !mutated &&
+          !(ts.isNewExpression(invocation) && invocation.expression === positioned)
+        ) {
+          fail('constructor-slot-read', parent)
+          return
+        }
+        if (!isObjectRoot(root) || keys.some((key) => !modelled(root, key))) {
+          fail('unmodelled-descriptor', parent)
+          return
+        }
+        if (callee) {
+          const site = sites.get(invocation)
+          if (!site) fail('unindexed-call', invocation)
+          else forward(root, site, true, -1)
+        }
+        return
+      }
+      if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) {
+        if (parent.expression === reference) {
+          if (reference.kind === ts.SyntaxKind.SuperKeyword && ts.isCallExpression(parent) && ts.isNewExpression(root)) {
+            read(nodeQuery('construct-targets', parent))
+            return
+          }
+          if (!isBody(root)) fail('non-callable-use', reference)
+          else if (ts.isCallExpression(parent)) {
+            // A call through a cell none of the body's names spells -- `const g =
+            // f; g()`, a parameter, an element, a destructured binding -- is a
+            // caller `candidateCallersOf` cannot list. Hand it to `case 'callers'`.
+            const site = sites.get(parent)
+            const name = site ? calleeNameOf(site) : null
+            if (!site || (name !== null && namesOf(root)?.includes(name) === false)) facts.add(parent)
+          }
+          return
+        }
+        if (ts.isCallExpression(parent)) {
+          const query = intrinsicOwnKeyQueryOf(checker, parent.expression)
+          if (
+            query !== null &&
+            parent.arguments.length === 1 &&
+            parent.arguments[0] === reference &&
+            ['keys', 'getOwnPropertyNames', 'getOwnPropertySymbols', 'ownKeys'].includes(query.member)
+          ) {
+            if (deferredIntrinsicProtocolLedgerOf(flow)?.requireMember(query.owner, query.member, parent) !== true)
+              fail('unproven-own-key-query', parent)
+            return
+          }
+          if (
+            parent.arguments.length === 1 &&
+            parent.arguments[0] === reference &&
+            intrinsicJsonStringifyQueryOf(checker, unwrapErasedExpression(parent.expression))
+          ) {
+            // This bounded observation has no replacer or coercing space
+            // argument, and enters no toJSON/getter/recursive object frame.
+            // Actual stored values and all future keys remain solver inputs.
+            const ledger = deferredIntrinsicProtocolLedgerOf(flow)
+            const absence = sourceObjectPrototypeAbsenceOf(checker, ['toJSON'], parent)
+            if (
+              !isObjectRoot(root) ||
+              (!ts.isObjectLiteralExpression(root) && !isFreshOrdinaryObject(root)) ||
+              (ts.isObjectLiteralExpression(root) &&
+                root.properties.some((one) => !ts.isPropertyAssignment(one) && !ts.isShorthandPropertyAssignment(one))) ||
+              !ledger ||
+              absence === null ||
+              !ledger.requireMember('JSON', 'stringify', parent) ||
+              !ledger.include([absence])
+            ) {
+              fail('unproven-json-observation', parent)
+              return
+            }
+            for (const key of read(nodeQuery('own-keys', root))) {
+              if (!ts.isStringLiteral(key) || key.text === 'toJSON') {
+                fail('json-hook-observation', parent)
+                continue
+              }
+              const entries = read(storedSlot(root, key.text))
+              if (sealing && entries.size === 0) fail('unresolved-json-slot', parent)
+              if ([...entries].some((entry) => !primitiveStoredValue(entry))) fail('json-object-observation', parent)
+            }
+            return
+          }
+          const installation = sourceCallableReflectSetOf(checker, parent)
+          if (installation && (installation.target === reference || installation.value === reference)) {
+            const owner = read(value(installation.target))
+            if (sealing && owner.size === 0) fail('unresolved-callable-data-owner', parent)
+            for (const held of owner) {
+              if (
+                !isSourceCallableObject(held) ||
+                !sourceCallableDataWriteProtocolOf(checker, flow, installation.key, parent) ||
+                deferredIntrinsicProtocolLedgerOf(flow)?.requireMember('Reflect', 'set', parent) !== true
+              ) {
+                fail('unproven-callable-data-write', parent)
+                continue
+              }
+              if (installation.target === reference) facts.add(parent)
+              else add(read(publication(root, held, installation.key)))
+            }
+            return
+          }
+        }
+        if (ts.isCallExpression(parent) && definitionPlans.has(parent)) {
+          const plan = definitionOf(parent)
+          if (plan === null) fail('intrinsic-definition-unproven', parent)
+          else if (parent.arguments[0] === reference) {
+            // The target gains the key (`case 'slot'` reads the value
+            // through this fact) and is handed to nobody but, when the
+            // intrinsic returns it, whoever reads the call.
+            facts.add(parent)
+            if (plan.returnsTarget && !ts.isExpressionStatement(parent.parent)) add(read(use(root, parent)))
+          } else if (parent.arguments[2] === reference) {
+            // The descriptor literal: its `value` is copied into the target
+            // (`case 'publication'` forwards it); the literal goes nowhere.
+            facts.add(parent)
+          } else if (parent.arguments[1] === reference) fail('coercing-property-key', reference)
+          else fail('unmodelled-invocation-frame', parent)
+          return
+        }
+        if (ts.isCallExpression(parent)) {
+          const bulk = bulkAssignOf(parent)
+          if (bulk !== null && parent.arguments.includes(reference)) {
+            // The call evaluates to its target, so a target root is used
+            // wherever the call's result is; a source's own slot values are
+            // copied into it (`case 'slot'` reads them through this fact),
+            // and a source literal itself goes nowhere. A source that is
+            // not a literal could run getters, which this does not enter.
+            facts.add(parent)
+            if (bulk.target === reference) add(read(use(root, parent)))
+            else if (!ts.isObjectLiteralExpression(root)) fail('bulk-assign-source-unmodelled', reference)
+            return
+          }
+        }
+        const site = sites.get(parent)
+        const operands = ts.isCallExpression(parent) ? (candidateOrdinaryOwnCallableOperandsOf(parent) ?? site?.operands) : site?.operands
+        // `f.call( receiver, ... )` writes the receiver in an ARGUMENT
+        // position of the syntax and reads it in the RECEIVER position of
+        // the frame. The operands already say which is which -- reading the
+        // syntax instead made every value handed to `.call` an argument no
+        // parameter had a slot for.
+        if (site && operands?.explicitThis && operands.receiver === reference) {
+          forward(root, site, true, -1)
+          return
+        }
+        // A value stored into a closed native Map (`store.set( key, value )`)
+        // is not handed to unknown code: the map's only way out is its
+        // `.get()` reads, and the value continues at each of them exactly
+        // as it would at a parameter. `case 'completion'` above reads the
+        // same stores back from the `.get()` side.
+        if (ts.isCallExpression(parent)) {
+          const continuations = collectionValueContinuationsOf(checker, flow, parent, reference, nativeProtocolClosed)
+          if (continuations !== null) {
+            for (const continued of continuations) add(read(use(root, continued)))
+            return
+          }
+        }
+        const position = operands?.args.indexOf(reference) ?? -1
+        if (!site || position < 0 || operands?.args.some(ts.isSpreadElement)) fail('unmodelled-invocation-frame', parent)
+        else forward(root, site, false, position)
+        return
+      }
+      if (ts.isReturnStatement(parent) || (ts.isArrowFunction(parent) && parent.body === reference)) {
+        // An expression-bodied arrow returns its body through the same
+        // synchronous completion and complete caller inventory as `return`.
+        const body = ts.isArrowFunction(parent) ? parent : ts.findAncestor(parent, ts.isFunctionLike)
+        if (body && ts.isGetAccessorDeclaration(body)) {
+          getterReturns(root, body)
+          return
+        }
+        if (!body || !isBody(body) || callableCompletionSummaryOf(flow, body)?.execution !== 'sync') {
+          fail('deferred-completion', parent)
+          return
+        }
+        read(closure(body))
+        // `return this` hands back the frame's own receiver, so the tracked value
+        // comes out only where it went in. Continuing it at every caller made a
+        // chainable method (`v.set( ... ).add( ... )`, 43 of them in three's
+        // Vector3) spread each receiver to every chained result in the program.
+        // The frame receiver is `read`: a refused frame refuses this use rather
+        // than dropping a continuation.
+        const returnsReceiver = !ts.isArrowFunction(body) && unwrapErasedExpression(reference).kind === ts.SyntaxKind.ThisKeyword
+        for (const call of read(callersOf(body)))
+          if (ts.isCallExpression(call) && (!returnsReceiver || read(frameQuery('frame-receiver', call, body)).has(root)))
+            add(read(use(root, call)))
+        return
+      }
+      // Enumerating an object reads its KEY SET and nothing else: no slot is
+      // read, nothing escapes, and the object is not even coerced. What the
+      // bound key then does is a question asked where the head is USED, not
+      // here -- and without this branch the enumerated object was opaque, so
+      // the key set could never be proven closed.
+      if (ts.isForInStatement(parent) && parent.expression === reference) return
+      if (ts.isForOfStatement(parent) && parent.expression === reference && ts.isArrayLiteralExpression(root)) {
+        if (parent.awaitModifier || deferredIntrinsicProtocolLedgerOf(flow)?.require('Array', parent) !== true)
+          fail('unproven-array-iteration', parent)
+        return
+      }
+      if (
+        ts.isExpressionStatement(parent) ||
+        ts.isTypeOfExpression(parent) ||
+        ts.isVoidExpression(parent) ||
+        (ts.isPrefixUnaryExpression(parent) && parent.operator === ts.SyntaxKind.ExclamationToken) ||
+        (ts.isIfStatement(parent) && parent.expression === reference)
+      )
+        return
+      fail('opaque-value-use', reference)
+    }
+    /** A parameter's values: every frame's argument and every rebinding of
+     * the cell, less `excluded` -- a rebinding the read asking cannot see. */
+    const parameterValues = (parameter: ts.ParameterDeclaration, excluded: ts.Node | null): void => {
+      const owner = parameter.parent
+      if (ts.isSetAccessorDeclaration(owner)) {
+        setterStores(owner)
+        // The enumeration is exhaustive -- every store through every
+        // instance -- so a setter nothing stores through has an EMPTY
+        // parameter, witnessed here, not one pending some origin.
+        seeded = true
+        return
+      }
+      if (!isBody(owner) && !ts.isConstructorDeclaration(owner)) {
+        fail('unindexed-parameter-frame')
+        return
+      }
+      // A binding pattern names no cell of its own, but the parameter DOES
+      // hold the whole argument -- that value is what each binding element
+      // then reads a slot of. Refusing here made the pattern's container
+      // unknowable, so every receiver destructured out of a parameter was
+      // opaque however completely the program built the object.
+      if (parameter.dotDotDotToken) {
+        fail('unmodelled-parameter-frame')
+        return
+      }
+      if (isBody(owner)) read(closure(owner))
+      const primitive = primitiveDeclaredParameter(parameter)
+      const addArguments = (held: ReadonlySet<Value>): void => {
+        for (const candidate of held) if (!primitive || !objectLikeRoot(candidate)) facts.add(candidate)
+      }
+      for (const site of constructionSitesTargeting(owner)) addArguments(carry(frameQuery('frame-argument', site.call, owner, parameter)))
+      for (const call of read(callersOf(owner)))
+        if (ts.isCallExpression(call) || ts.isNewExpression(call)) addArguments(carry(frameQuery('frame-argument', call, owner, parameter)))
+      for (const write of flow.writesToDeclaration(parameter)) {
+        if (write.site === excluded) continue
+        if (write.edge === 'call-argument' || write.edge === 'super-argument' || write.edge === 'default-parameter') continue
+        // A member or element write goes THROUGH the cell into the object
+        // it holds; it never rebinds the cell, so it is no evidence about
+        // what this parameter's value set is. Whether the object can still
+        // be described afterwards is that object's own closure to answer,
+        // and refusing here answered it in the wrong place -- turning
+        // `values[ k ] = 1` into "this parameter holds nothing".
+        if (write.slot !== 'whole') continue
+        if (!['identifier-assignment', 'logical-assignment'].includes(write.edge) || !write.value) {
+          fail('unmodelled-parameter-write', write.site)
+          continue
+        }
+        add(carry(value(write.value)))
+      }
+    }
+    seeded = false
+    switch (query.kind) {
+      case 'value': {
+        const expression = query.node
+        const moduleExport = sourceCommonJsExportValueOf(flow, expression)
+        if (moduleExport !== null) {
+          add(carry(value(moduleExport)))
+          break
+        }
+        if (isObjectRoot(expression)) {
+          if (isFreshOrdinaryObject(expression)) {
+            if (deferredIntrinsicProtocolLedgerOf(flow)?.requireMember('Object', 'prototype', expression) !== true)
+              fail('unproven-ordinary-object-allocation', expression)
+            facts.add(expression)
+            seeded = true
+          } else if (ts.isNewExpression(expression) && construction(expression) === null) {
+            // `new State()` on a plain function that returns an object
+            // from every completion and never mentions `this` yields THAT
+            // completion, never the fresh allocation (`new` discards it):
+            // the value is the call's completion, solved through the same
+            // frame a call would be. Anything else under `new` that is not
+            // a source construction stays opaque.
+            if (constructorFunctionCalleeOf(expression) !== null) add(carry(nodeQuery('completion', expression)))
+            else fail('opaque-construction')
+          } else {
+            facts.add(expression)
+            seeded = true
+            // `new this.constructor()` is a construction of one of the owned
+            // family `thisConstructorFamilyOf` named (its construction fact's
+            // alternatives) only while `this` itself holds nothing but such
+            // constructions. A method invoked with an explicit foreign
+            // receiver would make the fresh object a foreign instance, and
+            // that is decided here, by what `this` holds, not by the
+            // static fact.
+            if (ts.isNewExpression(expression)) {
+              const receiver = thisConstructorReceiverOf(expression)
+              if (receiver !== null) {
+                const alternatives = construction(expression)?.alternatives ?? []
+                for (const root of read(value(receiver))) {
+                  if (!ts.isNewExpression(root) || !construction(root)?.alternatives.every((owner) => alternatives.includes(owner))) {
+                    fail('opaque-construction', root)
+                    continue
+                  }
+                  // The read is of the INSTANCE's `constructor`, which an
+                  // own store or definition on that instance replaces:
+                  // `value.constructor = function () {}` makes the fresh
+                  // object whatever that function builds.
+                  for (const stored of read(closure(root))) {
+                    if (ts.isCallExpression(stored) && definitionPlans.has(stored)) {
+                      const plan = definitionOf(stored)
+                      if (plan === null || (plan.keys.includes('constructor') && read(value(stored.arguments[0]!)).has(root)))
+                        fail('constructor-slot-written', stored)
+                      continue
+                    }
+                    if (!ts.isPropertyAccessExpression(stored) && !ts.isElementAccessExpression(stored)) continue
+                    if (writeEdgeByAccess.has(stored) && keysOf(stored).includes('constructor')) fail('constructor-slot-written', stored)
+                  }
+                }
+              }
+            }
+          }
+        } else if (isBody(expression)) {
+          facts.add(expression)
+          seeded = true
+        } else if (ts.isIdentifier(expression)) {
+          const target = flow.targetOf(expression)
+          const declaration = aliasedDeclarationOf(target?.symbol ?? undefined) ?? target?.declaration
+          if (declaration && isBody(declaration) && flow.callableBodyIsIndexed(declaration)) {
+            facts.add(declaration)
+            seeded = true
+            if (!sourceGlobalCallableBindingIsClosed(checker, flow, declaration)) fail('global-object-callable', declaration)
+            for (const write of flow.writesToDeclaration(declaration)) {
+              if (write.slot !== 'whole' || write.edge === 'return' || write.edge === 'yield') continue
+              if (write.value && ['identifier-assignment', 'logical-assignment'].includes(write.edge)) add(carry(value(write.value)))
+              else fail('unmodelled-callable-binding-write', write.site)
+            }
+          } else if (declaration && ts.isVariableDeclaration(declaration)) {
+            const incoming = sourceBindingValuesOf(checker, flow, declaration, iterationValuesAt)
+            if (incoming === null) fail('unaccounted-binding-write', declaration)
+            else for (const entry of incoming) add(carry(value(entry)))
+            if (incoming !== null && bindingReadMayPrecedeFirstWrite(declaration, expression)) {
+              facts.add(undefinedValue)
+              seeded = true
+            }
+          } else if (declaration && ts.isParameter(declaration)) {
+            // `options = Object.assign({ ... }, options)`: the read in the
+            // rebinding's own right side runs before the rebinding, and once
+            // per cell -- outside a loop of the parameter's own body, and
+            // not deferred into a nested function -- so it never sees the
+            // value it is about to store. Joining it anyway made the copy's
+            // source include its own target.
+            const rebinding = rebindingAfterRead(declaration, expression)
+            if (rebinding === null) add(carry(nodeQuery('parameter', declaration)))
+            else parameterValues(declaration, rebinding)
+          } else if (declaration && ts.isBindingElement(declaration)) add(carry(nodeQuery('binding-element', declaration)))
+          else if (expression.text === 'undefined' && (!declaration || declaration.getSourceFile().hasNoDefaultLib)) {
+            facts.add(undefinedValue)
+            seeded = true
+          } else fail('opaque-binding')
+        } else if (expression.kind === ts.SyntaxKind.ThisKeyword || expression.kind === ts.SyntaxKind.SuperKeyword) {
+          const owner = flow.receiverOwnerOf(expression)
+          if (!owner) fail('unindexed-receiver')
+          else add(carry(nodeQuery('receiver', owner)))
+        } else if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
+          if (sourceIntrinsicMemberMayBeWrittenOf(checker, flow, expression)) {
+            const installed = sourceIntrinsicMemberDataWriteOf(checker, flow, expression)
+            if (installed === null) fail('unproven-intrinsic-member-read', expression)
+            else {
+              add(carry(value(installed.value)))
+              read(closure(installed.body))
+            }
+            break
+          }
+          const keys = keysOf(expression)
+          const roots = read(value(expression.expression))
+          for (const root of roots) {
+            // An element read off an array literal is answered by the
+            // literal only while `Array.prototype` is the original: the
+            // obligation goes to the ledger, as the legacy element authority
+            // (`nativeArrayProtocolPlanOf`) registered it, and refuses with
+            // nothing to carry it.
+            if (ts.isArrayLiteralExpression(root) && deferredIntrinsicProtocolLedgerOf(flow)?.require('Array', expression) !== true) {
+              fail('undeferrable-array-protocol', expression)
+              continue
+            }
+            if (isObjectRoot(root))
+              for (const key of keys) {
+                if (
+                  isSourceCallableObject(root) &&
+                  key !== 'name' &&
+                  key !== 'length' &&
+                  sourceCallableOwnDataWriteOf(checker, flow, root, key, expression) === null
+                )
+                  fail('unproven-callable-data-read', expression)
+                else add(carry(slot(root, key)))
+              }
+            else if (!isNullish(root)) fail('non-object-receiver')
+          }
+          // Every receiver nullish: the read throws, so the cell provably
+          // holds nothing. Empty is the answer, witnessed here, not a
+          // value still waiting on some origin.
+          if (roots.size > 0 && [...roots].every(isNullish)) seeded = true
+        } else if (ts.isCallExpression(expression)) add(carry(nodeQuery('completion', expression)))
+        else if (ts.isConditionalExpression(expression)) {
+          add(carry(value(expression.whenTrue)))
+          add(carry(value(expression.whenFalse)))
+        } else if (
+          ts.isBinaryExpression(expression) &&
+          [ts.SyntaxKind.EqualsToken, ts.SyntaxKind.CommaToken].includes(expression.operatorToken.kind)
+        )
+          add(carry(value(expression.right)))
+        else if (
+          ts.isBinaryExpression(expression) &&
+          [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.QuestionQuestionToken].includes(
+            expression.operatorToken.kind
+          )
+        ) {
+          add(carry(value(expression.left)))
+          add(carry(value(expression.right)))
+        } else if (
+          ts.isLiteralExpression(expression) ||
+          expression.kind === ts.SyntaxKind.NullKeyword ||
+          expression.kind === ts.SyntaxKind.TrueKeyword ||
+          expression.kind === ts.SyntaxKind.FalseKeyword ||
+          ts.isTypeOfExpression(expression) ||
+          ts.isVoidExpression(expression) ||
+          ts.isBinaryExpression(expression)
+        ) {
+          facts.add(expression)
+          seeded = true
+        } else fail('unmodelled-value-origin')
+        break
+      }
+      case 'slot':
+      case 'stored-slot': {
+        const root = query.node
+        const key = query.key
+        const getterRead =
+          ts.isNewExpression(root) && !isFreshOrdinaryObject(root) && !descriptorOf(root, key) ? familyReadOf(root, key) : null
+        if (!descriptorOf(root, key) && getterRead === null) {
+          // A literal that spells every key it has and holds no key this
+          // graph cannot name reads `undefined` for the ones it lacks:
+          // `options.attachment` on the `{}` a parameter defaults to.
+          if (
+            (ts.isObjectLiteralExpression(root) || isFreshOrdinaryObject(root)) &&
+            absentOwnKey(root, key, root, descriptorOf, hasUnnamedWrite)
+          ) {
+            read(closure(root))
+            if (query.kind === 'slot') {
+              facts.add(undefinedValue)
+              seeded = true
+            }
+          } else {
+            fail('unmodelled-descriptor')
+            break
+          }
+        }
+        read(closure(root))
+        if (isSourceCallableObject(root)) {
+          if (key === 'name' || key === 'length') {
+            const parameters = runtimeParametersOf(root)
+            const firstDefault = parameters.findIndex(
+              (parameter) => parameter.initializer !== undefined || parameter.dotDotDotToken !== undefined
+            )
+            const named =
+              (ts.isArrowFunction(root) ? undefined : root.name) ?? (ts.isVariableDeclaration(root.parent) ? root.parent.name : undefined)
+            let ownData = callableOwnData.get(root)
+            if (!ownData) callableOwnData.set(root, (ownData = new Map()))
+            let literal = ownData.get(key)
+            if (!literal)
+              ownData.set(
+                key,
+                (literal =
+                  key === 'name'
+                    ? ts.factory.createStringLiteral(named && ts.isIdentifier(named) ? named.text : '')
+                    : ts.factory.createNumericLiteral(firstDefault < 0 ? parameters.length : firstDefault))
+              )
+            facts.add(literal)
+            seeded = true
+          } else {
+            const installed = sourceCallableOwnDataWriteOf(checker, flow, root, key)
+            if (installed === null) fail('unproven-callable-data-slot', root)
+            else add(carry(value(installed.value)))
+          }
+        } else if (ts.isObjectLiteralExpression(root)) {
+          for (const entry of ownEntries(root, key) ?? []) {
+            if (ts.isPropertyAssignment(entry)) add(carry(value(entry.initializer)))
+            else if (ts.isShorthandPropertyAssignment(entry)) add(carry(value(entry.name)))
+            else if (ts.isMethodDeclaration(entry)) {
+              facts.add(entry)
+              seeded = true
+            }
+          }
+        } else if (ts.isArrayLiteralExpression(root)) {
+          if (key === ELEMENT_KEY) {
+            // Every position at once; an index never written reads undefined.
+            for (const element of root.elements) if (!ts.isOmittedExpression(element)) add(carry(value(element)))
+            facts.add(undefinedValue)
+            seeded = true
+          } else if (key === 'length') {
+            let length = arrayLengths.get(root)
+            if (!length) arrayLengths.set(root, (length = ts.factory.createNumericLiteral(root.elements.length)))
+            facts.add(length)
+            seeded = true
+          } else {
+            const element = root.elements[Number(key)]
+            if (element !== undefined && !ts.isOmittedExpression(element)) add(carry(value(element)))
+            else {
+              facts.add(undefinedValue)
+              seeded = true
+            }
+          }
+        } else if (ts.isNewExpression(root) && !isFreshOrdinaryObject(root)) {
+          for (const declaration of [...(classMembers(root, key) ?? []), ...(getterRead?.carriers ?? [])]) {
+            if (ts.isMethodDeclaration(declaration)) {
+              facts.add(declaration)
+              seeded = true
+            }
+            if (ts.isPropertyDeclaration(declaration)) {
+              if (declaration.initializer) add(carry(value(declaration.initializer)))
+              else {
+                facts.add(undefinedValue)
+                seeded = true
+              }
+            }
+            if (ts.isParameter(declaration)) add(carry(nodeQuery('parameter', declaration)))
+          }
+          if (getterRead !== null) {
+            // The getter runs with this construction as its receiver, and
+            // the read yields what the getter's completions yield.
+            for (const getter of getterRead.getters) {
+              for (const reference of flow.receiverReferencesToDeclaration(getter)) add(read(use(root, reference)))
+              const summary = callableCompletionSummaryOf(flow, getter)
+              if (summary === null || summary.execution !== 'sync') fail('unmodelled-getter-completion', getter)
+              else {
+                for (const completion of summary.values) add(carry(value(completion)))
+                if (summary.mayCompleteUndefined) {
+                  facts.add(undefinedValue)
+                  seeded = true
+                }
+              }
+            }
+            if (getterRead.absent) {
+              facts.add(undefinedValue)
+              seeded = true
+            }
+          }
+        }
+        // Only the writes that could name THIS key: the ones that spell it,
+        // and the ones that spell no key at all. Walking every write in the
+        // program here cost O(all writes) per (root, key) -- fine while
+        // computed slots were rare, and quadratic the moment a `for-in` head
+        // started naming a key set, which is what stopped a large class
+        // from finishing.
+        // The stores that go through this root are the root's own closure's
+        // facts -- `visitUse` publishes each one as it walks -- and this
+        // transfer already requires that closure above. Asking the write
+        // index instead meant subscribing to every write naming this key
+        // PLUS every computed write in the program, per slot, permanently:
+        // hundreds of edges on each of a large program's tens of thousands of
+        // slot states, and by far the largest contributor to its
+        // multi-million-edge graph. Same answer, no
+        // dependency this node was not already holding.
+        for (const stored of read(closure(root))) {
+          if (isSourceCallableObject(root) && ts.isCallExpression(stored)) {
+            const installation = sourceCallableReflectSetOf(checker, stored)
+            if (installation && installation.key === key && read(value(installation.target)).has(root))
+              add(carry(value(installation.value)))
+            continue
+          }
           if (ts.isCallExpression(stored) && definitionPlans.has(stored)) {
-            if (watched(value(stored.arguments[0]!)).has(root)) for (const key of definitionPlans.get(stored)!.keys) keys.add(key)
+            const plan = definitionOf(stored)
+            if (plan === null || !plan.keys.includes(key) || !read(value(stored.arguments[0]!)).has(root)) continue
+            if (plan.values.length === 0) {
+              facts.add(undefinedValue)
+              seeded = true
+            }
+            for (const defined of plan.values) add(carry(value(defined)))
             continue
           }
           if (ts.isCallExpression(stored)) {
-            // A bulk assign onto this root gives it every key its sources have.
+            // `Object.assign( root, ...sources )`: each source's own value
+            // under this key lands in the root. Only a literal whose keys
+            // are all spelled says what it holds; `null`/`undefined`
+            // sources are skipped by the intrinsic itself.
             const bulk = bulkAssignOf(stored)
-            if (bulk === null || !watched(value(bulk.target)).has(root)) continue
+            if (bulk === null || !read(value(bulk.target)).has(root)) continue
             for (const source of bulk.sources)
-              for (const held of watched(value(source))) {
+              for (const held of read(value(source))) {
                 if (held === undefinedValue || held.kind === ts.SyntaxKind.NullKeyword || ts.isVoidExpression(held)) continue
-                const sourceKeys = ownKeysOf(held)
-                if (sourceKeys === null) return null
-                for (const written of sourceKeys) keys.add(written)
+                if (!ts.isObjectLiteralExpression(held)) fail('bulk-assign-source-unmodelled', source)
+                else if (literalSpelledKeys(held) === null || hasUnnamedWrite(held)) fail('bulk-assign-source-keys-open', source)
+                else if (ownKeysOf(held)?.includes(key)) add(carry(storedSlot(held, key)))
               }
             continue
           }
           if (!ts.isPropertyAccessExpression(stored) && !ts.isElementAccessExpression(stored)) continue
-          for (const written of keysOf(stored)) keys.add(written)
-        }
-        return [...keys]
-      }
-      const descriptorOf = (root: ObjectRoot, key: string): boolean =>
-        descriptor(root, key) ||
-        (isSourceCallableObject(root) && sourceCallableOwnDataWriteOf(checker, flow, root, key) !== null) ||
-        ((ts.isObjectLiteralExpression(root) || isFreshOrdinaryObject(root)) && writesTo(root, namedWriteReceivers.get(key) ?? [])) ||
-        ((ts.isObjectLiteralExpression(root) || isFreshOrdinaryObject(root)) &&
-          [...holdersOf(root)].some((holder) =>
-            (computedWriteEdgesByReceiver.get(holder) ?? []).some((edge) => keysOf(edge.access).includes(key))
-          )) ||
-        writesTo(root, definitionReceivers.get(key) ?? [])
-
-      /**
-       * Every element key of the arrays an access could be reaching.
-       *
-       * `this.items[ i ]` -- every loop over a field array. The index is a counter no value bounds, so asking what
-       * `i` HOLDS correctly answers nothing; but the access still names some
-       * element, and an array literal spells all of them. Their union is a
-       * true superset where a single key is not available. `length` is not an
-       * element and is not in it, and nothing is inferred from list order --
-       * the keys are the positions the literal actually has.
-       *
-       * The container is read WITHOUT requiring it: the caller requires it
-       * anyway, and a bounded index must stay exact rather than widening to
-       * the whole array, so this answers only where no key is available.
-       */
-      const numericIndex = (index: ts.Expression): boolean => {
-        const numeric = (type: ts.Type): boolean =>
-          type.isUnion() ? type.types.every(numeric) : (type.flags & ts.TypeFlags.NumberLike) !== 0 && !type.isNumberLiteral()
-        return numeric(checker.getTypeAtLocation(index))
-      }
-      const arrayElementKeys = (access: ts.ElementAccessExpression): readonly string[] | null => {
-        const roots = observe(value(access.expression))
-        if (roots.size === 0) return null
-        for (const root of roots) if (!ts.isArrayLiteralExpression(root) || root.elements.some(ts.isSpreadElement)) return null
-        const bounded = observe(value(access.argumentExpression))
-        if (bounded.size > 0 && [...bounded].every((candidate) => ts.isStringLiteralLike(candidate) || ts.isNumericLiteral(candidate)))
-          return null
-        // `bounded` empty is ambiguous: on the FIRST transfer of any node it
-        // means the index's own state was only just created and has not been
-        // transferred yet, not that no bound exists -- `enumeratedKeysOf` and
-        // `keysOf`'s own `unresolved-property-key` meet the identical shape
-        // and both defer the empty-vs-opaque call to `sealing` for that
-        // reason. Widening here before the fixpoint published a PERMANENT
-        // fact per element (`case 'value'` -> `carry(slot(root, key))`) that
-        // the index's later, exact resolution to a single literal could never
-        // retract: `arr[k]` read every element forever because pass one saw
-        // `k` before its own value had transferred. Defer instead of guessing
-        // -- returning null falls through to `keysOf`'s own index read, which
-        // already requires the argument and applies the same `sealing` gate.
-        if (!sealing && bounded.size === 0) return null
-        return [ELEMENT_KEY]
-      }
-      const keysOf = (access: Access): readonly string[] => {
-        const direct = accessKey(access)
-        if (direct !== null) return [direct]
-        if (!ts.isElementAccessExpression(access)) return []
-        const enumerated = enumerationHeadOf(access.argumentExpression)
-        if (enumerated !== null) return enumeratedKeysOf(access, enumerated, read, fail, sealing, ownKeysOf)
-        const keyReference = unwrapErasedExpression(access.argumentExpression)
-        const keyDeclaration = ts.isIdentifier(keyReference) ? flow.targetOf(keyReference)?.declaration : undefined
-        if (keyDeclaration && ts.isVariableDeclaration(keyDeclaration)) {
-          const writes = flow.writesToDeclaration(keyDeclaration).filter((write) => write.slot === 'whole')
-          if (
-            writes.length > 0 &&
-            writes.every((write) => write.edge === 'iteration-binding' && write.iterationOrigin?.mode === 'values')
-          ) {
-            const keys = new Set<string>()
-            let complete = true
-            for (const write of writes) {
-              const source = write.iterationOrigin?.source
-              const call = source && unwrapErasedExpression(source)
-              const query = call && ts.isCallExpression(call) ? intrinsicOwnKeyQueryOf(checker, call.expression) : null
-              if (
-                !call ||
-                !ts.isCallExpression(call) ||
-                write.iterationOrigin?.asynchronous ||
-                call.arguments.length !== 1 ||
-                query?.owner !== 'Object' ||
-                !['keys', 'getOwnPropertyNames'].includes(query.member) ||
-                deferredIntrinsicProtocolLedgerOf(flow)?.requireMember(query.owner, query.member, call) !== true
-              ) {
-                complete = false
-                break
-              }
-              const roots = read(value(call.arguments[0]!))
-              if (sealing && roots.size === 0) fail('unresolved-key-enumeration-owner', call)
-              for (const root of roots) {
-                if (!isObjectRoot(root)) {
-                  fail('unmodelled-key-enumeration-owner', call)
-                  continue
-                }
-                for (const key of read(nodeQuery('own-keys', root))) {
-                  if (ts.isStringLiteral(key)) keys.add(key.text)
-                  else fail('unmodelled-own-key-value', call)
-                }
-              }
-            }
-            if (complete) return [...keys]
-          }
-        }
-        // A counter names a POSITION, never a key: `this.items[ i ]` with
-        // a `let i` loop counter. The checker calls it `number`, and
-        // asking what the counter holds only ever refused (`i++` is no value
-        // this graph states) and made the access opaque; the element slot is
-        // the answer, and it is a superset whatever the counter holds.
-        if (numericIndex(access.argumentExpression)) return [ELEMENT_KEY]
-        const elements = noArrayKeys ? null : arrayElementKeys(access)
-        if (elements !== null) return elements
-        const keys = new Set<string>()
-        const keyQuery = value(access.argumentExpression)
-        watched(keyQuery)
-        const candidates = read(keyQuery)
-        for (const candidate of candidates) {
-          if (ts.isStringLiteralLike(candidate) || ts.isNumericLiteral(candidate)) keys.add(candidate.text)
-          else fail('coercing-or-unbounded-property-key', access)
-        }
-        if (sealing && candidates.size === 0) fail('unresolved-property-key', access)
-        return [...keys]
-      }
-      // A root this lane cannot read refuses the binding, and the literal
-      // roots' entries are still returned. The solver keeps every fact a
-      // transfer ever published, so answering null once such a root arrived
-      // kept whatever entries had been read before it, and how many depended
-      // on the schedule (sakura 55269dd's `for (const m of mats)`, where
-      // `mats` also holds `o.material` itself). `readers` observes the
-      // refused cell without requiring it, so a missing entry there was a
-      // missing reader.
-      const iterationValuesAt = (source: ts.Expression): readonly ts.Expression[] => {
-        const elements: ts.Expression[] = []
-        for (const root of read(value(source))) {
-          if (
-            !ts.isArrayLiteralExpression(root) ||
-            root.elements.some((element) => ts.isSpreadElement(element) || ts.isOmittedExpression(element)) ||
-            deferredIntrinsicProtocolLedgerOf(flow)?.require('Array', source) !== true
-          ) {
-            fail('unmodelled-iteration-source', source)
-            continue
-          }
-          // This bounded lane transports the original literal's entries.
-          // Mutating its contents/length needs the full indexed storage plan.
-          for (const use of read(closure(root)))
-            if ((ts.isPropertyAccessExpression(use) || ts.isElementAccessExpression(use)) && writeEdgeByAccess.has(use))
-              fail('unmodelled-iteration-source', use)
-          for (const element of root.elements) if (!ts.isSpreadElement(element) && !ts.isOmittedExpression(element)) elements.push(element)
-        }
-        return elements
-      }
-      /**
-       * Mentions of an exported cell in the modules that import it, or null
-       * when the set of modules that can read it is not enumerable.
-       *
-       * `export const taurus = new TaurusStore()` -- taurus-display's entire
-       * store, and the receiver of every `this.<method>()` in it. An export
-       * was refused outright unless NOTHING imported it, which reads "someone
-       * imports this" as "this escaped". It is not an escape while every
-       * module that can read the name is enumerated: the importers' mentions
-       * are then simply more uses of the same cell. They are also mentions
-       * `referencesToDeclaration` does not carry -- an importing file's
-       * identifier resolves to the import specifier, not to the declaration --
-       * so a caller that widens the predicate must walk these too, or it has
-       * called a cell closed on the strength of uses it never looked at.
-       */
-      const importerMentions = (declaration: ts.Declaration): readonly ts.Expression[] | null =>
-        !isModuleExportedDeclaration(checker, declaration, null) ? [] : inProgramImportReferencesOf(checker, flow, declaration)
-      /** The refusal a cell earns, or null when it is closed -- named, because
-       * "exposed" covered three different facts and each has its own fix. */
-      const bindingClosed = (declaration: ts.VariableDeclaration): string | null => {
-        if (!sourceBindingWritesAreComplete(checker, flow, declaration)) return 'binding-writes-incomplete'
-        if (!isModuleExportedDeclaration(checker, declaration, null)) return null
-        if (exportIsUnimported(checker, flow, declaration)) return null
-        return importerMentions(declaration) !== null ? null : 'export-importers-unenumerable'
-      }
-      const refs = (root: Value, declaration: ts.Declaration): void => {
-        for (const reference of flow.referencesToDeclaration(declaration)) {
-          if (reference === ts.getNameOfDeclaration(declaration) || isTypePositionReference(reference)) continue
-          // Past an unconditional rebinding the cell holds only what a write
-          // after entry stored; a root none of those writes stores is no
-          // longer reachable through it.
-          if (
-            ts.isParameter(declaration) &&
-            readsAfterRebinding(declaration, reference) &&
-            parameterRebindingsOf(declaration).every((write) => write.value !== null && !read(value(write.value)).has(root))
-          )
-            continue
-          add(read(use(root, reference)))
-        }
-        for (const reference of importerMentions(declaration) ?? []) add(read(use(root, reference)))
-      }
-      /**
-       * A binding pattern taken apart over this value: every element reads one
-       * slot and nothing reads the object itself.
-       *
-       * Destructuring is a property READ, and `visitUse` already states that a
-       * property read of a tracked object is not a publication of it. Refusing
-       * the pattern spelling made the two disagree -- `p.app.go()` proved its
-       * receiver and `const { app } = p; app.go()` did not, though the object
-       * never left the program either way. A rest element stays refused: it
-       * builds a FRESH object out of whatever keys nothing else took, and that
-       * object is not modelled here.
-       */
-      const patternReadsSlots = (root: Value, pattern: ts.BindingPattern): void => {
-        if (!isObjectRoot(root)) {
-          fail('non-object-destructured-container', pattern)
-          return
-        }
-        for (const element of pattern.elements) {
-          if (ts.isOmittedExpression(element)) continue
-          const key = bindingElementKey(element)
-          if (element.dotDotDotToken) fail('rest-binding-element', element)
-          else if (key === null) fail('computed-binding-element', element)
-          else if (
-            isSourceCallableObject(root) &&
-            key !== 'name' &&
-            key !== 'length' &&
-            sourceCallableOwnDataWriteOf(checker, flow, root, key, element) === null
-          )
-            fail('unproven-callable-data-read', element)
-          else if (!descriptorOf(root, key)) fail('unmodelled-descriptor', element)
-        }
-      }
-      /**
-       * The complete set of source setters a plain store to `key` executes.
-       *
-       * `class Base { constructor() { this.type = 'Base' } }` with a subclass
-       * declaring `get type` / `set type`: the base constructor's plain store
-       * runs the SUBCLASS's setter. The plan already names every setter such
-       * a store can reach, or says the effects are opaque -- this only has to
-       * put the receiver into each of those bodies, which is what a member
-       * call does with its own frame.
-       */
-      const storeRunsSetters = (root: ObjectRoot, key: string): boolean => {
-        if (!ts.isNewExpression(root)) return false
-        const bodies = settersOf(root, key)
-        if (bodies === null) return false
-        for (const setter of bodies) for (const reference of flow.receiverReferencesToDeclaration(setter)) add(read(use(root, reference)))
-        return true
-      }
-      /**
-       * Every value a setter's parameter receives: the right-hand side of each
-       * store that runs the setter -- a store to its key on a construction of
-       * its class's family. A setter has no call sites, so `callersOf` names
-       * nothing for it and the parameter was an unindexed frame: a class's
-       * `set attachment( current )`. The family is by
-       * heritage; a descendant's own override is over-counted, which only
-       * widens the answer. A bulk `Object.assign` onto one of ours names no
-       * key to compare and refuses.
-       */
-      /**
-       * Every instance a class member can run on: the constructions of its
-       * heritage family, refused when the family is open or when a `new`
-       * naming a family class could not be placed.
-       */
-      // The instances and the opaque constructions naming a family are fixed
-      // facts of the program, but this runs inside every re-evaluation of every
-      // query on a class member: recomputing them was a walk of the construction
-      // index and of every opaque `new` each time. Only `fail` is per-evaluation.
-      const familyInstances = new Map<
-        SourceClass,
-        { readonly instances: readonly ts.NewExpression[]; readonly opaque: readonly ts.NewExpression[] } | null
-      >()
-      const familyInstancesOf = (holder: SourceClass, reason: string): readonly ts.NewExpression[] | null => {
-        let known = familyInstances.get(holder)
-        if (known === undefined) {
-          const family = sourceClassFamilyOf(checker, flow, new Set([holder]))
-          if (family === null) known = null
-          else {
-            const instances = new Set<ts.NewExpression>()
-            for (const owner of family.keys()) for (const instance of constructionsOf(owner)) instances.add(instance)
-            const opaque: ts.NewExpression[] = []
-            for (const call of opaqueConstructionsOf()) {
-              const declarations = checker.getTypeAtLocation(call).getSymbol()?.declarations ?? []
-              if (declarations.some((declaration) => family.has(declaration as SourceClass))) opaque.push(call)
-            }
-            known = { instances: [...instances], opaque }
-          }
-          familyInstances.set(holder, known)
-        }
-        if (known === null) {
-          fail(reason, holder)
-          return null
-        }
-        for (const call of known.opaque) fail('opaque-construction', call)
-        return known.instances
-      }
-      /**
-       * A value a getter returns is used wherever the getter is READ: every
-       * access spelling its key on one of its class family's constructions,
-       * from the instances outward like `setterStores`. A getter has no call
-       * sites, so `callersOf` names nothing for it; a class whose
-       * `get item()` returns `this.items[ 0 ]` has the element used
-       * at every `target.item` in the program. A descendant's override is
-       * over-counted, which only widens.
-       */
-      const getterReturns = (root: Value, getter: ts.GetAccessorDeclaration): void => {
-        const holder = getter.parent
-        if (
-          (!ts.isClassDeclaration(holder) && !ts.isClassExpression(holder)) ||
-          (ts.getCombinedModifierFlags(getter) & ts.ModifierFlags.Static) !== 0
-        ) {
-          fail('unmodelled-getter-owner', getter)
-          return
-        }
-        const key = declarationKey(getter.name)
-        if (key === null) {
-          fail('computed-getter-key', getter)
-          return
-        }
-        const instances = familyInstancesOf(holder, 'getter-family-open')
-        if (instances === null) return
-        for (const instance of instances)
-          for (const fact of read(closure(instance))) {
-            if (!ts.isPropertyAccessExpression(fact) && !ts.isElementAccessExpression(fact)) continue
-            if (writeEdgeByAccess.has(fact) || !keysOf(fact).includes(key)) continue
-            add(read(use(root, fact)))
-          }
-      }
-      const setterStores = (setter: ts.SetAccessorDeclaration): void => {
-        const holder = setter.parent
-        if (
-          (!ts.isClassDeclaration(holder) && !ts.isClassExpression(holder)) ||
-          (ts.getCombinedModifierFlags(setter) & ts.ModifierFlags.Static) !== 0
-        ) {
-          fail('unmodelled-setter-owner', setter)
-          return
-        }
-        const key = declarationKey(setter.name)
-        if (key === null) {
-          fail('computed-setter-key', setter)
-          return
-        }
-        const instances = familyInstancesOf(holder, 'setter-family-open')
-        if (instances === null) return
-        // From the instances outward, never from every write inward. The
-        // stores that can run this setter go through one of the family's
-        // constructions, and a construction's closure already lists every
-        // store through it (`case 'slot'` reads the same facts). Placing the
-        // receiver of every write naming the key instead read cells that
-        // had nothing to do with this family -- an event-dispatcher base's
-        // `listeners[ type ] = []` resolves `this._listeners` on every
-        // dispatcher in the program, this family's included, and this family's
-        // computed stores hang on the very `setValues` parameter this
-        // question is part of establishing. Their opacity became this
-        // parameter's.
-        for (const root of instances)
-          for (const stored of read(closure(root))) {
-            if (ts.isCallExpression(stored)) {
-              if (bulkAssignOf(stored) !== null && read(value(stored.arguments[0]!)).has(root)) fail('bulk-assign-runs-setter', stored)
-              continue
-            }
-            if (!ts.isPropertyAccessExpression(stored) && !ts.isElementAccessExpression(stored)) continue
-            const edge = writeEdgeByAccess.get(stored)
-            if (edge === undefined || !keysOf(stored).includes(key)) continue
-            const write = edge.write
-            if (write.value === null || !['property-assignment', 'index-assignment', 'logical-assignment'].includes(write.edge))
-              fail('unmodelled-setter-store', write.site)
-            else add(carry(value(write.value)))
-          }
-      }
-      /**
-       * Every read of an argument through the `arguments` object.
-       *
-       * A scene-graph style `Node.add( object )` that walks its own `arguments`
-       * to add several children at once receives a value at a
-       * PARAMETER and, on some index, at `arguments[ i ]` as well. Refusing
-       * the whole frame for that gave up on the entire node family --
-       * every callback parameter reached through those nodes hung on this one
-       * refusal.
-       *
-       * The index is not resolved and does not need to be: one that names any
-       * position means every argument reaches every read, which is the
-       * superset. `arguments.length` is a number and carries nothing. Any
-       * other mention -- a spread, the object handed on whole -- is a use this
-       * graph cannot follow, and stays a refusal.
-       */
-      const argumentsReads = (body: ts.SignatureDeclaration): readonly ts.Expression[] | null => {
-        const reads: ts.Expression[] = []
-        for (const mention of argumentsUsesAt(body) ?? []) {
-          const parent = mention.parent
-          if (ts.isPropertyAccessExpression(parent) && parent.expression === mention && parent.name.text === 'length') continue
-          if (ts.isElementAccessExpression(parent) && parent.expression === mention) reads.push(parent)
-          else return null
-        }
-        return reads
-      }
-      const forward = (root: Value, site: FlowCallSite, receiver: boolean, position: number): void => {
-        if (ts.isNewExpression(site.call) || site.operands.dispatch.kind === 'super-constructor') {
-          for (const body of read(nodeQuery('construct-targets', site.call))) {
-            if (!ts.isConstructorDeclaration(body) && !isBody(body)) {
-              fail('non-constructor-target', body)
-              continue
-            }
-            const spread = argumentsReads(body)
-            if (spread === null) {
-              fail('arguments-object-frame', body)
-              continue
-            }
-            for (const mention of spread) add(read(use(root, mention)))
-            const parameter = runtimeParametersOf(body)[position]
-            if (parameter?.dotDotDotToken) fail('rest-frame', parameter)
-            else if (parameter && objectEntersPrimitive(root, parameter)) continue
-            else if (parameter && ts.isIdentifier(parameter.name)) refs(root, parameter)
-            else if (parameter) patternReadsSlots(root, parameter.name as ts.BindingPattern)
-          }
-          return
-        }
-        const selected = read(targets(site.call))
-        if (sealing && selected.size === 0) fail('no-source-call-target', site.call)
-        for (const body of selected) {
-          if (!isCallableValue(body)) {
-            fail('non-callable-target', body)
-            continue
-          }
-          if (receiver) {
-            // `arguments` never holds the receiver, so an arguments-using body
-            // says nothing about where `this` goes.
-            if (!ts.isArrowFunction(body))
-              for (const reference of flow.receiverReferencesToDeclaration(body)) add(read(use(root, reference)))
-          } else {
-            const mentions = argumentsReads(body)
-            if (mentions === null) {
-              fail('arguments-object-frame', body)
-              continue
-            }
-            for (const mention of mentions) add(read(use(root, mention)))
-            const parameter = runtimeParametersOf(body)[position]
-            if (parameter?.dotDotDotToken) fail('rest-frame', parameter)
-            else if (parameter && objectEntersPrimitive(root, parameter)) continue
-            else if (parameter && ts.isIdentifier(parameter.name)) refs(root, parameter)
-            else if (parameter) patternReadsSlots(root, parameter.name as ts.BindingPattern)
-          }
-        }
-      }
-      const visitUse = (root: Value, reference: ts.Expression): void => {
-        if (isTypePositionReference(reference)) return
-        const parent = reference.parent
-        if (!parent) {
-          fail('unindexed-use', reference)
-          return
-        }
-        const positioned = outermostErasureOf(reference)
-        if (positioned !== reference) {
-          if (ts.isExpression(positioned)) add(read(use(root, positioned)))
-          else fail('unindexed-use', positioned)
-          return
-        }
-        if (ts.isVariableDeclaration(parent) || ts.isParameter(parent)) {
-          if (parent.name === reference) return
-          if (parent.initializer !== reference) {
-            fail('binding-pattern', parent)
-            return
-          }
-          if (!ts.isIdentifier(parent.name)) {
-            patternReadsSlots(root, parent.name)
-            return
-          }
-          const exposure = ts.isVariableDeclaration(parent) ? bindingClosed(parent) : null
-          if (exposure !== null) {
-            fail(`exposed-binding:${exposure}`, parent)
-            return
-          }
-          refs(root, parent)
-          return
-        }
-        if (ts.isBinaryExpression(parent)) {
-          if (parent.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
-            if (parent.left === reference) return
-            const moduleUses = sourceCommonJsExportUsesOf(flow, parent)
-            if (moduleUses !== null) {
-              if (parent.right !== reference) fail('unmatched-commonjs-export', reference)
-              else for (const alias of moduleUses) add(read(use(root, alias)))
-              return
-            }
-            const left = unwrapNaming(parent.left)
-            if (ts.isIdentifier(left)) {
-              const declaration = flow.targetOf(left)?.declaration
-              if (!declaration || (!ts.isVariableDeclaration(declaration) && !ts.isParameter(declaration))) {
-                fail('external-binding-store', left)
-                return
-              }
-              // `bindingClosed` names the REFUSAL, null when the cell is closed
-              // (its other reader above spells the same test). Read as a boolean
-              // it refused every store into a closed local and admitted every
-              // store into an exposed one -- `entry = makeRecord()` inside a
-              // closed factory was the 'exposed-binding' that kept the cache
-              // `.get()` receiver from ever being proven.
-              const exposure = ts.isVariableDeclaration(declaration) ? bindingClosed(declaration) : null
-              if (exposure !== null) {
-                fail(`exposed-binding:${exposure}`, declaration)
-                return
-              }
-              refs(root, declaration)
-            } else if (ts.isPropertyAccessExpression(left) || ts.isElementAccessExpression(left)) {
-              if (sourceIntrinsicMemberMayBeWrittenOf(checker, flow, left)) {
-                const installed = sourceIntrinsicMemberDataWriteOf(checker, flow, left)
-                if (installed === null || installed.site !== parent || sourceCallableObjectOf(checker, flow, reference) !== installed.body)
-                  fail('unproven-intrinsic-member-installation', left)
-                else for (const access of installed.reads) add(read(use(root, access)))
-                add(read(use(root, parent)))
-                return
-              }
-              if (objectLikeRoot(root) && primitiveDeclaredField(left)) return
-              const keys = keysOf(left)
-              const containers = read(value(left.expression))
-              if (sealing && containers.size === 0) fail('unresolved-container', left)
-              const frameMatched = frameMatchedContainers(root, reference, left, read)
-              for (const container of containers) {
-                if (frameMatched !== null && !frameMatched.has(container)) continue
-                // A store on `null`/`undefined` throws before it lands: an
-                // element slot read through a counter carries `undefined` for
-                // the positions never written (`this.items[ i ]` filled in a
-                // loop), and that is no container.
-                if (container === undefinedValue || container.kind === ts.SyntaxKind.NullKeyword || ts.isVoidExpression(container)) continue
-                if (!isObjectRoot(container)) {
-                  fail('opaque-container-store', left)
-                  continue
-                }
-                for (const key of keys) {
-                  if (descriptorOf(container, key)) {
-                    add(read(publication(root, container, key)))
-                    continue
-                  }
-                  // A store to an accessor key hands the value to the
-                  // SETTER's parameter, never to a slot of the container.
-                  if (ts.isNewExpression(container) && dataStoreOf(container, key)) {
-                    add(read(publication(root, container, key)))
-                    continue
-                  }
-                  const setters = ts.isNewExpression(container) ? settersOf(container, key) : null
-                  if (setters === null) fail('opaque-container-store', left)
-                  else
-                    for (const setter of setters) {
-                      const parameter = setter.parameters[0]
-                      if (!parameter || !ts.isIdentifier(parameter.name)) fail('unmodelled-setter-parameter', setter)
-                      else refs(root, parameter)
-                    }
-                }
-              }
-            } else fail('unmodelled-store', left)
-            add(read(use(root, parent)))
-            return
-          }
-          if (
-            parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
-            parent.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
-            parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
-            parent.operatorToken.kind === ts.SyntaxKind.CommaToken
-          ) {
-            add(read(use(root, parent)))
-            return
-          }
-          if (
-            parent.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken ||
-            parent.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken
-          )
-            return
-          if (parent.operatorToken.kind === ts.SyntaxKind.InKeyword && parent.right === reference) return
-          // OrdinaryHasInstance only walks the left operand's prototype chain:
-          // it reads no own key and runs no hook on it. A custom @@hasInstance
-          // would receive it, which the ordinary-instance proof rules out.
-          if (
-            parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword &&
-            parent.left === reference &&
-            ordinarySourceClassInstanceTestOf(checker, flow, parent)
-          )
-            return
-          fail('coercing-value-use', parent)
-          return
-        }
-        if (ts.isConditionalExpression(parent)) {
-          if (parent.condition !== reference) add(read(use(root, parent)))
-          return
-        }
-        if (ts.isPropertyAssignment(parent) && parent.initializer === reference) {
-          const key = declarationKey(parent.name)
-          if (key === null || key === '__proto__') fail('computed-publication', parent)
-          else add(read(publication(root, parent.parent, key)))
-          return
-        }
-        if (ts.isSpreadAssignment(parent) && parent.expression === reference && ts.isObjectLiteralExpression(root)) {
-          // CopyDataProperties observes own data slots without retaining the
-          // source owner. Copied identities continue through publication below;
-          // the same complete key/storage queries still reject opaque readers.
-          for (const key of read(nodeQuery('own-keys', root))) {
-            if (!ts.isStringLiteral(key)) fail('unmodelled-own-key-value', root)
-            else read(storedSlot(root, key.text))
-          }
-          facts.add(reference)
-          return
-        }
-        if (ts.isShorthandPropertyAssignment(parent)) {
-          add(read(publication(root, parent.parent, parent.name.text)))
-          return
-        }
-        if (ts.isPropertyDeclaration(parent) && parent.initializer === reference) {
-          const key = declarationKey(parent.name)
-          if (key === null || (ts.getCombinedModifierFlags(parent) & ts.ModifierFlags.Static) !== 0) {
-            fail('static-or-computed-publication', parent)
-            return
-          }
-          for (const construction of constructionsOf(parent)) add(read(publication(root, construction, key)))
-          return
-        }
-        if (ts.isArrayLiteralExpression(parent)) {
-          if (parent.elements.some(ts.isSpreadElement)) fail('spread-publication', parent)
-          else add(read(publication(root, parent, String(parent.elements.indexOf(reference)))))
-          return
-        }
-        if (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) {
-          if (parent.expression !== reference) {
-            // The reference is the access's NAME, not its object: `a.go`
-            // MENTIONS the method `go`, and `flow.referencesToDeclaration`
-            // hands that mention back when the tracked value is the method's
-            // own declaration. What is used is the access's result. Without
-            // this branch every class method's closure proof read its own call
-            // sites as a key coercion, so `this.run()` had no callable slot at
-            // all -- the one place a member name is not a key being coerced.
-            if (ts.isPropertyAccessExpression(parent) && parent.name === reference) {
-              add(read(use(root, parent)))
-              return
-            }
-            fail('coercing-property-key', reference)
-            return
-          }
-          const keys = keysOf(parent)
-          // `new ( /** @type {new (...args: any[]) => this} */ ( this.constructor ) )()`
-          // -- a common JS spelling of the clone idiom wherever a library
-          // JSDoc-casts the read --
-          // sits a ParenthesizedExpression between the access and the `new` that
-          // actually invokes it, purely to anchor the cast comment. Plain
-          // `parent.parent` lands on that paren, not the `new`, so the
-          // `constructor-slot-read` exception below never matched and every
-          // family member's `copy` override the census could not otherwise index
-          // came back an unmodelled frame. `outermostErasureOf` is the same
-          // erasure-aware "which node occupies the syntactic position" walk this
-          // graph already uses for `use`/`visitUse`; for the unparenthesized
-          // spelling it is a no-op (`parent.parent` unchanged).
-          const positioned = outermostErasureOf(parent)
-          const invocation = positioned.parent
-          const callee = ts.isCallExpression(invocation) && invocation.expression === positioned
-          const stored =
-            ts.isBinaryExpression(invocation) &&
-            invocation.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-            invocation.left === positioned
-          // `delete holder.field`, `holder.n += 1`, `holder.n++`, `holder.f ??=
-          // g`: the slot is rewritten without a plain `=`. Reading these as
-          // mere mentions of the slot left every one of them invisible to the
-          // slot's own value set -- a deleted field still "held" its
-          // initializer. They are stores; the slot decides what each edge
-          // means, and refuses the ones it cannot model.
-          const mutated =
-            (ts.isDeleteExpression(invocation) && invocation.expression === positioned) ||
-            (ts.isBinaryExpression(invocation) &&
-              invocation.left === positioned &&
-              invocation.operatorToken.kind !== ts.SyntaxKind.EqualsToken &&
-              invocation.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
-              invocation.operatorToken.kind <= ts.SyntaxKind.LastAssignment) ||
-            ((ts.isPrefixUnaryExpression(invocation) || ts.isPostfixUnaryExpression(invocation)) &&
-              (invocation.operator === ts.SyntaxKind.PlusPlusToken || invocation.operator === ts.SyntaxKind.MinusMinusToken))
-          if (mutated && !writeEdgeByAccess.has(parent)) {
-            fail('unmodelled-property-write', parent)
-            return
-          }
-          // A store through this root is a key the root gains, and THIS walk is
-          // where the program says so. Asking the write index instead -- "of
-          // every write in the program, which ones reach this root" -- is the
-          // same fact derived a second way, at O(all writes) per re-evaluation
-          // instead of O(uses of the root); on a large program that was the compile.
-          // `enumeratedKeysOf` already requires this closure, so the key set
-          // costs it no dependency it was not already holding.
-          if (stored || mutated) facts.add(parent)
-          /**
-           * Whether this graph can say what reaching `key` through this root
-           * does. A declared cell it can. A key proven absent from the chain
-           * it can -- except in a CALLEE position, where absence names no
-           * callable. And a plain store to a key the family declares as an
-           * accessor it can, because the store runs that accessor's SETTER:
-           * a frame, not an unmodelled descriptor. The getter is never
-           * evaluated -- a store does not read -- so a getter that hands its
-           * receiver out says nothing about this store.
-           */
-          const modelled = (held: ObjectRoot, key: string): boolean => {
-            if (isSourceCallableObject(held)) {
-              if ((key === 'name' || key === 'length') && !stored && !mutated) return true
-              if (stored) return !mutated && sourceCallableDataWriteProtocolOf(checker, flow, key, parent)
-              return !mutated && sourceCallableOwnDataWriteOf(checker, flow, held, key, parent) !== null
-            }
-            if (descriptorOf(held, key)) return true
-            if (callee) return false
-            if (stored && storeRunsSetters(held, key)) return true
-            if (ts.isNewExpression(held)) {
-              if (!stored && !mutated && familyReadOf(held, key) !== null) return true
-              if (stored && dataStoreOf(held, key)) return true
-            }
-            return absentOwnKey(held, key, parent, descriptorOf, hasUnnamedWrite)
-          }
-          // `instance.constructor` READS the class object off the prototype
-          // -- a value this graph does not carry, and one whose escape opens
-          // the family: `unknown( value.constructor )` can construct and
-          // retarget Base from anywhere. Only `new this.constructor()` is a
-          // modelled use of it (`case 'value'` places the construction).
-          if (
-            ts.isNewExpression(root) &&
-            keys.includes('constructor') &&
-            !stored &&
-            !mutated &&
-            !(ts.isNewExpression(invocation) && invocation.expression === positioned)
-          ) {
-            fail('constructor-slot-read', parent)
-            return
-          }
-          if (!isObjectRoot(root) || keys.some((key) => !modelled(root, key))) {
-            fail('unmodelled-descriptor', parent)
-            return
-          }
-          if (callee) {
-            const site = sites.get(invocation)
-            if (!site) fail('unindexed-call', invocation)
-            else forward(root, site, true, -1)
-          }
-          return
-        }
-        if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) {
-          if (parent.expression === reference) {
-            if (reference.kind === ts.SyntaxKind.SuperKeyword && ts.isCallExpression(parent) && ts.isNewExpression(root)) {
-              read(nodeQuery('construct-targets', parent))
-              return
-            }
-            if (!isBody(root)) fail('non-callable-use', reference)
-            else if (ts.isCallExpression(parent)) {
-              // A call through a cell none of the body's names spells -- `const g =
-              // f; g()`, a parameter, an element, a destructured binding -- is a
-              // caller `candidateCallersOf` cannot list. Hand it to `case 'callers'`.
-              const site = sites.get(parent)
-              const name = site ? calleeNameOf(site) : null
-              if (!site || (name !== null && namesOf(root)?.includes(name) === false)) facts.add(parent)
-            }
-            return
-          }
-          if (ts.isCallExpression(parent)) {
-            const query = intrinsicOwnKeyQueryOf(checker, parent.expression)
-            if (
-              query !== null &&
-              parent.arguments.length === 1 &&
-              parent.arguments[0] === reference &&
-              ['keys', 'getOwnPropertyNames', 'getOwnPropertySymbols', 'ownKeys'].includes(query.member)
-            ) {
-              if (deferredIntrinsicProtocolLedgerOf(flow)?.requireMember(query.owner, query.member, parent) !== true)
-                fail('unproven-own-key-query', parent)
-              return
-            }
-            if (
-              parent.arguments.length === 1 &&
-              parent.arguments[0] === reference &&
-              intrinsicJsonStringifyQueryOf(checker, unwrapErasedExpression(parent.expression))
-            ) {
-              // This bounded observation has no replacer or coercing space
-              // argument, and enters no toJSON/getter/recursive object frame.
-              // Actual stored values and all future keys remain solver inputs.
+          const edge = writeEdgeByAccess.get(stored)
+          if (edge === undefined) continue
+          if (!keyReaches(root, keysOf(stored), key)) continue
+          const write = edge.write
+          if (write.edge === 'delete' && (ts.isObjectLiteralExpression(root) || isFreshOrdinaryObject(root))) {
+            // Removing an own data descriptor contributes no stored payload.
+            // A value read can also reach the prototype after that removal.
+            if (query.kind === 'slot') {
               const ledger = deferredIntrinsicProtocolLedgerOf(flow)
-              const absence = sourceObjectPrototypeAbsenceOf(checker, ['toJSON'], parent)
-              if (
-                !isObjectRoot(root) ||
-                (!ts.isObjectLiteralExpression(root) && !isFreshOrdinaryObject(root)) ||
-                (ts.isObjectLiteralExpression(root) &&
-                  root.properties.some((one) => !ts.isPropertyAssignment(one) && !ts.isShorthandPropertyAssignment(one))) ||
-                !ledger ||
-                absence === null ||
-                !ledger.requireMember('JSON', 'stringify', parent) ||
-                !ledger.include([absence])
-              ) {
-                fail('unproven-json-observation', parent)
-                return
+              const absence = sourceObjectPrototypeAbsenceOf(checker, [key], stored)
+              if (!ledger || absence === null || !ledger.include([absence])) fail('unproven-deleted-slot-absence', stored)
+              else {
+                facts.add(undefinedValue)
+                seeded = true
               }
-              for (const key of read(nodeQuery('own-keys', root))) {
-                if (!ts.isStringLiteral(key) || key.text === 'toJSON') {
-                  fail('json-hook-observation', parent)
-                  continue
-                }
-                const entries = read(storedSlot(root, key.text))
-                if (sealing && entries.size === 0) fail('unresolved-json-slot', parent)
-                if ([...entries].some((entry) => !primitiveStoredValue(entry))) fail('json-object-observation', parent)
-              }
-              return
             }
-            const installation = sourceCallableReflectSetOf(checker, parent)
-            if (installation && (installation.target === reference || installation.value === reference)) {
-              const owner = read(value(installation.target))
-              if (sealing && owner.size === 0) fail('unresolved-callable-data-owner', parent)
-              for (const held of owner) {
-                if (
-                  !isSourceCallableObject(held) ||
-                  !sourceCallableDataWriteProtocolOf(checker, flow, installation.key, parent) ||
-                  deferredIntrinsicProtocolLedgerOf(flow)?.requireMember('Reflect', 'set', parent) !== true
-                ) {
-                  fail('unproven-callable-data-write', parent)
-                  continue
-                }
-                if (installation.target === reference) facts.add(parent)
-                else add(read(publication(root, held, installation.key)))
-              }
-              return
-            }
+            continue
           }
-          if (ts.isCallExpression(parent) && definitionPlans.has(parent)) {
-            const plan = definitionOf(parent)
-            if (plan === null) fail('intrinsic-definition-unproven', parent)
-            else if (parent.arguments[0] === reference) {
-              // The target gains the key (`case 'slot'` reads the value
-              // through this fact) and is handed to nobody but, when the
-              // intrinsic returns it, whoever reads the call.
-              facts.add(parent)
-              if (plan.returnsTarget && !ts.isExpressionStatement(parent.parent)) add(read(use(root, parent)))
-            } else if (parent.arguments[2] === reference) {
-              // The descriptor literal: its `value` is copied into the target
-              // (`case 'publication'` forwards it); the literal goes nowhere.
-              facts.add(parent)
-            } else if (parent.arguments[1] === reference) fail('coercing-property-key', reference)
-            else fail('unmodelled-invocation-frame', parent)
-            return
-          }
-          if (ts.isCallExpression(parent)) {
-            const bulk = bulkAssignOf(parent)
-            if (bulk !== null && parent.arguments.includes(reference)) {
-              // The call evaluates to its target, so a target root is used
-              // wherever the call's result is; a source's own slot values are
-              // copied into it (`case 'slot'` reads them through this fact),
-              // and a source literal itself goes nowhere. A source that is
-              // not a literal could run getters, which this does not enter.
-              facts.add(parent)
-              if (bulk.target === reference) add(read(use(root, parent)))
-              else if (!ts.isObjectLiteralExpression(root)) fail('bulk-assign-source-unmodelled', reference)
-              return
-            }
-          }
-          const site = sites.get(parent)
-          const operands = ts.isCallExpression(parent) ? (candidateOrdinaryOwnCallableOperandsOf(parent) ?? site?.operands) : site?.operands
-          // `f.call( receiver, ... )` writes the receiver in an ARGUMENT
-          // position of the syntax and reads it in the RECEIVER position of
-          // the frame. The operands already say which is which -- reading the
-          // syntax instead made every value handed to `.call` an argument no
-          // parameter had a slot for.
-          if (site && operands?.explicitThis && operands.receiver === reference) {
-            forward(root, site, true, -1)
-            return
-          }
-          // A value stored into a closed native Map (`store.set( key, value )`)
-          // is not handed to unknown code: the map's only way out is its
-          // `.get()` reads, and the value continues at each of them exactly
-          // as it would at a parameter. `case 'completion'` above reads the
-          // same stores back from the `.get()` side.
-          if (ts.isCallExpression(parent)) {
-            const continuations = collectionValueContinuationsOf(checker, flow, parent, reference, nativeProtocolClosed)
-            if (continuations !== null) {
-              for (const continued of continuations) add(read(use(root, continued)))
-              return
-            }
-          }
-          const position = operands?.args.indexOf(reference) ?? -1
-          if (!site || position < 0 || operands?.args.some(ts.isSpreadElement)) fail('unmodelled-invocation-frame', parent)
-          else forward(root, site, false, position)
-          return
-        }
-        if (ts.isReturnStatement(parent) || (ts.isArrowFunction(parent) && parent.body === reference)) {
-          // An expression-bodied arrow returns its body through the same
-          // synchronous completion and complete caller inventory as `return`.
-          const body = ts.isArrowFunction(parent) ? parent : ts.findAncestor(parent, ts.isFunctionLike)
-          if (body && ts.isGetAccessorDeclaration(body)) {
-            getterReturns(root, body)
-            return
-          }
-          if (!body || !isBody(body) || callableCompletionSummaryOf(flow, body)?.execution !== 'sync') {
-            fail('deferred-completion', parent)
-            return
-          }
-          read(closure(body))
-          // `return this` hands back the frame's own receiver, so the tracked value
-          // comes out only where it went in. Continuing it at every caller made a
-          // chainable method (`v.set( ... ).add( ... )`, 43 of them in three's
-          // Vector3) spread each receiver to every chained result in the program.
-          // The frame receiver is `read`: a refused frame refuses this use rather
-          // than dropping a continuation.
-          const returnsReceiver = !ts.isArrowFunction(body) && unwrapErasedExpression(reference).kind === ts.SyntaxKind.ThisKeyword
-          for (const call of read(callersOf(body)))
-            if (ts.isCallExpression(call) && (!returnsReceiver || read(frameQuery('frame-receiver', call, body)).has(root)))
-              add(read(use(root, call)))
-          return
-        }
-        // Enumerating an object reads its KEY SET and nothing else: no slot is
-        // read, nothing escapes, and the object is not even coerced. What the
-        // bound key then does is a question asked where the head is USED, not
-        // here -- and without this branch the enumerated object was opaque, so
-        // the key set could never be proven closed.
-        if (ts.isForInStatement(parent) && parent.expression === reference) return
-        if (ts.isForOfStatement(parent) && parent.expression === reference && ts.isArrayLiteralExpression(root)) {
-          if (parent.awaitModifier || deferredIntrinsicProtocolLedgerOf(flow)?.require('Array', parent) !== true)
-            fail('unproven-array-iteration', parent)
-          return
-        }
-        if (
-          ts.isExpressionStatement(parent) ||
-          ts.isTypeOfExpression(parent) ||
-          ts.isVoidExpression(parent) ||
-          (ts.isPrefixUnaryExpression(parent) && parent.operator === ts.SyntaxKind.ExclamationToken) ||
-          (ts.isIfStatement(parent) && parent.expression === reference)
-        )
-          return
-        fail('opaque-value-use', reference)
-      }
-      /** A parameter's values: every frame's argument and every rebinding of
-       * the cell, less `excluded` -- a rebinding the read asking cannot see. */
-      const parameterValues = (parameter: ts.ParameterDeclaration, excluded: ts.Node | null): void => {
-        const owner = parameter.parent
-        if (ts.isSetAccessorDeclaration(owner)) {
-          setterStores(owner)
-          // The enumeration is exhaustive -- every store through every
-          // instance -- so a setter nothing stores through has an EMPTY
-          // parameter, witnessed here, not one pending some origin.
-          seeded = true
-          return
-        }
-        if (!isBody(owner) && !ts.isConstructorDeclaration(owner)) {
-          fail('unindexed-parameter-frame')
-          return
-        }
-        // A binding pattern names no cell of its own, but the parameter DOES
-        // hold the whole argument -- that value is what each binding element
-        // then reads a slot of. Refusing here made the pattern's container
-        // unknowable, so every receiver destructured out of a parameter was
-        // opaque however completely the program built the object.
-        if (parameter.dotDotDotToken) {
-          fail('unmodelled-parameter-frame')
-          return
-        }
-        if (isBody(owner)) read(closure(owner))
-        const primitive = primitiveDeclaredParameter(parameter)
-        const addArguments = (held: ReadonlySet<Value>): void => {
-          for (const candidate of held) if (!primitive || !objectLikeRoot(candidate)) facts.add(candidate)
-        }
-        for (const site of constructionSitesTargeting(owner)) addArguments(carry(frameQuery('frame-argument', site.call, owner, parameter)))
-        for (const call of read(callersOf(owner)))
-          if (ts.isCallExpression(call) || ts.isNewExpression(call))
-            addArguments(carry(frameQuery('frame-argument', call, owner, parameter)))
-        for (const write of flow.writesToDeclaration(parameter)) {
-          if (write.site === excluded) continue
-          if (write.edge === 'call-argument' || write.edge === 'super-argument' || write.edge === 'default-parameter') continue
-          // A member or element write goes THROUGH the cell into the object
-          // it holds; it never rebinds the cell, so it is no evidence about
-          // what this parameter's value set is. Whether the object can still
-          // be described afterwards is that object's own closure to answer,
-          // and refusing here answered it in the wrong place -- turning
-          // `values[ k ] = 1` into "this parameter holds nothing".
-          if (write.slot !== 'whole') continue
-          if (!['identifier-assignment', 'logical-assignment'].includes(write.edge) || !write.value) {
-            fail('unmodelled-parameter-write', write.site)
+          if (write.value === null || !['property-assignment', 'index-assignment', 'class-field-initializer'].includes(write.edge)) {
+            fail('unmodelled-property-write', stored)
             continue
           }
           add(carry(value(write.value)))
         }
+        break
       }
-      seeded = false
-      switch (query.kind) {
-        case 'value': {
-          const expression = query.node
-          const moduleExport = sourceCommonJsExportValueOf(flow, expression)
-          if (moduleExport !== null) {
-            add(carry(value(moduleExport)))
+      case 'construct-targets': {
+        const selected = constructionFrames.targetsOf(query.node)
+        if (selected === null) fail('opaque-construction-frame')
+        else {
+          add(selected)
+          seeded = selected.length > 0
+        }
+        break
+      }
+      case 'super-targets': {
+        const dispatch = sites.get(query.node)?.operands.dispatch
+        // An object-literal home has no `extends` chain to walk, and a
+        // static home starts its lookup on the constructor object, not the
+        // prototype: both are other domains, named rather than mishandled.
+        const home =
+          dispatch?.kind === 'lexical-super' && dispatch.home !== null && !ts.isObjectLiteralExpression(dispatch.home)
+            ? dispatch.home
+            : null
+        if (dispatch?.kind !== 'lexical-super' || dispatch.static || dispatch.key === null || home === null) {
+          fail('unmodelled-super-lookup')
+          break
+        }
+        const selected = superLookup(home, dispatch.key, new Set())
+        if (selected === null) fail('unresolved-super-lookup', home)
+        else {
+          add(selected)
+          seeded = selected.length > 0
+        }
+        break
+      }
+      case 'targets': {
+        const site = sites.get(query.node)
+        if (site?.operands && !site.explicitThis && site.operands.dispatch.kind === 'lexical-super') {
+          add(carry(superTargets(query.node)))
+          break
+        }
+        // `super()` selects a BASE CONSTRUCTOR, which is the construction
+        // domain's question and already answered there -- the same selection
+        // `new Base()` makes, reached from the subclass's heritage instead of
+        // from a spelled callee.
+        if (site?.operands && !site.explicitThis && site.operands.dispatch.kind === 'super-constructor') {
+          add(carry(nodeQuery('construct-targets', query.node)))
+          break
+        }
+        // `.call`/`.apply` needs no separate resolver here: `operands.callee`
+        // is already the executable callee with the wrapper removed, and the
+        // thisArg is already out of `args`. What made this dispatch special
+        // was carrying the receiver, which is a FRAME question answered where
+        // frames are projected.
+        if (!site?.operands) {
+          fail('unmodelled-dispatch')
+          break
+        }
+        const operands = candidateOrdinaryOwnCallableOperandsOf(query.node) ?? site.operands
+        for (const candidate of read(value(operands.callee))) {
+          if (isBody(candidate) && flow.callableBodyIsIndexed(candidate)) {
+            facts.add(candidate)
+            seeded = true
+          } else if (candidate.kind !== ts.SyntaxKind.NullKeyword && !ts.isVoidExpression(candidate)) fail('opaque-call-target', candidate)
+        }
+        if (sealing && facts.size === 0 && !lookupThrows(query.node)) fail('no-source-call-target')
+        break
+      }
+      case 'completion': {
+        if (ts.isCallExpression(query.node)) {
+          const bulk = bulkAssignOf(query.node)
+          if (bulk !== null) {
+            add(carry(value(bulk.target)))
             break
           }
-          if (isObjectRoot(expression)) {
-            if (isFreshOrdinaryObject(expression)) {
-              if (deferredIntrinsicProtocolLedgerOf(flow)?.requireMember('Object', 'prototype', expression) !== true)
-                fail('unproven-ordinary-object-allocation', expression)
-              facts.add(expression)
-              seeded = true
-            } else if (ts.isNewExpression(expression) && construction(expression) === null) {
-              // `new State()` on a plain function that returns an object
-              // from every completion and never mentions `this` yields THAT
-              // completion, never the fresh allocation (`new` discards it):
-              // the value is the call's completion, solved through the same
-              // frame a call would be. Anything else under `new` that is not
-              // a source construction stays opaque.
-              if (constructorFunctionCalleeOf(expression) !== null) add(carry(nodeQuery('completion', expression)))
-              else fail('opaque-construction')
-            } else {
-              facts.add(expression)
-              seeded = true
-              // `new this.constructor()` is a construction of one of the owned
-              // family `thisConstructorFamilyOf` named (its construction fact's
-              // alternatives) only while `this` itself holds nothing but such
-              // constructions. A method invoked with an explicit foreign
-              // receiver would make the fresh object a foreign instance, and
-              // that is decided here, by what `this` holds, not by the
-              // static fact.
-              if (ts.isNewExpression(expression)) {
-                const receiver = thisConstructorReceiverOf(expression)
-                if (receiver !== null) {
-                  const alternatives = construction(expression)?.alternatives ?? []
-                  for (const root of read(value(receiver))) {
-                    if (!ts.isNewExpression(root) || !construction(root)?.alternatives.every((owner) => alternatives.includes(owner))) {
-                      fail('opaque-construction', root)
-                      continue
-                    }
-                    // The read is of the INSTANCE's `constructor`, which an
-                    // own store or definition on that instance replaces:
-                    // `value.constructor = function () {}` makes the fresh
-                    // object whatever that function builds.
-                    for (const stored of read(closure(root))) {
-                      if (ts.isCallExpression(stored) && definitionPlans.has(stored)) {
-                        const plan = definitionOf(stored)
-                        if (plan === null || (plan.keys.includes('constructor') && read(value(stored.arguments[0]!)).has(root)))
-                          fail('constructor-slot-written', stored)
-                        continue
-                      }
-                      if (!ts.isPropertyAccessExpression(stored) && !ts.isElementAccessExpression(stored)) continue
-                      if (writeEdgeByAccess.has(stored) && keysOf(stored).includes('constructor')) fail('constructor-slot-written', stored)
-                    }
-                  }
-                }
-              }
-            }
-          } else if (isBody(expression)) {
-            facts.add(expression)
+          // `store.get( key )` on a native Map this program alone fills:
+          // the completion is one of the values `store.set( _, value )`
+          // stored, whichever key -- the same closed-map proof
+          // (`collectionValueFlowOf`) that refuses the moment the map or
+          // its values leave through anything but these reads. Asked before
+          // `targets`, because a native method has no source body to
+          // select, and the receiver walk would otherwise end at `new Map()`
+          // as an opaque construction. The stores themselves continue at
+          // these reads (`visitUse` below), so the two are one graph.
+          const stored = collectionStoredValuesOf(checker, flow, query.node, nativeProtocolClosed)
+          if (stored !== null) {
+            for (const candidate of stored) add(carry(value(candidate)))
+            break
+          }
+        }
+        if (ts.isNewExpression(query.node)) {
+          for (const candidate of read(value(query.node.expression))) {
+            if (
+              ts.isFunctionDeclaration(candidate) &&
+              flow.callableBodyIsIndexed(candidate) &&
+              candidate === constructorFunctionCalleeOf(query.node) &&
+              constructionYieldsCompletionOf(flow, candidate)
+            )
+              add(carry(frameQuery('frame-completion', query.node, candidate)))
+            else fail('opaque-construction', candidate)
+          }
+          break
+        }
+        for (const body of read(targets(query.node))) {
+          if (!isBody(body)) fail('unindexed-body', body)
+          else add(carry(frameQuery('frame-completion', query.node, body)))
+        }
+        if (ts.isCallExpression(query.node) && lookupThrows(query.node)) seeded = true
+        break
+      }
+      case 'frame-receiver':
+      case 'frame-argument':
+      case 'frame-parameter':
+      case 'frame-value':
+      case 'frame-completion': {
+        const own = ts.isCallExpression(query.node) ? candidateOrdinaryOwnCallableOperandsOf(query.node) : null
+        const layout = sourceInvocationFrameLayoutOf(flow, query.node, query.body, own ?? undefined)
+        if (!layout) {
+          fail('unindexed-source-frame')
+          break
+        }
+        const contextual = (expression: ts.Expression): Query =>
+          frameQuery('frame-value', query.node, query.body, unwrapErasedExpression(expression))
+        if (query.kind === 'frame-receiver') {
+          const receiver = layout.receiver
+          if (receiver.kind === 'undefined') {
+            facts.add(undefinedValue)
             seeded = true
-          } else if (ts.isIdentifier(expression)) {
-            const target = flow.targetOf(expression)
-            const declaration = aliasedDeclarationOf(target?.symbol ?? undefined) ?? target?.declaration
-            if (declaration && isBody(declaration) && flow.callableBodyIsIndexed(declaration)) {
-              facts.add(declaration)
-              seeded = true
-              if (!sourceGlobalCallableBindingIsClosed(checker, flow, declaration)) fail('global-object-callable', declaration)
-              for (const write of flow.writesToDeclaration(declaration)) {
-                if (write.slot !== 'whole' || write.edge === 'return' || write.edge === 'yield') continue
-                if (write.value && ['identifier-assignment', 'logical-assignment'].includes(write.edge)) add(carry(value(write.value)))
-                else fail('unmodelled-callable-binding-write', write.site)
-              }
-            } else if (declaration && ts.isVariableDeclaration(declaration)) {
-              const incoming = sourceBindingValuesOf(checker, flow, declaration, iterationValuesAt)
-              if (incoming === null) fail('unaccounted-binding-write', declaration)
-              else for (const entry of incoming) add(carry(value(entry)))
-              if (incoming !== null && bindingReadMayPrecedeFirstWrite(declaration, expression)) {
+          } else if (receiver.kind === 'expression') {
+            const memberCall = !layout.operands.explicitThis
+            for (const candidate of carry(value(receiver.expression))) {
+              // `source.attachment.clone()` with no attachment set:
+              // the member lookup on `null` throws and the frame never runs
+              // with that receiver. Only an explicit `f.call( null )` binds
+              // a nullish receiver.
+              if (memberCall && isNullish(candidate)) continue
+              if (receiver.conversion === 'identity' || isObjectRoot(candidate) || isBody(candidate)) facts.add(candidate)
+              else
+                fail(
+                  ts.isVoidExpression(candidate) || candidate.kind === ts.SyntaxKind.NullKeyword
+                    ? 'global-object-receiver-origin'
+                    : 'primitive-receiver-conversion',
+                  receiver.expression
+                )
+            }
+          } else if (receiver.kind === 'constructed') add(carry(value(receiver.call)))
+          else if (receiver.kind === 'lexical' && receiver.source !== 'arrow') {
+            // `super.m()` and `super()` run with the calling frame's own
+            // `this`; the class the layout names is only where the lookup
+            // starts, and no receiver is owned by a class.
+            const callee = ts.isCallExpression(query.node) ? unwrapErasedExpression(query.node.expression) : null
+            const keyword =
+              callee === null
+                ? null
+                : callee.kind === ts.SyntaxKind.SuperKeyword
+                  ? callee
+                  : (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) &&
+                      callee.expression.kind === ts.SyntaxKind.SuperKeyword
+                    ? callee.expression
+                    : null
+            if (keyword === null) fail('unresolved-super-home', query.node)
+            else add(carry(value(keyword)))
+          } else if (receiver.kind === 'lexical' && receiver.owner) {
+            if (ts.isSourceFile(receiver.owner)) {
+              if (ts.isExternalModule(receiver.owner)) {
                 facts.add(undefinedValue)
                 seeded = true
-              }
-            } else if (declaration && ts.isParameter(declaration)) {
-              // `options = Object.assign({ ... }, options)`: the read in the
-              // rebinding's own right side runs before the rebinding, and once
-              // per cell -- outside a loop of the parameter's own body, and
-              // not deferred into a nested function -- so it never sees the
-              // value it is about to store. Joining it anyway made the copy's
-              // source include its own target.
-              const rebinding = rebindingAfterRead(declaration, expression)
-              if (rebinding === null) add(carry(nodeQuery('parameter', declaration)))
-              else parameterValues(declaration, rebinding)
-            } else if (declaration && ts.isBindingElement(declaration)) add(carry(nodeQuery('binding-element', declaration)))
-            else if (expression.text === 'undefined' && (!declaration || declaration.getSourceFile().hasNoDefaultLib)) {
+              } else fail('global-object-receiver-origin', receiver.owner)
+            } else add(carry(nodeQuery('receiver', receiver.owner)))
+          } else fail(receiver.kind === 'unsupported' ? receiver.reason : 'global-object-receiver-origin')
+        } else if (query.kind === 'frame-argument' || query.kind === 'frame-parameter') {
+          const parameter = query.subject
+          if (!parameter || !ts.isParameter(parameter) || parameter.parent !== query.body) {
+            fail('unindexed-parameter-frame')
+            break
+          }
+          if (query.kind === 'frame-parameter') {
+            add(carry(frameQuery('frame-argument', query.node, query.body, parameter)))
+            for (const write of flow.writesToDeclaration(parameter)) {
+              if (write.edge === 'call-argument' || write.edge === 'super-argument' || write.edge === 'default-parameter') continue
+              if (write.slot !== 'whole') continue
+              if (!['identifier-assignment', 'logical-assignment'].includes(write.edge) || !write.value)
+                fail('unmodelled-parameter-write', write.site)
+              else add(carry(contextual(write.value)))
+            }
+            break
+          }
+          if (layout.arguments.kind === 'spread') {
+            fail('spread-arguments')
+            break
+          }
+          const slot = layout.arguments.slots.find((candidate) => candidate.parameter === parameter)
+          if (!slot || slot.kind === 'rest') {
+            fail('unmodelled-parameter-frame', parameter)
+            break
+          }
+          if (slot.actual) {
+            for (const candidate of carry(value(slot.actual))) {
+              if (ts.isVoidExpression(candidate) && slot.defaultValue) add(carry(contextual(slot.defaultValue)))
+              else facts.add(candidate)
+            }
+          } else if (slot.defaultValue) add(carry(contextual(slot.defaultValue)))
+          else {
+            facts.add(undefinedValue)
+            seeded = true
+          }
+        } else if (query.kind === 'frame-completion') {
+          const summary = callableCompletionSummaryOf(flow, query.body)
+          if (!summary || summary.execution !== 'sync') fail('deferred-completion', query.body)
+          else {
+            for (const expression of summary.values) add(carry(contextual(expression)))
+            if (summary.mayCompleteUndefined || (ts.isCallExpression(query.node) && ts.isCallChain(query.node))) {
               facts.add(undefinedValue)
               seeded = true
-            } else fail('opaque-binding')
-          } else if (expression.kind === ts.SyntaxKind.ThisKeyword || expression.kind === ts.SyntaxKind.SuperKeyword) {
-            const owner = flow.receiverOwnerOf(expression)
-            if (!owner) fail('unindexed-receiver')
-            else add(carry(nodeQuery('receiver', owner)))
-          } else if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
-            if (sourceIntrinsicMemberMayBeWrittenOf(checker, flow, expression)) {
-              const installed = sourceIntrinsicMemberDataWriteOf(checker, flow, expression)
-              if (installed === null) fail('unproven-intrinsic-member-read', expression)
-              else {
-                add(carry(value(installed.value)))
-                read(closure(installed.body))
-              }
-              break
             }
+          }
+        } else {
+          const expression = query.subject
+          if (!expression || ts.isParameter(expression)) {
+            fail('unindexed-frame-value')
+            break
+          }
+          const declaration = ts.isIdentifier(expression) ? flow.targetOf(expression)?.declaration : null
+          if (declaration && ts.isParameter(declaration) && declaration.parent === query.body)
+            add(carry(frameQuery('frame-parameter', query.node, query.body, declaration)))
+          else if (declaration && ts.isVariableDeclaration(declaration) && ts.findAncestor(declaration, ts.isFunctionLike) === query.body) {
+            const incoming = sourceBindingValuesOf(checker, flow, declaration, iterationValuesAt)
+            if (incoming === null) fail('unaccounted-binding-write', declaration)
+            else for (const entry of incoming) add(carry(contextual(entry)))
+            if (incoming !== null && bindingReadMayPrecedeFirstWrite(declaration, expression)) {
+              facts.add(undefinedValue)
+              seeded = true
+            }
+          } else if (
+            (expression.kind === ts.SyntaxKind.ThisKeyword || expression.kind === ts.SyntaxKind.SuperKeyword) &&
+            (ts.isArrowFunction(query.body) || flow.receiverOwnerOf(expression) === query.body)
+          )
+            add(carry(frameQuery('frame-receiver', query.node, query.body)))
+          else if (ts.isConditionalExpression(expression)) {
+            add(carry(contextual(expression.whenTrue)))
+            add(carry(contextual(expression.whenFalse)))
+          } else if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
             const keys = keysOf(expression)
-            const roots = read(value(expression.expression))
-            for (const root of roots) {
-              // An element read off an array literal is answered by the
-              // literal only while `Array.prototype` is the original: the
-              // obligation goes to the ledger, as the legacy element authority
-              // (`nativeArrayProtocolPlanOf`) registered it, and refuses with
-              // nothing to carry it.
-              if (ts.isArrayLiteralExpression(root) && deferredIntrinsicProtocolLedgerOf(flow)?.require('Array', expression) !== true) {
-                fail('undeferrable-array-protocol', expression)
-                continue
-              }
+            for (const root of read(contextual(expression.expression))) {
               if (isObjectRoot(root))
                 for (const key of keys) {
                   if (
@@ -2866,841 +3391,352 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                     fail('unproven-callable-data-read', expression)
                   else add(carry(slot(root, key)))
                 }
-              else if (!isNullish(root)) fail('non-object-receiver')
+              else if (root.kind !== ts.SyntaxKind.NullKeyword && !ts.isVoidExpression(root)) fail('non-object-receiver')
             }
-            // Every receiver nullish: the read throws, so the cell provably
-            // holds nothing. Empty is the answer, witnessed here, not a
-            // value still waiting on some origin.
-            if (roots.size > 0 && [...roots].every(isNullish)) seeded = true
-          } else if (ts.isCallExpression(expression)) add(carry(nodeQuery('completion', expression)))
-          else if (ts.isConditionalExpression(expression)) {
-            add(carry(value(expression.whenTrue)))
-            add(carry(value(expression.whenFalse)))
           } else if (
             ts.isBinaryExpression(expression) &&
             [ts.SyntaxKind.EqualsToken, ts.SyntaxKind.CommaToken].includes(expression.operatorToken.kind)
           )
-            add(carry(value(expression.right)))
+            add(carry(contextual(expression.right)))
           else if (
             ts.isBinaryExpression(expression) &&
             [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.QuestionQuestionToken].includes(
               expression.operatorToken.kind
             )
           ) {
-            add(carry(value(expression.left)))
-            add(carry(value(expression.right)))
-          } else if (
-            ts.isLiteralExpression(expression) ||
-            expression.kind === ts.SyntaxKind.NullKeyword ||
-            expression.kind === ts.SyntaxKind.TrueKeyword ||
-            expression.kind === ts.SyntaxKind.FalseKeyword ||
-            ts.isTypeOfExpression(expression) ||
-            ts.isVoidExpression(expression) ||
-            ts.isBinaryExpression(expression)
-          ) {
-            facts.add(expression)
-            seeded = true
-          } else fail('unmodelled-value-origin')
-          break
+            add(carry(contextual(expression.left)))
+            add(carry(contextual(expression.right)))
+          } else add(carry(value(expression)))
         }
-        case 'slot':
-        case 'stored-slot': {
-          const root = query.node
-          const key = query.key
-          const getterRead =
-            ts.isNewExpression(root) && !isFreshOrdinaryObject(root) && !descriptorOf(root, key) ? familyReadOf(root, key) : null
-          if (!descriptorOf(root, key) && getterRead === null) {
-            // A literal that spells every key it has and holds no key this
-            // graph cannot name reads `undefined` for the ones it lacks:
-            // `options.attachment` on the `{}` a parameter defaults to.
-            if (
-              (ts.isObjectLiteralExpression(root) || isFreshOrdinaryObject(root)) &&
-              absentOwnKey(root, key, root, descriptorOf, hasUnnamedWrite)
-            ) {
-              read(closure(root))
-              if (query.kind === 'slot') {
-                facts.add(undefinedValue)
-                seeded = true
-              }
-            } else {
-              fail('unmodelled-descriptor')
-              break
-            }
-          }
-          read(closure(root))
-          if (isSourceCallableObject(root)) {
-            if (key === 'name' || key === 'length') {
-              const parameters = runtimeParametersOf(root)
-              const firstDefault = parameters.findIndex(
-                (parameter) => parameter.initializer !== undefined || parameter.dotDotDotToken !== undefined
-              )
-              const named =
-                (ts.isArrowFunction(root) ? undefined : root.name) ?? (ts.isVariableDeclaration(root.parent) ? root.parent.name : undefined)
-              let ownData = callableOwnData.get(root)
-              if (!ownData) callableOwnData.set(root, (ownData = new Map()))
-              let literal = ownData.get(key)
-              if (!literal)
-                ownData.set(
-                  key,
-                  (literal =
-                    key === 'name'
-                      ? ts.factory.createStringLiteral(named && ts.isIdentifier(named) ? named.text : '')
-                      : ts.factory.createNumericLiteral(firstDefault < 0 ? parameters.length : firstDefault))
-                )
-              facts.add(literal)
-              seeded = true
-            } else {
-              const installed = sourceCallableOwnDataWriteOf(checker, flow, root, key)
-              if (installed === null) fail('unproven-callable-data-slot', root)
-              else add(carry(value(installed.value)))
-            }
-          } else if (ts.isObjectLiteralExpression(root)) {
-            for (const entry of ownEntries(root, key) ?? []) {
-              if (ts.isPropertyAssignment(entry)) add(carry(value(entry.initializer)))
-              else if (ts.isShorthandPropertyAssignment(entry)) add(carry(value(entry.name)))
-              else if (ts.isMethodDeclaration(entry)) {
-                facts.add(entry)
-                seeded = true
-              }
-            }
-          } else if (ts.isArrayLiteralExpression(root)) {
-            if (key === ELEMENT_KEY) {
-              // Every position at once; an index never written reads undefined.
-              for (const element of root.elements) if (!ts.isOmittedExpression(element)) add(carry(value(element)))
-              facts.add(undefinedValue)
-              seeded = true
-            } else if (key === 'length') {
-              let length = arrayLengths.get(root)
-              if (!length) arrayLengths.set(root, (length = ts.factory.createNumericLiteral(root.elements.length)))
-              facts.add(length)
-              seeded = true
-            } else {
-              const element = root.elements[Number(key)]
-              if (element !== undefined && !ts.isOmittedExpression(element)) add(carry(value(element)))
-              else {
-                facts.add(undefinedValue)
-                seeded = true
-              }
-            }
-          } else if (ts.isNewExpression(root) && !isFreshOrdinaryObject(root)) {
-            for (const declaration of [...(classMembers(root, key) ?? []), ...(getterRead?.carriers ?? [])]) {
-              if (ts.isMethodDeclaration(declaration)) {
-                facts.add(declaration)
-                seeded = true
-              }
-              if (ts.isPropertyDeclaration(declaration)) {
-                if (declaration.initializer) add(carry(value(declaration.initializer)))
-                else {
-                  facts.add(undefinedValue)
-                  seeded = true
-                }
-              }
-              if (ts.isParameter(declaration)) add(carry(nodeQuery('parameter', declaration)))
-            }
-            if (getterRead !== null) {
-              // The getter runs with this construction as its receiver, and
-              // the read yields what the getter's completions yield.
-              for (const getter of getterRead.getters) {
-                for (const reference of flow.receiverReferencesToDeclaration(getter)) add(read(use(root, reference)))
-                const summary = callableCompletionSummaryOf(flow, getter)
-                if (summary === null || summary.execution !== 'sync') fail('unmodelled-getter-completion', getter)
-                else {
-                  for (const completion of summary.values) add(carry(value(completion)))
-                  if (summary.mayCompleteUndefined) {
-                    facts.add(undefinedValue)
-                    seeded = true
-                  }
-                }
-              }
-              if (getterRead.absent) {
-                facts.add(undefinedValue)
-                seeded = true
-              }
-            }
-          }
-          // Only the writes that could name THIS key: the ones that spell it,
-          // and the ones that spell no key at all. Walking every write in the
-          // program here cost O(all writes) per (root, key) -- fine while
-          // computed slots were rare, and quadratic the moment a `for-in` head
-          // started naming a key set, which is what stopped a large class
-          // from finishing.
-          // The stores that go through this root are the root's own closure's
-          // facts -- `visitUse` publishes each one as it walks -- and this
-          // transfer already requires that closure above. Asking the write
-          // index instead meant subscribing to every write naming this key
-          // PLUS every computed write in the program, per slot, permanently:
-          // hundreds of edges on each of a large program's tens of thousands of
-          // slot states, and by far the largest contributor to its
-          // multi-million-edge graph. Same answer, no
-          // dependency this node was not already holding.
-          for (const stored of read(closure(root))) {
-            if (isSourceCallableObject(root) && ts.isCallExpression(stored)) {
-              const installation = sourceCallableReflectSetOf(checker, stored)
-              if (installation && installation.key === key && read(value(installation.target)).has(root))
-                add(carry(value(installation.value)))
-              continue
-            }
-            if (ts.isCallExpression(stored) && definitionPlans.has(stored)) {
-              const plan = definitionOf(stored)
-              if (plan === null || !plan.keys.includes(key) || !read(value(stored.arguments[0]!)).has(root)) continue
-              if (plan.values.length === 0) {
-                facts.add(undefinedValue)
-                seeded = true
-              }
-              for (const defined of plan.values) add(carry(value(defined)))
-              continue
-            }
-            if (ts.isCallExpression(stored)) {
-              // `Object.assign( root, ...sources )`: each source's own value
-              // under this key lands in the root. Only a literal whose keys
-              // are all spelled says what it holds; `null`/`undefined`
-              // sources are skipped by the intrinsic itself.
-              const bulk = bulkAssignOf(stored)
-              if (bulk === null || !read(value(bulk.target)).has(root)) continue
-              for (const source of bulk.sources)
-                for (const held of read(value(source))) {
-                  if (held === undefinedValue || held.kind === ts.SyntaxKind.NullKeyword || ts.isVoidExpression(held)) continue
-                  if (!ts.isObjectLiteralExpression(held)) fail('bulk-assign-source-unmodelled', source)
-                  else if (literalSpelledKeys(held) === null || hasUnnamedWrite(held)) fail('bulk-assign-source-keys-open', source)
-                  else if (ownKeysOf(held)?.includes(key)) add(carry(storedSlot(held, key)))
-                }
-              continue
-            }
-            if (!ts.isPropertyAccessExpression(stored) && !ts.isElementAccessExpression(stored)) continue
-            const edge = writeEdgeByAccess.get(stored)
-            if (edge === undefined) continue
-            if (!keyReaches(root, keysOf(stored), key)) continue
-            const write = edge.write
-            if (write.edge === 'delete' && (ts.isObjectLiteralExpression(root) || isFreshOrdinaryObject(root))) {
-              // Removing an own data descriptor contributes no stored payload.
-              // A value read can also reach the prototype after that removal.
-              if (query.kind === 'slot') {
-                const ledger = deferredIntrinsicProtocolLedgerOf(flow)
-                const absence = sourceObjectPrototypeAbsenceOf(checker, [key], stored)
-                if (!ledger || absence === null || !ledger.include([absence])) fail('unproven-deleted-slot-absence', stored)
-                else {
-                  facts.add(undefinedValue)
-                  seeded = true
-                }
-              }
-              continue
-            }
-            if (write.value === null || !['property-assignment', 'index-assignment', 'class-field-initializer'].includes(write.edge)) {
-              fail('unmodelled-property-write', stored)
-              continue
-            }
-            add(carry(value(write.value)))
-          }
-          break
-        }
-        case 'construct-targets': {
-          const selected = constructionFrames.targetsOf(query.node)
-          if (selected === null) fail('opaque-construction-frame')
+        break
+      }
+      case 'parameter': {
+        parameterValues(query.node, null)
+        break
+      }
+      case 'binding-element': {
+        const element = query.node
+        const pattern = element.parent
+        const holder = pattern.parent
+        const key = bindingElementKey(element)
+        // A rest element holds a FRESH object built from the keys nothing
+        // else took -- unmodelled regardless of presence.
+        if (element.dotDotDotToken) fail('rest-binding-element', element)
+        else if (key === null) fail('computed-binding-element', element)
+        else {
+          // The container is whatever cell holds the object being taken
+          // apart, and every form of it is already a query: a parameter, an
+          // outer binding element of a nested pattern, or the initializer of
+          // a destructuring declaration.
+          const container = bindingContainer(element)
+          if (container === null) fail('unmodelled-binding-container', holder)
           else {
-            add(selected)
-            seeded = selected.length > 0
-          }
-          break
-        }
-        case 'super-targets': {
-          const dispatch = sites.get(query.node)?.operands.dispatch
-          // An object-literal home has no `extends` chain to walk, and a
-          // static home starts its lookup on the constructor object, not the
-          // prototype: both are other domains, named rather than mishandled.
-          const home =
-            dispatch?.kind === 'lexical-super' && dispatch.home !== null && !ts.isObjectLiteralExpression(dispatch.home)
-              ? dispatch.home
-              : null
-          if (dispatch?.kind !== 'lexical-super' || dispatch.static || dispatch.key === null || home === null) {
-            fail('unmodelled-super-lookup')
-            break
-          }
-          const selected = superLookup(home, dispatch.key, new Set())
-          if (selected === null) fail('unresolved-super-lookup', home)
-          else {
-            add(selected)
-            seeded = selected.length > 0
-          }
-          break
-        }
-        case 'targets': {
-          const site = sites.get(query.node)
-          if (site?.operands && !site.explicitThis && site.operands.dispatch.kind === 'lexical-super') {
-            add(carry(superTargets(query.node)))
-            break
-          }
-          // `super()` selects a BASE CONSTRUCTOR, which is the construction
-          // domain's question and already answered there -- the same selection
-          // `new Base()` makes, reached from the subclass's heritage instead of
-          // from a spelled callee.
-          if (site?.operands && !site.explicitThis && site.operands.dispatch.kind === 'super-constructor') {
-            add(carry(nodeQuery('construct-targets', query.node)))
-            break
-          }
-          // `.call`/`.apply` needs no separate resolver here: `operands.callee`
-          // is already the executable callee with the wrapper removed, and the
-          // thisArg is already out of `args`. What made this dispatch special
-          // was carrying the receiver, which is a FRAME question answered where
-          // frames are projected.
-          if (!site?.operands) {
-            fail('unmodelled-dispatch')
-            break
-          }
-          const operands = candidateOrdinaryOwnCallableOperandsOf(query.node) ?? site.operands
-          for (const candidate of read(value(operands.callee))) {
-            if (isBody(candidate) && flow.callableBodyIsIndexed(candidate)) {
-              facts.add(candidate)
-              seeded = true
-            } else if (candidate.kind !== ts.SyntaxKind.NullKeyword && !ts.isVoidExpression(candidate))
-              fail('opaque-call-target', candidate)
-          }
-          if (sealing && facts.size === 0 && !lookupThrows(query.node)) fail('no-source-call-target')
-          break
-        }
-        case 'completion': {
-          if (ts.isCallExpression(query.node)) {
-            const bulk = bulkAssignOf(query.node)
-            if (bulk !== null) {
-              add(carry(value(bulk.target)))
-              break
-            }
-            // `store.get( key )` on a native Map this program alone fills:
-            // the completion is one of the values `store.set( _, value )`
-            // stored, whichever key -- the same closed-map proof
-            // (`collectionValueFlowOf`) that refuses the moment the map or
-            // its values leave through anything but these reads. Asked before
-            // `targets`, because a native method has no source body to
-            // select, and the receiver walk would otherwise end at `new Map()`
-            // as an opaque construction. The stores themselves continue at
-            // these reads (`visitUse` below), so the two are one graph.
-            const stored = collectionStoredValuesOf(checker, flow, query.node, nativeProtocolClosed)
-            if (stored !== null) {
-              for (const candidate of stored) add(carry(value(candidate)))
-              break
-            }
-          }
-          if (ts.isNewExpression(query.node)) {
-            for (const candidate of read(value(query.node.expression))) {
-              if (
-                ts.isFunctionDeclaration(candidate) &&
-                flow.callableBodyIsIndexed(candidate) &&
-                candidate === constructorFunctionCalleeOf(query.node) &&
-                constructionYieldsCompletionOf(flow, candidate)
-              )
-                add(carry(frameQuery('frame-completion', query.node, candidate)))
-              else fail('opaque-construction', candidate)
-            }
-            break
-          }
-          for (const body of read(targets(query.node))) {
-            if (!isBody(body)) fail('unindexed-body', body)
-            else add(carry(frameQuery('frame-completion', query.node, body)))
-          }
-          if (ts.isCallExpression(query.node) && lookupThrows(query.node)) seeded = true
-          break
-        }
-        case 'frame-receiver':
-        case 'frame-argument':
-        case 'frame-parameter':
-        case 'frame-value':
-        case 'frame-completion': {
-          const own = ts.isCallExpression(query.node) ? candidateOrdinaryOwnCallableOperandsOf(query.node) : null
-          const layout = sourceInvocationFrameLayoutOf(flow, query.node, query.body, own ?? undefined)
-          if (!layout) {
-            fail('unindexed-source-frame')
-            break
-          }
-          const contextual = (expression: ts.Expression): Query =>
-            frameQuery('frame-value', query.node, query.body, unwrapErasedExpression(expression))
-          if (query.kind === 'frame-receiver') {
-            const receiver = layout.receiver
-            if (receiver.kind === 'undefined') {
-              facts.add(undefinedValue)
-              seeded = true
-            } else if (receiver.kind === 'expression') {
-              const memberCall = !layout.operands.explicitThis
-              for (const candidate of carry(value(receiver.expression))) {
-                // `source.attachment.clone()` with no attachment set:
-                // the member lookup on `null` throws and the frame never runs
-                // with that receiver. Only an explicit `f.call( null )` binds
-                // a nullish receiver.
-                if (memberCall && isNullish(candidate)) continue
-                if (receiver.conversion === 'identity' || isObjectRoot(candidate) || isBody(candidate)) facts.add(candidate)
-                else
-                  fail(
-                    ts.isVoidExpression(candidate) || candidate.kind === ts.SyntaxKind.NullKeyword
-                      ? 'global-object-receiver-origin'
-                      : 'primitive-receiver-conversion',
-                    receiver.expression
-                  )
-              }
-            } else if (receiver.kind === 'constructed') add(carry(value(receiver.call)))
-            else if (receiver.kind === 'lexical' && receiver.source !== 'arrow') {
-              // `super.m()` and `super()` run with the calling frame's own
-              // `this`; the class the layout names is only where the lookup
-              // starts, and no receiver is owned by a class.
-              const callee = ts.isCallExpression(query.node) ? unwrapErasedExpression(query.node.expression) : null
-              const keyword =
-                callee === null
-                  ? null
-                  : callee.kind === ts.SyntaxKind.SuperKeyword
-                    ? callee
-                    : (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) &&
-                        callee.expression.kind === ts.SyntaxKind.SuperKeyword
-                      ? callee.expression
-                      : null
-              if (keyword === null) fail('unresolved-super-home', query.node)
-              else add(carry(value(keyword)))
-            } else if (receiver.kind === 'lexical' && receiver.owner) {
-              if (ts.isSourceFile(receiver.owner)) {
-                if (ts.isExternalModule(receiver.owner)) {
-                  facts.add(undefinedValue)
-                  seeded = true
-                } else fail('global-object-receiver-origin', receiver.owner)
-              } else add(carry(nodeQuery('receiver', receiver.owner)))
-            } else fail(receiver.kind === 'unsupported' ? receiver.reason : 'global-object-receiver-origin')
-          } else if (query.kind === 'frame-argument' || query.kind === 'frame-parameter') {
-            const parameter = query.subject
-            if (!parameter || !ts.isParameter(parameter) || parameter.parent !== query.body) {
-              fail('unindexed-parameter-frame')
-              break
-            }
-            if (query.kind === 'frame-parameter') {
-              add(carry(frameQuery('frame-argument', query.node, query.body, parameter)))
-              for (const write of flow.writesToDeclaration(parameter)) {
-                if (write.edge === 'call-argument' || write.edge === 'super-argument' || write.edge === 'default-parameter') continue
-                if (write.slot !== 'whole') continue
-                if (!['identifier-assignment', 'logical-assignment'].includes(write.edge) || !write.value)
-                  fail('unmodelled-parameter-write', write.site)
-                else add(carry(contextual(write.value)))
-              }
-              break
-            }
-            if (layout.arguments.kind === 'spread') {
-              fail('spread-arguments')
-              break
-            }
-            const slot = layout.arguments.slots.find((candidate) => candidate.parameter === parameter)
-            if (!slot || slot.kind === 'rest') {
-              fail('unmodelled-parameter-frame', parameter)
-              break
-            }
-            if (slot.actual) {
-              for (const candidate of carry(value(slot.actual))) {
-                if (ts.isVoidExpression(candidate) && slot.defaultValue) add(carry(contextual(slot.defaultValue)))
-                else facts.add(candidate)
-              }
-            } else if (slot.defaultValue) add(carry(contextual(slot.defaultValue)))
-            else {
-              facts.add(undefinedValue)
-              seeded = true
-            }
-          } else if (query.kind === 'frame-completion') {
-            const summary = callableCompletionSummaryOf(flow, query.body)
-            if (!summary || summary.execution !== 'sync') fail('deferred-completion', query.body)
-            else {
-              for (const expression of summary.values) add(carry(contextual(expression)))
-              if (summary.mayCompleteUndefined || (ts.isCallExpression(query.node) && ts.isCallChain(query.node))) {
-                facts.add(undefinedValue)
-                seeded = true
-              }
-            }
-          } else {
-            const expression = query.subject
-            if (!expression || ts.isParameter(expression)) {
-              fail('unindexed-frame-value')
-              break
-            }
-            const declaration = ts.isIdentifier(expression) ? flow.targetOf(expression)?.declaration : null
-            if (declaration && ts.isParameter(declaration) && declaration.parent === query.body)
-              add(carry(frameQuery('frame-parameter', query.node, query.body, declaration)))
-            else if (
-              declaration &&
-              ts.isVariableDeclaration(declaration) &&
-              ts.findAncestor(declaration, ts.isFunctionLike) === query.body
-            ) {
-              const incoming = sourceBindingValuesOf(checker, flow, declaration, iterationValuesAt)
-              if (incoming === null) fail('unaccounted-binding-write', declaration)
-              else for (const entry of incoming) add(carry(contextual(entry)))
-              if (incoming !== null && bindingReadMayPrecedeFirstWrite(declaration, expression)) {
-                facts.add(undefinedValue)
-                seeded = true
-              }
-            } else if (
-              (expression.kind === ts.SyntaxKind.ThisKeyword || expression.kind === ts.SyntaxKind.SuperKeyword) &&
-              (ts.isArrowFunction(query.body) || flow.receiverOwnerOf(expression) === query.body)
-            )
-              add(carry(frameQuery('frame-receiver', query.node, query.body)))
-            else if (ts.isConditionalExpression(expression)) {
-              add(carry(contextual(expression.whenTrue)))
-              add(carry(contextual(expression.whenFalse)))
-            } else if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
-              const keys = keysOf(expression)
-              for (const root of read(contextual(expression.expression))) {
-                if (isObjectRoot(root))
-                  for (const key of keys) {
-                    if (
-                      isSourceCallableObject(root) &&
-                      key !== 'name' &&
-                      key !== 'length' &&
-                      sourceCallableOwnDataWriteOf(checker, flow, root, key, expression) === null
-                    )
-                      fail('unproven-callable-data-read', expression)
-                    else add(carry(slot(root, key)))
-                  }
-                else if (root.kind !== ts.SyntaxKind.NullKeyword && !ts.isVoidExpression(root)) fail('non-object-receiver')
-              }
-            } else if (
-              ts.isBinaryExpression(expression) &&
-              [ts.SyntaxKind.EqualsToken, ts.SyntaxKind.CommaToken].includes(expression.operatorToken.kind)
-            )
-              add(carry(contextual(expression.right)))
-            else if (
-              ts.isBinaryExpression(expression) &&
-              [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.QuestionQuestionToken].includes(
-                expression.operatorToken.kind
-              )
-            ) {
-              add(carry(contextual(expression.left)))
-              add(carry(contextual(expression.right)))
-            } else add(carry(value(expression)))
-          }
-          break
-        }
-        case 'parameter': {
-          parameterValues(query.node, null)
-          break
-        }
-        case 'binding-element': {
-          const element = query.node
-          const pattern = element.parent
-          const holder = pattern.parent
-          const key = bindingElementKey(element)
-          // A rest element holds a FRESH object built from the keys nothing
-          // else took -- unmodelled regardless of presence.
-          if (element.dotDotDotToken) fail('rest-binding-element', element)
-          else if (key === null) fail('computed-binding-element', element)
-          else {
-            // The container is whatever cell holds the object being taken
-            // apart, and every form of it is already a query: a parameter, an
-            // outer binding element of a nested pattern, or the initializer of
-            // a destructuring declaration.
-            const container = bindingContainer(element)
-            if (container === null) fail('unmodelled-binding-container', holder)
-            else {
-              const roots = read(container)
-              // A default makes the cell's value depend on whether the slot
-              // was present -- a presence fact this graph does not otherwise
-              // carry, EXCEPT for the one shape `ownEntries` already answers:
-              // an object-literal root that OWNS this key outright (a plain
-              // property, no spread, no accessor). JS only consults a
-              // destructuring default when the read is exactly `undefined`,
-              // and a literal's own stated property is never that by
-              // omission -- so when every root the container resolves to is
-              // such a literal, the default is dead code and the slot reads
-              // below are the whole, sound answer. A host-options literal
-              // like `new Renderer({ canvas, context, depth: true, ... })`
-              // states every field its constructor destructures
-              // with a default, so refusing EVERY defaulted binding element
-              // unconditionally made the host context -- and everything
-              // downstream of it, the whole host surface -- permanently unenumerable no
-              // matter what the program actually wrote at the call site.
-              const defaultIsLive =
-                element.initializer !== undefined &&
-                (roots.size === 0 || [...roots].some((root) => !ts.isObjectLiteralExpression(root) || ownEntries(root, key) === null))
-              if (defaultIsLive) fail('defaulted-binding-element', element)
-              else
-                for (const root of roots) {
-                  if (
-                    isSourceCallableObject(root) &&
-                    key !== 'name' &&
-                    key !== 'length' &&
-                    sourceCallableOwnDataWriteOf(checker, flow, root, key, element) === null
-                  )
-                    fail('unproven-callable-data-read', element)
-                  else if (isObjectRoot(root)) add(carry(slot(root, key)))
-                  else fail('non-object-destructured-container', element)
-                }
-            }
-          }
-          break
-        }
-        case 'receiver': {
-          const owner = query.node
-          if (ts.isSourceFile(owner) && ts.isExternalModule(owner)) {
-            facts.add(undefinedValue)
-            seeded = true
-          } else if (
-            ts.isConstructorDeclaration(owner) ||
-            ts.isPropertyDeclaration(owner) ||
-            ts.isGetAccessorDeclaration(owner) ||
-            ts.isSetAccessorDeclaration(owner)
-          ) {
-            for (const construction of constructionsOf(owner)) add(carry(value(construction)))
-          } else if (isBody(owner)) {
-            read(closure(owner))
-            for (const construction of constructionsOf(owner)) add(carry(value(construction)))
-            for (const call of read(callersOf(owner))) if (ts.isCallExpression(call)) add(carry(frameQuery('frame-receiver', call, owner)))
-          } else fail('unmodelled-receiver-owner')
-          break
-        }
-        case 'callers': {
-          // The exact filter every inline caller used to run for itself --
-          // moved here so the whole-program walk it does for an unnamed body
-          // is paid once per OWNER, not once per (owner, consumer) pair. See
-          // `callersOf`'s comment for the shape and the measured cost this
-          // replaces.
-          // Discovery by name and by CLOSURE, soundness by CLOSURE. The spelled
-          // calls that resolve to this owner are its callers only while the owner
-          // can be reached from nowhere else: the body's own closure says where
-          // the callable value goes -- including each call through an alias no
-          // name of the owner spells, which it lists -- and for a class member each instance's
-          // closure says where the receivers go -- an instance handed to
-          // unknown code can be called through from there with arguments no
-          // site spells. A spelled call whose targets are opaque is then
-          // either a call through one of those closures, which already
-          // refused, or a call on something that never holds this owner.
-          // Requiring every candidate's targets instead made a class's `copy`
-          // wait on `targetMatrix.copy( ... )` inside a module-level helper
-          // literal, a matrix the graph never places.
-          const owner = query.node
-          // A constructor is never CALLED: its frames are its construction
-          // sites, which `constructionSitesTargeting` names from the
-          // construction domain, so it has no closure to read here.
-          if (ts.isConstructorDeclaration(owner)) break
-          // `const g = f; g()` before this: `callers(f)` was a complete `[]`. Seeded
-          // so `holdersOf` below finds the ones whose targets hold the owner; the
-          // closure's other calls (a bulk assign or definition onto it) never do.
-          const unnamed: ts.CallExpression[] = []
-          for (const use of read(closure(owner))) if (ts.isCallExpression(use)) unnamed.push(use)
-          for (const call of unnamed) seed(targets(call))
-          if (ts.isClassElement(owner) && ts.isClassLike(owner.parent)) {
-            if ((ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Static) !== 0) fail('static-member-callers-open', owner)
-            else for (const instance of familyInstancesOf(owner.parent, 'member-family-open') ?? []) read(closure(instance))
-          }
-          // Which candidates' targets hold this owner, asked in reverse. Observing
-          // every candidate's `targets` made an owner whose names cannot be
-          // enumerated a dependent of every call in the program, and re-ran it
-          // whenever any of them gained any body: in round 1 of Sakura Fantasy
-          // (55269dd) 1.57M of the session's 4.29M observe edges, and 94% of these
-          // transfers added nothing. `holdersOf` wakes this node only when the
-          // owner itself joins a seeded `targets` state, and is discovery-only
-          // exactly as the observe edges were.
-          const candidates = callerCandidatesOf(owner)
-          const held = new Set<ts.Node>()
-          for (const holder of holdersOf(owner)) if (holder.kind === 'targets') held.add(holder.node)
-          for (const candidate of candidates) {
-            if (candidate.call === null || held.has(candidate.call)) facts.add(candidate.site.call)
-          }
-          for (const call of unnamed) if (held.has(call)) facts.add(call)
-          break
-        }
-        case 'closure': {
-          const root = query.node
-          if (ts.isFunctionDeclaration(root)) {
-            // `refs` follows the same import inventory as stored cells. A
-            // factory imported by a source module is not an external escape.
-            if (importerMentions(root) === null) fail('exported-callable')
-            if (!sourceGlobalCallableBindingIsClosed(checker, flow, root)) fail('global-object-callable')
-            refs(root, root)
-          } else if (ts.isMethodDeclaration(root)) {
-            if (ts.isObjectLiteralExpression(root.parent)) {
-              const key = declarationKey(root.name)
-              if (key === null) fail('computed-method')
-              else add(read(publication(root, root.parent, key)))
-            } else refs(root, root)
-          } else if (ts.isExpression(root)) add(read(use(root, root)))
-          else fail('unmodelled-root')
-          if (ts.isNewExpression(root) && !isFreshOrdinaryObject(root)) {
-            const owners = constructionFrames.receiverOwnersOf(root)
-            if (!owners) {
-              fail('opaque-construction')
-              break
-            }
-            for (const owner of owners) {
-              if (!isClassSpelledSourceClass(owner)) {
-                for (const reference of flow.receiverReferencesToDeclaration(owner)) add(read(use(root, reference)))
-                continue
-              }
-              for (const member of owner.members) {
+            const roots = read(container)
+            // A default makes the cell's value depend on whether the slot
+            // was present -- a presence fact this graph does not otherwise
+            // carry, EXCEPT for the one shape `ownEntries` already answers:
+            // an object-literal root that OWNS this key outright (a plain
+            // property, no spread, no accessor). JS only consults a
+            // destructuring default when the read is exactly `undefined`,
+            // and a literal's own stated property is never that by
+            // omission -- so when every root the container resolves to is
+            // such a literal, the default is dead code and the slot reads
+            // below are the whole, sound answer. A host-options literal
+            // like `new Renderer({ canvas, context, depth: true, ... })`
+            // states every field its constructor destructures
+            // with a default, so refusing EVERY defaulted binding element
+            // unconditionally made the host context -- and everything
+            // downstream of it, the whole host surface -- permanently unenumerable no
+            // matter what the program actually wrote at the call site.
+            const defaultIsLive =
+              element.initializer !== undefined &&
+              (roots.size === 0 || [...roots].some((root) => !ts.isObjectLiteralExpression(root) || ownEntries(root, key) === null))
+            if (defaultIsLive) fail('defaulted-binding-element', element)
+            else
+              for (const root of roots) {
                 if (
-                  ts.isConstructorDeclaration(member) ||
-                  (ts.isPropertyDeclaration(member) && (ts.getCombinedModifierFlags(member) & ts.ModifierFlags.Static) === 0)
+                  isSourceCallableObject(root) &&
+                  key !== 'name' &&
+                  key !== 'length' &&
+                  sourceCallableOwnDataWriteOf(checker, flow, root, key, element) === null
                 )
-                  for (const reference of flow.receiverReferencesToDeclaration(member)) add(read(use(root, reference)))
+                  fail('unproven-callable-data-read', element)
+                else if (isObjectRoot(root)) add(carry(slot(root, key)))
+                else fail('non-object-destructured-container', element)
               }
-            }
           }
-          break
         }
-        case 'use':
-          visitUse(query.root, query.node)
-          break
-        case 'unknown-reads': {
-          // Inverted from a scan of all 968 receivers to a reverse-index
-          // lookup: `holdersOf` hands back the receiver queries that hold
-          // THIS container, so the container asks once instead of every
-          // container asking the same 968-entry list. A holder that is not
-          // one of the unknown-read receivers -- a `slot`, `parameter` or any
-          // other kind of state that also happens to hold this exact node --
-          // is not in `unknownReadsByReceiver` and is simply skipped.
-          for (const holder of holdersOf(query.node))
-            for (const entry of unknownReadsByReceiver.get(holder) ?? NO_READS) facts.add(entry.access)
-          break
+        break
+      }
+      case 'receiver': {
+        const owner = query.node
+        if (ts.isSourceFile(owner) && ts.isExternalModule(owner)) {
+          facts.add(undefinedValue)
+          seeded = true
+        } else if (
+          ts.isConstructorDeclaration(owner) ||
+          ts.isPropertyDeclaration(owner) ||
+          ts.isGetAccessorDeclaration(owner) ||
+          ts.isSetAccessorDeclaration(owner)
+        ) {
+          for (const construction of constructionsOf(owner)) add(carry(value(construction)))
+        } else if (isBody(owner)) {
+          read(closure(owner))
+          for (const construction of constructionsOf(owner)) add(carry(value(construction)))
+          for (const call of read(callersOf(owner))) if (ts.isCallExpression(call)) add(carry(frameQuery('frame-receiver', call, owner)))
+        } else fail('unmodelled-receiver-owner')
+        break
+      }
+      case 'callers': {
+        // The exact filter every inline caller used to run for itself --
+        // moved here so the whole-program walk it does for an unnamed body
+        // is paid once per OWNER, not once per (owner, consumer) pair. See
+        // `callersOf`'s comment for the shape and the measured cost this
+        // replaces.
+        // Discovery by name and by CLOSURE, soundness by CLOSURE. The spelled
+        // calls that resolve to this owner are its callers only while the owner
+        // can be reached from nowhere else: the body's own closure says where
+        // the callable value goes -- including each call through an alias no
+        // name of the owner spells, which it lists -- and for a class member each instance's
+        // closure says where the receivers go -- an instance handed to
+        // unknown code can be called through from there with arguments no
+        // site spells. A spelled call whose targets are opaque is then
+        // either a call through one of those closures, which already
+        // refused, or a call on something that never holds this owner.
+        // Requiring every candidate's targets instead made a class's `copy`
+        // wait on `targetMatrix.copy( ... )` inside a module-level helper
+        // literal, a matrix the graph never places.
+        const owner = query.node
+        // A constructor is never CALLED: its frames are its construction
+        // sites, which `constructionSitesTargeting` names from the
+        // construction domain, so it has no closure to read here.
+        if (ts.isConstructorDeclaration(owner)) break
+        // `const g = f; g()` before this: `callers(f)` was a complete `[]`. Seeded
+        // so `holdersOf` below finds the ones whose targets hold the owner; the
+        // closure's other calls (a bulk assign or definition onto it) never do.
+        const unnamed: ts.CallExpression[] = []
+        for (const use of read(closure(owner))) if (ts.isCallExpression(use)) unnamed.push(use)
+        for (const call of unnamed) seed(targets(call))
+        if (ts.isClassElement(owner) && ts.isClassLike(owner.parent)) {
+          if ((ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Static) !== 0) fail('static-member-callers-open', owner)
+          else for (const instance of familyInstancesOf(owner.parent, 'member-family-open') ?? []) read(closure(instance))
         }
-        case 'own-keys': {
-          const root = query.node
-          const keys = ownKeysOf(root)
-          if (keys === null) {
-            fail('unspelled-own-key-domain', root)
+        // Which candidates' targets hold this owner, asked in reverse. Observing
+        // every candidate's `targets` made an owner whose names cannot be
+        // enumerated a dependent of every call in the program, and re-ran it
+        // whenever any of them gained any body: in round 1 of Sakura Fantasy
+        // (55269dd) 1.57M of the session's 4.29M observe edges, and 94% of these
+        // transfers added nothing. `holdersOf` wakes this node only when the
+        // owner itself joins a seeded `targets` state, and is discovery-only
+        // exactly as the observe edges were.
+        const candidates = callerCandidatesOf(owner)
+        const held = new Set<ts.Node>()
+        for (const holder of holdersOf(owner)) if (holder.kind === 'targets') held.add(holder.node)
+        for (const candidate of candidates) {
+          if (candidate.call === null || held.has(candidate.call)) facts.add(candidate.site.call)
+        }
+        for (const call of unnamed) if (held.has(call)) facts.add(call)
+        break
+      }
+      case 'closure': {
+        const root = query.node
+        if (ts.isFunctionDeclaration(root)) {
+          // `refs` follows the same import inventory as stored cells. A
+          // factory imported by a source module is not an external escape.
+          if (importerMentions(root) === null) fail('exported-callable')
+          if (!sourceGlobalCallableBindingIsClosed(checker, flow, root)) fail('global-object-callable')
+          refs(root, root)
+        } else if (ts.isMethodDeclaration(root)) {
+          if (ts.isObjectLiteralExpression(root.parent)) {
+            const key = declarationKey(root.name)
+            if (key === null) fail('computed-method')
+            else add(read(publication(root, root.parent, key)))
+          } else refs(root, root)
+        } else if (ts.isExpression(root)) add(read(use(root, root)))
+        else fail('unmodelled-root')
+        if (ts.isNewExpression(root) && !isFreshOrdinaryObject(root)) {
+          const owners = constructionFrames.receiverOwnersOf(root)
+          if (!owners) {
+            fail('opaque-construction')
             break
           }
-          const stored = read(closure(root))
-          for (const key of keys) facts.add(keyValue(root, key))
-          seeded = true
-          // Discovery subscriptions alone cannot authenticate a bulk source.
-          // Require each contributing source's complete keys and closure in
-          // the same solver graph, including keys that it acquired earlier.
-          for (const write of stored) {
-            if (!ts.isCallExpression(write)) continue
-            const bulk = bulkAssignOf(write)
-            if (bulk === null || !read(value(bulk.target)).has(root)) continue
-            for (const source of bulk.sources)
-              for (const held of read(value(source))) {
-                if (isNullish(held)) continue
-                if (!ts.isObjectLiteralExpression(held)) fail('bulk-assign-source-unmodelled', source)
-                else
-                  for (const key of read(nodeQuery('own-keys', held))) {
-                    if (ts.isStringLiteral(key)) facts.add(keyValue(root, key.text))
-                    else fail('unmodelled-own-key-value', held)
-                  }
-              }
-          }
-          break
-        }
-        case 'readers': {
-          const aliases = ts.isArrayLiteralExpression(query.node)
-            ? query.key === ELEMENT_KEY
-              ? [...readsByKey.keys()].filter((key) => key === ELEMENT_KEY || isCanonicalIndex(key))
-              : isCanonicalIndex(query.key)
-                ? [query.key, ELEMENT_KEY]
-                : [query.key]
-            : [query.key]
-          for (const alias of aliases)
-            for (const entry of readsByKey.get(alias) ?? NO_READS) {
-              if (!observe(entry.receiver).has(query.node)) continue
-              if (keyReaches(query.node, keysOf(entry.access), query.key)) facts.add(entry.access)
+          for (const owner of owners) {
+            if (!isClassSpelledSourceClass(owner)) {
+              for (const reference of flow.receiverReferencesToDeclaration(owner)) add(read(use(root, reference)))
+              continue
             }
-          // Discovery-only, exactly as the receiver test it replaces was: a
-          // publication never required the unknown reads to have settled, it
-          // only had to see the ones that had.
-          for (const access of observe(unknownReadsOf(query.node))) {
-            if (!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access)) continue
-            if (keyReaches(query.node, keysOf(access), query.key)) facts.add(access)
-          }
-          break
-        }
-        case 'publication': {
-          read(closure(query.node))
-          // A container merged into another by `Object.assign` hands this
-          // key's value to the target as well.
-          for (const stored of read(closure(query.node))) {
-            if (!ts.isCallExpression(stored)) continue
-            const bulk = bulkAssignOf(stored)
-            if (bulk === null || !bulk.sources.some((source) => read(value(source)).has(query.node))) continue
-            for (const held of read(value(bulk.target))) if (isObjectRoot(held)) add(read(publication(query.root, held, query.key)))
-          }
-          for (const stored of read(closure(query.node))) {
-            const copied = ts.isExpression(stored) ? outermostErasureOf(stored).parent : undefined
-            if (copied && ts.isSpreadAssignment(copied) && read(value(copied.expression)).has(query.node))
-              add(read(publication(query.root, copied.parent, query.key)))
-            if (!ts.isCallExpression(stored) || !definitionPlans.has(stored) || query.key !== 'value') continue
-            const plan = definitionOf(stored)
-            if (plan === null || !read(value(stored.arguments[2]!)).has(query.node)) continue
-            for (const held of read(value(stored.arguments[0]!)))
-              if (isObjectRoot(held)) for (const key of plan.keys) add(read(publication(query.root, held, key)))
-          }
-          // Required, so the readers' completeness and the ledger obligations their
-          // key tests raise still reach this publication.
-          for (const access of read(readers(query.node, query.key)))
-            if (ts.isPropertyAccessExpression(access) || ts.isElementAccessExpression(access)) add(read(use(query.root, access)))
-          // The value this key holds also reaches every cell a binding element
-          // of this container declares. Enumerating only `propertyAccesses`
-          // left `const { app } = p; sink(app)` out of the inventory, which is
-          // a hole in a closure proof, not a missing capability.
-          for (const element of both(patternReadsByKey.get(query.key), unknownPatternReads)) {
-            const container = bindingContainer(element)
-            if (container === null || !observe(container).has(query.node)) continue
-            if (element.dotDotDotToken || bindingElementKey(element) === null) fail('unmodelled-container-read', element)
-            else refs(query.root, element)
-          }
-          if (ts.isArrayLiteralExpression(query.node) && (query.key === ELEMENT_KEY || isCanonicalIndex(query.key)))
-            for (const write of (valueIterationWrites ??= flow.allWrites.filter((write) => write.iterationOrigin?.mode === 'values'))) {
-              const origin = write.iterationOrigin!
-              if (!observe(value(origin.source)).has(query.node)) continue
-              if (origin.asynchronous || deferredIntrinsicProtocolLedgerOf(flow)?.require('Array', origin.source) !== true) {
-                fail('unproven-array-iteration', write.site)
-                continue
-              }
-              const declaration = write.target.declaration
-              if (declaration && ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name)) refs(query.root, declaration)
-              else fail('unmodelled-iteration-binding', write.site)
+            for (const member of owner.members) {
+              if (
+                ts.isConstructorDeclaration(member) ||
+                (ts.isPropertyDeclaration(member) && (ts.getCombinedModifierFlags(member) & ts.ModifierFlags.Static) === 0)
+              )
+                for (const reference of flow.receiverReferencesToDeclaration(member)) add(read(use(root, reference)))
             }
-          break
+          }
         }
+        break
       }
-      finalCauses = causes.length === 0 ? NO_CAUSES : causes
-      // Only the seal reads the grounding edges, and the seal is the last
-      // call this query receives; materializing the list on every transfer
-      // allocated one object per carried edge per re-evaluation for nothing.
-      if (sealing)
-        finalGrounding = grounding.size === 0 ? NO_GROUNDING : [...grounding].map((dependency) => ({ domain: VALUE_ORIGIN, dependency }))
-      return facts
-    }
-    const run = (read: Read, observe: Read, holdersOf: DependencyFactHoldersOf<Query, Value>, sealing: boolean): ReadonlySet<Value> => {
-      const ledger = deferredIntrinsicProtocolLedgerOf(flow)
-      if (!ledger) return evaluate(read, observe, holdersOf, sealing)
-      const captured = ledger.capture(() => evaluate(read, observe, holdersOf, sealing))
-      // Overwrite, not union -- like `finalCauses`/`finalGrounding` above,
-      // this is safe ONLY because `evaluate` is monotone: `facts` published to
-      // the solver (`component-solver.ts`'s `state.facts`) accumulate forever
-      // regardless of what any one call returns, so the LAST call for this
-      // query (the seal that ends the re-seal loop) is the only one whose
-      // `facts` can differ from that accumulated set, and then only by being
-      // equal to it. `arrayElementKeys`' widen-on-empty was the one place that
-      // invariant broke -- an early pass published every element as a
-      // permanent fact that a later, exact pass never re-derived, so the
-      // ledger requirement that early pass owed was needed forever but this
-      // map would have forgotten it the moment a narrower pass overwrote it.
-      // With that widening now gated on `sealing`, no known transfer in this
-      // file can produce fewer facts on a later call than an earlier one
-      // already published, and a requirement that is raised without being
-      // needed is merely a stricter refusal, while a needed one gone missing
-      // is a wrong answer -- so if this invariant is ever broken again by a
-      // NEW transfer, union (not overwrite) is the direction that cannot lie:
-      // `both(requirements.get(query), captured.requirements)`.
-      // An empty list is not kept: `obligations` reads a missing entry as
-      // empty, and one empty list per query in the session was a map entry and
-      // an array for nothing.
-      if (captured.requirements.length > 0) requirements.set(query, captured.requirements)
-      else requirements.delete(query)
-      return captured.value
-    }
-    return {
-      transfer: (read, observe, holdersOf) => run(read, observe, holdersOf, false),
-      seal: (read, observe, holdersOf) => {
-        run(read, observe, holdersOf, true)
-        const carriesValue = VALUE_CARRYING_KINDS.has(query.kind)
-        return {
-          locallyComplete: finalCauses.length === 0,
-          causes: finalCauses,
-          groundingRequirements: carriesValue ? VALUE_ORIGIN_DOMAINS : NO_DOMAINS,
-          groundingSeeds: seeded ? VALUE_ORIGIN_DOMAINS : NO_DOMAINS,
-          groundingDependencies: finalGrounding
+      case 'use':
+        visitUse(query.root, query.node)
+        break
+      case 'unknown-reads': {
+        // Inverted from a scan of all 968 receivers to a reverse-index
+        // lookup: `holdersOf` hands back the receiver queries that hold
+        // THIS container, so the container asks once instead of every
+        // container asking the same 968-entry list. A holder that is not
+        // one of the unknown-read receivers -- a `slot`, `parameter` or any
+        // other kind of state that also happens to hold this exact node --
+        // is not in `unknownReadsByReceiver` and is simply skipped.
+        for (const holder of holdersOf(query.node))
+          for (const entry of unknownReadsByReceiver.get(holder) ?? NO_READS) facts.add(entry.access)
+        break
+      }
+      case 'own-keys': {
+        const root = query.node
+        const keys = ownKeysOf(root)
+        if (keys === null) {
+          fail('unspelled-own-key-domain', root)
+          break
         }
+        const stored = read(closure(root))
+        for (const key of keys) facts.add(keyValue(root, key))
+        seeded = true
+        // Discovery subscriptions alone cannot authenticate a bulk source.
+        // Require each contributing source's complete keys and closure in
+        // the same solver graph, including keys that it acquired earlier.
+        for (const write of stored) {
+          if (!ts.isCallExpression(write)) continue
+          const bulk = bulkAssignOf(write)
+          if (bulk === null || !read(value(bulk.target)).has(root)) continue
+          for (const source of bulk.sources)
+            for (const held of read(value(source))) {
+              if (isNullish(held)) continue
+              if (!ts.isObjectLiteralExpression(held)) fail('bulk-assign-source-unmodelled', source)
+              else
+                for (const key of read(nodeQuery('own-keys', held))) {
+                  if (ts.isStringLiteral(key)) facts.add(keyValue(root, key.text))
+                  else fail('unmodelled-own-key-value', held)
+                }
+            }
+        }
+        break
+      }
+      case 'readers': {
+        const aliases = ts.isArrayLiteralExpression(query.node)
+          ? query.key === ELEMENT_KEY
+            ? [...readsByKey.keys()].filter((key) => key === ELEMENT_KEY || isCanonicalIndex(key))
+            : isCanonicalIndex(query.key)
+              ? [query.key, ELEMENT_KEY]
+              : [query.key]
+          : [query.key]
+        for (const alias of aliases)
+          for (const entry of readsByKey.get(alias) ?? NO_READS) {
+            if (!observe(entry.receiver).has(query.node)) continue
+            if (keyReaches(query.node, keysOf(entry.access), query.key)) facts.add(entry.access)
+          }
+        // Discovery-only, exactly as the receiver test it replaces was: a
+        // publication never required the unknown reads to have settled, it
+        // only had to see the ones that had.
+        for (const access of observe(unknownReadsOf(query.node))) {
+          if (!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access)) continue
+          if (keyReaches(query.node, keysOf(access), query.key)) facts.add(access)
+        }
+        break
+      }
+      case 'publication': {
+        read(closure(query.node))
+        // A container merged into another by `Object.assign` hands this
+        // key's value to the target as well.
+        for (const stored of read(closure(query.node))) {
+          if (!ts.isCallExpression(stored)) continue
+          const bulk = bulkAssignOf(stored)
+          if (bulk === null || !bulk.sources.some((source) => read(value(source)).has(query.node))) continue
+          for (const held of read(value(bulk.target))) if (isObjectRoot(held)) add(read(publication(query.root, held, query.key)))
+        }
+        for (const stored of read(closure(query.node))) {
+          const copied = ts.isExpression(stored) ? outermostErasureOf(stored).parent : undefined
+          if (copied && ts.isSpreadAssignment(copied) && read(value(copied.expression)).has(query.node))
+            add(read(publication(query.root, copied.parent, query.key)))
+          if (!ts.isCallExpression(stored) || !definitionPlans.has(stored) || query.key !== 'value') continue
+          const plan = definitionOf(stored)
+          if (plan === null || !read(value(stored.arguments[2]!)).has(query.node)) continue
+          for (const held of read(value(stored.arguments[0]!)))
+            if (isObjectRoot(held)) for (const key of plan.keys) add(read(publication(query.root, held, key)))
+        }
+        // Required, so the readers' completeness and the ledger obligations their
+        // key tests raise still reach this publication.
+        for (const access of read(readers(query.node, query.key)))
+          if (ts.isPropertyAccessExpression(access) || ts.isElementAccessExpression(access)) add(read(use(query.root, access)))
+        // The value this key holds also reaches every cell a binding element
+        // of this container declares. Enumerating only `propertyAccesses`
+        // left `const { app } = p; sink(app)` out of the inventory, which is
+        // a hole in a closure proof, not a missing capability.
+        for (const element of both(patternReadsByKey.get(query.key), unknownPatternReads)) {
+          const container = bindingContainer(element)
+          if (container === null || !observe(container).has(query.node)) continue
+          if (element.dotDotDotToken || bindingElementKey(element) === null) fail('unmodelled-container-read', element)
+          else refs(query.root, element)
+        }
+        if (ts.isArrayLiteralExpression(query.node) && (query.key === ELEMENT_KEY || isCanonicalIndex(query.key)))
+          for (const write of (valueIterationWrites ??= flow.allWrites.filter((write) => write.iterationOrigin?.mode === 'values'))) {
+            const origin = write.iterationOrigin!
+            if (!observe(value(origin.source)).has(query.node)) continue
+            if (origin.asynchronous || deferredIntrinsicProtocolLedgerOf(flow)?.require('Array', origin.source) !== true) {
+              fail('unproven-array-iteration', write.site)
+              continue
+            }
+            const declaration = write.target.declaration
+            if (declaration && ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name)) refs(query.root, declaration)
+            else fail('unmodelled-iteration-binding', write.site)
+          }
+        break
       }
     }
+    own.finalCauses = causes.length === 0 ? NO_CAUSES : causes
+    // Only the seal reads the grounding edges, and the seal is the last
+    // call this query receives; materializing the list on every transfer
+    // allocated one object per carried edge per re-evaluation for nothing.
+    if (sealing)
+      own.finalGrounding = grounding.size === 0 ? NO_GROUNDING : [...grounding].map((dependency) => ({ domain: VALUE_ORIGIN, dependency }))
+    own.seeded = seeded
+    return facts
   }
+  const run = (
+    own: QueryDefinition,
+    read: Read,
+    observe: Read,
+    holdersOf: DependencyFactHoldersOf<Query, Value>,
+    sealing: boolean
+  ): ReadonlySet<Value> => {
+    const ledger = deferredIntrinsicProtocolLedgerOf(flow)
+    if (!ledger) return evaluate(own, read, observe, holdersOf, sealing)
+    const captured = ledger.capture(() => evaluate(own, read, observe, holdersOf, sealing))
+    // Overwrite, not union -- like `finalCauses`/`finalGrounding` above,
+    // this is safe ONLY because `evaluate` is monotone: `facts` published to
+    // the solver (`component-solver.ts`'s `state.facts`) accumulate forever
+    // regardless of what any one call returns, so the LAST call for this
+    // query (the seal that ends the re-seal loop) is the only one whose
+    // `facts` can differ from that accumulated set, and then only by being
+    // equal to it. `arrayElementKeys`' widen-on-empty was the one place that
+    // invariant broke -- an early pass published every element as a
+    // permanent fact that a later, exact pass never re-derived, so the
+    // ledger requirement that early pass owed was needed forever but this
+    // map would have forgotten it the moment a narrower pass overwrote it.
+    // With that widening now gated on `sealing`, no known transfer in this
+    // file can produce fewer facts on a later call than an earlier one
+    // already published, and a requirement that is raised without being
+    // needed is merely a stricter refusal, while a needed one gone missing
+    // is a wrong answer -- so if this invariant is ever broken again by a
+    // NEW transfer, union (not overwrite) is the direction that cannot lie:
+    // `both(requirements.get(query), captured.requirements)`.
+    // An empty list is not kept: `obligations` reads a missing entry as
+    // empty, and one empty list per query in the session was a map entry and
+    // an array for nothing.
+    if (captured.requirements.length > 0) requirements.set(own.query, captured.requirements)
+    else requirements.delete(own.query)
+    return captured.value
+  }
+  const define = (query: Query): DependencyFactDefinition<Query, Value, Cause> => new QueryDefinition(query, run)
   const { solve, requiredDependenciesOf, seed } = dependencyFactSolver(define, 'grounding-domains')
   // `case 'unknown-reads'` now asks `holdersOf` for the receivers that hold a
   // container, instead of `observe`-ing all 968 of them itself -- but a
