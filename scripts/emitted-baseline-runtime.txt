@@ -124,7 +124,7 @@ borrowed-array-join-over-arguments-into-dynamic-result.runtime.js.cpp 1fd4956ff2
 borrowed-builtin-call-bind.runtime.js.cpp b511f174c73a
 borrowed-formals.ts.cpp 7003d787461d
 borrowed-method-copied-onto-receiver-class.ts.cpp 43fd03bd9fb6
-bound-interface-method-replaces-its-own-member.runtime.ts.cpp a9b02f8f22e4
+bound-interface-method-replaces-its-own-member.runtime.ts.cpp 8fd6f19fdc97
 bound-method-read-of-a-this-stating-field.runtime.ts.cpp c29bae8e9f4c
 bound-methods-into-promiselike-then.runtime.ts.cpp 881394997f58
 bound-rest-method-packs-fixed-interface-arguments.runtime.ts.cpp 6f419421baab
@@ -1007,7 +1007,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp ba66f3c8919a
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 1529f347bb00
-printer-drift.txt ac4c98097e2e
+printer-drift.txt 2c6d465647a7
 private-names-are-not-own-properties.ts.cpp 5d0e90d41f28
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp 9a472a9cb9f7
@@ -1063,6 +1063,7 @@ record-into-ambiguous-union-parameter-keeps-identity.runtime.ts.cpp 9555f1b8914a
 record-key-order-follows-insertion-after-late-optional-write.runtime.ts.cpp e95cdfdb2456
 record-macro-named-fields.ts.cpp 1b1e14a1f21a
 record-read-out-of-unknown-map-keeps-its-keys.runtime.ts.cpp 81c0c04af941
+record-ref-array-of-optional-records-defined-first.runtime.ts.cpp 409ff7fcf6a5
 record-sidecar-key-order-object-keys.runtime.ts.cpp 13b9103efc61
 record-sidecar-key-order-reflection.runtime.ts.cpp ca2fa921d6dc
 record-string-computed-read.runtime.js.cpp 13cb1767ba77
@@ -1298,7 +1299,7 @@ uniform-tuple-const-object-indexed-read-in-a-free-function.runtime.ts.cpp 22be91
 uniform-tuple-identity-comparison-keeps-array-identity.runtime.ts.cpp 7894e44d7c4c
 uniform-tuple-mutated-through-an-alias-keeps-array-identity.runtime.ts.cpp 1ee771af3e75
 uniform-tuple-passed-to-a-plain-array-parameter-keeps-array-identity.runtime.ts.cpp 70cfd5eb434b
-uniform-tuple-pushed-into-an-array-avoids-a-nested-array-object.runtime.ts.cpp e7f03a5eeeea
+uniform-tuple-pushed-into-an-array-avoids-a-nested-array-object.runtime.ts.cpp 6b5aed0fc2c6
 uniform-tuple-widened-to-a-plain-array-keeps-array-identity.runtime.ts.cpp 6d222b246092
 union-absent-arm-equals-nullable-reference.runtime.ts.cpp be13bf90daf7
 union-arm-rest-method-packs-fixed-interface-arguments.runtime.ts.cpp 4b13f46a754a
