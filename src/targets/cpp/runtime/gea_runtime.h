@@ -20256,6 +20256,8 @@ struct Error;
 namespace host {
 inline gea::Ref<gea::runtime::Error> createRuntimeError(const char* kind, const gea::Optional<std::string>& message);
 inline bool isRuntimeError(const gea::Value& value);
+inline gea::Ref<gea::runtime::Error> runtimeErrorOf(const gea::Value& value);
+inline bool isErrorValue(const gea::Value& value);
 inline bool instanceOfRuntimeError(const gea::Value& value, const char* kind);
 inline std::string runtimeErrorString(const gea::Value& value);
 [[noreturn]] inline void throwRuntimeError(const char* kind, const std::string& message);
@@ -43275,7 +43277,7 @@ inline std::string typeOf(const gea::Value &value) {
 // without that dynamic boundary still refuses by name inside `dynamicToString`:
 // manufacturing "[object Object]" would bypass a possible native `toString`.
 inline std::string toString(const gea::Value &value) {
-  if (gea::host::isRuntimeError(value)) return gea::host::runtimeErrorString(value);
+  if (gea::host::isErrorValue(value)) return gea::host::runtimeErrorString(value);
   switch (value.tag()) {
     case gea::Value::Tag::Undefined:
       return toStringUndefined();
@@ -44229,7 +44231,7 @@ inline void registerErrorRecordType(const char* name) {
  */
 inline bool instanceOfError(const gea::Value& value, const char* name) {
   if (value.tag() != gea::Value::Tag::Object) return false;
-  if (gea::host::isRuntimeError(value)) return gea::host::instanceOfRuntimeError(value, name);
+  if (gea::host::isErrorValue(value)) return gea::host::instanceOfRuntimeError(value, name);
   const auto found = detail::errorPayloadTypes().find(name);
   if (found == detail::errorPayloadTypes().end()) return false;
   const void* payload = value.payloadType();
@@ -51944,11 +51946,23 @@ inline bool isRuntimeError(const gea::Value& value) {
   return value.tag() == gea::Value::Tag::Object &&
       value.payloadType() == gea::detail::payloadTypeTagFor<gea::Ref<gea::runtime::Error>>();
 }
+inline gea::Ref<gea::runtime::Error> runtimeErrorOf(const gea::Value& value) {
+  if (value.tag() != gea::Value::Tag::Object) return {};
+  if (value.payloadType() == gea::detail::payloadTypeTagFor<gea::Ref<gea::runtime::Error>>()) return value.as<gea::Ref<gea::runtime::Error>>();
+  if (value.classObject() && gea::detail::classIdentityExtends(value.classIdentity(), &gea::detail::RefOperationsFor<gea::runtime::Error>::table))
+    return value.classObject().template staticCast<gea::runtime::Error>();
+  return {};
+}
+inline bool isErrorValue(const gea::Value& value) { return static_cast<bool>(runtimeErrorOf(value)); }
 inline bool instanceOfRuntimeError(const gea::Value& value, const char* kind) {
-  return isRuntimeError(value) && value.as<gea::Ref<gea::runtime::Error>>()->instanceOf(kind);
+  const auto error = runtimeErrorOf(value);
+  return error && error->instanceOf(kind);
 }
 inline std::string runtimeErrorString(const gea::Value& value) {
-  return gea::detail::unboxAs<gea::Ref<gea::runtime::Error>>(value, gea::Value::Tag::Object, "Error ToString")->toString();
+  const auto error = runtimeErrorOf(value);
+  if (!error) return gea::detail::unboxAs<gea::Ref<gea::runtime::Error>>(value, gea::Value::Tag::Object, "Error ToString")->toString();
+  if (value.classObject() && value.getProperty(gea::PropertyKey::string("toString")).tag() == gea::Value::Tag::Function) return gea::dynamicToString(value);
+  return error->toString();
 }
 [[noreturn]] inline void throwRuntimeError(const char* kind, const std::string& message) {
 #if defined(GEA_RUNTIME_THROW_ENDS_PROGRAM) && GEA_RUNTIME_THROW_ENDS_PROGRAM
@@ -51973,7 +51987,7 @@ inline const bool uncaughtDescriberInstalled = [] {
       std::rethrow_exception(current);
     } catch (const gea::Value& value) {
       try {
-        text = gea::host::isRuntimeError(value) ? gea::host::runtimeErrorString(value) : gea::dynamicToString(value);
+        text = gea::host::isErrorValue(value) ? gea::host::runtimeErrorString(value) : gea::dynamicToString(value);
       } catch (...) {
         text = "<a value whose ToString threw>";
       }

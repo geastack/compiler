@@ -621,6 +621,7 @@ instanceof-class-union-through-nested-record-views.runtime.ts.cpp 540bfb9a5f2f
 instanceof-date-over-a-union-of-native-carriers.runtime.ts.cpp 6543d6b77454
 instanceof-derived-class.ts.cpp 526f685a24d1
 instanceof-else-arm-narrowed-to-never-is-not-converted.runtime.ts.cpp 439d10677a1d
+instanceof-error-over-boxed-error-subclass.runtime.ts.cpp 0a6f5f7e88c3
 instanceof-error-over-error-subclass-union-arm.runtime.ts.cpp 3f5bdc34a912
 instanceof-error-over-union-carrier.ts.cpp c0a862a2df14
 instanceof-over-union-with-record-arm-after-a-boxed-callable.runtime.ts.cpp 61940b54d14f
@@ -1230,6 +1231,7 @@ string-length-reuse-mutation.ts.cpp 0cd264bd8d0a
 string-length-reuse.ts.cpp 429819fd086c
 string-normalize-forms.ts.cpp 98c5bc66ab2f
 string-object-with-declared-fields.ts.cpp 8a8056fbe5ad
+string-of-boxed-error-subclass-overriding-tostring.runtime.ts.cpp 5bc5135e23d8
 string-of-symbol.runtime.js.cpp 234cbfea9b0d
 string-raw-tagged-template-into-regexp.runtime.ts.cpp b72805f3b232
 string-shared-layout.ts.cpp 645b4b7ef4b6
