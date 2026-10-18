@@ -274,6 +274,31 @@ test('native literal iteration retains element escapes in the source closure', (
   assert.ok(checked.ledger.capture(() => checked.session.ownSlotOf(owner, 'extra')).value === null)
 })
 
+test('an iteration binding refused by one source root keeps the literal entries whatever was solved first', () => {
+  // `values` holds the literal at once and `other()`'s object only after the
+  // call resolves. Solving `values` first used to refuse `value` before it held
+  // anything, so `readers` never saw `value.inner`, and `inner` looked closed
+  // although `escape` receives it.
+  const source = `
+    declare function escape(value: unknown): void;
+    declare const flag: boolean;
+    const inner = { count: 1 };
+    const outer = { inner: /* target */ inner };
+    function other() { return { inner: 0 } }
+    const values = flag ? [outer] : other();
+    for (const value of /* source */ values) escape(value.inner);
+  `
+  for (const sourceFirst of [false, true]) {
+    const checked = inspect(source)
+    if (sourceFirst)
+      assert.ok(checked.ledger.capture(() => checked.session.valuesOf(targetExpression(checked.file, '/* source */', 'values'))).value)
+    const inner = targetExpression(checked.file, '/* target */', 'inner')
+    // Compared as text: a failing assertion would otherwise print the nodes, and with them the whole program.
+    const closed = checked.ledger.capture(() => checked.session.closedValuesOf(inner)).value
+    assert.deepEqual(closed?.map((value) => value.getText(checked.file)) ?? null, null, `\`values\` solved first: ${sourceFirst}`)
+  }
+})
+
 /** The parameter of the first `set <key>(...)` accessor in the file. */
 const setterParameterOf = (file: ts.SourceFile, key: string): ts.ParameterDeclaration => {
   let found: ts.ParameterDeclaration | undefined
