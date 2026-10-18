@@ -28,7 +28,7 @@ array-buffer-inline-storage-aliasing.runtime.ts.cpp 4760b613e64b
 array-buffer-is-view-of-dynamic.runtime.ts.cpp efa48be51cfa
 array-capacity-hint-counts-from-the-counter-start.runtime.ts.cpp cf840974a39e
 array-concat-array-argument.ts.cpp db9be36008ed
-array-concat-of-element-or-array-union.ts.cpp 5aef77ab01ab
+array-concat-of-element-or-array-union.ts.cpp 081901235970
 array-element-string-key.ts.cpp 546d30ec479e
 array-entries-keys-values-iterators.ts.cpp fd77442e2fff
 array-from-length-mapper-takes-element-and-index.ts.cpp 067777fd9524
@@ -41,7 +41,7 @@ array-includes-optional-search.ts.cpp dd8451997401
 array-index-absence.ts.cpp 864943ace55c
 array-into-iterable-unknown-parameter.runtime.ts.cpp 1e741e2302be
 array-is-array-narrowed-readonly-tuple-index-is-its-element.runtime.ts.cpp c92d98c144ba
-array-isarray-guard-on-a-typed-readonly-array.runtime.ts.cpp a0c593a72c15
+array-isarray-guard-on-a-typed-readonly-array.runtime.ts.cpp 9fe769ce4110
 array-isarray-identity-conditional.ts.cpp d2d4d5622c4a
 array-literal-asserted-narrower-keeps-its-own-elements.runtime.ts.cpp 131a15d3eadf
 array-logical-receiver-with-dynamic-this.runtime.ts.cpp 5ebba3e75c80
@@ -121,7 +121,7 @@ bind-of-unknown-origin-method-guards-own-bind.runtime.ts.cpp 888572e47ef9
 bind-stays-builtin-when-a-computed-write-cannot-reach-the-function.runtime.ts.cpp b6be1a3be555
 bind-stays-builtin-when-an-emitter-is-viewed-as-an-interface.runtime.ts.cpp 8f18b1ecc018
 boolean-host-class-read-as-value.ts.cpp 35e1b1967130
-borrow-dynamic-guard.ts.cpp 4c07dbd134ee
+borrow-dynamic-guard.ts.cpp da96b41a5667
 borrow-effectful-private-actual.ts.cpp c7fa3912eb18
 borrow-getter-reentry.ts.cpp 90ec530f60de
 borrow-guarded-field.ts.cpp ebb851544530
@@ -141,8 +141,8 @@ boxed-date-reads-absent-member.runtime.ts.cpp 6f3b0e14384d
 boxed-live-view-enumerates-the-original.runtime.js.cpp 55266b5e8403
 boxed-payload-scope.ts.cpp 3593bf832bd1
 boxed-promise-payload-read-as-named-interface.runtime.ts.cpp 780d2868c7f3
-boxed-record-refcount.ts.cpp f637d856b619
-boxed-record-to-string-is-object-tag.runtime.ts.cpp a023d8668be1
+boxed-record-refcount.ts.cpp cdbce1ee3c0b
+boxed-record-to-string-is-object-tag.runtime.ts.cpp 9214ea7ca231
 boxed-typed-array-to-primitive.ts.cpp a1f085dc2cf8
 break-continue-through-finally.runtime.ts.cpp 8a97589ba417
 builtin-function-name-length.runtime.js.cpp f77da4e3c887
@@ -232,7 +232,7 @@ clone-through-each-subclass-copy-override.runtime.js.cpp 71994b1fb7fd
 closed-key-write-of-member-value-union.runtime.js.cpp 0bb00e748089
 closed-literal-absent-key-push.runtime.js.cpp 26cb270747d2
 closed-object-method-forwarding.runtime.ts.cpp f529c81c27e5
-closed-object-parameter-in-record.runtime.ts.cpp 55944679c4d9
+closed-object-parameter-in-record.runtime.ts.cpp 8c287ce93696
 closed-tuple-boxed-into-any-is-an-array.runtime.ts.cpp bcd8246b989b
 closure-cycle-lifetime.ts.cpp 29ca79a82b62
 closure-equality-compares-environment-anchors.runtime.ts.cpp 0e854c370edb
@@ -245,7 +245,7 @@ closure-frame-soundness.runtime.ts.cpp 3f0b8d99e615
 co-return-union-of-value-or-promise-async-arrow.runtime.ts.cpp f8dc9b06256b
 co-return-union-of-value-or-promise-async-method.runtime.ts.cpp 2841bb066011
 co-return-union-of-value-or-promise-settles-same-tick.runtime.ts.cpp 1167d06bbb48
-codec-table-static-method-dispatch.runtime.ts.cpp b014f6d02d10
+codec-table-static-method-dispatch.runtime.ts.cpp 2221c8e569f9
 collection-get-native-union.ts.cpp f83559b1594e
 composed-field-descriptor.runtime.js.cpp 3f6d6076d798
 computed-class-prototype-method.ts.cpp 3621b3951dfd
@@ -352,7 +352,7 @@ dynamic-array-absent-element.ts.cpp 1ebc756e20b6
 dynamic-array-literal-gather.runtime.js.cpp 60a83cabf76e
 dynamic-array-projection.ts.cpp 1eae2374ff84
 dynamic-array-rebuild-keeps-holes-and-order.runtime.ts.cpp fe99e85a7b77
-dynamic-bag-method-call-behind-property-guard.runtime.js.cpp a27d020fbea0
+dynamic-bag-method-call-behind-property-guard.runtime.js.cpp 65b0054f145c
 dynamic-call-argument-views-the-callers-record-and-array.runtime.js.cpp 38078c9e1b05
 dynamic-callable-boxed-call-frame.runtime.js.cpp f850d0629758
 dynamic-callable-rest-adapter.runtime.js.cpp 53c778910dad
@@ -430,6 +430,7 @@ fixed-field-assignment-widening.runtime.js.cpp 67fccd09bd1a
 fixed-field-define-property-widening.runtime.js.cpp e2af5c1a6166
 fixed-field-define-property.runtime.js.cpp ef569e0cafc0
 flat-over-tuples-and-from-entries-of-entries.ts.cpp 53c5832de06e
+flat-record-reached-through-an-any-view-keeps-identity.runtime.ts.cpp 6fecee19a40d
 float32-stencil-hot-loop.ts.cpp 7f9f66c2e09e
 fn-classref.ts.cpp 25cac7242896
 fn-scalar.ts.cpp 0ebb1e179ff1
@@ -645,7 +646,7 @@ interface-distinct-class-implementations.runtime.ts.cpp f6e23ee8fd23
 interface-extends-readonly-array.ts.cpp 0793066146af
 interface-family-absorbs-optional-intersection-partner.runtime.ts.cpp 000953f53975
 interface-family-adopts-literals-flowing-into-its-views.runtime.ts.cpp 44b00eae6e2b
-interface-family-copies-keep-undeclared-keys.runtime.ts.cpp 09001336d6b9
+interface-family-copies-keep-undeclared-keys.runtime.ts.cpp 54bedeb1fff4
 interface-family-layout.ts.cpp d2824c121747
 interface-family-through-omit-base-keeps-identity.runtime.ts.cpp 4ad6bcb1c0f6
 interface-overloads-joined-and-projected-per-call.runtime.ts.cpp a87f50d086a2
@@ -686,8 +687,8 @@ json-stringify-class-own-fields.ts.cpp 2b4f69d2e834
 json-stringify-class-with-to-json.ts.cpp 26e98d7e2eff
 json-stringify-of-undefined-is-undefined.runtime.ts.cpp 6338f7f22c79
 json-stringify-record-with-dynamic-dictionary-field.runtime.ts.cpp b1010dfc124a
-json-stringify-replacer.ts.cpp f6dfc12166dc
-json-stringify-tuples-are-arrays.ts.cpp 58af76ba0b96
+json-stringify-replacer.ts.cpp 03974bcbb5a5
+json-stringify-tuples-are-arrays.ts.cpp 59d135329def
 jsx-class-map.tsx.cpp 32c70926c421
 jsx-component-timer-initialization.tsx.cpp 6169a2a334a6
 jsx-conditional-reactive-class.tsx.cpp f5548faa2aa8
@@ -789,7 +790,7 @@ native-array-descriptor-snapshot.runtime.ts.cpp 47bf701821ee
 native-array-isarray-normalization.ts.cpp aaea6a3ec5f3
 native-array-prototype-descriptors.ts.cpp 5178b1e2fc42
 native-array-reflection-transport.ts.cpp 822bf4ec52d2
-native-bound-callable-dynamic-input.runtime.ts.cpp 2125b03c8cec
+native-bound-callable-dynamic-input.runtime.ts.cpp 6e476cac3c1a
 native-buffer-slice-method-values.runtime.ts.cpp 4c49f219356b
 native-byte-writer-borrow.ts.cpp 890961066095
 native-callable-allocation-alias.ts.cpp eece9a10438f
@@ -839,8 +840,8 @@ native-nullish-operations.ts.cpp e318bf4d6735
 native-object-freeze.ts.cpp c0e90654d6f9
 native-optional-call-frame.ts.cpp 26157f90992e
 native-optional-record-dynamic-hook.ts.cpp 30c2e77e105e
-native-optional-record-presence.ts.cpp 573d6aa8f22b
-native-parameter-dynamic-forward.runtime.js.cpp ab369efd7868
+native-optional-record-presence.ts.cpp 5b833d89c4ae
+native-parameter-dynamic-forward.runtime.js.cpp c881f671bedf
 native-parameter-union-forward.runtime.js.cpp 5736be500e9d
 native-presence-query.ts.cpp d5a5048e9567
 native-primitive-brand-guard.runtime.js.cpp 0ba9904f0a8b
@@ -879,7 +880,7 @@ nested-callback-field-initializer.runtime.ts.cpp a7ea118831ce
 nested-dynamic-operand-roles.ts.cpp 1ee16df7723c
 nested-generic-construct-alias-filling.runtime.ts.cpp 9111f403daeb
 nested-generic-construct-object-filling.runtime.ts.cpp 0fabe864e62a
-nested-literal-in-document-array-reads-absent-member.runtime.ts.cpp 461517bbf835
+nested-literal-in-document-array-reads-absent-member.runtime.ts.cpp 8f5814678007
 nested-typed-array-union-narrowing.ts.cpp bd8f0c6797d5
 nested-union-arm-recast-keeps-inner-discriminant.ts.cpp 8d4d71cd1dda
 never-arm-conditional-merge.ts.cpp 605c9a45023e
@@ -926,7 +927,7 @@ object-assign-described-source-into-narrower-literal.runtime.ts.cpp 0bfdedbfd78a
 object-assign-dynamic-source-into-typed-dictionary.runtime.ts.cpp 73b29c4e9c33
 object-assign-fresh-literal-into-document-return.runtime.ts.cpp 22072600c6f5
 object-assign-fresh-target-laid-out-as-intersection.runtime.ts.cpp d1b99cfb3967
-object-assign-literal-target-merges-optional-options.runtime.ts.cpp 7959baf4c40d
+object-assign-literal-target-merges-optional-options.runtime.ts.cpp 29e42bcd1cd8
 object-assign-native-error-into-class-instance.runtime.ts.cpp 4724cd41315a
 object-assign-record-into-any-document-field.runtime.ts.cpp be210bbc9706
 object-constructor-called-without-a-value.ts.cpp 12d1ed083a88
@@ -965,7 +966,7 @@ object-spread-optional-interface-fields-into-record.runtime.ts.cpp d3a640b441bc
 object-values-of-mixed-field-record.ts.cpp 61c44a410f0d
 observed-indexed-absence-kept-in-a-store-a-comparison-and-instanceof.runtime.js.cpp f46f4cff7fce
 open-document-adopted-into-record-key-order.runtime.ts.cpp 171f8f483664
-open-document-boxed-arm-into-document-field-is-viewed.runtime.ts.cpp b848cfa0e30c
+open-document-boxed-arm-into-document-field-is-viewed.runtime.ts.cpp 60b269220dfd
 open-document-narrowed-array-into-document-field-is-viewed.runtime.ts.cpp ce562c6a8a17
 open-document-optional-callable-member-is-a-document.ts.cpp e6e75f0c744f
 open-document-parameter-forwards-its-arms.runtime.ts.cpp 12e675644d23
@@ -1140,7 +1141,7 @@ returned-object-bag.js.cpp e1f577b0b131
 runtime-module-int-const.ts.cpp 2b5f8078f746
 runtime-size-mask-index.ts.cpp 76746dbe319a
 same-block-reads-before-last-transferring-use-move.runtime.ts.cpp a129ad4caa53
-scalar-arm-member-read-into-open-result.runtime.js.cpp 2c513b3aa7b3
+scalar-arm-member-read-into-open-result.runtime.js.cpp a34c85722565
 scalar-roundtrip.ts.cpp 17809a57a118
 schema-validator-callable-object-intersection.ts.cpp 9330b1f3fa3d
 self-referential-record-crossing-from-dynamic.runtime.ts.cpp 7e2a52ee9880
@@ -1240,7 +1241,7 @@ switch-clause-groups.ts.cpp f9b44988413c
 switch-dispatch.ts.cpp 09c3d9433804
 switch-fallthrough.ts.cpp 5cdf194b02ff
 symbol-description.runtime.js.cpp 08751c87dc41
-symbol-getter-on-a-base-read-through-any.runtime.ts.cpp edd2a5952c23
+symbol-getter-on-a-base-read-through-any.runtime.ts.cpp 63ff4800859d
 symbol-key-declared-field.ts.cpp 17e9a952a98b
 symbol-keyed-class-field-declarations.ts.cpp 2210db795c0a
 symbol-keyed-method-deletes-symbol-expando.ts.cpp 4ecf6df297bb
