@@ -121,18 +121,25 @@ export const withStableTypeQueries = (checker: ts.TypeChecker, program?: ts.Prog
     return signatures
   }
   // Preserve the checker's full surface, including capability-checked internal
-  // constructors used by existing inference producers, without copying it: the
-  // checker is the prototype, so every other member is the checker's own. Not
-  // a `Proxy` -- every checker call the frontend makes goes through this
-  // object, and a proxy's `get` trap was a measurable share of normalization.
-  return Object.assign(Object.create(checker) as ts.TypeChecker, {
-    getTypeAtLocation,
-    getSymbolAtLocation,
-    getApparentType,
-    getNonNullableType,
-    getPropertiesOfType,
-    getBaseTypes,
-    getPropertyOfType,
-    getSignaturesOfType
-  })
+  // members used by existing inference producers, by copying its own members:
+  // TypeScript's checker is one object literal of functions. Not a `Proxy` --
+  // every checker call the frontend makes goes through this object, and a
+  // proxy's `get` trap was a measurable share of normalization. Not
+  // `Object.create(checker)` either: that makes the checker a prototype, and V8
+  // keeps maps its optimized code embedded alive, prototypes included, for a
+  // GC or two after last use, so the checker, the program and every AST
+  // (0.27 GB on a 48K-line app) outlived the frontend into the backend.
+  return Object.assign(
+    { ...checker },
+    {
+      getTypeAtLocation,
+      getSymbolAtLocation,
+      getApparentType,
+      getNonNullableType,
+      getPropertiesOfType,
+      getBaseTypes,
+      getPropertyOfType,
+      getSignaturesOfType
+    }
+  )
 }

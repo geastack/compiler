@@ -3079,8 +3079,14 @@ const descriptorDomainsOver = (
   bodyById: ReadonlyMap<FunctionId, IrBody | null>,
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   expandoStored: ReadonlyMap<string, ReadonlyMap<string | null, readonly Representation[]>>
-): NativeFieldViewDomains =>
-  nativeFieldViewDomainsOf(viewNodes, deriver, (id) => bodyById.get(id)?.abi ?? null, classes, expandoStoredReaderOf(expandoStored))
+): NativeFieldViewDomains => {
+  // The domains outlive the solve inside every remembered and re-pointed
+  // reader, so they keep the ABIs rather than `bodyById`, which held the
+  // solved body generation for as long as any reader did.
+  const abis = new Map<FunctionId, CallableAbi | null>()
+  for (const [id, body] of bodyById) abis.set(id, body?.abi ?? null)
+  return nativeFieldViewDomainsOf(viewNodes, deriver, (id) => abis.get(id) ?? null, classes, expandoStoredReaderOf(expandoStored))
+}
 
 const absentRoutesReaderOf =
   (valueCarriers: ReadonlyMap<IrValueId, Representation>, domains: NativeFieldViewDomains) =>
@@ -3149,35 +3155,49 @@ export const nativeCallableFlowOf = (...args: Parameters<typeof computeNativeCal
   }
   const sameContext = (entry: RememberedCallableFlow): boolean =>
     entry.placements === placements && entry.conversions === conversions && entry.deriver === (deriver ?? null)
-  for (const entry of entries)
-    if (
-      sameContext(entry) &&
-      entry.programConversions === (programConversions ?? null) &&
-      entry.constructionTopology === (constructionTopology ?? null) &&
-      entry.bodies.length === bodies.length &&
-      entry.bodies.every((body, index) => body === bodies[index])
-    )
-      return entry.flow
-  for (let index = 0; index < entries.length; index++) {
-    const entry = entries[index]!
-    if (
-      !sameContext(entry) ||
-      entry.bodies.length !== bodies.length ||
-      (entry.programConversions === null) !== (programConversions === undefined) ||
-      (entry.constructionTopology === null) !== (constructionTopology === undefined)
-    )
-      continue
-    const pairs = new Map<object, object>()
-    if (
-      !pairSameData(entry.bodies, bodies, pairs) ||
-      !pairSameData(entry.programConversions, programConversions ?? null, pairs) ||
-      !pairSameData(entry.constructionTopology, constructionTopology ?? null, pairs)
-    )
-      continue
-    const reused = flowOverCopy(entry.flow, pairs)
-    if (reused === null) continue
-    return remember(reused, index)
-  }
+  // The search runs in its own frame: a failed pairing's map pairs both
+  // programs object for object, and the loop's last `pairs` and `entry`
+  // registers kept it, and the entry about to be replaced, alive through the
+  // solve below -- the compile's peak.
+  const found = ((): NativeCallableFlow | null => {
+    for (const entry of entries)
+      if (
+        sameContext(entry) &&
+        entry.programConversions === (programConversions ?? null) &&
+        entry.constructionTopology === (constructionTopology ?? null) &&
+        entry.bodies.length === bodies.length &&
+        entry.bodies.every((body, index) => body === bodies[index])
+      )
+        return entry.flow
+    for (let index = 0; index < entries.length; index++) {
+      const entry = entries[index]!
+      if (
+        !sameContext(entry) ||
+        entry.bodies.length !== bodies.length ||
+        (entry.programConversions === null) !== (programConversions === undefined) ||
+        (entry.constructionTopology === null) !== (constructionTopology === undefined)
+      )
+        continue
+      const pairs = new Map<object, object>()
+      if (
+        !pairSameData(entry.bodies, bodies, pairs) ||
+        !pairSameData(entry.programConversions, programConversions ?? null, pairs) ||
+        !pairSameData(entry.constructionTopology, constructionTopology ?? null, pairs)
+      )
+        continue
+      const reused = flowOverCopy(entry.flow, pairs)
+      if (reused === null) continue
+      return remember(reused, index)
+    }
+    return null
+  })()
+  if (found !== null) return found
+  // `remember` replaces an answer of the same kind with the new one; dropping
+  // it before solving, rather than after, keeps its body generation and flow
+  // out of the solve's peak. Nothing between here and `remember` reads it.
+  const kind = flowKindOf(programConversions, constructionTopology)
+  for (let index = entries.length - 1; index >= 0; index--)
+    if (flowKindOf(entries[index]!.programConversions, entries[index]!.constructionTopology) === kind) entries.splice(index, 1)
   const flow = computeNativeCallableFlow(...args)
   return remember(flow, -1)
 }

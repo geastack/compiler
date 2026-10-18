@@ -1305,91 +1305,99 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // Method provenance follows the exact adapter entries a Get will execute.
   // Publish those recipes before settling dispatch, then publish again after
   // the final rewrites so certification authenticates the operations printed.
+  // Each pass below rebuilds every body, so the chain is a sequence of
+  // assignments rather than one nested expression: nested, every intermediate
+  // generation stays in an argument or object-literal register of this frame
+  // until the outermost call returns -- nine copies of the program's IR alive
+  // at once, inside a round that is already the compile's peak.
   const publishNativeOperationFacts = (
     bodies: ReadonlyMap<PhysicalBodyId, IrBody>,
     operationClasses: ReadonlyMap<DeclarationId, ClassLayout>
-  ): ReadonlyMap<PhysicalBodyId, IrBody> =>
-    publishLogicalReceivers(
-      publishNativeAccessorDefinitions({
-        bodies: publishNativeDataDefinitions({
-          bodies: publishNativeFieldViewFacts({
-            bodies: publishNativeArrayDescriptorSnapshots({
-              bodies: publishNativeOwnAssignments({
-                bodies: publishNativeObjectDataSlots({
-                  bodies: publishNativeCallableDataSlots({
-                    bodies: publishNativeCallablePrivateSlots({
-                      bodies,
-                      placements: splitPlacements,
-                      conversions: conversionCensus,
-                      deriver: representations.deriver,
-                      classes: operationClasses,
-                      graph: frontend.graph
-                    }),
-                    placements: splitPlacements,
-                    conversions: conversionCensus,
-                    deriver: representations.deriver,
-                    classes: operationClasses,
-                    calleeRendering: slotsForClasses(operationClasses).input,
-                    graph: frontend.graph,
-                    nativeCallableData: representations.nativeCallableData,
-                    programConversions: nativeProgramConversions ?? null
-                  }),
-                  placements: splitPlacements,
-                  conversions: conversionCensus,
-                  deriver: representations.deriver,
-                  graph: frontend.graph
-                }),
-                graph: frontend.graph,
-                deriver: representations.deriver,
-                conversions: conversionCensus,
-                placements: splitPlacements,
-                selected: representations.plan.selected,
-                calleeRendering: slotsForClasses(operationClasses).input
-              }),
-              placements: splitPlacements,
-              classes: operationClasses,
-              conversions: conversionCensus,
-              deriver: representations.deriver,
-              calleeRendering: slotsForClasses(operationClasses).input
-            }),
-            placements: splitPlacements,
-            classes: operationClasses,
-            conversions: conversionCensus,
-            deriver: representations.deriver,
-            ...(nativeProgramConversions ? { programConversions: nativeProgramConversions } : {})
-          }),
-          classes: operationClasses,
-          deriver: representations.deriver,
-          conversions: conversionCensus,
-          graph: frontend.graph,
-          calleeRendering: slotsForClasses(operationClasses).input
-        }),
-        graph: frontend.graph,
-        abis: abis.abis,
-        conversions: conversionCensus,
-        calleeRendering: slotsForClasses(operationClasses).input
-      }),
-      splitPlacements,
-      operationClasses,
-      conversionCensus,
-      representations.deriver,
+  ): ReadonlyMap<PhysicalBodyId, IrBody> => {
+    bodies = publishNativeCallablePrivateSlots({
+      bodies,
+      placements: splitPlacements,
+      conversions: conversionCensus,
+      deriver: representations.deriver,
+      classes: operationClasses,
+      graph: frontend.graph
+    })
+    bodies = publishNativeCallableDataSlots({
+      bodies,
+      placements: splitPlacements,
+      conversions: conversionCensus,
+      deriver: representations.deriver,
+      classes: operationClasses,
+      calleeRendering: slotsForClasses(operationClasses).input,
+      graph: frontend.graph,
+      nativeCallableData: representations.nativeCallableData,
+      programConversions: nativeProgramConversions ?? null
+    })
+    bodies = publishNativeObjectDataSlots({
+      bodies,
+      placements: splitPlacements,
+      conversions: conversionCensus,
+      deriver: representations.deriver,
+      graph: frontend.graph
+    })
+    bodies = publishNativeOwnAssignments({
+      bodies,
+      graph: frontend.graph,
+      deriver: representations.deriver,
+      conversions: conversionCensus,
+      placements: splitPlacements,
+      selected: representations.plan.selected,
+      calleeRendering: slotsForClasses(operationClasses).input
+    })
+    bodies = publishNativeArrayDescriptorSnapshots({
+      bodies,
+      placements: splitPlacements,
+      classes: operationClasses,
+      conversions: conversionCensus,
+      deriver: representations.deriver,
+      calleeRendering: slotsForClasses(operationClasses).input
+    })
+    bodies = publishNativeFieldViewFacts({
+      bodies,
+      placements: splitPlacements,
+      classes: operationClasses,
+      conversions: conversionCensus,
+      deriver: representations.deriver,
+      ...(nativeProgramConversions ? { programConversions: nativeProgramConversions } : {})
+    })
+    bodies = publishNativeDataDefinitions({
+      bodies,
+      classes: operationClasses,
+      deriver: representations.deriver,
+      conversions: conversionCensus,
+      graph: frontend.graph,
+      calleeRendering: slotsForClasses(operationClasses).input
+    })
+    bodies = publishNativeAccessorDefinitions({
+      bodies,
+      graph: frontend.graph,
+      abis: abis.abis,
+      conversions: conversionCensus,
+      calleeRendering: slotsForClasses(operationClasses).input
+    })
+    return publishLogicalReceivers(bodies, splitPlacements, operationClasses, conversionCensus, representations.deriver, hosts)
+  }
+  const dispatchRecipesOf = (bodies: ReadonlyMap<PhysicalBodyId, IrBody>): ReadonlyMap<PhysicalBodyId, IrBody> => {
+    const calleeRendering = slotsForClasses(shaken?.classes ?? classes).input
+    bodies = discardUnreadCallResults(bodies)
+    bodies = publishConversionRecipes({
+      calleeRendering,
+      wellKnownSymbols: frontend.wellKnownSymbols,
+      bodies,
+      placements: splitPlacements,
+      classes: shaken?.classes ?? classes,
+      abis: abis.abis,
+      deriver: representations.deriver,
+      conversions: conversionCensus,
       hosts
-    )
-  const dispatchRecipesOf = (bodies: ReadonlyMap<PhysicalBodyId, IrBody>): ReadonlyMap<PhysicalBodyId, IrBody> =>
-    publishNativeOperationFacts(
-      publishConversionRecipes({
-        calleeRendering: slotsForClasses(shaken?.classes ?? classes).input,
-        wellKnownSymbols: frontend.wellKnownSymbols,
-        bodies: discardUnreadCallResults(bodies),
-        placements: splitPlacements,
-        classes: shaken?.classes ?? classes,
-        abis: abis.abis,
-        deriver: representations.deriver,
-        conversions: conversionCensus,
-        hosts
-      }),
-      shaken?.classes ?? classes
-    )
+    })
+    return publishNativeOperationFacts(bodies, shaken?.classes ?? classes)
+  }
   let dispatchedBodies =
     captureFacts && shaken && dispatchVerdict
       ? fillCallDispatchTargets(
@@ -1462,6 +1470,25 @@ export const compile = (request: CompilationRequest): CompilationResult => {
       return count
     }
     let count = closedFactsOf(dispatchedBodies.values())
+    // A round runs in its own frame, and drops the generation it was handed
+    // before filling: a `const next` in this loop, or the argument register
+    // a direct call leaves behind, kept the previous generation alive through
+    // the next round and on past the loop into certification.
+    const dispatchRound = (exposure: ReflectionExposure): void => {
+      const recipes = dispatchRecipesOf(dispatchedBodies!)
+      dispatchedBodies = null
+      dispatchedBodies = fillCallDispatchTargets(
+        recipes,
+        splitPlacements,
+        shaken.classes,
+        (callable) => abis.abis.get(callable) ?? null,
+        capturesNothingOf,
+        dispatchVerdict,
+        representations.deriver,
+        conversionCensus,
+        exposure
+      )
+    }
     let programSignature = ''
     for (;;) {
       nativeProgramConversions = publishProgramConversionRecipes({
@@ -1477,19 +1504,8 @@ export const compile = (request: CompilationRequest): CompilationResult => {
       )
       const programChanged = nextProgramSignature !== programSignature
       programSignature = nextProgramSignature
-      const next = fillCallDispatchTargets(
-        dispatchRecipesOf(dispatchedBodies),
-        splitPlacements,
-        shaken.classes,
-        (callable) => abis.abis.get(callable) ?? null,
-        capturesNothingOf,
-        dispatchVerdict,
-        representations.deriver,
-        conversionCensus,
-        reflection
-      )
-      const nextCount = closedFactsOf(next.values())
-      dispatchedBodies = next
+      dispatchRound(reflection)
+      const nextCount = closedFactsOf(dispatchedBodies!.values())
       stage('reflection-round')
       if (nextCount <= count && !programChanged) break
       count = nextCount
