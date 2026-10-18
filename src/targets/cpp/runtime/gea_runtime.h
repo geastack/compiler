@@ -5785,6 +5785,43 @@ inline void tasks(Count count, const Body& body) {
   detail::parallel::runRegion(total, run);
 }
 
+/**
+ * `tabulate(length, body)` of `@geastack/parallel/native`: the array whose
+ * element `index` is `body(index)`. The result is sized once, before the
+ * region, and every task stores its own contiguous run of elements straight
+ * into it. A parallel `map` built on `tasks` instead filled an array per leaf
+ * and concatenated them on the joining thread afterwards; with forty short
+ * maps in a row that serial gap outlasted the workers' spin, so every region
+ * paid to wake them again (spectral-norm at 20 threads: 27 ms against Rayon's
+ * 18).
+ *
+ * Tasks own disjoint index ranges and the storage never grows, so no two
+ * threads touch one cell. The compiler certified `body` exactly as it does a
+ * `tasks` body; the stores of what it returns are the runtime's, here. The
+ * leaf count only schedules work: every element is computed on its own, so
+ * no result depends on it, and the exception that escapes is the lowest
+ * index's, as in a sequential loop.
+ */
+template <typename Count, typename Body>
+inline auto tabulate(Count length, const Body& body) {
+  using Element = std::decay_t<decltype(body.callStable(0LL))>;
+  auto out = gea::makeRef<gea::ArrayObject<Element>>();
+  const double requested = static_cast<double>(length);
+  if (!(requested > 0)) return out;
+  const auto total = static_cast<std::size_t>(requested);
+  out->cells.resize(total);
+  gea::ArrayObject<Element>& array = *out;
+  const std::size_t leaves = total < 1024 ? total : 1024;
+  auto run = [&array, &body, total, leaves](std::size_t leaf) -> bool {
+    const std::size_t end = (leaf + 1) * total / leaves;
+    for (std::size_t index = leaf * total / leaves; index < end; ++index)
+      array.cells[index].value = body.callStable(static_cast<long long>(index));
+    return false;
+  };
+  detail::parallel::runRegion(leaves, run);
+  return out;
+}
+
 }  // namespace parallel
 #endif
 
