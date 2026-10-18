@@ -1703,3 +1703,34 @@ test('a body stored on a property finds its callers by which call targets hold i
   )
   assert.deepEqual(session.callerSitesOf(declared('idle')), [])
 })
+
+test('a body read into another cell finds the calls made through that cell', () => {
+  // `candidateCallersOf` lists calls by the body's own names. A call through
+  // `const g = f`, a parameter, an element or a destructured binding spells
+  // another one, and `callers(f)` was a complete `[]`; the body's closure
+  // walks each alias to its call.
+  const { file, ledger, session } = inspect(`
+    function f(x) { return x; }
+    function idle(y) { return y; }
+    const g = f;
+    g(1);
+    function apply(h) { return h(2); }
+    apply(f);
+    const list = [f];
+    list[0](3);
+    const { run } = { run: f };
+    run(4);
+    f(5);
+    idle;
+  `)
+  const declared = (name: string): ts.FunctionDeclaration => {
+    const found = file.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === name)
+    assert.ok(found, name)
+    return found
+  }
+  const f = declared('f')
+  const texts = (values: readonly ts.Node[] | null): string[] | null => values?.map((value) => value.getText(file)).sort() ?? null
+  assert.deepEqual(texts(ledger.capture(() => session.callerSitesOf(f)).value), ['f(5)', 'g(1)', 'h(2)', 'list[0](3)', 'run(4)'])
+  assert.deepEqual(texts(ledger.capture(() => session.parameterValuesOf(f.parameters[0]!)).value), ['1', '2', '3', '4', '5'])
+  assert.deepEqual(ledger.capture(() => session.callerSitesOf(declared('idle'))).value, [])
+})

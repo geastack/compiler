@@ -164,6 +164,7 @@ callable-operand-coerces-to-its-source-text.runtime.js.cpp 6e6dbe91b8b3
 callable-own-mutation-guards.runtime.js.cpp cdfde02a9603
 callable-result-conversion.ts.cpp 1fd137584f3d
 callback-call-with-this-arg.ts.cpp 4999de1b6e03
+calls-through-an-alias-are-callers.runtime.ts.cpp b65154d7d099
 captured-cell-branch-assignment.ts.cpp 60384ee3328a
 captured-let-assigned-on-either-branch-has-one-cell.runtime.ts.cpp 796d7c71404a
 captured-slot-alias.runtime.ts.cpp 59e5e4dae0a4
