@@ -96,8 +96,9 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
   // types are a property of the copy, and every path that passes through it
   // asks the same question. `null` marks a copy with no instantiated spelling,
   // so the miss is paid once.
-  const tables = new Map<ts.Declaration, (Map<ts.Type, ts.Type> | null)[]>()
+  const tables = new Map<ts.Declaration, (LazyTable | null)[]>()
   // The tables of copies with an `any` filling, where an `any` image is real.
+  const noneBound: ReadonlySet<ts.Type> = new Set()
   const anyFilledTables = new WeakSet<Map<ts.Type, ts.Type>>()
   /** How many instantiable types `isOpen` has handed to `isCopyHole`; see `isOpenFor`. */
   let holesAsked = 0
@@ -119,7 +120,13 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
    * A closed type needs no image: it already IS its own instantiation, and the
    * table exists only to answer for the ones that are not.
    */
-  const isOpen = (type: ts.Type, depth: number, seen: Set<ts.Type>, owner: ts.Declaration): boolean => {
+  const isOpen = (
+    type: ts.Type,
+    depth: number,
+    seen: Set<ts.Type>,
+    owner: ts.Declaration,
+    bound: ReadonlySet<ts.Type> = noneBound
+  ): boolean => {
     // `Instantiable` is the checker's own name for exactly this: a type
     // parameter, a conditional, an indexed access, a `keyof`, a substitution
     // or a template-literal mapping -- every form that is unresolved only
@@ -127,7 +134,7 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     // though, not in any parameter at all: see `isCopyHole`.
     if (type.flags & ts.TypeFlags.Instantiable) {
       holesAsked++
-      return isCopyHole(type, owner, depth)
+      return isCopyHole(type, owner, depth, bound)
     }
     // A primitive, a literal or an enum member has no structure to hold a
     // hole and no image other than itself. Its apparent members are the
@@ -138,24 +145,24 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     if ((type.flags & (ts.TypeFlags.Object | ts.TypeFlags.UnionOrIntersection)) === 0) return false
     if (depth > pairingDepth || seen.has(type)) return false
     seen.add(type)
-    if (type.isUnionOrIntersection()) return type.types.some((one) => isOpen(one, depth + 1, seen, owner))
-    for (const argument of type.aliasTypeArguments ?? []) if (isOpen(argument, depth + 1, seen, owner)) return true
+    if (type.isUnionOrIntersection()) return type.types.some((one) => isOpen(one, depth + 1, seen, owner, bound))
+    for (const argument of type.aliasTypeArguments ?? []) if (isOpen(argument, depth + 1, seen, owner, bound)) return true
     const reference = type as ts.TypeReference
     if (reference.target !== undefined) {
-      for (const argument of checker.getTypeArguments(reference)) if (isOpen(argument, depth + 1, seen, owner)) return true
+      // An instantiated anonymous type (`typeof lookup<R, T>`) has a `target`
+      // too, but no type arguments: the checker's `getTypeArguments` reads
+      // a reference's own and throws on anything else.
+      if (reference.objectFlags & ts.ObjectFlags.Reference)
+        for (const argument of checker.getTypeArguments(reference)) if (isOpen(argument, depth + 1, seen, owner, bound)) return true
       if (closedReference(reference, owner)) return false
-      if (onlyEnclosingMembersCanBeOpen(reference)) {
-        // Those members can name a hole only through a generic function
-        // between the declaration and the copy; with none, the answer needs
-        // no member at all, and reading even one resolves them all.
-        if (!genericFunctionBetween(owner, reference.target.getSymbol()?.declarations ?? [])) return false
-        const enclosing = (declaration: ts.Declaration | undefined): boolean => declaration !== undefined && encloses(declaration, owner)
-        for (const property of type.getProperties()) {
-          const at = property.valueDeclaration ?? property.declarations?.[0]
-          if (enclosing(at) && isOpen(checker.getTypeOfSymbolAtLocation(property, at!), depth + 1, seen, owner)) return true
-        }
-        return false
-      }
+      // The members left can name a hole only as a parameter of a generic
+      // function between the declaration and the copy -- the method the copy
+      // is of, or one holding it -- and a member's signature binds its own
+      // parameters (see the signature walk below), so none names them freely.
+      // Reading the members to confirm resolved every one of each instance --
+      // `number[]`, `Track[]`, every `U[]` a `map` returns -- for an answer
+      // that was always closed.
+      if (onlyEnclosingMembersCanBeOpen(reference)) return false
     } else if (type.isClassOrInterface()) {
       // A class or interface that is not a reference has no parameters of its
       // own and none from outside (the checker makes one nested in a generic
@@ -166,14 +173,25 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     }
     for (const property of type.getProperties()) {
       const at = property.valueDeclaration ?? property.declarations?.[0]
-      if (at && isOpen(checker.getTypeOfSymbolAtLocation(property, at), depth + 1, seen, owner)) return true
+      if (at && isOpen(checker.getTypeOfSymbolAtLocation(property, at), depth + 1, seen, owner, bound)) return true
     }
-    for (const index of checker.getIndexInfosOfType(type)) if (isOpen(index.type, depth + 1, seen, owner)) return true
+    for (const index of checker.getIndexInfosOfType(type)) if (isOpen(index.type, depth + 1, seen, owner, bound)) return true
     for (const signature of [...type.getCallSignatures(), ...type.getConstructSignatures()]) {
-      if (isOpen(signature.getReturnType(), depth + 1, seen, owner)) return true
+      // A generic signature's own parameters are bound by it, not holes of
+      // the copy, even when the copy is of that very declaration: inside
+      // `Array.prototype.map<U>`'s copy, `number[]` names `map`'s `U` only
+      // through its own `map` member, which every instantiation leaves
+      // generic. Counting it made every array type, and every record holding
+      // one, an open key of `map`'s copies that no walk could ever record --
+      // and each such question ran the copy's whole table. Under a binder the
+      // walk sees types in a different light, so it keeps its own `seen`.
+      const own = signature.getTypeParameters() ?? []
+      const inner = own.length === 0 ? bound : new Set([...bound, ...own])
+      const innerSeen = own.length === 0 ? seen : new Set<ts.Type>()
+      if (isOpen(signature.getReturnType(), depth + 1, innerSeen, owner, inner)) return true
       for (const parameter of signature.parameters) {
         const at = parameter.valueDeclaration ?? parameter.declarations?.[0]
-        if (at && isOpen(checker.getTypeOfSymbolAtLocation(parameter, at), depth + 1, seen, owner)) return true
+        if (at && isOpen(checker.getTypeOfSymbolAtLocation(parameter, at), depth + 1, innerSeen, owner, inner)) return true
       }
     }
     return false
@@ -256,23 +274,28 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
    * to the parameters they are gated on; a form this does not know stays
    * open, which is the old answer and the safe one.
    */
-  const isCopyHole = (type: ts.Type, owner: ts.Declaration, depth: number): boolean => {
+  const isCopyHole = (type: ts.Type, owner: ts.Declaration, depth: number, bound: ReadonlySet<ts.Type>): boolean => {
+    // Bound is an answer, not a guess, so it comes before the depth cap's
+    // conservative one: `number[].map`'s `U[]` has a `map` of its own, and
+    // the chain of them reached the cap on parameters every link had bound.
+    if (bound.has(type)) return false
     if (depth > pairingDepth) return true
     const flags = type.flags
     if (flags & ts.TypeFlags.TypeParameter) return parameterBelongsToCopy(type as ts.TypeParameter, owner)
     if (flags & ts.TypeFlags.IndexedAccess) {
       const access = type as ts.IndexedAccessType
-      return isCopyHole(access.objectType, owner, depth + 1) || isCopyHole(access.indexType, owner, depth + 1)
+      return isCopyHole(access.objectType, owner, depth + 1, bound) || isCopyHole(access.indexType, owner, depth + 1, bound)
     }
     if (flags & ts.TypeFlags.Conditional) {
       const conditional = type as ts.ConditionalType
-      return isCopyHole(conditional.checkType, owner, depth + 1) || isCopyHole(conditional.extendsType, owner, depth + 1)
+      return isCopyHole(conditional.checkType, owner, depth + 1, bound) || isCopyHole(conditional.extendsType, owner, depth + 1, bound)
     }
-    if (flags & ts.TypeFlags.Index) return isCopyHole((type as ts.IndexType).type, owner, depth + 1)
-    if (flags & ts.TypeFlags.StringMapping) return isCopyHole((type as ts.StringMappingType).type, owner, depth + 1)
-    if (flags & ts.TypeFlags.Substitution) return isCopyHole((type as ts.SubstitutionType).baseType, owner, depth + 1)
-    if (flags & ts.TypeFlags.TemplateLiteral) return (type as ts.TemplateLiteralType).types.some((one) => isCopyHole(one, owner, depth + 1))
-    if (type.isUnionOrIntersection()) return type.types.some((one) => isCopyHole(one, owner, depth + 1))
+    if (flags & ts.TypeFlags.Index) return isCopyHole((type as ts.IndexType).type, owner, depth + 1, bound)
+    if (flags & ts.TypeFlags.StringMapping) return isCopyHole((type as ts.StringMappingType).type, owner, depth + 1, bound)
+    if (flags & ts.TypeFlags.Substitution) return isCopyHole((type as ts.SubstitutionType).baseType, owner, depth + 1, bound)
+    if (flags & ts.TypeFlags.TemplateLiteral)
+      return (type as ts.TemplateLiteralType).types.some((one) => isCopyHole(one, owner, depth + 1, bound))
+    if (type.isUnionOrIntersection()) return type.types.some((one) => isCopyHole(one, owner, depth + 1, bound))
     return (flags & ts.TypeFlags.Instantiable) !== 0
   }
 
@@ -342,14 +365,14 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     return false
   }
 
-  const pair = (
+  function* pair(
     open: ts.Type,
     closed: ts.Type,
     into: Map<ts.Type, ts.Type>,
     depth: number,
     seen: Set<ts.Type>,
     owner: ts.Declaration
-  ): void => {
+  ): Generator<void> {
     if (open === closed || !admits(open, into, depth, owner)) return
     // The open side is admitted because it has a genuine hole (`admits` already
     // proved that), so a closed image of `any`/`unknown` here is never the
@@ -376,6 +399,7 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     if ((closed.flags & ts.TypeFlags.Unknown) !== 0) return
     if ((closed.flags & ts.TypeFlags.Any) !== 0 && !anyFilledTables.has(into)) return
     into.set(open, closed)
+    yield
     // A deferred CONDITIONAL is recorded whole and never walked into. Its
     // properties and signatures are the checker's apparent ones, synthesized
     // from its constraint rather than declared -- `Parameters<E[K]>` answers
@@ -405,10 +429,10 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     // declared result. The arms themselves are matched safely, so nothing is
     // lost by stopping here.
     if (open.isUnion() || closed.isUnion()) {
-      if (open.isUnion() && closed.isUnion()) pairArms(open.types, closed.types, into, depth, seen, owner)
+      if (open.isUnion() && closed.isUnion()) yield* pairArms(open.types, closed.types, into, depth, seen, owner)
       return
     }
-    if (open.isIntersection() && closed.isIntersection()) pairArms(open.types, closed.types, into, depth, seen, owner)
+    if (open.isIntersection() && closed.isIntersection()) yield* pairArms(open.types, closed.types, into, depth, seen, owner)
     // The ARGUMENTS of a reference, so `Promise<Keyed<T>>` records an
     // entry for `Keyed<T>` too. The target is checked, not just the
     // count: two references of the same arity to different generics have
@@ -423,7 +447,7 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
         for (let index = 0; index < openArguments.length; index += 1) {
           const one = openArguments[index]
           const other = closedArguments[index]
-          if (one && other) pair(one, other, into, depth + 1, seen, owner)
+          if (one && other) yield* pair(one, other, into, depth + 1, seen, owner)
         }
       }
     }
@@ -439,7 +463,7 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
       if (!admits(openMember, into, depth + 1, owner)) continue
       const counterpart = checker.getPropertyOfType(closed, property.getName())
       if (!counterpart) continue
-      pair(openMember, checker.getTypeOfSymbolAtLocation(counterpart, at), into, depth + 1, seen, owner)
+      yield* pair(openMember, checker.getTypeOfSymbolAtLocation(counterpart, at), into, depth + 1, seen, owner)
     }
     // Index signatures BY KEY TYPE, the same exact correspondence a name is:
     // `Result<T>.ids` typed `{ [key: number]: InferId<T> }` has its only hole
@@ -449,10 +473,10 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     const closedIndexes = checker.getIndexInfosOfType(closed)
     for (const index of checker.getIndexInfosOfType(open)) {
       const counterpart = closedIndexes.find((candidate) => candidate.keyType === index.keyType)
-      if (counterpart && admits(index.type, into, depth + 1, owner)) pair(index.type, counterpart.type, into, depth + 1, seen, owner)
+      if (counterpart && admits(index.type, into, depth + 1, owner)) yield* pair(index.type, counterpart.type, into, depth + 1, seen, owner)
     }
-    pairSignatures(open.getCallSignatures(), closed.getCallSignatures(), into, depth, seen, owner)
-    pairSignatures(open.getConstructSignatures(), closed.getConstructSignatures(), into, depth, seen, owner)
+    yield* pairSignatures(open.getCallSignatures(), closed.getCallSignatures(), into, depth, seen, owner)
+    yield* pairSignatures(open.getConstructSignatures(), closed.getConstructSignatures(), into, depth, seen, owner)
   }
 
   /**
@@ -477,16 +501,16 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
    * unambiguous, so that is the only case that records anything; anything else
    * is a collapse or a genuine ambiguity, and the honest answer is no entry.
    */
-  const pairArms = (
+  function* pairArms(
     open: readonly ts.Type[],
     closed: readonly ts.Type[],
     into: Map<ts.Type, ts.Type>,
     depth: number,
     seen: Set<ts.Type>,
     owner: ts.Declaration
-  ): void => {
+  ): Generator<void> {
     const remaining = [...closed]
-    let unmatched: ts.Type[] = []
+    const unmatched: ts.Type[] = []
     for (const arm of open) {
       const at = remaining.indexOf(arm)
       if (at >= 0) remaining.splice(at, 1)
@@ -498,37 +522,39 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     // which leaves `Omit<T, 'key'>` and its `Pick<...>` image as the
     // one-to-one leftover. Two arms of one generic (`ArrayIterator<A> |
     // ArrayIterator<B>`) share a symbol and so are never matched this way.
-    unmatched = unmatched.filter((arm) => {
+    const leftover: ts.Type[] = []
+    for (const arm of unmatched) {
       const symbol = arm.getSymbol()
-      if (!symbol) return true
-      const candidates = remaining.filter((candidate) => candidate.getSymbol() === symbol)
-      const rivals = unmatched.filter((other) => other.getSymbol() === symbol)
+      const candidates = symbol ? remaining.filter((candidate) => candidate.getSymbol() === symbol) : []
+      const rivals = symbol ? unmatched.filter((other) => other.getSymbol() === symbol) : []
       const image = candidates.length === 1 && rivals.length === 1 ? candidates[0] : undefined
-      if (!image) return true
+      if (!image) {
+        leftover.push(arm)
+        continue
+      }
       remaining.splice(remaining.indexOf(image), 1)
-      pair(arm, image, into, depth + 1, seen, owner)
-      return false
-    })
-    const sole = unmatched.length === 1 ? unmatched[0] : undefined
+      yield* pair(arm, image, into, depth + 1, seen, owner)
+    }
+    const sole = leftover.length === 1 ? leftover[0] : undefined
     const image = remaining.length === 1 ? remaining[0] : undefined
-    if (sole && image) pair(sole, image, into, depth + 1, seen, owner)
+    if (sole && image) yield* pair(sole, image, into, depth + 1, seen, owner)
   }
 
-  const pairSignatures = (
+  function* pairSignatures(
     open: readonly ts.Signature[],
     closed: readonly ts.Signature[],
     into: Map<ts.Type, ts.Type>,
     depth: number,
     seen: Set<ts.Type>,
     owner: ts.Declaration
-  ): void => {
+  ): Generator<void> {
     if (open.length !== closed.length) return
     for (let index = 0; index < open.length; index += 1) {
       const left = open[index]
       const right = closed[index]
       if (!left || !right) continue
       const openReturn = left.getReturnType()
-      if (admits(openReturn, into, depth + 1, owner)) pair(openReturn, right.getReturnType(), into, depth + 1, seen, owner)
+      if (admits(openReturn, into, depth + 1, owner)) yield* pair(openReturn, right.getReturnType(), into, depth + 1, seen, owner)
       if (left.parameters.length !== right.parameters.length) continue
       for (let position = 0; position < left.parameters.length; position += 1) {
         const leftParameter = left.parameters[position]
@@ -537,12 +563,26 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
         if (!leftParameter || !rightParameter || !at) continue
         const openParameter = checker.getTypeOfSymbolAtLocation(leftParameter, at)
         if (!admits(openParameter, into, depth + 1, owner)) continue
-        pair(openParameter, checker.getTypeOfSymbolAtLocation(rightParameter, at), into, depth + 1, seen, owner)
+        yield* pair(openParameter, checker.getTypeOfSymbolAtLocation(rightParameter, at), into, depth + 1, seen, owner)
       }
     }
   }
 
-  const build = (declaration: ts.Declaration, ordinal: number): Map<ts.Type, ts.Type> | null => {
+  /**
+   * A copy's table, filled only as far as a question needs. An entry is the
+   * first image the depth-first walk records for its open type, so running the
+   * same walk lazily, until the asked type is recorded or the walk ends, gives
+   * every answer the whole walk would. Building tables whole recorded 232,204
+   * entries on a large app, each instantiating a closed member, to answer
+   * 15,300 questions; the 1,956 hits all sat within two levels of a root.
+   */
+  interface LazyTable {
+    readonly entries: Map<ts.Type, ts.Type>
+    readonly owner: ts.Declaration
+    readonly steps: Iterator<void>
+    done: boolean
+  }
+  const build = (declaration: ts.Declaration, ordinal: number): LazyTable | null => {
     const copy = specializations.specializationsOf(declaration)[ordinal]
     if (!copy) return null
     const closedParent = copy.instantiated
@@ -550,23 +590,31 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     if (!closedParent && !signatures) return null
     const table = new Map<ts.Type, ts.Type>()
     if (copy.arguments.some((argument) => (argument.flags & ts.TypeFlags.Any) !== 0)) anyFilledTables.add(table)
-    if (signatures) pairSignatures([signatures[0]], [signatures[1]], table, 0, new Set(), declaration)
-    if (!closedParent) return table
-    for (const member of membersOf(declaration)) {
-      const name = memberNameOf(member)
-      if (name === null) continue
-      const openSymbol = checker.getSymbolAtLocation(member.name as ts.Node)
-      if (!openSymbol) continue
-      const openMember = checker.getTypeOfSymbolAtLocation(openSymbol, member)
-      if (!admits(openMember, table, 0, declaration)) continue
-      const closedSymbol = checker.getPropertyOfType(closedParent, name)
-      if (!closedSymbol) continue
-      pair(openMember, checker.getTypeOfSymbolAtLocation(closedSymbol, member), table, 0, new Set(), declaration)
+    function* walk(): Generator<void> {
+      if (signatures) yield* pairSignatures([signatures[0]], [signatures[1]], table, 0, new Set(), declaration)
+      if (!closedParent) return
+      for (const member of membersOf(declaration)) {
+        const name = memberNameOf(member)
+        if (name === null) continue
+        const openSymbol = checker.getSymbolAtLocation(member.name as ts.Node)
+        if (!openSymbol) continue
+        const openMember = checker.getTypeOfSymbolAtLocation(openSymbol, member)
+        if (!admits(openMember, table, 0, declaration)) continue
+        const closedSymbol = checker.getPropertyOfType(closedParent, name)
+        if (!closedSymbol) continue
+        yield* pair(openMember, checker.getTypeOfSymbolAtLocation(closedSymbol, member), table, 0, new Set(), declaration)
+      }
     }
-    return table
+    return { entries: table, owner: declaration, steps: walk(), done: false }
+  }
+  const answerIn = (table: LazyTable, type: ts.Type): ts.Type | undefined => {
+    // The walk records only types `admits`, so a closed one is never a key.
+    if (!isOpenFor(type, table.owner)) return undefined
+    while (!table.done && !table.entries.has(type)) if (table.steps.next().done) table.done = true
+    return table.entries.get(type)
   }
 
-  const tableFor = (declaration: ts.Declaration, ordinal: number): Map<ts.Type, ts.Type> | null => {
+  const tableFor = (declaration: ts.Declaration, ordinal: number): LazyTable | null => {
     const known = tables.get(declaration) ?? []
     const remembered = known[ordinal]
     if (remembered !== undefined) return remembered
@@ -587,7 +635,8 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
         for (let index = path.length - 1; index >= 0; index -= 1) {
           const step = path[index]
           if (!step) continue
-          const answer = tableFor(step.owner, step.ordinal)?.get(type)
+          const table = tableFor(step.owner, step.ordinal)
+          const answer = table && answerIn(table, type)
           if (answer) return answer
         }
         return null
