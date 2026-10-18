@@ -2281,19 +2281,30 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         if (sealing && candidates.size === 0) fail('unresolved-property-key', access)
         return [...keys]
       }
-      const iterationValuesAt = (source: ts.Expression): readonly ts.Expression[] | null => {
+      // A root this lane cannot read refuses the binding, and the literal
+      // roots' entries are still returned. The solver keeps every fact a
+      // transfer ever published, so answering null once such a root arrived
+      // kept whatever entries had been read before it, and how many depended
+      // on the schedule (sakura 55269dd's `for (const m of mats)`, where
+      // `mats` also holds `o.material` itself). `readers` observes the
+      // refused cell without requiring it, so a missing entry there was a
+      // missing reader.
+      const iterationValuesAt = (source: ts.Expression): readonly ts.Expression[] => {
         const elements: ts.Expression[] = []
         for (const root of read(value(source))) {
           if (
             !ts.isArrayLiteralExpression(root) ||
             root.elements.some((element) => ts.isSpreadElement(element) || ts.isOmittedExpression(element)) ||
             deferredIntrinsicProtocolLedgerOf(flow)?.require('Array', source) !== true
-          )
-            return null
+          ) {
+            fail('unmodelled-iteration-source', source)
+            continue
+          }
           // This bounded lane transports the original literal's entries.
           // Mutating its contents/length needs the full indexed storage plan.
           for (const use of read(closure(root)))
-            if ((ts.isPropertyAccessExpression(use) || ts.isElementAccessExpression(use)) && writeEdgeByAccess.has(use)) return null
+            if ((ts.isPropertyAccessExpression(use) || ts.isElementAccessExpression(use)) && writeEdgeByAccess.has(use))
+              fail('unmodelled-iteration-source', use)
           for (const element of root.elements) if (!ts.isSpreadElement(element) && !ts.isOmittedExpression(element)) elements.push(element)
         }
         return elements
