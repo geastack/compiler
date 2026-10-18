@@ -1267,13 +1267,19 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // `targets/cpp/captures.ts` used to compute from this same, already-shaken
   // list at render time. `renderTranslationUnit` reads the published fact
   // off each body instead of re-deriving it from a fresh walk.
-  let captureFacts = shakenBodies
-    ? publishCaptureFacts(
-        shakenBodies,
-        splitPlacements,
-        recordAccessorBodiesOf([...representations.plan.selected.values()], representations.deriver)
-      )
-    : null
+  //
+  // The shaken generation is spent once its capture facts are published:
+  // every later reader took `dispatchedBodies ?? shakenBodies`, and the first
+  // is set whenever the second is, so holding it kept a whole generation of
+  // the program's IR alive through every call/reflection round.
+  const captureFactsOf = (): ReadonlyMap<PhysicalBodyId, IrBody> =>
+    publishCaptureFacts(
+      shakenBodies!,
+      splitPlacements,
+      recordAccessorBodiesOf([...representations.plan.selected.values()], representations.deriver)
+    )
+  let captureFacts = shakenBodies ? captureFactsOf() : null
+  shakenBodies = null
   // `CallOperation.target` (a fact moved out of the target): which
   // FunctionId a call's callee resolves to statically, so the target reads a
   // fact instead of re-deriving it from a whole-unit capture index at render
@@ -1310,10 +1316,28 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // generation stays in an argument or object-literal register of this frame
   // until the outermost call returns -- nine copies of the program's IR alive
   // at once, inside a round that is already the compile's peak.
+  //
+  // Handed a taker rather than the generation itself, and run as one frame
+  // from the conversion recipes on: an argument stays in the caller's
+  // register until that frame returns, so the generation a caller handed in,
+  // or held between two of these steps, lived through every pass after it.
   const publishNativeOperationFacts = (
-    bodies: ReadonlyMap<PhysicalBodyId, IrBody>,
+    take: () => ReadonlyMap<PhysicalBodyId, IrBody>,
     operationClasses: ReadonlyMap<DeclarationId, ClassLayout>
   ): ReadonlyMap<PhysicalBodyId, IrBody> => {
+    const calleeRendering = slotsForClasses(operationClasses).input
+    let bodies = discardUnreadCallResults(take())
+    bodies = publishConversionRecipes({
+      calleeRendering,
+      wellKnownSymbols: frontend.wellKnownSymbols,
+      bodies,
+      placements: splitPlacements,
+      classes: operationClasses,
+      abis: abis.abis,
+      deriver: representations.deriver,
+      conversions: conversionCensus,
+      hosts
+    })
     bodies = publishNativeCallablePrivateSlots({
       bodies,
       placements: splitPlacements,
@@ -1382,36 +1406,34 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     })
     return publishLogicalReceivers(bodies, splitPlacements, operationClasses, conversionCensus, representations.deriver, hosts)
   }
-  const dispatchRecipesOf = (bodies: ReadonlyMap<PhysicalBodyId, IrBody>): ReadonlyMap<PhysicalBodyId, IrBody> => {
-    const calleeRendering = slotsForClasses(shaken?.classes ?? classes).input
-    bodies = discardUnreadCallResults(bodies)
-    bodies = publishConversionRecipes({
-      calleeRendering,
-      wellKnownSymbols: frontend.wellKnownSymbols,
-      bodies,
-      placements: splitPlacements,
-      classes: shaken?.classes ?? classes,
-      abis: abis.abis,
-      deriver: representations.deriver,
-      conversions: conversionCensus,
-      hosts
-    })
-    return publishNativeOperationFacts(bodies, shaken?.classes ?? classes)
-  }
-  let dispatchedBodies =
-    captureFacts && shaken && dispatchVerdict
-      ? fillCallDispatchTargets(
-          dispatchRecipesOf(captureFacts),
-          splitPlacements,
-          shaken.classes,
-          (callable) => abis.abis.get(callable) ?? null,
-          capturesNothingOf,
-          dispatchVerdict,
-          representations.deriver,
-          conversionCensus
-        )
-      : captureFacts
+  let dispatchedBodies = captureFacts
   captureFacts = null
+  const takeDispatched = (): ReadonlyMap<PhysicalBodyId, IrBody> => {
+    const taken = dispatchedBodies!
+    dispatchedBodies = null
+    return taken
+  }
+  // Every step of the call/reflection rounds below runs in a frame of its own
+  // and reads the current generation from `dispatchedBodies` rather than
+  // taking it as an argument: argument and literal registers of `compile`'s
+  // own frame outlive the call they were made for, and each kept a generation
+  // of the program's IR -- or an array or iterator over one -- alive through
+  // every later round and on into certification.
+  const dispatchRound = (exposure: ReflectionExposure | undefined): void => {
+    const recipes = publishNativeOperationFacts(takeDispatched, shaken!.classes)
+    dispatchedBodies = fillCallDispatchTargets(
+      recipes,
+      splitPlacements,
+      shaken!.classes,
+      (callable) => abis.abis.get(callable) ?? null,
+      capturesNothingOf,
+      dispatchVerdict!,
+      representations.deriver,
+      conversionCensus,
+      exposure
+    )
+  }
+  if (dispatchedBodies && shaken && dispatchVerdict) dispatchRound(undefined)
   stage('call-dispatch')
   // Physical emission dependencies come from the final program. The sealed
   // plan stays intact as carrier authority and as the incomplete-shake fallback.
@@ -1420,45 +1442,45 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     frontend.graph.structuralTypes,
     representations.deriver
   )
-  let emissionRepresentations = shaken
-    ? publishEmissionRepresentationsOf({
-        bodies: dispatchedBodies ?? shakenBodies!,
-        placements: splitPlacements,
-        classes: shaken.classes,
-        resolveClassRef,
-        deriver: representations.deriver,
-        conversions: conversionCensus,
-        omitGlobals: shaken.unreferencedCells,
-        complete: shaken.refused === null,
-        fallbackRoots: [...representations.plan.selected.values()]
-      })
-    : undefined
+  const emissionRepresentationsOf = (): ReturnType<typeof publishEmissionRepresentationsOf> =>
+    publishEmissionRepresentationsOf({
+      bodies: dispatchedBodies!,
+      placements: splitPlacements,
+      classes: shaken!.classes,
+      resolveClassRef,
+      deriver: representations.deriver,
+      conversions: conversionCensus,
+      omitGlobals: shaken!.unreferencedCells,
+      complete: shaken!.refused === null,
+      fallbackRoots: [...representations.plan.selected.values()]
+    })
+  let emissionRepresentations = shaken ? emissionRepresentationsOf() : undefined
   stage('emission-carriers')
   // Candidate native reads become executable only after the one reflection
   // census proves their layouts stay closed across the reachable program.
-  let reflection = shaken
-    ? reflectionExposureOf([...(dispatchedBodies ?? shakenBodies!).values()], shaken.classes, representations.deriver, {
-        representations: emissionRepresentations?.representations ?? [...representations.plan.selected.values()],
-        wellKnownSymbols: frontend.wellKnownSymbols,
-        physicalClasses: physicalClassLayoutsOf(
-          shaken.classes,
-          emissionRepresentations?.representations ?? [...representations.plan.selected.values()]
-        ).layouts,
-        placements: splitPlacements,
-        conversions: conversionCensus,
-        adapterBoundaries,
-        trace: request.includeIr === true,
-        shakeComplete: shaken.refused === null && emissionRepresentations?.complete === true
-      })
-    : undefined
+  const firstReflectionOf = (): ReflectionExposure =>
+    reflectionExposureOf([...dispatchedBodies!.values()], shaken!.classes, representations.deriver, {
+      representations: emissionRepresentations?.representations ?? [...representations.plan.selected.values()],
+      wellKnownSymbols: frontend.wellKnownSymbols,
+      physicalClasses: physicalClassLayoutsOf(
+        shaken!.classes,
+        emissionRepresentations?.representations ?? [...representations.plan.selected.values()]
+      ).layouts,
+      placements: splitPlacements,
+      conversions: conversionCensus,
+      adapterBoundaries,
+      trace: request.includeIr === true,
+      shakeComplete: shaken!.refused === null && emissionRepresentations?.complete === true
+    })
+  let reflection = shaken ? firstReflectionOf() : undefined
   // Closed containers can transport callable records through their native
   // fields. Newly authenticated calls can close further containers. Grow the
   // same call/reflection censuses to a fixed point before ownership or emission
   // consumes either publication; no printer derives this provenance.
   if (shaken && dispatchedBodies && reflection && dispatchVerdict) {
-    const closedFactsOf = (bodies: Iterable<IrBody>): number => {
+    const closedFactsOf = (): number => {
       let count = 0
-      for (const body of bodies)
+      for (const body of dispatchedBodies!.values())
         for (const block of body.blocks.values())
           for (const operation of block.operations)
             if (
@@ -1469,76 +1491,50 @@ export const compile = (request: CompilationRequest): CompilationResult => {
               count++
       return count
     }
-    let count = closedFactsOf(dispatchedBodies.values())
-    // A round runs in its own frame, and drops the generation it was handed
-    // before filling: a `const next` in this loop, or the argument register
-    // a direct call leaves behind, kept the previous generation alive through
-    // the next round and on past the loop into certification.
-    const dispatchRound = (exposure: ReflectionExposure): void => {
-      const recipes = dispatchRecipesOf(dispatchedBodies!)
-      dispatchedBodies = null
-      dispatchedBodies = fillCallDispatchTargets(
-        recipes,
-        splitPlacements,
-        shaken.classes,
-        (callable) => abis.abis.get(callable) ?? null,
-        capturesNothingOf,
-        dispatchVerdict,
-        representations.deriver,
-        conversionCensus,
-        exposure
-      )
-    }
-    let programSignature = ''
-    for (;;) {
-      nativeProgramConversions = publishProgramConversionRecipes({
-        bodies: dispatchedBodies.values(),
+    let count = closedFactsOf()
+    const programRecipesOf = (exposure: ReflectionExposure): readonly ProgramConversionRecipe[] =>
+      publishProgramConversionRecipes({
+        bodies: dispatchedBodies!.values(),
         classes: shaken.classes,
         deriver: representations.deriver,
         conversions: conversionCensus,
-        reflection,
+        reflection: exposure,
         representations: emissionRepresentations?.representations ?? [...representations.plan.selected.values()]
       })
+    const nextReflectionOf = (emission: NonNullable<typeof emissionRepresentations>): ReflectionExposure =>
+      reflectionExposureOf([...dispatchedBodies!.values()], shaken.classes, representations.deriver, {
+        representations: emission.representations,
+        wellKnownSymbols: frontend.wellKnownSymbols,
+        physicalClasses: physicalClassLayoutsOf(shaken.classes, emission.representations).layouts,
+        placements: splitPlacements,
+        conversions: conversionCensus,
+        programConversions: nativeProgramConversions!,
+        adapterBoundaries,
+        trace: request.includeIr === true,
+        shakeComplete: shaken.refused === null && emission.complete
+      })
+    let programSignature = ''
+    for (;;) {
+      nativeProgramConversions = programRecipesOf(reflection)
       const nextProgramSignature = JSON.stringify(
         nativeProgramConversions.map((recipe) => [programConversionKey(recipe), recipe.conversion.id]).sort()
       )
       const programChanged = nextProgramSignature !== programSignature
       programSignature = nextProgramSignature
       dispatchRound(reflection)
-      const nextCount = closedFactsOf(dispatchedBodies!.values())
+      const nextCount = closedFactsOf()
       stage('reflection-round')
       if (nextCount <= count && !programChanged) break
       count = nextCount
-      emissionRepresentations = publishEmissionRepresentationsOf({
-        bodies: dispatchedBodies,
-        placements: splitPlacements,
-        classes: shaken.classes,
-        resolveClassRef,
-        deriver: representations.deriver,
-        conversions: conversionCensus,
-        omitGlobals: shaken.unreferencedCells,
-        complete: shaken.refused === null,
-        fallbackRoots: [...representations.plan.selected.values()]
-      })
-      reflection = reflectionExposureOf([...dispatchedBodies.values()], shaken.classes, representations.deriver, {
-        representations: emissionRepresentations.representations,
-        wellKnownSymbols: frontend.wellKnownSymbols,
-        physicalClasses: physicalClassLayoutsOf(shaken.classes, emissionRepresentations.representations).layouts,
-        placements: splitPlacements,
-        conversions: conversionCensus,
-        programConversions: nativeProgramConversions,
-        adapterBoundaries,
-        trace: request.includeIr === true,
-        shakeComplete: shaken.refused === null && emissionRepresentations.complete
-      })
+      emissionRepresentations = emissionRepresentationsOf()
+      reflection = nextReflectionOf(emissionRepresentations)
     }
   }
   let finalizedReads =
     shaken && reflection
-      ? finalizeTypedComputedReads(confirmUnboxedMethodBinds(dispatchedBodies ?? shakenBodies!, reflection, shaken.classes), reflection)
+      ? finalizeTypedComputedReads(confirmUnboxedMethodBinds(dispatchedBodies!, reflection, shaken.classes), reflection)
       : null
   dispatchedBodies = null
-  shakenBodies = null
   let fieldOwnership =
     shaken && reflection && finalizedReads
       ? finalizeNativeFieldOwnership(finalizedReads, shaken.classes, representations.deriver, conversionCensus, reflection, (reads) =>
@@ -1642,22 +1638,12 @@ export const compile = (request: CompilationRequest): CompilationResult => {
         ...(reflection ? { reflection } : {})
       })
     : undefined
-  let operationBodies = unsealedBodies
-    ? publishNativeOperationFacts(
-        publishConversionRecipes({
-          calleeRendering: slotsForClasses(executableClasses).input,
-          wellKnownSymbols: frontend.wellKnownSymbols,
-          bodies: discardUnreadCallResults(unsealedBodies),
-          placements: splitPlacements,
-          classes: executableClasses,
-          abis: abis.abis,
-          deriver: representations.deriver,
-          conversions: conversionCensus,
-          hosts
-        }),
-        executableClasses
-      )
-    : null
+  const takeUnsealed = (): ReadonlyMap<PhysicalBodyId, IrBody> => {
+    const taken = unsealedBodies!
+    unsealedBodies = null
+    return taken
+  }
+  let operationBodies = unsealedBodies ? publishNativeOperationFacts(takeUnsealed, executableClasses) : null
   unsealedBodies = null
   let finalRecipeBodies = operationBodies
     ? publishConversionRecipes({

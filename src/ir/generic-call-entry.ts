@@ -68,7 +68,7 @@ const frameConversionMatches = (
  */
 export const nativeGenericCallEntriesOf = (
   operation: CallOperation,
-  origins: ReadonlySet<FunctionId>,
+  origins: Iterable<FunctionId> & { readonly size: number },
   bodyOf: (id: FunctionId) => IrBody | null | undefined,
   conversions?: Pick<ConversionCensus, 'nodeById'>
 ): readonly { readonly functionId: FunctionId; readonly arguments: readonly IrOperand[] }[] | null => {

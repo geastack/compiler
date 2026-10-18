@@ -241,6 +241,10 @@ const sumHomesOf = (target: Sum): SumHomes => {
 /** A source's leaves: what `plan` splits an optional or a union into. */
 const sumLeaves = new WeakMap<Representation, readonly Representation[]>()
 const sumLeavesOf = (source: Representation): readonly Representation[] => {
+  // A source that is neither is its own one leaf. Remembering that for every
+  // carrier ever planned held a table entry and an array per carrier, for an
+  // answer cheaper to build than to look up.
+  if (source.kind !== 'optional' && source.kind !== 'tagged-union') return [source]
   const known = sumLeaves.get(source)
   if (known !== undefined) return known
   const leaves: Representation[] = []
