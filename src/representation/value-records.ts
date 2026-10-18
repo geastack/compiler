@@ -1,7 +1,8 @@
 import type { DeclarationId, StructuralTypeId } from '../identity/ids.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import type { SemanticOperand } from '../semantics/model/operands.js'
-import type { SignatureShape, StructuralShape } from '../semantics/model/structural-types.js'
+import type { SemanticOperation } from '../semantics/model/operations.js'
+import type { PropertyKeyShape, SignatureParameter, SignatureShape, StructuralShape } from '../semantics/model/structural-types.js'
 import { instantiatedParameterTypes } from '../semantics/model/selected-signature.js'
 import { sharedPrimitiveDomainOf } from './primitive-domain.js'
 
@@ -64,6 +65,62 @@ const typeArgumentsOf = (graph: SemanticGraph, id: StructuralTypeId): ReadonlySe
   if (shape.kind === 'tuple') return new Set(shape.elements.map((element) => element.type))
   if (shape.kind === 'declared' || shape.kind === 'class-instance') return new Set(shape.typeArguments)
   return new Set()
+}
+
+/** `any`/`unknown`: the one view no later operation on it can attribute to a record type. */
+const isDynamic = (graph: SemanticGraph, id: StructuralTypeId): boolean => {
+  const shape = graph.structuralTypes.get(id)?.shape
+  return shape?.kind === 'primitive' && (shape.primitive === 'any' || shape.primitive === 'unknown')
+}
+
+/** The layout a named type stands for. */
+const bodyOf = (graph: SemanticGraph, id: StructuralTypeId): StructuralTypeId => {
+  const shape = graph.structuralTypes.get(id)?.shape
+  if ((shape?.kind === 'declared' || shape?.kind === 'class-instance') && shape.body !== null) return bodyOf(graph, shape.body)
+  return shape?.kind === 'object-anchor' ? bodyOf(graph, shape.body) : id
+}
+
+/** The type an argument at `ordinal` binds to, a rest parameter's element included. */
+const parameterTypeAt = (
+  graph: SemanticGraph,
+  parameters: readonly SignatureParameter[],
+  ordinal: number
+): StructuralTypeId | undefined => {
+  const last = parameters[parameters.length - 1]
+  if (!last?.rest || ordinal < parameters.length - 1) return parameters[ordinal]?.type
+  const rest = graph.structuralTypes.get(bodyOf(graph, last.type))?.shape
+  return rest?.kind === 'array' ? rest.element : undefined
+}
+
+const sameKey = (left: PropertyKeyShape, right: PropertyKeyShape): boolean =>
+  left.kind === 'symbol'
+    ? right.kind === 'symbol' && right.declaration === left.declaration
+    : right.kind !== 'symbol' && right.kind === left.kind && right.value === left.value
+
+/** The cores of a type that can hold an object, as `objectCoresOf` finds them. */
+const objectHoldersOf = (graph: SemanticGraph, id: StructuralTypeId): StructuralTypeId[] => {
+  const cores = new Set<StructuralTypeId>()
+  objectCoresOf(graph, id, cores)
+  const scalar = new Set(['primitive', 'literal', 'unique-symbol', 'union', 'intersection'])
+  return [...cores].filter((core) => {
+    const shape = graph.structuralTypes.get(core)?.shape
+    return shape !== undefined && !scalar.has(shape.kind)
+  })
+}
+
+/** The receiver's own declared view of the slot a store under `key` lands in (`null`: a computed key). */
+const slotTypesOf = (graph: SemanticGraph, receiver: StructuralTypeId, key: string | null): StructuralTypeId[] => {
+  if (isDynamic(graph, receiver)) return [receiver]
+  const slots: StructuralTypeId[] = []
+  for (const core of objectHoldersOf(graph, receiver)) {
+    const shape = graph.structuralTypes.get(core)?.shape
+    if (shape?.kind === 'array') slots.push(shape.element)
+    if (shape?.kind !== 'object') continue
+    const member = shape.members.find((candidate) => candidate.key.kind === 'string' && candidate.key.value === key)
+    if (member) slots.push(member.type)
+    else for (const index of shape.index) slots.push(index.value)
+  }
+  return slots
 }
 
 /** Object shapes reachable from a type that a mutation or an identity test named. */
@@ -226,7 +283,100 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
       for (const parameter of signature.parameters) disqualifyParameter(parameter.type)
     }
   }
+  // A write or identity test made through an `any`/`unknown` view names no
+  // record type, so the type-keyed proof above cannot see it. Everything a
+  // value carries BY VALUE leaves with it: a dynamic read of a by-value field
+  // boxes a copy, so `view.inner.t = 2` would land in that copy. A worklist,
+  // not recursion: an app's object graph nests deeper than the stack.
+  const exposed = new Set<StructuralTypeId>()
+  const exposeToDynamic = (id: StructuralTypeId): void => {
+    const pending = [id]
+    for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+      if (exposed.has(next)) continue
+      exposed.add(next)
+      disqualifyCallable(next)
+      const cores = new Set<StructuralTypeId>()
+      objectCoresOf(graph, next, cores)
+      for (const core of cores) {
+        disqualified.add(core)
+        const shape = graph.structuralTypes.get(core)?.shape
+        if (shape?.kind === 'object') for (const member of shape.members) pending.push(member.type)
+        pending.push(...typeArgumentsOf(graph, core))
+      }
+    }
+  }
+  // A value of type `source` stored where the program's view of it is
+  // `destination` -- a parameter, a field, a callback's parameter. The proof
+  // keys every write and identity test by the type at that site, so the two
+  // must be one alias class, as a binding's own views are; a dynamic view
+  // escapes the proof outright. The walk follows fields, elements and
+  // callable parameters, which hold the same objects under their own types.
+  // A host's own declared type (`join` false) is no view the program writes
+  // through, and the call already disqualified what it was handed; only its
+  // dynamic slots and the program callbacks it calls back are walked.
+  const entered = new Set<string>()
+  const entersView = (source: StructuralTypeId, destination: StructuralTypeId, join = true): void => {
+    const edge = `${join ? '' : 'host '}${source}>${destination}`
+    if (source === destination || entered.has(edge)) return
+    entered.add(edge)
+    const held = objectHoldersOf(graph, source)
+    if (held.length === 0) return
+    if (isDynamic(graph, destination)) return exposeToDynamic(source)
+    // Only the object-shaped cores join: an alias through a shared primitive
+    // id would let any comparison against that primitive disqualify both.
+    if (join) connect([...held, ...objectHoldersOf(graph, destination)])
+    const from = graph.structuralTypes.get(bodyOf(graph, source))?.shape
+    const to = graph.structuralTypes.get(bodyOf(graph, destination))?.shape
+    if (from?.kind === 'array' && to?.kind === 'array') entersView(from.element, to.element, join)
+    if (from?.kind === 'object' && to?.kind === 'object')
+      for (const member of from.members) {
+        const slot = to.members.find((candidate) => sameKey(candidate.key, member.key))
+        if (slot) entersView(member.type, slot.type, join)
+      }
+    const [fromCall] = signatureShapesOf(source)
+    const [toCall] = signatureShapesOf(destination)
+    if (!fromCall || !toCall) return
+    // A callback's parameters receive what its caller passes, so values flow
+    // from the destination's parameters into the source's.
+    fromCall.parameters.forEach((parameter, ordinal) => {
+      const passed = parameterTypeAt(graph, toCall.parameters, ordinal)
+      if (passed !== undefined && !parameter.rest) entersView(passed, parameter.type)
+    })
+    entersView(fromCall.result, toCall.result, join)
+  }
+  // Where an invocation's argument lands: the callee's own type at the call
+  // site is instantiated, while a selected generic signature may still name
+  // its type parameters, and joining a type parameter would alias every
+  // record it is ever filled with. That fallback only answers whether the
+  // parameter is dynamic, which no instantiation changes.
+  const enterArguments = (operation: Extract<SemanticOperation, { family: 'invocation' }>): void => {
+    const callee = operation.operands.find((operand) => operand.role === 'callee')
+    const calleeSignatures = callee ? signatureShapesOf(callee.type) : []
+    const exact = calleeSignatures.length === 1 ? calleeSignatures[0]!.parameters : null
+    const join = operation.selectedSignature?.provenance !== 'ambient'
+    for (const operand of operation.operands) {
+      if (operand.role !== 'argument') continue
+      const destination = exact ? parameterTypeAt(graph, exact, operand.ordinal) : undefined
+      if (destination !== undefined) entersView(operand.type, destination, join)
+      else {
+        const declared = operation.selectedSignature
+          ? parameterTypeAt(graph, operation.selectedSignature.parameters, operand.ordinal)
+          : undefined
+        if (declared !== undefined && isDynamic(graph, declared)) exposeToDynamic(operand.type)
+      }
+    }
+  }
   for (const operation of graph.operations.values()) {
+    // An erased assertion (`list as any[]`) hands a typed result to an operand
+    // whose own type is dynamic, with no operation in between to compare.
+    for (const operand of operation.operands) {
+      const source = operand.source
+      if (source.kind !== 'result' || !isDynamic(graph, operand.type)) continue
+      const producer = graph.results.get(source.result)
+      const produced =
+        producer === undefined ? undefined : graph.operations.get(producer)?.results.find((result) => result.id === source.result)
+      if (produced) entersView(produced.type, operand.type)
+    }
     // A `VariableDeclaration` with an initializer is the one binding shape
     // whose operand and result can carry two DIFFERENT types: `initializer`
     // reads `typeAt(initializer)`, the value's own concrete type, while the
@@ -235,16 +385,18 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
     // binding shape (a plain parameter, a destructured element, a plain `x =
     // expr` write) reuses ONE type for both, so this never fires for them.
     //
-    // Gated on the RESULT resolving to `any`/`unknown` specifically, not on
-    // the two types merely differing: an ordinary typed widening (`let n:
-    // number = 5 as const`, a literal into its declared interface where
+    // Only a RESULT resolving to `any`/`unknown` disqualifies, not the two
+    // types merely differing: an ordinary typed widening (`let n: number = 5
+    // as const`, a literal into its declared interface where
     // `recordStorageFamilies` did not happen to connect the two Type objects)
     // differs by identity constantly without being an escape, and disqualifying
     // on that alone moved well over a hundred unrelated programs' emitted
-    // output measured against `npm run gate`. `any`/`unknown` is the one
-    // declared type this compiler can never narrow back to the operand's own
-    // shape, which is exactly the condition a second, differently-typed name
-    // for this cell needs to retain the object after this rule's proof.
+    // output measured against `npm run gate`. Such a widening is a second view
+    // of the same object, which `entersView` joins to the operand's alias
+    // class. `any`/`unknown` is the one declared type this compiler can never
+    // narrow back to the operand's own shape, which is exactly the condition a
+    // second, differently-typed name for this cell needs to retain the object
+    // after this rule's proof.
     if (operation.family === 'binding') {
       if (operation.action !== 'initialize' && operation.action !== 'write') continue
       const result = operation.results[0]
@@ -260,12 +412,12 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
       // structure, so this can never disqualify anything the check above
       // already decides for objects.
       const resultIsWideningArray = !resultIsDynamic && resultShape?.kind === 'array'
-      if (!resultIsDynamic && !resultIsWideningArray) continue
       for (const operand of operation.operands) {
         if (operand.type === result.type) continue
-        if (resultIsWideningArray && graph.structuralTypes.get(operand.type)?.shape.kind !== 'tuple') continue
-        objectCoresOf(graph, operand.type, disqualified)
-        disqualifyCallable(operand.type)
+        if (resultIsWideningArray && graph.structuralTypes.get(operand.type)?.shape.kind === 'tuple') {
+          objectCoresOf(graph, operand.type, disqualified)
+          disqualifyCallable(operand.type)
+        } else entersView(operand.type, result.type)
       }
       continue
     }
@@ -274,6 +426,10 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
       if (operation.internalMethod === 'own-property-keys') continue
       const receiver = operation.operands.find((operand) => operand.role === 'receiver')
       if (!receiver) continue
+      const value = operation.operands.find((operand) => operand.role === 'value')
+      const key = operation.operands.find((operand) => operand.role === 'key')?.source
+      if (value)
+        for (const slot of slotTypesOf(graph, receiver.type, key?.kind === 'constant' ? key.text : null)) entersView(value.type, slot)
       // `define-own-property` is how an object LITERAL installs its own fields,
       // so every record in the program carries one and reading it as a mutation
       // disqualifies all of them. The write that matters is one aimed at an
@@ -291,6 +447,7 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
     // admitted, because that function's own body compiles against the same
     // carrier and its copy is the value the language already promises.
     if (operation.family === 'invocation') {
+      enterArguments(operation)
       const target = operation.target
       if (target.kind === 'exact' && target.target.kind === 'function') {
         // The exemption's own premise -- "the callee's body compiles against
