@@ -64,8 +64,13 @@ const includesUndefined = (type: ts.Type): boolean => {
   return type.isUnion() && type.types.some(includesUndefined)
 }
 
-/** Whether an equality operation directly compares this expression with `undefined`. */
-const comparesWithUndefined = (context: ProducerContext, node: ts.Expression): boolean => {
+/**
+ * Whether this expression is an equality operand or `instanceof`'s left
+ * operand. Both answer for `undefined` without reading it: IsStrictlyEqual and
+ * IsLooselyEqual compare it, and OrdinaryHasInstance returns false for a
+ * non-object.
+ */
+const comparesItsOperand = (node: ts.Expression): boolean => {
   let inner: ts.Node = node
   let parent = inner.parent
   while (parent && ts.isParenthesizedExpression(parent)) {
@@ -74,16 +79,13 @@ const comparesWithUndefined = (context: ProducerContext, node: ts.Expression): b
   }
   if (!parent || !ts.isBinaryExpression(parent)) return false
   const operator = parent.operatorToken.kind
-  if (
-    operator !== ts.SyntaxKind.EqualsEqualsToken &&
-    operator !== ts.SyntaxKind.ExclamationEqualsToken &&
-    operator !== ts.SyntaxKind.EqualsEqualsEqualsToken &&
-    operator !== ts.SyntaxKind.ExclamationEqualsEqualsToken
-  ) {
-    return false
-  }
-  const other = parent.left === inner ? parent.right : parent.right === inner ? parent.left : null
-  return other !== null && (context.types.rawTypeAt(other).flags & ts.TypeFlags.Undefined) !== 0
+  if (operator === ts.SyntaxKind.InstanceOfKeyword) return parent.left === inner
+  return (
+    operator === ts.SyntaxKind.EqualsEqualsToken ||
+    operator === ts.SyntaxKind.ExclamationEqualsToken ||
+    operator === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+    operator === ts.SyntaxKind.ExclamationEqualsEqualsToken
+  )
 }
 
 /**
@@ -94,23 +96,29 @@ const comparesWithUndefined = (context: ProducerContext, node: ts.Expression): b
  * property producer restores that absence and the cell therefore physically
  * holds `Optional<T>`; dereferencing it at a later optional return or
  * `!== undefined` test would discard the very absence the producer recovered.
+ * An unannotated local has the same cell when the local-binding census
+ * restored the absence from a later test (`observedIndexedAbsence`), and the
+ * checker types its other reads `T` just the same.
  *
  * This does not suppress ordinary control-flow narrowing: only a use whose
- * contextual destination itself admits `undefined`, or which directly tests
- * for it, keeps the declaration's stated carrier. A use that requires `T`
- * continues to use the checker's narrowed answer and its existing presence
- * proof/conversion.
+ * contextual destination itself admits `undefined`, or which compares it
+ * (`comparesItsOperand`), keeps the declaration's stated carrier. A use that
+ * requires `T` continues to use the checker's narrowed answer and its existing
+ * presence proof/conversion.
  */
 const destinationPreservesDeclaredAbsence = (
   context: ProducerContext,
   node: ts.Identifier,
   declaration: ts.Declaration | null
 ): StructuralTypeId | null => {
-  if (!declaration || !ts.isVariableDeclaration(declaration) || declaration.type === undefined) return null
-  const declared = context.checker.getTypeAtLocation(declaration.name)
-  if (!includesUndefined(declared)) return null
+  if (!declaration || !ts.isVariableDeclaration(declaration)) return null
+  const declared =
+    declaration.type !== undefined
+      ? context.checker.getTypeAtLocation(declaration.name)
+      : (context.parameters.preferredTypeAt?.(declaration) ?? null)
+  if (!declared || !includesUndefined(declared)) return null
   const contextual = context.checker.getContextualType(node)
-  if ((contextual === undefined || !includesUndefined(contextual)) && !comparesWithUndefined(context, node)) return null
+  if ((contextual === undefined || !includesUndefined(contextual)) && !comparesItsOperand(node)) return null
   return context.types.typeAt(declaration)
 }
 
