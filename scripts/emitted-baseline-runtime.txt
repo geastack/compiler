@@ -306,6 +306,7 @@ dead-event-emission-relay.runtime.ts.cpp 440207517dd5
 dead-helper-obligations.runtime.js.cpp 2cb43ef9a086
 dead-values.ts.cpp b1670b33a17d
 declared-integer-bindings-hold-their-width.runtime.ts.cpp 913ab0adb521
+decode-uri-component-malformed-throws-uri-error.runtime.ts.cpp 8b62a2d3e2db
 decorate-decrypted-document-symbol-keys.runtime.ts.cpp a6513d9b2363
 defaulted-empty-literal-parameter-reads-caller-keys.runtime.js.cpp 5cbd2562bf36
 define-aspects-over-constructor-family-union.runtime.ts.cpp 8afbbd094ef0

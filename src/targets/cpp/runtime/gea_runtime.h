@@ -50767,18 +50767,6 @@ inline void gea_json_read(gea::json::Reader& reader, gea::embedded::ui::Signal<T
 // of a malformed percent sequence (`URIError`, ECMA-262 19.2.6.5 step 4.b),
 // and `new TextDecoder(label)` for a label this implementation does not
 // support (`RangeError`).
-//
-// v1 raises those through `gea_cpp_reject(gea_cpp_value::error(...))`, which
-// needs its boxed error carrier. This runtime has no such carrier: a thrown
-// value here is a program-generated error struct (`ErrorConstructor::create`
-// is a template over one, declared *after* this header), so a library
-// function in this header cannot construct one. So each of the four aborts BY
-// NAME with the specification's own message and clause, exactly as
-// `detail::typedArrayLengthIndex`, `gea::runtime::array::reduce`'s empty-array
-// TypeError and `detail::refuseOmittedArgument` already do for the same
-// reason. That is a real difference from ECMAScript -- a `try { atob(x) }
-// catch {}` cannot recover -- and it is stated here rather than papered over
-// with a plausible empty string.
 // ===========================================================================
 
 namespace gea::runtime::text {
@@ -51094,11 +51082,7 @@ inline void appendPercentU(std::string& out, std::uint32_t codeUnit) {
   out.push_back(hexDigit(codeUnit & 0x0F));
 }
 
-/** v1: `gea::uri::uri_error` (uri.cpp), re-typed to this runtime's named abort -- see this family's header comment for why. */
-[[noreturn]] inline void refuseMalformedUri() {
-  std::fprintf(stderr, "gea: URIError: URI malformed (ECMA-262 19.2.6.5 Decode, step 4.b / 19.2.6.4 Encode, step 4.b)\n");
-  gea::detail::abortAfterFlush();
-}
+[[noreturn]] inline void refuseMalformedUri() { gea::host::throwRuntimeError("URIError", "URI malformed"); }
 
 /** v1: `gea::uri::is_unescaped` (uri.cpp). ECMA-262 19.2.6.1.1's `uriUnescaped` = `uriAlpha` + DecimalDigit + `uriMark`. */
 inline bool isUnescaped(std::uint32_t codePoint) {
@@ -51335,15 +51319,19 @@ inline std::string unescapeImpl(const std::string& input) {
  * than through a second copy.
  */
 inline std::string encodeUri(const std::string& value) { return encodeImpl(value, false); }
+inline std::string encodeUri(const char* value) { return encodeUri(std::string(value)); }
 inline std::string encodeUri(double value) { return encodeImpl(gea::host::detail::toString(value), false); }
 inline std::string encodeUri(bool value) { return encodeImpl(gea::host::detail::toString(value), false); }
 inline std::string encodeUriComponent(const std::string& value) { return encodeImpl(value, true); }
+inline std::string encodeUriComponent(const char* value) { return encodeUriComponent(std::string(value)); }
 inline std::string encodeUriComponent(double value) { return encodeImpl(gea::host::detail::toString(value), true); }
 inline std::string encodeUriComponent(bool value) { return encodeImpl(gea::host::detail::toString(value), true); }
 inline std::string decodeUri(const std::string& value) { return decodeImpl(value, false); }
+inline std::string decodeUri(const char* value) { return decodeUri(std::string(value)); }
 inline std::string decodeUri(double value) { return decodeImpl(gea::host::detail::toString(value), false); }
 inline std::string decodeUri(bool value) { return decodeImpl(gea::host::detail::toString(value), false); }
 inline std::string decodeUriComponent(const std::string& value) { return decodeImpl(value, true); }
+inline std::string decodeUriComponent(const char* value) { return decodeUriComponent(std::string(value)); }
 inline std::string decodeUriComponent(double value) { return decodeImpl(gea::host::detail::toString(value), true); }
 inline std::string decodeUriComponent(bool value) { return decodeImpl(gea::host::detail::toString(value), true); }
 
