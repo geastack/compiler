@@ -1226,12 +1226,27 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    * its assignability to the owner's class each time; on a large program that
    * was the session's heaviest transfer. Kept in site order, so the facts the
    * transfer adds keep their order.
+   *
+   * Each candidate call's `targets` is seeded here, once: the transfer asks
+   * `holdersOf(owner)` which of them hold the owner, and a reverse index only
+   * finds seeded states. Seeding forces exactly the states the old per-candidate
+   * `observe` forced, without the edge.
    */
   const callerCandidates = new Map<ts.SignatureDeclaration, readonly CallerCandidate[]>()
+  // An owner whose names cannot be enumerated, with no stated instance type, that
+  // no `new` can enter, has the same list as every other such owner: every call
+  // in the program. One copy instead of one per owner -- 159 owners of 9,104 calls
+  // each in round 1 of Sakura Fantasy (55269dd).
+  let everyCall: readonly CallerCandidate[] | null = null
   const callerCandidatesOf = (owner: ts.SignatureDeclaration): readonly CallerCandidate[] => {
     const known = callerCandidates.get(owner)
     if (known !== undefined) return known
     const ownerType = ownerInstanceTypeOf(owner)
+    const shared = ownerType === null && !ts.isFunctionDeclaration(owner) && namesOf(owner) === null
+    if (shared && everyCall !== null) {
+      callerCandidates.set(owner, everyCall)
+      return everyCall
+    }
     const answer: CallerCandidate[] = []
     for (const site of candidateCallersOf(owner)) {
       // `new Factory( state )` on a plain function enters the
@@ -1247,6 +1262,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       }
       answer.push({ site, call: site.call })
     }
+    for (const candidate of answer) if (candidate.call !== null) seed(targets(candidate.call))
+    if (shared) everyCall = answer
     callerCandidates.set(owner, answer)
     return answer
   }
@@ -3421,8 +3438,19 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             if ((ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Static) !== 0) fail('static-member-callers-open', owner)
             else for (const instance of familyInstancesOf(owner.parent, 'member-family-open') ?? []) read(closure(instance))
           }
-          for (const candidate of callerCandidatesOf(owner)) {
-            if (candidate.call === null || observe(targets(candidate.call)).has(owner)) facts.add(candidate.site.call)
+          // Which candidates' targets hold this owner, asked in reverse. Observing
+          // every candidate's `targets` made an owner whose names cannot be
+          // enumerated a dependent of every call in the program, and re-ran it
+          // whenever any of them gained any body: in round 1 of Sakura Fantasy
+          // (55269dd) 1.57M of the session's 4.29M observe edges, and 94% of these
+          // transfers added nothing. `holdersOf` wakes this node only when the
+          // owner itself joins a seeded `targets` state, and is discovery-only
+          // exactly as the observe edges were.
+          const candidates = callerCandidatesOf(owner)
+          const held = new Set<ts.Node>()
+          for (const holder of holdersOf(owner)) if (holder.kind === 'targets') held.add(holder.node)
+          for (const candidate of candidates) {
+            if (candidate.call === null || held.has(candidate.call)) facts.add(candidate.site.call)
           }
           break
         }
