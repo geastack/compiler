@@ -420,12 +420,12 @@ export const sourceValueSessionOf = (checker: ts.TypeChecker, flow: ValueFlowInd
 /**
  * Releases the solver behind `flow`'s session. A later question is still
  * answered: by a fresh solver over the same flow, which reaches the same
- * fixed point. The frontend retires a round's flow once the next round has
- * replaced it, and the final round's once the frontend returns. On a
- * large program no retired session is ever asked again; of the gate's programs
- * one is (a later census falling through `upstream` to an earlier round,
- * `indexed-absence-forwarded-cache`), and its rebuilt answer emits the same
- * program.
+ * fixed point. The frontend retires every earlier round's flow each time a
+ * new round replaces it, and all of them once the frontend returns: a retired
+ * session is asked again whenever a later census falls through `upstream` to
+ * an earlier round's bindings (`indexed-absence-forwarded-cache` in the gate;
+ * three of four rounds on a three.js slice), and a rebuilt solver is released
+ * the same way as the one it replaced.
  */
 export const retireSourceValueSession = (flow: ValueFlowIndex): void => {
   sessions.get(flow)?.retire()

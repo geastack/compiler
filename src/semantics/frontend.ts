@@ -1173,12 +1173,15 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
             (earlier) => earlier !== valueFlow && sameValueFlowContent(earlier, valueFlow) && shareSourceValueSession(earlier, valueFlow)
           )
         : undefined
-    // A round's solver is asked nothing once the next round's index replaces
-    // it (`retireSourceValueSession`); keeping it cost ~1 GB per round. A
-    // solver handed on above is the new round's own, and stays.
+    // A round's solver is released once the next round's index replaces it
+    // (`retireSourceValueSession`); keeping it cost ~1 GB per round. Every
+    // earlier round's, not only the last one's: a retired solver can still be
+    // asked -- the next census reads this round's bindings through `upstream`,
+    // and they answer from this round's flow -- and the question rebuilds it
+    // whole. Retired once, such a rebuild then lived to the end of the compile.
+    // A solver handed on above is the new round's own, and stays.
     for (const earlier of roundFlows) if (earlier !== valueFlow && earlier !== sharedFrom) retireSourceValueSession(earlier)
-    roundFlows.length = 0
-    roundFlows.push(valueFlow)
+    if (!roundFlows.includes(valueFlow)) roundFlows.push(valueFlow)
     attachDeferredIntrinsicProtocolLedger(valueFlow, intrinsicProtocols)
     commonJsModuleRecords.attachToFlow(valueFlow)
     if (statedModules) attachStatedModuleSet(valueFlow, statedModules)
