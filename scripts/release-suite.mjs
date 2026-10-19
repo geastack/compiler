@@ -197,6 +197,8 @@ if (wanted('core')) {
       // not skipped quietly: the summary names every one this host left unrun.
       if (process.platform !== 'darwin' && readFileSync(join(tests, file), 'utf8').includes('-framework'))
         hostOnly.push(`core: ${file} (links a macOS framework)`)
+      else if (file.startsWith('run-gea-companion-'))
+        hostOnly.push(`core: ${file} (needs a gea-companion macOS build's generated C++, which no lane produces)`)
       else add('core', file, examples, ['bash', join(tests, file)], env)
     }
   }
