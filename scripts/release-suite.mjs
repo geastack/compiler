@@ -378,13 +378,18 @@ if (wanted('perf')) {
   // @geastack/parallel workloads (against Rayon and a C++ pool), compared with
   // the baseline benchmarks/ records for this machine. A machine without one
   // fails: an unmeasured release has not passed this lane.
-  const benchmarks = checkout('benchmarks', 'node/release-gate/perf-gate.mjs')
   if (process.platform === 'linux' && process.arch === 'x64')
-    last('perf', 'HTTP and parallel performance gate', benchmarks, ['node', 'node/release-gate/perf-gate.mjs', '--fix-loopback'], {
-      GEA_COMPILER_DIR: compiler,
-      GEA_NODE_COMPAT_DIR: join(workspace, 'node-compat'),
-      PARALLEL_ROOT: join(workspace, 'parallel')
-    })
+    last(
+      'perf',
+      'HTTP and parallel performance gate',
+      checkout('benchmarks', 'node/release-gate/perf-gate.mjs'),
+      ['node', 'node/release-gate/perf-gate.mjs', '--fix-loopback'],
+      {
+        GEA_COMPILER_DIR: compiler,
+        GEA_NODE_COMPAT_DIR: join(workspace, 'node-compat'),
+        PARALLEL_ROOT: join(workspace, 'parallel')
+      }
+    )
   else hostOnly.push('perf: the HTTP and parallel performance gate (needs Linux on x86-64)')
 }
 
