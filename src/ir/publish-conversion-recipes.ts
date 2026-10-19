@@ -161,7 +161,21 @@ export interface PublishConversionRecipesInput {
 /** Publish after all body rewrites, so the certificate and the printer name the same adaptations. */
 export const publishConversionRecipes = (input: PublishConversionRecipesInput): ReadonlyMap<PhysicalBodyId, IrBody> => {
   const nativeBodies = publishNativeHostMethodReads(input.bodies, input.calleeRendering, input.hosts.members)
-  let callableFlow: ReturnType<typeof nativeCallableFlowOf> | undefined
+  // Solved before the first body is published, when any call will ask for it:
+  // asked lazily, the solve ran beside the half-built output generation, the
+  // largest thing alive in this pass.
+  const asksCallableFlow = [...nativeBodies.values()].some((body) =>
+    [...body.blocks.values()].some((block) =>
+      allOperationsOf(block).some((operation) => {
+        if (operation.kind !== 'call') return false
+        const receiver = genericNativeLogicalReceiverOf(operation)
+        return receiver !== null && !nativeLogicalReceiverProtocolSupported(nativeLogicalReceiverProtocolOf(receiver.representation))
+      })
+    )
+  )
+  let callableFlow: ReturnType<typeof nativeCallableFlowOf> | undefined = asksCallableFlow
+    ? nativeCallableFlowOf([...nativeBodies.values()], input.placements, input.classes, input.conversions, undefined, input.deriver)
+    : undefined
   const virtualFrames = settledVirtualCallFramesOf(input.bodies.values(), input.classes, input.conversions)
   const hostMethodAliases = buildHostMethodAliasIndex([...input.bodies.values()], input.placements, input.hosts)
   const bodies = new Map<PhysicalBodyId, IrBody>()

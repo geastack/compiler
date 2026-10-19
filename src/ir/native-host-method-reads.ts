@@ -2,7 +2,15 @@ import type { IrValueId, PhysicalBodyId } from '../identity/ids.js'
 import type { CalleeRenderingInput } from '../projection/callee.js'
 import type { HostMemberTable } from '../targets/cpp/host/host-members.js'
 import { authenticatedNativeHostMethodReadOf, type AuthenticatedNativeHostMethodRead } from './intrinsic-call-facts.js'
-import { allOperationsOf, type GetOperation, type IrBody, type IrOperation } from './model.js'
+import {
+  allOperationsOf,
+  type GetOperation,
+  type IrBlock,
+  type IrBlockId,
+  type IrBody,
+  type IrNonTerminatorOperation,
+  type IrOperation
+} from './model.js'
 import { resultOfIrOperation } from './queries.js'
 
 /** Final call entries authenticate the exact deferred reads, independently
@@ -40,34 +48,36 @@ export const nativeHostMethodReadProofsOf = (
 
 /** Publish before callable, field-presence or reflection flow first runs;
  * every subsequent rewrite recomputes rather than inherits this receipt.
+ *
+ * A Get that carries no receipt and earns none is kept as it is, and so is a
+ * block or body with nothing republished: a whole fresh copy of the program
+ * beside the input, which every caller still holds, sat under the callable
+ * flow solved over it.
  */
 export const publishNativeHostMethodReads = (
   bodies: ReadonlyMap<PhysicalBodyId, IrBody>,
   rendering: CalleeRenderingInput | undefined,
   hosts?: HostMemberTable
-): ReadonlyMap<PhysicalBodyId, IrBody> =>
-  new Map(
-    [...bodies].map(([id, body]) => {
-      const proofs = nativeHostMethodReadProofsOf(body, rendering, hosts)
-      return [
-        id,
-        {
-          ...body,
-          blocks: new Map(
-            [...body.blocks].map(([blockId, block]) => [
-              blockId,
-              {
-                ...block,
-                operations: block.operations.map((operation) => {
-                  if (operation.kind !== 'get') return operation
-                  const { nativeHostMethodRead: _previous, ...current } = operation
-                  const proof = proofs.get(operation)
-                  return proof === undefined ? current : { ...current, nativeHostMethodRead: proof.receipt }
-                })
-              }
-            ])
-          )
-        }
-      ]
-    })
-  )
+): ReadonlyMap<PhysicalBodyId, IrBody> => {
+  const result = new Map<PhysicalBodyId, IrBody>()
+  for (const [id, body] of bodies) {
+    const proofs = nativeHostMethodReadProofsOf(body, rendering, hosts)
+    let blocks: Map<IrBlockId, IrBlock> | null = null
+    for (const [blockId, block] of body.blocks) {
+      let operations: IrNonTerminatorOperation[] | null = null
+      for (let at = 0; at < block.operations.length; at++) {
+        const operation = block.operations[at]!
+        if (operation.kind !== 'get') continue
+        const proof = proofs.get(operation)
+        if (proof === undefined && !Object.prototype.hasOwnProperty.call(operation, 'nativeHostMethodRead')) continue
+        const { nativeHostMethodRead: _previous, ...current } = operation
+        ;(operations ??= block.operations.slice())[at] = proof === undefined ? current : { ...current, nativeHostMethodRead: proof.receipt }
+      }
+      if (operations === null) continue
+      blocks ??= new Map(body.blocks)
+      blocks.set(blockId, { ...block, operations })
+    }
+    result.set(id, blocks === null ? body : { ...body, blocks })
+  }
+  return result
+}

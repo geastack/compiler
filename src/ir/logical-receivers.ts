@@ -10,7 +10,7 @@ import { nativeLogicalReceiverProtocolOf, nativeLogicalReceiverProtocolSupported
 import { hostReceiverProtocolOf } from '../representation/host-templates.js'
 import { hostMemberOf, type HostSpellings } from '../targets/cpp/host/host-members.js'
 import { nativeCallableFlowOf } from './callable-class-flow.js'
-import type { BindCallableOperation, GetOperation, IrBody, IrOperation } from './model.js'
+import type { BindCallableOperation, GetOperation, IrBlock, IrBlockId, IrBody, IrNonTerminatorOperation, IrOperation } from './model.js'
 import { genericNativeLogicalReceiverOf } from './call-entry.js'
 
 /** A public nil ABI is insufficient: every possible source body must independently ignore logical this. */
@@ -76,6 +76,36 @@ const rewrite = (
     ])
   )
 
+/**
+ * `rewrite` for a generation that lives only as long as one solve: a block
+ * none of whose operations changed is the input's own block, and a body none
+ * of whose blocks changed is the input's own body. A whole fresh copy of the
+ * program beside the input, which the caller still holds, was the largest
+ * thing alive at the solve over it.
+ */
+const rewriteSharing = (
+  bodies: ReadonlyMap<PhysicalBodyId, IrBody>,
+  operation: (operation: IrOperation) => IrOperation
+): ReadonlyMap<PhysicalBodyId, IrBody> => {
+  const result = new Map<PhysicalBodyId, IrBody>()
+  for (const [id, body] of bodies) {
+    let blocks: Map<IrBlockId, IrBlock> | null = null
+    for (const [blockId, block] of body.blocks) {
+      let operations: IrNonTerminatorOperation[] | null = null
+      for (let at = 0; at < block.operations.length; at++) {
+        const value = block.operations[at]!
+        const next = operation(value) as typeof value
+        if (next !== value) (operations ??= block.operations.slice())[at] = next
+      }
+      if (operations === null) continue
+      blocks ??= new Map(body.blocks)
+      blocks.set(blockId, { ...block, operations })
+    }
+    result.set(id, blocks === null ? body : { ...body, blocks })
+  }
+  return result
+}
+
 /** Close receiver irrelevance before shaking decides which operands require runtime values. */
 export const publishLogicalReceivers = (
   bodies: ReadonlyMap<PhysicalBodyId, IrBody>,
@@ -90,7 +120,7 @@ export const publishLogicalReceivers = (
     for (const block of body.blocks.values())
       for (const operation of block.operations)
         if (operation.kind === 'constant' && operation.literal === 'string') keyTexts.set(operation.result.id, operation.text)
-  const marked = rewrite(bodies, (operation) => {
+  const marked = rewriteSharing(bodies, (operation) => {
     if (operation.kind !== 'get') return operation
     if (hostReadIgnoresLogicalReceiver(operation, hosts, keyTexts.get(operation.key.value) ?? null))
       return { ...operation, logicalReceiver: 'ignored' }

@@ -1131,6 +1131,12 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // at certification on a large program. Each generation is therefore a `let`,
   // dropped once the next one is built, and the long-lived results (`lowered`,
   // `shaken`) keep only their facts, not their bodies.
+  // Every step that consumes a generation runs through `inFrame`, reading the
+  // generation from this frame's context instead of taking it as an argument
+  // here: argument and literal registers of `compile`'s own frame outlive the
+  // call they were made for, and one of them kept the pre-shake generation
+  // alive through certification -- the compile's heap floor.
+  const inFrame = <T>(step: () => T): T => step()
   let loweredProgram = diagnostics.planClean
     ? lowerToIr({
         graph: frontend.graph,
@@ -1167,9 +1173,9 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // consumers of the body list, so the shaker and the emitter agree on which
   // bodies -- and which placements, since a bridged cell mints its own -- the
   // program actually has.
-  let split = complete && loweredProgram ? splitGeneratorBodies(loweredProgram.bodies, placements) : null
-  let splitBodies: ReadonlyMap<PhysicalBodyId, IrBody> | null = split?.bodies ?? loweredProgram?.bodies ?? new Map()
-  const splitPlacements = split?.placements ?? placements
+  let split = complete && loweredProgram ? inFrame(() => splitGeneratorBodies(loweredProgram!.bodies, placements)) : null
+  let splitBodies: ReadonlyMap<PhysicalBodyId, IrBody> | null = inFrame(() => split?.bodies ?? loweredProgram?.bodies ?? new Map())
+  const splitPlacements = inFrame(() => split?.placements ?? placements)
   loweredProgram = null
   split = null
   // Pruning is per body, and a body lowering blocked on is absent rather than
@@ -1180,45 +1186,47 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // while an unrelated file's lowering was blocked, and vanished whenever it
   // was not.
   stage('generator-split')
-  let provenPruned: { bodies: ReadonlyMap<PhysicalBodyId, IrBody>; slotDrift: readonly SlotDrift[] } | null = lowered
-    ? pruneProvenBranches(splitBodies, frontend.graph, lowered.slotDrift)
-    : { bodies: splitBodies, slotDrift: [] }
+  let provenPruned: { bodies: ReadonlyMap<PhysicalBodyId, IrBody>; slotDrift: readonly SlotDrift[] } | null = inFrame(() =>
+    lowered ? pruneProvenBranches(splitBodies!, frontend.graph, lowered.slotDrift) : { bodies: splitBodies!, slotDrift: [] }
+  )
   splitBodies = null
-  const prunedSlotDrift = provenPruned.slotDrift
+  const prunedSlotDrift = inFrame(() => provenPruned!.slotDrift)
   // Run after the set rewrite so a body it left alone is still judged on its own;
   // the copy elision needs the placements to prove its cell is frame-local.
-  let prunedBodies: ReadonlyMap<PhysicalBodyId, IrBody> | null = publishLogicalReceivers(
-    publishNativeHostMethodReads(
-      publishNativeCallableDataSlots({
-        bodies: publishNativeCallablePrivateSlots({
-          bodies: elideReadOnlySpreadCopies(
-            rewriteLiteralSetMembership(threadShortCircuitJoins(provenPruned.bodies)),
-            splitPlacements,
-            representations.deriver
-          ),
+  let prunedBodies: ReadonlyMap<PhysicalBodyId, IrBody> | null = inFrame(() =>
+    publishLogicalReceivers(
+      publishNativeHostMethodReads(
+        publishNativeCallableDataSlots({
+          bodies: publishNativeCallablePrivateSlots({
+            bodies: elideReadOnlySpreadCopies(
+              rewriteLiteralSetMembership(threadShortCircuitJoins(provenPruned!.bodies)),
+              splitPlacements,
+              representations.deriver
+            ),
+            placements: splitPlacements,
+            conversions: conversionCensus,
+            deriver: representations.deriver,
+            classes,
+            graph: frontend.graph
+          }),
           placements: splitPlacements,
           conversions: conversionCensus,
           deriver: representations.deriver,
           classes,
-          graph: frontend.graph
+          calleeRendering: slotsForClasses(classes).input,
+          graph: frontend.graph,
+          nativeCallableData: representations.nativeCallableData,
+          programConversions: null
         }),
-        placements: splitPlacements,
-        conversions: conversionCensus,
-        deriver: representations.deriver,
-        classes,
-        calleeRendering: slotsForClasses(classes).input,
-        graph: frontend.graph,
-        nativeCallableData: representations.nativeCallableData,
-        programConversions: null
-      }),
-      slotsForClasses(classes).input,
-      hosts.members
-    ),
-    splitPlacements,
-    classes,
-    conversionCensus,
-    representations.deriver,
-    hosts
+        slotsForClasses(classes).input,
+        hosts.members
+      ),
+      splitPlacements,
+      classes,
+      conversionCensus,
+      representations.deriver,
+      hosts
+    )
   )
   provenPruned = null
   stage('prune')
@@ -1233,34 +1241,36 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // why the cut is after lowering rather than before it.
   let shakeResult =
     complete && lowered
-      ? shakeProgram({
-          bodies: prunedBodies,
-          placements: splitPlacements,
-          classes,
-          conversions: conversionCensus,
-          deriver: representations.deriver,
-          // A computed class read keeps only methods the C++ callable
-          // conversion authority can actually publish at that read's ABI.
-          // Passing the question in keeps the generic IR shaker free of C++
-          // spellings while making pruning and emission share one answer.
-          computedMethodCanFill: (callable, target) => {
-            const abi = abis.abis.get(callable)
-            // A read the checker typed `any` boxes whatever method the key
-            // selects; the boxing conversion is the same authority, asked
-            // against the `dynamic` carrier.
-            if (abi === undefined || (target.kind !== 'function-value-dispatch' && target.kind !== 'dynamic')) return false
-            const source = { kind: 'function-value-dispatch' as const, abi }
-            const node = conversionCensus.nativeMethodFor(source, target) ?? conversionCensus.nodeFor(source, target)
-            return [...recipeClosureOf([node], conversionCensus.nodeById).values()].every(
-              (recipe) => conversionCensus.nodeById(recipe.id) === recipe && isMaterializable(recipe.capability)
-            )
-          }
-        })
+      ? inFrame(() =>
+          shakeProgram({
+            bodies: prunedBodies!,
+            placements: splitPlacements,
+            classes,
+            conversions: conversionCensus,
+            deriver: representations.deriver,
+            // A computed class read keeps only methods the C++ callable
+            // conversion authority can actually publish at that read's ABI.
+            // Passing the question in keeps the generic IR shaker free of C++
+            // spellings while making pruning and emission share one answer.
+            computedMethodCanFill: (callable, target) => {
+              const abi = abis.abis.get(callable)
+              // A read the checker typed `any` boxes whatever method the key
+              // selects; the boxing conversion is the same authority, asked
+              // against the `dynamic` carrier.
+              if (abi === undefined || (target.kind !== 'function-value-dispatch' && target.kind !== 'dynamic')) return false
+              const source = { kind: 'function-value-dispatch' as const, abi }
+              const node = conversionCensus.nativeMethodFor(source, target) ?? conversionCensus.nodeFor(source, target)
+              return [...recipeClosureOf([node], conversionCensus.nodeById).values()].every(
+                (recipe) => conversionCensus.nodeById(recipe.id) === recipe && isMaterializable(recipe.capability)
+              )
+            }
+          })
+        )
       : null
   // An incomplete program has no shaken list, so it certifies the pruned one.
   if (shakeResult) prunedBodies = null
-  let shakenBodies = shakeResult?.bodies ?? null
-  const shaken = shakeResult && { ...shakeResult, bodies: null }
+  let shakenBodies = inFrame(() => shakeResult?.bodies ?? null)
+  const shaken = inFrame(() => shakeResult && { ...shakeResult, bodies: null })
   shakeResult = null
   stage('shake')
   // Which cells a closure captures, and whether a captured cell is boxed
@@ -1536,13 +1546,15 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   }
   let finalizedReads =
     shaken && reflection
-      ? finalizeTypedComputedReads(confirmUnboxedMethodBinds(dispatchedBodies!, reflection, shaken.classes), reflection)
+      ? inFrame(() => finalizeTypedComputedReads(confirmUnboxedMethodBinds(dispatchedBodies!, reflection!, shaken.classes), reflection!))
       : null
   dispatchedBodies = null
   let fieldOwnership =
     shaken && reflection && finalizedReads
-      ? finalizeNativeFieldOwnership(finalizedReads, shaken.classes, representations.deriver, conversionCensus, reflection, (reads) =>
-          nativeClassFieldUsesOf(frontend.graph, representations.plan, representations.deriver, classes, slotsForClasses(classes), reads)
+      ? inFrame(() =>
+          finalizeNativeFieldOwnership(finalizedReads!, shaken.classes, representations.deriver, conversionCensus, reflection!, (reads) =>
+            nativeClassFieldUsesOf(frontend.graph, representations.plan, representations.deriver, classes, slotsForClasses(classes), reads)
+          )
         )
       : null
   // Presence is the census's to prove, not the checker's to assert: a load out
@@ -1561,30 +1573,34 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // impossible without treating its declared return type as a runtime fact.
   let normalResultPruned: { bodies: ReadonlyMap<PhysicalBodyId, IrBody> | null; slotDrift: readonly SlotDrift[] } | null =
     fieldOwnership || finalizedReads
-      ? pruneProvenBranches(fieldOwnership?.bodies ?? finalizedReads!, frontend.graph, prunedSlotDrift, {
-          conversions: conversionCensus,
-          placements: splitPlacements
-        })
+      ? inFrame(() =>
+          pruneProvenBranches(fieldOwnership?.bodies ?? finalizedReads!, frontend.graph, prunedSlotDrift, {
+            conversions: conversionCensus,
+            placements: splitPlacements
+          })
+        )
       : { bodies: null, slotDrift: prunedSlotDrift }
-  const normalResultSlotDrift = normalResultPruned.slotDrift
-  let finalizedBodies = normalResultPruned.bodies ? withPresenceChecks(normalResultPruned.bodies, readsUnchecked) : null
+  const normalResultSlotDrift = inFrame(() => normalResultPruned!.slotDrift)
+  let finalizedBodies = inFrame(() => (normalResultPruned!.bodies ? withPresenceChecks(normalResultPruned!.bodies, readsUnchecked) : null))
   normalResultPruned = null
   finalizedReads = null
-  const executableClasses = fieldOwnership?.classes ?? shaken?.classes ?? classes
+  const executableClasses = inFrame(() => fieldOwnership?.classes ?? shaken?.classes ?? classes)
   if (shaken && fieldOwnership && fieldOwnership.classes !== shaken.classes) {
     // Relocation preserves every lowered field carrier, but changes which
     // native layouts and dispatch identities the emitted program requires.
-    emissionRepresentations = publishEmissionRepresentationsOf({
-      bodies: fieldOwnership.bodies,
-      placements: splitPlacements,
-      classes: executableClasses,
-      resolveClassRef: physicalClassInstanceResolverOf(executableClasses, frontend.graph.structuralTypes, representations.deriver),
-      deriver: representations.deriver,
-      conversions: conversionCensus,
-      omitGlobals: shaken.unreferencedCells,
-      complete: shaken.refused === null,
-      fallbackRoots: [...representations.plan.selected.values()]
-    })
+    emissionRepresentations = inFrame(() =>
+      publishEmissionRepresentationsOf({
+        bodies: fieldOwnership!.bodies,
+        placements: splitPlacements,
+        classes: executableClasses,
+        resolveClassRef: physicalClassInstanceResolverOf(executableClasses, frontend.graph.structuralTypes, representations.deriver),
+        deriver: representations.deriver,
+        conversions: conversionCensus,
+        omitGlobals: shaken.unreferencedCells,
+        complete: shaken.refused === null,
+        fallbackRoots: [...representations.plan.selected.values()]
+      })
+    )
   }
   fieldOwnership = null
   const physicalClasses =
@@ -1592,27 +1608,32 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   if (reflection && physicalClasses) reflection = closePhysicalClassReflection(reflection, physicalClasses.layouts)
   // A union read's class arm that provably lacks the key reads `undefined`;
   // only the CLOSED exposure can say its class never gained a dynamic protocol.
-  let absentArmBodies =
+  let absentArmBodies = inFrame(() =>
     finalizedBodies && reflection ? finalizeAbsentClassArms(finalizedBodies, reflection, executableClasses) : finalizedBodies
+  )
   finalizedBodies = null
   // Last, so the call targets it follows into a callee are the final ones.
   let sharedEmptyBodies = absentArmBodies
-    ? shareReadOnlyEmptyRecords(absentArmBodies, {
-        placements: splitPlacements,
-        declaresField: (shapeId, key) => {
-          const layout = recordLayoutOfShapeId(representations.deriver, shapeId)
-          return layout !== null && layout.fields.some((field) => field.key === key)
-        },
-        plainSharedRecord: (representation) => {
-          if (representation.kind !== 'record' && representation.kind !== 'native-record-ref') return false
-          return representation.ownership === 'shared-refcount' && plainRecordFieldsOf(representation, representations.deriver) !== null
-        }
-      })
+    ? inFrame(() =>
+        shareReadOnlyEmptyRecords(absentArmBodies!, {
+          placements: splitPlacements,
+          declaresField: (shapeId, key) => {
+            const layout = recordLayoutOfShapeId(representations.deriver, shapeId)
+            return layout !== null && layout.fields.some((field) => field.key === key)
+          },
+          plainSharedRecord: (representation) => {
+            if (representation.kind !== 'record' && representation.kind !== 'native-record-ref') return false
+            return representation.ownership === 'shared-refcount' && plainRecordFieldsOf(representation, representations.deriver) !== null
+          }
+        })
+      )
     : absentArmBodies
   absentArmBodies = null
   // Before the recipes and certification that read the final operation list:
   // a selection an `instanceof` no longer reads (`call-dispatch.ts`) goes.
-  let emittedBodies = sharedEmptyBodies ? dropUnreadPureConversions(sharedEmptyBodies, conversionCensus) : sharedEmptyBodies
+  let emittedBodies = inFrame(() =>
+    sharedEmptyBodies ? dropUnreadPureConversions(sharedEmptyBodies, conversionCensus) : sharedEmptyBodies
+  )
   sharedEmptyBodies = null
   stage('reflection')
   // Certification is a walk of the IR lowering actually built
@@ -1629,19 +1650,24 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // incomplete program has no shaken list at all, so it certifies the bodies
   // lowering did build: its refusals are the point of running at all, and
   // dropping them would hide why it did not lower.
-  let unsealedBodies = emittedBodies ?? (lowered ? prunedBodies : null)
+  let unsealedBodies = inFrame(() => emittedBodies ?? (lowered ? prunedBodies : null))
   emittedBodies = null
   prunedBodies = null
-  nativeProgramConversions = unsealedBodies
-    ? publishProgramConversionRecipes({
-        bodies: unsealedBodies.values(),
-        classes: executableClasses,
-        deriver: representations.deriver,
-        conversions: conversionCensus,
-        representations: emissionRepresentations?.representations ?? [...representations.plan.selected.values()],
-        ...(reflection ? { reflection } : {})
-      })
-    : undefined
+  // Each step from here to certification is called through a closure that
+  // reads its generation from this frame's context: an argument object or
+  // iterator built in this frame stays in one of its registers until the
+  // frame returns, and kept every spent generation alive through the
+  // certification walk -- the compile's heap floor.
+  const programRecipesOver = (bodies: () => Iterable<IrBody>): readonly ProgramConversionRecipe[] =>
+    publishProgramConversionRecipes({
+      bodies: bodies(),
+      classes: executableClasses,
+      deriver: representations.deriver,
+      conversions: conversionCensus,
+      representations: emissionRepresentations?.representations ?? [...representations.plan.selected.values()],
+      ...(reflection ? { reflection } : {})
+    })
+  nativeProgramConversions = unsealedBodies ? programRecipesOver(() => unsealedBodies!.values()) : undefined
   const takeUnsealed = (): ReadonlyMap<PhysicalBodyId, IrBody> => {
     const taken = unsealedBodies!
     unsealedBodies = null
@@ -1649,34 +1675,31 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   }
   let operationBodies = unsealedBodies ? publishNativeOperationFacts(takeUnsealed, executableClasses) : null
   unsealedBodies = null
-  let finalRecipeBodies = operationBodies
-    ? publishConversionRecipes({
-        calleeRendering: slotsForClasses(executableClasses).input,
-        wellKnownSymbols: frontend.wellKnownSymbols,
-        bodies: operationBodies,
-        placements: splitPlacements,
-        classes: executableClasses,
-        abis: abis.abis,
-        deriver: representations.deriver,
-        conversions: conversionCensus,
-        hosts
-      })
-    : null
+  const finalRecipesOf = (): ReadonlyMap<PhysicalBodyId, IrBody> => {
+    const taken = operationBodies!
+    operationBodies = null
+    return publishConversionRecipes({
+      calleeRendering: slotsForClasses(executableClasses).input,
+      wellKnownSymbols: frontend.wellKnownSymbols,
+      bodies: taken,
+      placements: splitPlacements,
+      classes: executableClasses,
+      abis: abis.abis,
+      deriver: representations.deriver,
+      conversions: conversionCensus,
+      hosts
+    })
+  }
+  let finalRecipeBodies = operationBodies ? finalRecipesOf() : null
   operationBodies = null
-  const certifiedBodies = finalRecipeBodies
-    ? new Map([...finalRecipeBodies].map(([id, body]) => [id, publishDenseLoopPlan(body, splitPlacements, conversionCensus)]))
-    : null
+  const denseLoopPlannedOf = (): Map<PhysicalBodyId, IrBody> => {
+    const taken = finalRecipeBodies!
+    finalRecipeBodies = null
+    return new Map([...taken].map(([id, body]) => [id, publishDenseLoopPlan(body, splitPlacements, conversionCensus)]))
+  }
+  const certifiedBodies = finalRecipeBodies ? denseLoopPlannedOf() : null
   finalRecipeBodies = null
-  const programConversionRecipes = certifiedBodies
-    ? publishProgramConversionRecipes({
-        bodies: certifiedBodies.values(),
-        classes: executableClasses,
-        deriver: representations.deriver,
-        conversions: conversionCensus,
-        representations: emissionRepresentations?.representations ?? [...representations.plan.selected.values()],
-        ...(reflection ? { reflection } : {})
-      })
-    : []
+  const programConversionRecipes = certifiedBodies ? programRecipesOver(() => certifiedBodies.values()) : []
   const parallelRegionEntries = new Set(plugins.flatMap((plugin) => [...(plugin.capabilities.parallelRegionEntries ?? [])]))
   const certificationManifest = certifiedBodies ? withCppIrOperandHelpers(manifest, certifiedBodies.values()) : manifest
   const certification: IrCertification | null =
