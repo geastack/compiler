@@ -108,6 +108,8 @@ const absent: unique symbol = Symbol('absent')
 class CellSet<T> implements Iterable<T> {
   first: T | typeof absent = absent
   members: Set<T> | null = null
+  /** Held by more than one cell (`shareHeaps`): the next write copies it first. */
+  shared = false
   get size(): number {
     return this.members !== null ? this.members.size : this.first === absent ? 0 : 1
   }
@@ -216,14 +218,12 @@ const emptyCellSet = Object.freeze(new CellSet<never>()) as CellSet<never>
 const emptyCellMap = Object.freeze(new CellMap<never, never>()) as CellMap<never, never>
 const emptySourceSet = Object.freeze(new SourceSet<never>()) as SourceSet<never>
 const ownCellSet = <T>(current: CellSet<T>, install: (own: CellSet<T>) => void): CellSet<T> => {
-  if (current !== emptyCellSet) return current
+  if (current !== emptyCellSet && !current.shared) return current
   const own = new CellSet<T>()
-  install(own)
-  return own
-}
-const ownCellMap = <K, V>(current: CellMap<K, V>, install: (own: CellMap<K, V>) => void): CellMap<K, V> => {
-  if (current !== emptyCellMap) return current
-  const own = new CellMap<K, V>()
+  if (current !== emptyCellSet) {
+    own.first = current.first
+    own.members = current.members === null ? null : new Set(current.members)
+  }
   install(own)
   return own
 }
@@ -234,6 +234,77 @@ const ownSourceSet = <T>(current: SourceSet<T>, install: (own: SourceSet<T>) => 
   return own
 }
 
+/**
+ * A table keyed by SSA value id. `irValueId` spells a value as its defining
+ * body and an ordinal, so the table keeps one array per body, indexed by the
+ * ordinal: a `Map` over the program's every value costs about forty bytes an
+ * entry, and the solve held two of them through its peak. An id of any other
+ * spelling goes to a `Map`. Iteration is insertion order and visits an entry
+ * added while it runs, as a `Map`'s does.
+ */
+class ValueTable<T extends object> implements Iterable<[IrValueId, T]> {
+  private readonly byBody = new Map<string, (T | undefined)[]>()
+  private readonly other = new Map<IrValueId, T>()
+  private readonly order: IrValueId[] = []
+  private lastBody = ''
+  private lastSlots: (T | undefined)[] | null = null
+  private ordinal = 0
+  /** `order` is kept only for a table that is iterated. */
+  constructor(private readonly ordered: boolean) {}
+  /** The body's slots with `ordinal` set; undefined for an id of another spelling, null for an unknown body. */
+  private slotsOf(id: IrValueId, create: boolean): (T | undefined)[] | null | undefined {
+    const bar = id.lastIndexOf('|')
+    const end = id.length
+    if (bar <= 4 || end - bar - 1 > 9 || bar + 1 === end || (id.charCodeAt(bar + 1) === 48 && end > bar + 2) || !id.startsWith('ssa|'))
+      return undefined
+    let ordinal = 0
+    for (let at = bar + 1; at < end; at++) {
+      const digit = id.charCodeAt(at) - 48
+      if (digit < 0 || digit > 9) return undefined
+      ordinal = ordinal * 10 + digit
+    }
+    this.ordinal = ordinal
+    if (this.lastSlots !== null && bar === 4 + this.lastBody.length && id.startsWith(this.lastBody, 4)) return this.lastSlots
+    const body = id.slice(4, bar)
+    let slots = this.byBody.get(body)
+    if (slots === undefined) {
+      if (!create) return null
+      slots = []
+      this.byBody.set(body, slots)
+    }
+    this.lastBody = body
+    this.lastSlots = slots
+    return slots
+  }
+  get(id: IrValueId): T | undefined {
+    const slots = this.slotsOf(id, false)
+    return slots === undefined ? this.other.get(id) : slots === null ? undefined : slots[this.ordinal]
+  }
+  has(id: IrValueId): boolean {
+    return this.get(id) !== undefined
+  }
+  set(id: IrValueId, entry: T): void {
+    const slots = this.slotsOf(id, true)
+    if (slots === undefined) {
+      if (this.ordered && !this.other.has(id)) this.order.push(id)
+      this.other.set(id, entry)
+      return
+    }
+    if (this.ordered && slots![this.ordinal] === undefined) this.order.push(id)
+    slots![this.ordinal] = entry
+  }
+  clear(): void {
+    this.byBody.clear()
+    this.other.clear()
+    this.order.length = 0
+    this.lastBody = ''
+    this.lastSlots = null
+  }
+  *[Symbol.iterator](): Iterator<[IrValueId, T]> {
+    for (let at = 0; at < this.order.length; at++) yield [this.order[at]!, this.get(this.order[at]!)!]
+  }
+}
+
 const QUEUED = 1
 const DOCUMENT_INSTALLED = 2
 const DOCUMENT_BLOCKED = 4
@@ -242,9 +313,13 @@ const ESCAPED = 16
 const LOGICAL_RECEIVER = 32
 const DYNAMIC_RECEIVER = 64
 const IGNORES_LOGICAL_RECEIVER = 128
+const UNRESTRICTED_UNKNOWN_HEAPS = 256
+/** `OriginCell.state` keeps the flags below this and the version above it. */
+const FLAG_SPAN = 512
 
 /** What few cells ever hold: under one cell in thirty gets any of these. */
 interface OriginCellRare {
+  unknownHeaps: Set<NativeHeap> | undefined
   documents: Map<string, Representation>
   arrayViews: Set<string>
   descriptorSnapshots: Set<IrValueId>
@@ -262,27 +337,49 @@ interface OriginCellRare {
  * plain object of twenty-one properties was twice the size.
  */
 class OriginCell {
-  incoming: CellSet<OriginCell> = emptyCellSet
+  /** The cells with an edge into this one (`incomingAdd`, `incomingEach`). */
+  incoming: IncomingCells = null
   functions: CellSet<FunctionId> = emptyCellSet
   heaps: CellSet<NativeHeap> = emptyCellSet
-  /** Null transfers every origin; native selection can exclude incompatible heaps. */
-  edges: CellMap<OriginCell, readonly NativeHeap[] | null> = emptyCellMap
-  /** Null is unrestricted; a canonical checked sum can bound its unknown normal destinations. */
-  unknownHeaps: Set<NativeHeap> | null = emptySet
+  /**
+   * Null transfers every origin; native selection can exclude incompatible
+   * heaps. A lone unrestricted edge is the target cell itself (`edgeGet`,
+   * `edgeSet`, `edgesOf`): most cells with an edge have just that one.
+   */
+  edges: CellMap<OriginCell, readonly NativeHeap[] | null> | OriginCell = emptyCellMap
   escapeSources: SourceSet<IrOperation | null> = emptySourceSet
-  /** Bumped by every `changed(cell)`; see `heapEffect`. */
-  version = 0
-  private flags = 0
+  /** The flags, and above `FLAG_SPAN` the version bumped by every `changed(cell)` (see `heapEffect`). */
+  private state = 0
   private rare: OriginCellRare | null = null
   constructor(readonly index: number) {}
+  get version(): number {
+    return Math.floor(this.state / FLAG_SPAN)
+  }
+  set version(version: number) {
+    this.state = version * FLAG_SPAN + (this.state % FLAG_SPAN)
+  }
   private flag(bit: number): boolean {
-    return (this.flags & bit) !== 0
+    return ((this.state % FLAG_SPAN) & bit) !== 0
   }
   private setFlag(bit: number, on: boolean): void {
-    this.flags = on ? this.flags | bit : this.flags & ~bit
+    const flags = this.state % FLAG_SPAN
+    this.state += (on ? flags | bit : flags & ~bit) - flags
+  }
+  /**
+   * Null is unrestricted; a canonical checked sum can bound its unknown normal
+   * destinations. Under one cell in three hundred bounds them, so the set
+   * lives in `rare` and unrestricted is a flag.
+   */
+  get unknownHeaps(): Set<NativeHeap> | null {
+    return this.flag(UNRESTRICTED_UNKNOWN_HEAPS) ? null : (this.rare?.unknownHeaps ?? emptySet)
+  }
+  set unknownHeaps(own: Set<NativeHeap> | null) {
+    this.setFlag(UNRESTRICTED_UNKNOWN_HEAPS, own === null)
+    if (own !== null && (own !== emptySet || this.rare !== null)) this.own().unknownHeaps = own
   }
   private own(): OriginCellRare {
     return (this.rare ??= {
+      unknownHeaps: undefined,
       documents: emptyMap,
       arrayViews: emptySet,
       descriptorSnapshots: emptySet,
@@ -392,6 +489,77 @@ class OriginCell {
   }
 }
 
+/**
+ * The cells with an edge into one cell: none, the one cell itself, a list of
+ * up to eight in insertion order, or a `Set` from the ninth. Most cells with
+ * an incoming edge have one and nearly all the rest two to four, where a
+ * `Set` cost several times its members.
+ */
+type IncomingCells = OriginCell | OriginCell[] | Set<OriginCell> | null
+const incomingListLimit = 8
+const incomingAdd = (to: OriginCell, from: OriginCell): void => {
+  const current = to.incoming
+  if (current === null) to.incoming = from
+  else if (current instanceof OriginCell) {
+    if (current !== from) to.incoming = [current, from]
+  } else if (Array.isArray(current)) {
+    if (current.includes(from)) return
+    if (current.length < incomingListLimit) {
+      const next = new Array<OriginCell>(current.length + 1)
+      for (let at = 0; at < current.length; at++) next[at] = current[at]!
+      next[current.length] = from
+      to.incoming = next
+    } else to.incoming = new Set([...current, from])
+  } else current.add(from)
+}
+const incomingEach = (cell: OriginCell, visit: (incoming: OriginCell) => void): void => {
+  const current = cell.incoming
+  if (current === null) return
+  if (current instanceof OriginCell) visit(current)
+  else for (const incoming of current) visit(incoming)
+}
+const edgeGet = (from: OriginCell, to: OriginCell): readonly NativeHeap[] | null | undefined => {
+  const edges = from.edges
+  return edges instanceof OriginCell ? (edges === to ? null : undefined) : edges.get(to)
+}
+const edgeHas = (from: OriginCell, to: OriginCell): boolean => {
+  const edges = from.edges
+  return edges instanceof OriginCell ? edges === to : edges.has(to)
+}
+const edgeSet = (from: OriginCell, to: OriginCell, allowed: readonly NativeHeap[] | null): void => {
+  const edges = from.edges
+  if (edges instanceof OriginCell) {
+    if (edges === to && allowed === null) return
+    const own = new CellMap<OriginCell, readonly NativeHeap[] | null>()
+    own.set(edges, null)
+    own.set(to, allowed)
+    from.edges = own
+  } else if (edges === emptyCellMap) {
+    if (allowed === null) from.edges = to
+    else from.edges = new CellMap<OriginCell, readonly NativeHeap[] | null>().set(to, allowed)
+  } else edges.set(to, allowed)
+}
+/**
+ * The edges out of a cell, in insertion order, visiting an edge added while
+ * this runs exactly as iterating the cell's `CellMap` did: a lone edge that
+ * grows into a map continues past the entry already visited.
+ */
+function* edgesOf(cell: OriginCell): Generator<[OriginCell, readonly NativeHeap[] | null]> {
+  const edges = cell.edges
+  if (!(edges instanceof OriginCell)) {
+    yield* edges
+    return
+  }
+  yield [edges, null]
+  const grown = cell.edges
+  if (grown instanceof OriginCell || grown === emptyCellMap) return
+  let skipped = false
+  for (const entry of grown) {
+    if (skipped) yield entry
+    skipped = true
+  }
+}
+
 interface NativeHeap {
   /** Internal proxy slots are not ordinary source property names. */
   readonly proxy?: true
@@ -461,6 +629,15 @@ export interface NativeCallableFlow {
  * which that demand needs. Unsupported transports fail closed. In particular,
  * an arbitrary matching callable signature is never an implementation source.
  */
+const ownedOperationKinds: ReadonlySet<IrOperation['kind']> = new Set<IrOperation['kind']>([
+  'get',
+  'set',
+  'define-own-property',
+  'receiver',
+  'return',
+  'super-initialize'
+])
+
 const computeNativeCallableFlow = (
   bodies: readonly IrBody[],
   placements: ReadonlyMap<DeclarationId, BindingPlacement>,
@@ -576,7 +753,7 @@ const computeNativeCallableFlow = (
       }
     if (grew) {
       changed(cell)
-      for (const incoming of cell.incoming) schedule(incoming)
+      incomingEach(cell, schedule)
     }
     if (trace && reason !== undefined) cell.escapeReason ??= reason
   }
@@ -593,7 +770,7 @@ const computeNativeCallableFlow = (
       if (!cell.escaped) {
         cell.escaped = true
         changed(cell)
-        for (const incoming of cell.incoming) schedule(incoming)
+        incomingEach(cell, schedule)
       }
       if (trace && target.escapeReason !== undefined) cell.escapeReason ??= target.escapeReason
       return
@@ -618,7 +795,7 @@ const computeNativeCallableFlow = (
     }
     if (grew) {
       changed(cell)
-      for (const incoming of cell.incoming) schedule(incoming)
+      incomingEach(cell, schedule)
     }
     if (trace && target.escapeReason !== undefined) cell.escapeReason ??= target.escapeReason
     ;(cell.escapeAbsorbed ??= new Map()).set(target, list.size)
@@ -644,7 +821,7 @@ const computeNativeCallableFlow = (
     cells.push(cell)
     return cell
   }
-  const values = new Map<IrValueId, OriginCell>()
+  const values = new ValueTable<OriginCell>(true)
   const value = (id: IrValueId): OriginCell => {
     const found = values.get(id)
     if (found) return found
@@ -756,7 +933,7 @@ const computeNativeCallableFlow = (
       viewMethodFields.set(fields.target.shapeId, methods)
     }
   }
-  const producers = new Map<IrValueId, IrOperation>()
+  const producers = new ValueTable<IrOperation>(false)
   const bodyById = new Map<FunctionId, IrBody | null>()
   const physicalBodiesBySource = new Map<FunctionId, IrBody[]>()
   const returns = new Map<FunctionId, OriginCell>()
@@ -765,10 +942,17 @@ const computeNativeCallableFlow = (
   const frameReceivers = new Map<FunctionId, OriginCell>()
   const parameters = new Map<FunctionId, Extract<IrOperation, { kind: 'parameter' | 'receiver' }>[]>()
   // An operation's source owner is its physical body's: one table, not a
-  // second of the same half million operations.
+  // second of the same half million operations. Only the kinds asked about
+  // are entered -- reads, writes and definitions for their presence guards, and frame
+  // entries and returns -- about one operation in nine; asking about any
+  // other kind is a defect here, not an absent owner.
   const physicalOwner = new Map<IrOperation, IrBody>()
+  const physicalOwnerOf = (operation: IrOperation): IrBody | undefined => {
+    if (!ownedOperationKinds.has(operation.kind)) throw new Error(`callable flow: no owner is recorded for a ${operation.kind} operation`)
+    return physicalOwner.get(operation)
+  }
   const owner = {
-    get: (operation: IrOperation): FunctionId | undefined => physicalOwner.get(operation)?.sourceOwner as FunctionId | undefined
+    get: (operation: IrOperation): FunctionId | undefined => physicalOwnerOf(operation)?.sourceOwner as FunctionId | undefined
   }
   for (const body of bodies) {
     const id = body.sourceOwner as FunctionId
@@ -781,7 +965,7 @@ const computeNativeCallableFlow = (
     const inputs: Extract<IrOperation, { kind: 'parameter' | 'receiver' }>[] = []
     for (const block of body.blocks.values())
       for (const operation of [...block.operations, block.terminator]) {
-        physicalOwner.set(operation, body)
+        if (ownedOperationKinds.has(operation.kind)) physicalOwner.set(operation, body)
         if (operation.kind === 'parameter' || operation.kind === 'receiver') inputs.push(operation)
       }
     parameters.set(id, inputs)
@@ -1045,7 +1229,7 @@ const computeNativeCallableFlow = (
     if (at === undefined || cell.unknown || cell.escaped || heaps.length === 0 || !heaps.every(ordinaryAllocated))
       return { heaps, present: false }
     presenceConsulted = true
-    const guard = propertyPresence.get(physicalOwner.get(at)!)?.(receiver, key, at, (operation, guard) =>
+    const guard = propertyPresence.get(physicalOwnerOf(at)!)?.(receiver, key, at, (operation, guard) =>
       preservesPresence(operation, key, guard)
     )
     if (guard === undefined || guard === null) return { heaps, present: false }
@@ -1105,9 +1289,9 @@ const computeNativeCallableFlow = (
     markEscaped(cell, reason, [operation ?? null])
   }
   const link = (from: OriginCell, to: OriginCell): void => {
-    if (from.edges.get(to) === null) return
-    ownCellMap(from.edges, (own) => (from.edges = own)).set(to, null)
-    ownCellSet(to.incoming, (own) => (to.incoming = own)).add(from)
+    if (edgeGet(from, to) === null) return
+    edgeSet(from, to, null)
+    incomingAdd(to, from)
     changed(from)
   }
   const linkPayload = (from: OriginCell, to: OriginCell, representations: readonly Representation[]): void => {
@@ -1115,13 +1299,14 @@ const computeNativeCallableFlow = (
     // Only a sealed payload-preserving conversion calls this. Layouts bound
     // which input allocations can survive its native tag/identity selection;
     // they never create an origin for an allocation not present in the input.
-    if (references.some((reference) => !reference.complete) || from.edges.has(to)) link(from, to)
+    if (references.some((reference) => !reference.complete) || edgeHas(from, to)) link(from, to)
     else {
-      ownCellMap(from.edges, (own) => (from.edges = own)).set(
+      edgeSet(
+        from,
         to,
         references.flatMap((reference) => reference.heaps)
       )
-      ownCellSet(to.incoming, (own) => (to.incoming = own)).add(from)
+      incomingAdd(to, from)
       changed(from)
     }
   }
@@ -2440,7 +2625,7 @@ const computeNativeCallableFlow = (
       while (pendingCells.length > 0) {
         const cell = popCell()
         sweepIndex = cell.index
-        for (const [target, allowed] of cell.edges) {
+        for (const [target, allowed] of edgesOf(cell)) {
           for (const id of cell.fieldViews)
             if (!target.fieldViews.has(id)) {
               ownSet(target.fieldViews, (own) => (target.fieldViews = own)).add(id)
@@ -2473,8 +2658,16 @@ const computeNativeCallableFlow = (
           // origin is any allocation of another layout: `ContextLike | null`
           // holding a class instance behind a record view. Dropping that origin
           // left the record arm the sole implementation of a field it never held.
-          for (const heap of cell.heaps)
-            if (allowed === null || cell.fieldViews.size > 0 || heapAdmitted(heap, allowed)) addHeap(target, heap)
+          // A target with no allocation of its own that takes every one of
+          // this cell's holds the very same set until either writes it: most
+          // multi-allocation cells hold exactly the set of a cell before them.
+          if (target.heaps === emptyCellSet && target !== cell && cell.heaps.size > 0 && (allowed === null || cell.fieldViews.size > 0)) {
+            cell.heaps.shared = true
+            target.heaps = cell.heaps
+            changed(target)
+          } else
+            for (const heap of cell.heaps)
+              if (allowed === null || cell.fieldViews.size > 0 || heapAdmitted(heap, allowed)) addHeap(target, heap)
           if (cell.unknown) {
             const admitted =
               cell.unknownHeaps === null
@@ -2675,7 +2868,8 @@ const computeNativeCallableFlow = (
   // built from here on are the backend's peak, so the solve-only effect list
   // goes first and the program-wide carrier table is built only now.
   heapEffects.length = 0
-  const valueCarriers = new Map(bodies.flatMap((body) => [...body.values]))
+  releasePropagation(cells)
+  const valueCarriers = valueCarriersOf(bodies)
   const result = new Map<IrValueId, CallCalleeIdentity>()
   // Presence is checked by the later optional conversion. This fact names
   // possible implementations, never a physical call ABI or a non-null value.
@@ -2766,7 +2960,7 @@ const computeNativeCallableFlow = (
   // program for a few thousand distinct answers.
   const heapNumbers = new Map<object, number>()
   const commonByHeaps = new Map<string, ReadonlyMap<string, readonly Representation[]>>()
-  const accessorsByHeaps = new Map<string, Map<string, { read: Representation; write: Representation | null }[]>>()
+  const accessorsByHeaps = new Map<string, ReadonlyMap<string, readonly { read: Representation; write: Representation | null }[]>>()
   for (const [id, cell] of values) {
     if (cell.unknown || cell.heaps.size === 0 || [...cell.heaps].some((heap) => !heap.valid || heap.proxy)) continue
     const heapsKey = [...cell.heaps]
@@ -2799,7 +2993,7 @@ const computeNativeCallableFlow = (
       for (const key of admitted.keys())
         if ([...cell.heaps].some((heap) => heap.declaration === null || classMemberOf(classes, heap.declaration, key)?.kind !== 'method'))
           admitted.delete(key)
-      nativeFieldMethodValues.set(id, admitted)
+      nativeFieldMethodValues.set(id, admitted.size === 0 ? emptyMap : admitted)
     }
     let accessors = accessorsByHeaps.get(heapsKey)
     if (accessors === undefined) {
@@ -2828,7 +3022,8 @@ const computeNativeCallableFlow = (
       for (const key of [...built.keys()])
         if ([...cell.heaps].some((heap) => heap.declaration === null || classMemberOf(classes, heap.declaration, key)?.kind !== 'accessor'))
           built.delete(key)
-      accessorsByHeaps.set(heapsKey, (accessors = built))
+      // Under one heap set in a hundred has an accessor: the rest share one empty table.
+      accessorsByHeaps.set(heapsKey, (accessors = built.size === 0 ? emptyMap : built))
     }
     nativeAccessorStorageValues.set(id, accessors)
   }
@@ -2914,6 +3109,11 @@ const computeNativeCallableFlow = (
   }
   const nativeFieldOperationStorageValues = new Map<IrOperation, ReadonlyMap<string, readonly NativeFieldStorageDomain[]>>()
   const originDomains = new Map<string, ReturnType<typeof nativeFieldViewDomainsOf>>()
+  // The fields every selected heap holds are a function of the selection
+  // alone, and thousands of reads select the same few: one table per
+  // selection, which a read copies only to add what is its own.
+  const selectionNumbers = new Map<NativeHeap, number>()
+  const fieldsBySelection = new Map<string, ReadonlyMap<string, readonly NativeFieldStorageDomain[]>>()
   for (const operation of operations) {
     if (operation.kind !== 'get' && operation.kind !== 'set') continue
     const key = keyOf(operation.key)
@@ -2921,16 +3121,30 @@ const computeNativeCallableFlow = (
     if (key === null || receiver.unknown || receiver.heaps.size === 0) continue
     const { heaps, present } = heapSelectionAt(operation.receiver, key, operation)
     if (heaps === null || heaps.length === 0 || !heaps.every(ordinaryAllocated)) continue
-    const domains = new Map<string, NativeFieldStorageDomain[]>()
-    for (const name of heaps[0]!.fields.keys()) {
-      if (!heaps.every((heap) => heap.fields.has(name))) continue
-      const entries = new Map<string, NativeFieldStorageDomain>()
-      for (const heap of heaps) {
-        const stored = heap.fields.get(name)!.representation
-        entries.set(representationKey(stored), { read: stored, write: stored })
+    const selection = heaps
+      .map((heap) => {
+        let number = selectionNumbers.get(heap)
+        if (number === undefined) selectionNumbers.set(heap, (number = selectionNumbers.size))
+        return number
+      })
+      .join(',')
+    let shared = fieldsBySelection.get(selection)
+    if (shared === undefined) {
+      const built = new Map<string, NativeFieldStorageDomain[]>()
+      for (const name of heaps[0]!.fields.keys()) {
+        if (!heaps.every((heap) => heap.fields.has(name))) continue
+        const entries = new Map<string, NativeFieldStorageDomain>()
+        for (const heap of heaps) {
+          const stored = heap.fields.get(name)!.representation
+          entries.set(representationKey(stored), { read: stored, write: stored })
+        }
+        built.set(name, [...entries.values()])
       }
-      domains.set(name, [...entries.values()])
+      fieldsBySelection.set(selection, (shared = built))
     }
+    let domains: ReadonlyMap<string, readonly NativeFieldStorageDomain[]> = shared
+    const writable = (): Map<string, readonly NativeFieldStorageDomain[]> =>
+      (domains === shared ? (domains = new Map(shared)) : domains) as Map<string, readonly NativeFieldStorageDomain[]>
     if (
       operation.kind === 'get' &&
       heaps.some((heap) => !heap.fields.has(key)) &&
@@ -2945,7 +3159,7 @@ const computeNativeCallableFlow = (
             : { read: slot.representation, write: slot.representation }
         )
       }
-      domains.set(key, entries)
+      writable().set(key, entries)
     }
     // A receiver that may hold a live view also holds, in this cell, the
     // allocations behind each view -- of another layout, which the plain
@@ -2970,7 +3184,7 @@ const computeNativeCallableFlow = (
               : { read: slot.representation, write: slot.representation }
           entries.set(`${representationKey(entry.read)}:${entry.originalAbsent === true}`, entry)
         }
-        domains.set(key, [...entries.values()])
+        writable().set(key, [...entries.values()])
       }
     }
     if (receiver.fieldViews.size > 0) {
@@ -2997,7 +3211,7 @@ const computeNativeCallableFlow = (
         // absence; a union arm's certified absence is the unknown-receiver
         // answer (`native-field-view-domains.ts`) and is no route behind them.
         if (routes.some((route) => route.originalAbsent === true || route.dynamicGet === true || route.nativeData === true)) continue
-        domains.set(name, [
+        writable().set(name, [
           ...(domains.get(name) ?? []),
           ...(present && name === key ? routes.filter((route) => route.sourceAbsent !== true) : routes)
         ])
@@ -3325,6 +3539,83 @@ const descriptorDomainsOver = (
   return nativeFieldViewDomainsOf(viewNodes, deriver, (id) => abis.get(id) ?? null, classes, expandoStoredReaderOf(expandoStored))
 }
 
+interface ValueCarriers extends Iterable<readonly [IrValueId, Representation]> {
+  get(id: IrValueId): Representation | undefined
+}
+
+/** Whether `id` is `irValueId(owner, n)` for some ordinal, read without slicing it. */
+/**
+ * Ends a settled solve's propagation state. The edges, the cells feeding each
+ * cell and the escape-absorption marks carry propagation only, and nothing
+ * propagates once the solve has settled; held through the answers built
+ * after it, they made those answers the solve's peak. A heap set equal, in
+ * members and order, to an earlier cell's becomes that one set, shared (and
+ * copied on any later write): most cells holding several allocations hold
+ * exactly another's.
+ */
+const releasePropagation = (cells: readonly OriginCell[]): void => {
+  const sets = new Map<string, CellSet<NativeHeap>[]>()
+  const numbers = new Map<NativeHeap, number>()
+  const numberOf = (heap: NativeHeap): number => {
+    let number = numbers.get(heap)
+    if (number === undefined) numbers.set(heap, (number = numbers.size))
+    return number
+  }
+  const sameMembers = (left: CellSet<NativeHeap>, right: CellSet<NativeHeap>): boolean => {
+    const theirs = right[Symbol.iterator]()
+    for (const heap of left) if (theirs.next().value !== heap) return false
+    return true
+  }
+  for (const cell of cells) {
+    cell.edges = emptyCellMap
+    cell.incoming = null
+    if (cell.escapeAbsorbed !== undefined) cell.escapeAbsorbed = undefined
+    const heaps = cell.heaps
+    if (heaps.members === null) continue
+    let last: NativeHeap | undefined
+    for (const heap of heaps.members) last = heap
+    const key = `${heaps.size}:${numberOf(heaps.first as NativeHeap)}:${numberOf(last!)}`
+    const candidates = sets.get(key)
+    const found = candidates?.find((candidate) => candidate === heaps || sameMembers(candidate, heaps))
+    if (found !== undefined) cell.heaps = found
+    else {
+      heaps.shared = true
+      if (candidates === undefined) sets.set(key, [heaps])
+      else candidates.push(heaps)
+    }
+  }
+}
+
+const valueOwnedBy = (id: string, owner: string): boolean =>
+  id.startsWith('ssa|') && id.startsWith(owner, 4) && id.charCodeAt(4 + owner.length) === 124 && id.indexOf('|', 5 + owner.length) === -1
+
+/**
+ * Every SSA value's carrier, read through the bodies rather than copied into
+ * one table: a table of the program's every value, built at the solve's end,
+ * was the largest single thing the solve allocated beside its answers. A value
+ * names the body that defines it (`irValueId`), so a lookup goes straight to
+ * that body. Bodies whose values do not all name them, or two bodies of one
+ * id, fall back to the table, which then answers exactly as before.
+ */
+const valueCarriersOf = (bodies: readonly IrBody[]): ValueCarriers => {
+  const byOwner = new Map<string, IrBody>()
+  let owned = true
+  for (const body of bodies) {
+    const ownerId = String(body.owner)
+    if (byOwner.has(ownerId)) owned = false
+    byOwner.set(ownerId, body)
+    if (owned) for (const id of body.values.keys()) if (!valueOwnedBy(id, ownerId)) owned = false
+    if (!owned) break
+  }
+  if (!owned) return new Map(bodies.flatMap((body) => [...body.values]))
+  return {
+    get: (id) => byOwner.get(id.slice(4, id.lastIndexOf('|')))?.values.get(id),
+    *[Symbol.iterator]() {
+      for (const body of bodies) yield* body.values
+    }
+  }
+}
+
 /**
  * `absentRoutesOf` answers null for any carrier that is not, under its
  * optional and borrowed wrappers, one of `viewShapes` -- a shape some view
@@ -3332,7 +3623,7 @@ const descriptorDomainsOver = (
  * answer: every value of the program was a table per remembered flow.
  */
 const absentRoutesReaderOf = (
-  valueCarriers: ReadonlyMap<IrValueId, Representation>,
+  valueCarriers: ValueCarriers,
   viewShapes: ReadonlySet<string>,
   domains: NativeFieldViewDomains
 ): ((receiver: IrValueId, key: string | null) => readonly NativeFieldStorageDomain[] | null) => {
