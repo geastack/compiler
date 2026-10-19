@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 import type { TargetRuntimeManifest } from '../preflight/obligations.js'
 import type { SealedRepresentationPlan } from '../representation/plan.js'
-import type { SemanticGraph } from '../semantics/model/graph.js'
+import { SemanticEdgeTable } from '../semantics/model/edges.js'
+import { PublishedResults, type SemanticGraph } from '../semantics/model/graph.js'
 import type { IrCertification } from './certify.js'
 
 /**
@@ -101,7 +102,15 @@ const digestOf = (value: unknown): string => {
       for (const element of val) visit(element)
       return write(']')
     }
-    if (val instanceof Map) {
+    // The sealed graph's edge and result tables stand in for the array and
+    // the map they replaced, and digest as those: their own fields are a
+    // storage layout, and the edge table's grow as lookups memoize.
+    if (val instanceof SemanticEdgeTable) {
+      write(`A${val.length}[`)
+      for (const edge of val) visit(edge)
+      return write(']')
+    }
+    if (val instanceof Map || val instanceof PublishedResults) {
       write(`M${val.size}[`)
       for (const [key, entry] of val) {
         visit(key)

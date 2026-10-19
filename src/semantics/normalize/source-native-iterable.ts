@@ -24,7 +24,8 @@ export interface SourceNativeIterable {
 }
 
 export const sourceNativeIterableOf = (
-  context: ProducerContext,
+  // Without the ordinal counters: it mints nothing, and the frontend's shared context does not carry them.
+  context: Omit<ProducerContext, 'ordinals' | 'evaluationOrdinals'>,
   flow: ValueFlowIndex,
   providers: ReadonlyMap<string, NativeIterableProvider>,
   source: ts.Expression,

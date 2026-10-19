@@ -228,6 +228,18 @@ const valueEdge = (operand: SemanticOperation['operands'][number], to: Operation
     ? { kind: 'value', result: operand.source.result, to, role: operand.role, ordinal: operand.ordinal }
     : null
 
+/** The edges one stated entry stands for: itself, or an operation's value edges in operand order. */
+export function* edgesStatedBy(entry: StatedEdge): Generator<SemanticEdge> {
+  if (!('family' in entry)) {
+    yield entry
+    return
+  }
+  for (const operand of entry.operands) {
+    const edge = valueEdge(operand, entry.id)
+    if (edge !== null) yield edge
+  }
+}
+
 /**
  * The edge table of a sealed graph: the producers' own edges, then one edge per
  * scope of every gated operation's chain.
@@ -331,24 +343,32 @@ export const edgesOfKind = <K extends PlainStatedKind>(
 /**
  * The producers' edges with every run that restates an operation's value
  * edges -- each result-citing operand in order, nothing else -- replaced by
- * that operation. Anything that differs in the slightest stays an edge.
+ * that operation, appended to `stated`. Anything that differs in the
+ * slightest stays an edge.
  */
 export const compactStatedEdges = (
-  edges: readonly SemanticEdge[],
-  operations: ReadonlyMap<OperationId, SemanticOperation>
-): readonly StatedEdge[] => {
-  const stated: StatedEdge[] = []
+  edges: readonly StatedEdge[],
+  operationOf: (operation: OperationId) => SemanticOperation | undefined,
+  stated: StatedEdge[] = []
+): StatedEdge[] => {
   let index = 0
   while (index < edges.length) {
     const edge = edges[index]!
-    const operation = edge.kind === 'value' ? operations.get(edge.to) : undefined
+    if ('family' in edge) {
+      stated.push(edge)
+      index++
+      continue
+    }
+    const operation = edge.kind === 'value' ? operationOf(edge.to) : undefined
     let run = 0
     if (operation !== undefined) {
       for (const operand of operation.operands) {
         if (operand.source.kind !== 'result') continue
         const candidate = edges[index + run]
         if (
-          candidate?.kind !== 'value' ||
+          candidate === undefined ||
+          'family' in candidate ||
+          candidate.kind !== 'value' ||
           candidate.to !== operation.id ||
           candidate.result !== operand.source.result ||
           candidate.role !== operand.role ||

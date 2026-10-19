@@ -1,8 +1,8 @@
 import type { OperationFamily, OperationId, RegionId, SemanticResultId } from '../../identity/ids.js'
 import { operationFamilies } from '../../identity/ids.js'
 import { operationOfResult } from '../../identity/ids.js'
-import type { GatedOperations, GateLink, GateScope, SemanticEdge } from '../model/edges.js'
-import { compactStatedEdges, edgeSource, gateScopeSealer, SemanticEdgeTable } from '../model/edges.js'
+import type { GatedOperations, GateLink, GateScope, SemanticEdge, StatedEdge } from '../model/edges.js'
+import { compactStatedEdges, edgeSource, edgesStatedBy, gateScopeSealer, SemanticEdgeTable } from '../model/edges.js'
 import type { SemanticGraph, SemanticRegion } from '../model/graph.js'
 import { PublishedResults, validateGraph } from '../model/graph.js'
 import { internedText, internSealedFacts } from '../model/sealed-facts.js'
@@ -78,19 +78,20 @@ export const normalizeProgram = (input: NormalizationInput): NormalizationResult
     byCopy.set(key, built)
     return built
   }
-  const published = publishProgram(operationFamilies, producersFor, input.census.byFamily)
+  // Sealed as each candidate contributes rather than once all have: the
+  // unsealed copies of every operation's identities and facts were otherwise
+  // all alive together at the end of publication, the frontend's peak.
+  const published = publishProgram(operationFamilies, producersFor, input.census.byFamily, internSealedFacts())
 
   const operations = new Map<OperationId, SemanticOperation>()
   // Only a result whose identity does not name its own operation needs an
   // entry of its own; every other one is answered by the operation table.
   const foreignResults = new Map<SemanticResultId, OperationId>()
   let resultCount = 0
-  const intern = internSealedFacts()
   for (const operation of published.operations) {
     if (operations.has(operation.id)) {
       throw new Error(`operation ${operation.id} was published twice; one source operation must mint one identity`)
     }
-    intern(operation)
     operations.set(operation.id, operation)
   }
   for (const operation of operations.values()) {
@@ -158,23 +159,37 @@ export const normalizeProgram = (input: NormalizationInput): NormalizationResult
     innermostScopes.push(innermost)
   }
 
+  // An operation standing for its value edges stands for them only while all
+  // of them reach; otherwise the ones that do are stated one by one, which is
+  // what filtering the uncompacted edges kept.
+  const reachingEdges: StatedEdge[] = []
+  for (const entry of published.edges) {
+    if (!('family' in entry)) {
+      if (reaches(entry)) reachingEdges.push(entry)
+      continue
+    }
+    let all = true
+    for (const edge of edgesStatedBy(entry))
+      if (!reaches(edge)) {
+        all = false
+        break
+      }
+    if (all) reachingEdges.push(entry)
+    else for (const edge of edgesStatedBy(entry)) if (reaches(edge)) reachingEdges.push(edge)
+  }
+
   const graph: SemanticGraph = {
     regions,
     structuralTypes: input.types.seal(),
     operations,
-    edges: new SemanticEdgeTable(compactStatedEdges(published.edges.filter(reaches), operations), {
-      operations: gatedOperations,
-      innermost: innermostScopes
-    }),
-    // A report lists its operations by the identities they were published
-    // under, before sealing interned them; naming the sealed copies instead
-    // lets the pre-seal strings go.
-    coverage: new Map(
-      [...published.reports].map(([family, report]) => [
-        family,
-        { ...report, operations: report.operations.map((id) => operations.get(id)?.id ?? id) }
-      ])
+    edges: new SemanticEdgeTable(
+      compactStatedEdges(reachingEdges, (id) => operations.get(id)),
+      {
+        operations: gatedOperations,
+        innermost: innermostScopes
+      }
     ),
+    coverage: published.reports,
     results
   }
 

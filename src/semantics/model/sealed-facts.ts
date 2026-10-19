@@ -101,6 +101,9 @@ const keyOf = (value: unknown): string | null => {
   return `${key}}`
 }
 
+/** The one empty list a sealed operation's operands or results can be; frozen, as nothing may grow it. */
+const noneSealed: readonly never[] = Object.freeze([])
+
 /**
  * A function interning one operation's facts in place. Meant for one sealing:
  * its pools go when the caller drops it.
@@ -143,8 +146,9 @@ export const internSealedFacts = (): ((operation: SemanticOperation) => Semantic
       }
       // A list a producer grew by pushing keeps the capacity its first push
       // reserved -- seventeen slots for a call's two or three arguments. A
-      // copy is exactly as long as its contents.
-      if (operation.operands.length > 0) fields['operands'] = operation.operands.slice()
+      // copy is exactly as long as its contents, and every empty list is one.
+      fields['operands'] = operation.operands.length > 0 ? operation.operands.slice() : noneSealed
+      if (operation.results.length === 0) fields['results'] = noneSealed
     }
     for (const result of operation.results) if (!Object.isFrozen(result)) (result as Writable<typeof result>).id = internedText(result.id)
     for (const operand of operation.operands) internOperand(operand)

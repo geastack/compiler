@@ -27,9 +27,9 @@ import type { FamilyProducer } from './normalize/contribution.js'
 import { createIdentityTable, rootSpecialization, walkOrdinals, type IdentityTable } from './normalize/identities.js'
 import { censusDeclaredIntegers, type DeclaredIntegerWidth } from './declared-integers.js'
 import { gatingEdges } from './normalize/gating.js'
-import { normalizeProgram } from './normalize/normalize.js'
+import { normalizeProgram, type NormalizationInput, type NormalizationResult } from './normalize/normalize.js'
 import type { ProducerContext } from './normalize/producer-context.js'
-import { createEvaluationOrdinals, createOrdinalCounter } from './normalize/producers/mint.js'
+import { createEvaluationOrdinals, createOrdinalCounter, type EvaluationOrdinals, type OrdinalCounter } from './normalize/producers/mint.js'
 import { intrinsicPropertyCallOf } from './normalize/intrinsic-property-call.js'
 import { createStructuralMapper, type ClassCopyKey } from './normalize/structural.js'
 import { createSloppyAbsenceCensus, noSloppyAbsence } from './normalize/sloppy-absence.js'
@@ -912,6 +912,17 @@ interface LocatedFile {
   /** A name whose `text` is not its source slice (a unicode escape). */
   readonly spelledNames: ReadonlyMap<number, string>
 }
+
+/**
+ * Normalization with the one pair of ordinal counters every producer mints
+ * from, made here rather than in the frontend's scope: the counters hold an
+ * entry per minted operation and nothing reads them once the graph is sealed,
+ * yet anything the frontend's own frame holds -- a local, or the input object
+ * it builds for a call -- lives as long as the frontend does.
+ */
+const normalizeMinting = (
+  inputOf: (ordinals: OrdinalCounter, evaluationOrdinals: EvaluationOrdinals) => NormalizationInput
+): NormalizationResult => normalizeProgram(inputOf(createOrdinalCounter(), createEvaluationOrdinals()))
 
 const locateFile = (file: ts.SourceFile): LocatedFile => {
   const ordinals = walkOrdinals(file)
@@ -1857,7 +1868,10 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   for (const [owner, sites] of argumentsObjects.usesByOwner)
     if (parameters.implicitArgumentsTupleAt?.(owner)) for (const site of sites) actualArgumentSites.add(site)
   const settledArgumentsObjects = { ...argumentsObjects, actualFrameOf: (node: ts.Node) => actualArgumentSites.has(node) }
-  const context: ProducerContext = {
+  // Everything a producer reads but the two ordinal counters, which are minted
+  // per normalization below: the counters are read only while operations are
+  // minted, and this context lives as long as the frontend does.
+  const context: Omit<ProducerContext, 'ordinals' | 'evaluationOrdinals'> = {
     nativeIterableAt: (source, consumer) => {
       if (!hostMutationFactsSealed) return null
       return sourceNativeIterableOf(context, valueFlow, input.nativeIterableProviders ?? new Map(), source, consumer)
@@ -1945,8 +1959,6 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // fact about the build, not about any one file's syntax.
     buildIsStrict,
     table,
-    ordinals: createOrdinalCounter(),
-    evaluationOrdinals: createEvaluationOrdinals(),
     // Overridden per candidate below (`path: candidate.specialization`) --
     // `rootSpecialization` here is only to satisfy the type on this shared
     // base object, which is never read from directly as a producer context.
@@ -2254,7 +2266,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // Resolved the same way and for the same reason as `keyedCollections` above.
   const regexpDeclarations = regexpDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
   timing.mark('structural-and-host-censuses')
-  const normalized = normalizeProgram({
+  const normalized = normalizeMinting((ordinals, evaluationOrdinals) => ({
     census,
     types: table,
     // One producer set per monomorphized copy, differing only in which mapper
@@ -2264,6 +2276,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     producers: (candidate) =>
       input.producers({
         ...context,
+        ordinals,
+        evaluationOrdinals,
         identities: identities.forSpecialization(candidate.specialization),
         types: types.forSpecialization(candidate.specialization),
         path: candidate.specialization
@@ -2283,7 +2297,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
         unresolvableNames,
         namespacePaths
       })
-  })
+  }))
 
   timing.mark('normalization')
   timing.report()
