@@ -234,6 +234,17 @@ const push = <K, V>(table: Map<K, V[]>, key: K, value: V): void => {
   if (existing) existing.push(value)
   else table.set(key, [value])
 }
+/**
+ * Copies every list a walk grew past one entry to its exact length. A list
+ * starts as a one-element literal (`push`), but its second `push` reserves 17
+ * slots, and these tables live as long as their index: on a 48K-line app the
+ * reference and write tables held ~12 MB of slots no entry ever used. Only
+ * called once the walk that filled the table is over, so no reader holds a
+ * list it replaces.
+ */
+const toExactLists = <K, V>(table: Map<K, V[]>): void => {
+  for (const [key, list] of table) if (list.length > 1) table.set(key, list.slice())
+}
 
 const sameNodes = (a: readonly ts.Node[], b: readonly ts.Node[]): boolean => {
   if (a.length !== b.length) return false
@@ -997,7 +1008,17 @@ export const indexValueFlow = (
   }
 
   for (const file of files) forEachReachableStatement(reachable, file, visit)
-  if (recordSyntax) rememberSyntaxFacts(checker, reachable, files, syntax)
+  if (recordSyntax) {
+    toExactLists(memberReferences)
+    toExactLists(referencesBySymbol)
+    toExactLists(referencesByDeclaration)
+    toExactLists(receiverReferences)
+    rememberSyntaxFacts(checker, reachable, files, syntax)
+  }
+  toExactLists(state.bySymbol)
+  toExactLists(state.byDeclaration)
+  toExactLists(state.fromSymbol)
+  toExactLists(state.fromDeclaration)
 
   const NO_WRITES: readonly ValueWrite[] = []
   const NO_REFERENCES: readonly ts.Expression[] = []
@@ -1010,6 +1031,7 @@ export const indexValueFlow = (
     if (entries) entries.push(write)
     else writesBySite.set(write.site, [write])
   }
+  toExactLists(writesBySite)
   return {
     buildIsStrict,
     calls,

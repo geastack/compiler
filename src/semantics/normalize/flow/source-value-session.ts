@@ -815,7 +815,16 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     readonly key: string
     readonly order: number
   }
-  const namedReadsByReceiver = new Map<Query, Map<string, NamedRead[]>>()
+  // A receiver read under one key keeps that key's list in place of a
+  // one-entry Map: on a 48K-line app every one of ~32K receivers was read
+  // under a single key, and each such Map was ~300 bytes of hash table for
+  // one list whose entries already carry the key.
+  const namedReadsByReceiver = new Map<Query, Map<string, NamedRead[]> | readonly NamedRead[]>()
+  const namedReadsOf = (receiver: Query, key: string): readonly NamedRead[] | undefined => {
+    const held = namedReadsByReceiver.get(receiver)
+    if (held === undefined || !Array.isArray(held)) return (held as Map<string, NamedRead[]> | undefined)?.get(key)
+    return held[0]!.key === key ? held : undefined
+  }
   {
     let order = 0
     for (const access of flow.propertyAccesses) {
@@ -823,14 +832,18 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       const position = order++
       if (key === null) continue
       const receiver = value(access.expression)
-      let byKey = namedReadsByReceiver.get(receiver)
+      let byKey = namedReadsByReceiver.get(receiver) as Map<string, NamedRead[]> | undefined
       if (!byKey) namedReadsByReceiver.set(receiver, (byKey = new Map()))
       let entries = byKey.get(key)
       if (!entries) byKey.set(key, (entries = []))
       entries.push({ access, receiver, key, order: position })
     }
     // Copied to their exact length, as `writesByBodyValue`'s lists are.
-    for (const byKey of namedReadsByReceiver.values()) for (const [key, entries] of byKey) byKey.set(key, entries.slice())
+    for (const [receiver, held] of namedReadsByReceiver) {
+      const byKey = held as Map<string, NamedRead[]>
+      if (byKey.size === 1) namedReadsByReceiver.set(receiver, [...byKey.values().next().value!])
+      else for (const [key, entries] of byKey) byKey.set(key, entries.slice())
+    }
   }
   /**
    * The read keys that can reach slot `key` of `container`: the key itself,
@@ -1764,12 +1777,31 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   // a re-seal's causes by identity, and a fresh literal per evaluation made
   // every unchanged refusal look like a changed seal -- each one threw away
   // the component solve and re-expanded the whole sealed graph.
-  const internedCauses = new Map<ts.Node, Map<string, Cause>>()
+  // A node refused for one reason holds its cause directly rather than a
+  // one-entry Map: ~15K nodes on a 48K-line app, all but a few dozen with a
+  // single reason, and the cause already carries the reason it is keyed by.
+  const internedCauses = new Map<ts.Node, Cause | Map<string, Cause>>()
   const causeOf = (reason: string, node: ts.Node): Cause => {
-    let byReason = internedCauses.get(node)
-    if (byReason === undefined) internedCauses.set(node, (byReason = new Map()))
-    let cause = byReason.get(reason)
-    if (cause === undefined) byReason.set(reason, (cause = { reason, node }))
+    const held = internedCauses.get(node)
+    if (held === undefined) {
+      const cause: Cause = { reason, node }
+      internedCauses.set(node, cause)
+      return cause
+    }
+    if (!(held instanceof Map)) {
+      if (held.reason === reason) return held
+      const cause: Cause = { reason, node }
+      internedCauses.set(
+        node,
+        new Map([
+          [held.reason, held],
+          [reason, cause]
+        ])
+      )
+      return cause
+    }
+    let cause = held.get(reason)
+    if (cause === undefined) held.set(reason, (cause = { reason, node }))
     return cause
   }
   /**
@@ -3910,9 +3942,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           }
           const found: NamedRead[] = []
           for (const holder of holdersOf(container)) {
-            const byKey = namedReadsByReceiver.get(holder)
-            if (byKey === undefined) continue
-            for (const key of reaching) for (const entry of byKey.get(key) ?? NO_NAMED_READS) found.push(entry)
+            if (!namedReadsByReceiver.has(holder)) continue
+            for (const key of reaching) for (const entry of namedReadsOf(holder, key) ?? NO_NAMED_READS) found.push(entry)
           }
           // Program order, the order the scan this replaces discovered them in.
           found.sort((a, b) => a.order - b.order)
@@ -4011,7 +4042,9 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       // transfer allocated one object per carried edge per re-evaluation for
       // nothing.
       if (outcome !== null) {
-        outcome.causes = causes.length === 0 ? NO_CAUSES : causes
+        // Exactly sized: the solver keeps every seal's causes for the life
+        // of the session, and a list grown by `push` reserves 17 slots.
+        outcome.causes = causes.length === 0 ? NO_CAUSES : causes.slice()
         outcome.grounding = grounding.size === 0 ? NO_GROUNDING : [...grounding].map((dependency) => ({ domain: VALUE_ORIGIN, dependency }))
         outcome.seeded = seeded
       }

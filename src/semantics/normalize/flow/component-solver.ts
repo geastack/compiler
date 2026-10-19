@@ -684,7 +684,7 @@ export interface DependencyFactSolver<K, V, R> {
 type EdgeStates<S extends object> = S | readonly S[] | null
 /** Past this many entries an edge collection becomes a hash table: a lookup is a linear scan below it. */
 const SMALL_EDGES = 8
-const edgeCount = (edges: object | null): number =>
+const edgeCount = (edges: unknown): number =>
   edges === null ? 0 : edges instanceof Map || edges instanceof Set ? edges.size : Array.isArray(edges) ? edges.length : 1
 const NO_EDGE_STATES: readonly never[] = []
 const edgeStates = <S extends object>(edges: EdgeStates<S> | Set<S>): Iterable<S> =>
@@ -742,8 +742,11 @@ class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlot {
   /**
    * Edges whose completeness contributes to the published answer, as keys:
    * the component solve and `requiredDependenciesOf` iterate them as given.
+   * A lone key is held as itself (`loneRequired`), as a lone observed edge
+   * is: ~114K of a 48K-line app's ~155K states require exactly one, and a
+   * one-element array is 56 bytes to hold a pointer.
    */
-  requiredDependencies: readonly K[] | Set<K> | null = null
+  requiredDependencies: K | readonly K[] | Set<K> | null = null
   /**
    * Dependents, held as states for the same reason `key` is: `propagate`
    * fires an edge by re-enqueuing its owner, and it already holds that
@@ -756,7 +759,12 @@ class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlot {
   groundedDomains: ReadonlySet<DependencyGroundingDomain> | null = null
   private flags = 0
   private one: V | typeof NO_FACT = NO_FACT
-  private many: Set<V> | null = null
+  /**
+   * Two to `SMALL_EDGES` facts in an exactly sized array, more in a `Set`:
+   * ~22K of a 48K-line app's ~28K multi-fact states hold at most eight, and
+   * the smallest `Set` holding two is ~180 bytes of hash table.
+   */
+  private many: readonly V[] | Set<V> | null = null
   /**
    * Carried on the state so `dependents` and the propagation queue can hold
    * states directly instead of keys. Both used to hold `K`, and every drain
@@ -781,17 +789,29 @@ class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlot {
     this.flags = value ? this.flags | COMPONENT_READ : this.flags & ~COMPONENT_READ
   }
   get size(): number {
-    return this.many !== null ? this.many.size : this.one === NO_FACT ? 0 : 1
+    const many = this.many
+    if (many !== null) return Array.isArray(many) ? many.length : (many as Set<V>).size
+    return this.one === NO_FACT ? 0 : 1
   }
   has(value: V): boolean {
-    if (this.many !== null) return this.many.has(value)
+    // `includes` is SameValueZero, as `Set.prototype.has` is.
+    if (this.many !== null) return Array.isArray(this.many) ? this.many.includes(value) : (this.many as Set<V>).has(value)
     const one = this.one
     // SameValueZero: NaN is the one value not equal to itself.
     return one !== NO_FACT && (one === value || (one !== one && value !== value))
   }
   add(value: V): void {
-    if (this.many !== null) {
-      this.many.add(value)
+    const many = this.many
+    if (many !== null) {
+      if (!Array.isArray(many)) {
+        ;(many as Set<V>).add(value)
+        return
+      }
+      if (many.includes(value)) return
+      // A new array rather than a push: a pushed array keeps growth slack,
+      // and no reader iterates a state's facts while they are added
+      // (`factsFrom`), so a replaced array is never mid-iteration.
+      this.many = many.length < SMALL_EDGES ? many.concat([value]) : new Set<V>(many).add(value)
       return
     }
     if (this.one === NO_FACT) {
@@ -799,11 +819,11 @@ class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlot {
       return
     }
     if (this.has(value)) return
-    this.many = new Set<V>().add(this.one).add(value)
+    this.many = [this.one, value]
     this.one = NO_FACT
   }
   values(): SetIterator<V> {
-    if (this.many !== null) return this.many.values()
+    if (this.many !== null) return this.many.values() as SetIterator<V>
     return (this.one === NO_FACT ? NO_FACTS.values() : [this.one].values()) as SetIterator<V>
   }
   keys(): SetIterator<V> {
@@ -813,7 +833,11 @@ class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlot {
     return this.values()
   }
   entries(): SetIterator<[V, V]> {
-    if (this.many !== null) return this.many.entries()
+    const many = this.many
+    if (many !== null)
+      return (Array.isArray(many) ? many.map((value) => [value, value] as [V, V]).values() : (many as Set<V>).entries()) as SetIterator<
+        [V, V]
+      >
     return (this.one === NO_FACT ? NO_FACTS.entries() : [[this.one, this.one] as [V, V]].values()) as SetIterator<[V, V]>
   }
   forEach(callback: (value: V, key: V, set: ReadonlySet<V>) => void, thisArg?: unknown): void {
@@ -861,14 +885,25 @@ export const dependencyFactSolver = <K, V, R>(
     for (const candidate of small) map.set(candidate.key, candidate)
     return map.set(dependencyState.key, dependencyState)
   }
-  const isRequired = (required: State['requiredDependencies'], dependency: K): boolean =>
-    required !== null && (required instanceof Set ? required.has(dependency) : (required as readonly K[]).includes(dependency))
+  // A key is held alone only when it cannot be mistaken for a collection of
+  // keys: an object that is neither an array nor a `Set`. Any other key (none
+  // in this solver's one caller) takes the one-element array it always had.
+  const loneRequired = (dependency: K): boolean =>
+    typeof dependency === 'object' && dependency !== null && !Array.isArray(dependency) && !(dependency instanceof Set)
+  const isRequired = (required: State['requiredDependencies'], dependency: K): boolean => {
+    if (required === null) return false
+    if (required instanceof Set) return required.has(dependency)
+    if (Array.isArray(required)) return (required as readonly K[]).includes(dependency)
+    return required === dependency
+  }
   const withRequired = (required: State['requiredDependencies'], dependency: K): State['requiredDependencies'] => {
-    if (required === null) return [dependency]
+    if (required === null) return loneRequired(dependency) ? dependency : [dependency]
     if (required instanceof Set) return required.add(dependency)
-    const small = required as readonly K[]
+    const small = Array.isArray(required) ? (required as readonly K[]) : [required as K]
     return small.length < SMALL_EDGES ? small.concat([dependency]) : new Set(small).add(dependency)
   }
+  const requiredOf = (required: State['requiredDependencies']): Iterable<K> =>
+    required === null ? NO_DEPENDENCIES : required instanceof Set || Array.isArray(required) ? (required as Iterable<K>) : [required as K]
   // States, not keys: `propagate` used to hold keys and call `stateOf(key)`
   // on every drain, a Map lookup per edge fire across a large program's millions
   // of observe edges. The State is already in hand wherever an edge fires or is
@@ -1217,7 +1252,7 @@ export const dependencyFactSolver = <K, V, R>(
           },
           existingSlotOf: (key) => states.get(key),
           localOf: (state) => state.sealed!,
-          dependenciesOf: (state) => state.requiredDependencies ?? NO_DEPENDENCIES
+          dependenciesOf: (state) => requiredOf(state.requiredDependencies)
         },
         mode
       )
@@ -1240,5 +1275,5 @@ export const dependencyFactSolver = <K, V, R>(
     }
   }
 
-  return { solve, requiredDependenciesOf: (key) => states.get(key)?.requiredDependencies ?? NO_DEPENDENCIES, seed }
+  return { solve, requiredDependenciesOf: (key) => requiredOf(states.get(key)?.requiredDependencies ?? null), seed }
 }

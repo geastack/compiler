@@ -332,6 +332,11 @@ const callsOf = (flow: ValueFlowIndex) => {
       else declarations.set(declaration, [site])
     }
   }
+  // Each list copied to its exact length: a second `push` reserves 17 slots,
+  // and these tables stay alive with the index (~2 MB of unused slots per
+  // index on a 48K-line app).
+  for (const table of [declarations, callees, writes] as Map<unknown, unknown[]>[])
+    for (const [key, list] of table) if (list.length > 1) table.set(key, list.slice())
   const result = { sites, declarations, callees, writes, writeReceivers }
   callLookups.set(flow.calls, result)
   return result

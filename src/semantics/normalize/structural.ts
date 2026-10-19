@@ -494,6 +494,36 @@ export const createStructuralMapper = (
   return mapperFor(rootSpecialization)
 }
 
+// Constant name lists the borrowed-prototype read consults (see
+// `prototypeObjectTypeAt`), kept once rather than rebuilt by every view.
+const borrowedPrototypeMethodNames: ReadonlySet<string> = new Set(['call', 'apply', 'bind'])
+// The ambient constructors whose `.prototype` methods, read as values, carry
+// an invoke that brand-checks a boxed receiver and dispatches to the
+// instance's own member (`hostPrototypeMethodValueText`, targets/cpp). A
+// constructor is added here only together with that dispatch: without it a
+// borrow through the prototype's method would compile to a callable that
+// throws for every receiver, which is a wrong answer where the instance
+// path at least refuses.
+const receiverDispatchingPrototypes: ReadonlySet<string> = new Set(['Date'])
+/**
+ * Prototype members whose `[[Call]]` is GENERIC over the receiver -- ECMA-262
+ * 21.4.4.37 `Date.prototype.toJSON` runs ToPrimitive(this, number) and then
+ * invokes `toISOString` on whatever it was given, never a brand check -- so
+ * the boxed-receiver stub (`hostPrototypeMethodValueText`), whose invoke IS
+ * a brand check, would render a borrow of it as a TypeError the language does
+ * not throw. Such a borrow keeps the instance path's compile-time refusal
+ * until the target states the generic form (ToPrimitive over a boxed value is
+ * a runtime capability it does not carry yet); the VALUE read still renders,
+ * so `name`/`length`/descriptor reflection over the member is untouched.
+ */
+const receiverGenericPrototypeMembers: ReadonlySet<string> = new Set(['toJSON'])
+/**
+ * The names each file declares with a spreading object literal -- a fact of
+ * the file's syntax alone, so one answer per file serves every view; each of
+ * the 907 views on a 48K-line app used to walk and hold its own.
+ */
+const spreadLiteralCellNames = new WeakMap<ts.SourceFile, ReadonlySet<string>>()
+
 const buildMapper = (
   checker: ts.TypeChecker,
   identities: IdentityTable,
@@ -546,7 +576,11 @@ const buildMapper = (
   const completed = new Map<ts.Type, StructuralTypeId>()
   /** Self-reference with no declared name to anchor on -- a recursive type alias. See `structural-self-reference.ts`. */
   const walking = new Set<ts.Type>()
-  const selfReferential = new Set<ts.Type>()
+  // Created on the first self-referential type. A mapper is built per view --
+  // 907 of them on a 48K-line app -- and almost none ever meets one, so these
+  // and the per-view tables below marked the same way were each an empty
+  // hash table per view for the whole compile.
+  let selfReferential: Set<ts.Type> | undefined
   /**
    * Every memo an in-flight attempt has written, so an unwind can take them
    * back. A stale citation, not a missing one: an unwound frame's memos are
@@ -558,7 +592,7 @@ const buildMapper = (
    * containing `unresolved(...)`. `null` when nothing is in flight.
    */
   let journal: ts.Type[] | null = null
-  const selfReferentialKeys = new Map<ts.Type, string>()
+  let selfReferentialKeys: Map<ts.Type, string> | undefined
 
   const unresolved = (reason: string, fallback?: 'erased-type-expression'): StructuralTypeId =>
     table.intern({ kind: 'unresolved', reason, ...(fallback ? { fallback } : {}) })
@@ -1449,11 +1483,12 @@ const buildMapper = (
    * members of the same family are the same layout (`Expression &
    * Declaration`); members of different families are not one object.
    */
-  const familyFieldNames = new Map<DeclarationId, ReadonlySet<string>>()
-  const memberFieldNames = new Map<DeclarationId, ReadonlySet<string>>()
+  // Created on first use (see `selfReferential`).
+  let familyFieldNames: Map<DeclarationId, ReadonlySet<string>> | undefined
+  let memberFieldNames: Map<DeclarationId, ReadonlySet<string>> | undefined
   /** The keys the family's interface members declare, absorbed partners aside. */
   const familyMemberFieldNames = (family: InterfaceFamily): ReadonlySet<string> => {
-    let names = memberFieldNames.get(family.key)
+    let names = memberFieldNames?.get(family.key)
     if (!names) {
       const collected = new Set<string>()
       for (const declaration of family.members) {
@@ -1462,7 +1497,7 @@ const buildMapper = (
         for (const property of checker.getPropertiesOfType(checker.getDeclaredTypeOfSymbol(symbol))) collected.add(property.getName())
       }
       names = collected
-      memberFieldNames.set(family.key, names)
+      ;(memberFieldNames ??= new Map()).set(family.key, names)
     }
     return names
   }
@@ -1489,13 +1524,13 @@ const buildMapper = (
       narrowings.push(part)
     }
     if (family === null || member === null) return null
-    let names = familyFieldNames.get(family.key)
+    let names = familyFieldNames?.get(family.key)
     if (!names) {
       const collected = new Set(familyMemberFieldNames(family))
       for (const absorbed of family.absorbed)
         for (const property of checker.getPropertiesOfType(absorbed)) collected.add(property.getName())
       names = collected
-      familyFieldNames.set(family.key, names)
+      ;(familyFieldNames ??= new Map()).set(family.key, names)
     }
     for (const part of narrowings) {
       if (checker.getIndexInfosOfType(part).length > 0 || part.getCallSignatures().length > 0 || part.getConstructSignatures().length > 0)
@@ -1935,7 +1970,7 @@ const buildMapper = (
     // to: unwind to that walk's own frame, which retries under an anchor.
     if (walking.has(type)) throw selfReferentialSignal(type)
 
-    if (selfReferential.has(type)) {
+    if (selfReferential?.has(type)) {
       // `fresh` is the table's own answer to who owns this reservation. A walk
       // that did not create it must not complete it and must not abandon it:
       // the anchor is either finished already or being built by an outer frame,
@@ -1948,7 +1983,8 @@ const buildMapper = (
       // view closes the cycle at one anchor (`createViewIndependentRecurrence`).
       const sharedKey = viewIndependentKeyOf(type)
       const recurrenceKey =
-        sharedKey ?? `${identities.copyKeyOf(path)}|${identities.copyKeyOf(bindingPath)}|${selfReferentialKeyOf(selfReferentialKeys, type)}`
+        sharedKey ??
+        `${identities.copyKeyOf(path)}|${identities.copyKeyOf(bindingPath)}|${selfReferentialKeyOf((selfReferentialKeys ??= new Map()), type)}`
       const { id: anchor, fresh } = table.anchor(recurrenceKey)
       if (!fresh) return remember(type, anchor)
       inProgress.set(type, anchor)
@@ -2064,7 +2100,7 @@ const buildMapper = (
         if (rememberedId && table.citesAbandoned(rememberedId)) table.releaseKey(rememberedId)
       }
       attempt.length = mark
-      selfReferential.add(type)
+      ;(selfReferential ??= new Set()).add(type)
     } finally {
       walking.delete(type)
       if (outermost) journal = null
@@ -2134,10 +2170,12 @@ const buildMapper = (
    * than trusting the spelling is the whole point -- a program's own
    * `type Awaited<T> = ...` is a different operator with the same name.
    */
-  const globalAliases = new Map<string, ts.Symbol | null>()
+  // Created on first use (see `selfReferential`).
+  let globalAliases: Map<string, ts.Symbol | null> | undefined
   const isGlobalAlias = (name: string, symbol: ts.Symbol, at: ts.Node): boolean => {
-    if (!globalAliases.has(name)) globalAliases.set(name, checker.resolveName(name, at, ts.SymbolFlags.TypeAlias, false) ?? null)
-    const resolved = globalAliases.get(name) ?? null
+    const aliases = (globalAliases ??= new Map())
+    if (!aliases.has(name)) aliases.set(name, checker.resolveName(name, at, ts.SymbolFlags.TypeAlias, false) ?? null)
+    const resolved = aliases.get(name) ?? null
     return resolved !== null && resolved === symbol
   }
 
@@ -4050,27 +4088,6 @@ const buildMapper = (
   // members. `bindHostObjectClosure` registers the slot's declaration as a
   // protocol of its own; this anchors a declared shape on that declaration,
   // carrying the instance's body so the member reads keep their signatures.
-  const borrowedPrototypeMethodNames = new Set(['call', 'apply', 'bind'])
-  // The ambient constructors whose `.prototype` methods, read as values, carry
-  // an invoke that brand-checks a boxed receiver and dispatches to the
-  // instance's own member (`hostPrototypeMethodValueText`, targets/cpp). A
-  // constructor is added here only together with that dispatch: without it a
-  // borrow through the prototype's method would compile to a callable that
-  // throws for every receiver, which is a wrong answer where the instance
-  // path at least refuses.
-  const receiverDispatchingPrototypes = new Set(['Date'])
-  /**
-   * Prototype members whose `[[Call]]` is GENERIC over the receiver -- ECMA-262
-   * 21.4.4.37 `Date.prototype.toJSON` runs ToPrimitive(this, number) and then
-   * invokes `toISOString` on whatever it was given, never a brand check -- so
-   * the boxed-receiver stub (`hostPrototypeMethodValueText`), whose invoke IS
-   * a brand check, would render a borrow of it as a TypeError the language does
-   * not throw. Such a borrow keeps the instance path's compile-time refusal
-   * until the target states the generic form (ToPrimitive over a boxed value is
-   * a runtime capability it does not carry yet); the VALUE read still renders,
-   * so `name`/`length`/descriptor reflection over the member is untouched.
-   */
-  const receiverGenericPrototypeMembers = new Set(['toJSON'])
   const prototypeObjectTypeAt = (node: ts.Node): StructuralTypeId | null => {
     if (!ts.isPropertyAccessExpression(node) || node.name.text !== 'prototype') return null
     const receiverType = checker.getTypeAtLocation(node.expression)
@@ -4291,10 +4308,11 @@ const buildMapper = (
     }
   }
 
-  const resolvingArgumentSources = new Set<ts.SignatureDeclaration>()
+  // Created on first use (see `selfReferential`).
+  let resolvingArgumentSources: Set<ts.SignatureDeclaration> | undefined
   const implicitArgumentsSourceTypeAt = (declaration: ts.SignatureDeclaration, frame: ImplicitArgumentsTuple): StructuralTypeId | null => {
-    if (frame.sourcePositions === undefined || resolvingArgumentSources.has(declaration)) return null
-    resolvingArgumentSources.add(declaration)
+    if (frame.sourcePositions === undefined || resolvingArgumentSources?.has(declaration)) return null
+    ;(resolvingArgumentSources ??= new Set()).add(declaration)
     try {
       const join = (sources: readonly ts.Expression[]): StructuralTypeId | null => {
         const members: StructuralTypeId[] = []
@@ -4585,7 +4603,6 @@ const buildMapper = (
    * of any other name -- nearly every identifier -- is answered without a
    * symbol lookup.
    */
-  const spreadLiteralCellNames = new Map<ts.SourceFile, ReadonlySet<string>>()
   const spreadLiteralCellNamesOf = (file: ts.SourceFile): ReadonlySet<string> => {
     const known = spreadLiteralCellNames.get(file)
     if (known !== undefined) return known

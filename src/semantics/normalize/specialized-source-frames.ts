@@ -19,10 +19,14 @@ export const createSpecializedSourceFrames = (
   const candidates = new Map<ts.Node, SpecializationPath[]>()
   for (const candidate of census.candidates) {
     if (candidate.family !== 'invocation') continue
-    const paths = candidates.get(candidate.node) ?? []
-    paths.push(candidate.specialization)
-    candidates.set(candidate.node, paths)
+    const paths = candidates.get(candidate.node)
+    if (paths) paths.push(candidate.specialization)
+    else candidates.set(candidate.node, [candidate.specialization])
   }
+  // Exactly sized: this table lives through normalization, nearly every call
+  // has one copy, and an array grown by `push` reserves 17 slots for it
+  // (~2.5 MB on a 48K-line app).
+  for (const [node, paths] of candidates) if (paths.length > 1) candidates.set(node, paths.slice())
   return (call, path) => {
     const body = ts.findAncestor(call, ts.isFunctionLike)
     if (!body || !path.some((step) => step.owner === body)) return undefined

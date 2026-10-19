@@ -49,7 +49,7 @@ interface FrameLayoutAnswer {
   readonly body: ts.SignatureDeclaration
   readonly layout: SourceInvocationFrameLayout | null
 }
-const layouts = new WeakMap<ValueFlowIndex, WeakMap<ts.CallExpression | ts.NewExpression, FrameLayoutAnswer[]>>()
+const layouts = new WeakMap<ValueFlowIndex, WeakMap<ts.CallExpression | ts.NewExpression, readonly FrameLayoutAnswer[]>>()
 
 const unwrapped = (expression: ts.Expression): ts.Expression => {
   let current = unwrapErasedExpression(expression)
@@ -101,12 +101,18 @@ export const sourceInvocationFrameLayoutOf = (
   if (ordinaryOwnOperands !== undefined && !ordinaryOwnInvocationOperandsMatch(call, ordinaryOwnOperands)) return null
   let calls = layouts.get(flow)
   if (!calls) layouts.set(flow, (calls = new WeakMap()))
-  let answers = calls.get(call)
-  if (!answers) calls.set(call, (answers = []))
-  for (const answer of answers) if (answer.body === body && answer.operands === ordinaryOwnOperands) return answer.layout
-  const held = answers
+  const answers = calls.get(call)
+  if (answers) for (const answer of answers) if (answer.body === body && answer.operands === ordinaryOwnOperands) return answer.layout
+  const held = calls
+  // Each list exactly sized: almost every call keeps one answer, and an
+  // empty array grown by `push` reserves 17 slots for it (~4 MB over a
+  // 48K-line app's ~35K calls). Read again here rather than captured above,
+  // so an answer the computation below remembered for this same call is kept
+  // ahead of this one, as the shared array kept it.
   const remember = (layout: SourceInvocationFrameLayout | null): SourceInvocationFrameLayout | null => {
-    held.push({ operands: ordinaryOwnOperands, body, layout })
+    const answer: FrameLayoutAnswer = { operands: ordinaryOwnOperands, body, layout }
+    const known = held.get(call)
+    held.set(call, known ? [...known, answer] : [answer])
     return layout
   }
   const site = flow.callSiteOf(call)

@@ -637,10 +637,14 @@ export const censusProgram = (
       if (families.length === 0) return
       const caller = sharedCaller(callerOf(node, identities, regions, callerPath))
       const owner = ts.isClassDeclaration(node) ? node : ts.isClassDeclaration(node.parent) ? node.parent : null
+      // One id string per node, shared by every family it is censused under:
+      // each candidate holds its id for the whole compile, and minting it per
+      // family kept equal copies of the same string side by side.
+      const id = identities.nodeIdOf(node, path)
       for (const family of families) {
         candidates.push({
           node,
-          id: identities.nodeIdOf(node, path),
+          id,
           family,
           caller,
           ...(owner && reachable.classIsLayoutOnly(owner) ? { classLayoutOnly: true } : {}),

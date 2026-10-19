@@ -21,10 +21,13 @@ export const createLocalUnionResolver = (
   refinedSourceAt: (node: ts.Node) => StructuralTypeId | null = () => null,
   sourceCallResultAt: (node: ts.Node) => StructuralTypeId | null = () => null
 ): ((node: ts.Node) => StructuralTypeId | null) => {
-  const memo = new Map<ts.VariableDeclaration, StructuralTypeId | null>()
-  const pending = new Set<ts.VariableDeclaration>()
-  const sourceRefined = new Set<ts.VariableDeclaration>()
-  const sourceCallRefined = new Set<ts.VariableDeclaration>()
+  // Created on first use: one resolver is built per structural view (907 on
+  // a 48K-line app) and most never resolve a local, so four empty hash tables
+  // per view were held for the whole compile.
+  let memo: Map<ts.VariableDeclaration, StructuralTypeId | null> | undefined
+  let pending: Set<ts.VariableDeclaration> | undefined
+  let sourceRefined: Set<ts.VariableDeclaration> | undefined
+  let sourceCallRefined: Set<ts.VariableDeclaration> | undefined
   const localOf = (node: ts.Node): ts.VariableDeclaration | null => {
     if (!ts.isIdentifier(node)) return null
     const declarations = checker.getSymbolAtLocation(node)?.declarations
@@ -42,15 +45,16 @@ export const createLocalUnionResolver = (
   }
   const resolve = (declaration: ts.VariableDeclaration): StructuralTypeId | null => {
     if (!flow || declaration.type || !ts.isIdentifier(declaration.name)) return null
-    if (memo.has(declaration)) return memo.get(declaration) ?? null
-    if (pending.has(declaration)) return null
+    if (memo?.has(declaration)) return memo.get(declaration) ?? null
+    if (pending?.has(declaration)) return null
     const writes = flow.writesToDeclaration(declaration).filter((write) => write.slot === 'whole')
     if (
       !writes.length ||
       writes.some((write) => !write.value || (write.edge !== 'declaration-initializer' && write.edge !== 'identifier-assignment'))
     )
       return null
-    pending.add(declaration)
+    const inFlight = (pending ??= new Set())
+    inFlight.add(declaration)
     // A proved own Function replacement can have a different result from the
     // checker's inherited .call signature. It owns this writer's value; every
     // other writer still contributes its actual structural type. An inferred
@@ -61,7 +65,7 @@ export const createLocalUnionResolver = (
       if (direct !== null) return direct
       const alias = localOf(value)
       const result = alias ? resolve(alias) : null
-      return alias && sourceCallRefined.has(alias) ? result : null
+      return alias && sourceCallRefined?.has(alias) ? result : null
     })
     const hasSourceCall = sourceCalls.some((result) => result !== null)
     const unionArms = census.unionArmsAt(declaration)
@@ -72,18 +76,18 @@ export const createLocalUnionResolver = (
       const refinements = writes.map((write) => refinedSourceAt(write.value as ts.Expression))
       const first = refinements[0]
       if (!first || refinements.some((id) => id !== first) || !concreteRefinement(first)) {
-        pending.delete(declaration)
+        inFlight.delete(declaration)
         return null
       }
-      sourceRefined.add(declaration)
+      ;(sourceRefined ??= new Set()).add(declaration)
     }
-    if (hasSourceCall) sourceCallRefined.add(declaration)
+    if (hasSourceCall) (sourceCallRefined ??= new Set()).add(declaration)
     const members = writes.map((write, ordinal) => sourceCalls[ordinal] ?? read(write.value as ts.Expression))
-    pending.delete(declaration)
+    inFlight.delete(declaration)
     // An uninitialized lexical binding holds undefined until its first write.
     if (!declaration.initializer) members.push(table.intern({ kind: 'primitive', primitive: 'undefined' }))
     const result = table.intern({ kind: 'union', members })
-    memo.set(declaration, result)
+    ;(memo ??= new Map()).set(declaration, result)
     return result
   }
   return (node) => {
@@ -100,7 +104,7 @@ export const createLocalUnionResolver = (
     // The checker inferred these locals from a different executable source.
     // Even its nullish exclusions may be stale. Preserve the complete actual
     // writer domain; later control-flow proofs may narrow that native value.
-    if (sourceCallRefined.has(declaration)) return result
+    if (sourceCallRefined?.has(declaration)) return result
     // Calling a union-held local does not first convert the cell into the
     // checker's common signature. The callable value remains whichever arm
     // was stored, and [[Call]] dispatches through that arm's own convention.
@@ -128,7 +132,7 @@ export const createLocalUnionResolver = (
     }
     // A real flow narrowing keeps its own type. An erased Function/any at a
     // read is not such a narrowing, but may still prove nullish exclusion.
-    if (!sourceRefined.has(declaration) && !containsUnstatedPosition(checker, node, raw)) return null
+    if (!sourceRefined?.has(declaration) && !containsUnstatedPosition(checker, node, raw)) return null
     if ((raw.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return result
     if ((raw.flags & ts.TypeFlags.Undefined) !== 0) return table.intern({ kind: 'primitive', primitive: 'undefined' })
     if ((raw.flags & ts.TypeFlags.Null) !== 0) return table.intern({ kind: 'primitive', primitive: 'null' })
