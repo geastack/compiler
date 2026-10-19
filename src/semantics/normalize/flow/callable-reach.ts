@@ -266,11 +266,27 @@ const ownedConstructionReceiverTypeAt = (checker: ts.TypeChecker, flow: ValueFlo
 const callLookups = new WeakMap<
   readonly FlowCallSite[],
   {
-    readonly declarations: ReadonlyMap<ts.SignatureDeclaration | ts.JSDocSignature, readonly FlowCallSite[]>
-    readonly callees: ReadonlyMap<ts.Expression, readonly FlowCallSite[]>
+    readonly declarationSites: (declaration: ts.SignatureDeclaration | ts.JSDocSignature) => readonly FlowCallSite[]
+    readonly calleeSites: (callee: ts.Expression) => readonly FlowCallSite[] | undefined
     readonly writeReceivers: KeySet<ts.Expression>
   }
 >()
+/**
+ * A call-lookup entry: its lone site as itself, more in an exactly sized
+ * array. Nearly every callee and most declarations have one site, and a
+ * one-element array is 56 bytes to hold a pointer (~3 MB over the two indices
+ * alive through normalization on a 48K-line app). Read back as a list.
+ */
+type CallSiteEntry = FlowCallSite | FlowCallSite[]
+const NO_CALL_SITES: readonly FlowCallSite[] = []
+const callSitesIn = (entry: CallSiteEntry | undefined): readonly FlowCallSite[] | undefined =>
+  entry === undefined ? undefined : Array.isArray(entry) ? entry : [entry]
+const withCallSite = <K>(table: Map<K, CallSiteEntry>, key: K, site: FlowCallSite): void => {
+  const entry = table.get(key)
+  if (entry === undefined) table.set(key, site)
+  else if (Array.isArray(entry)) entry.push(site)
+  else table.set(key, [entry, site])
+}
 /** Calls whose callee is a named member access, by key: record method calls
  * the checker cannot attribute are found here and authenticated per proof. */
 const callsByMemberName = new WeakMap<ValueFlowIndex, ReadonlyMap<string, readonly FlowCallSite[]>>()
@@ -312,30 +328,28 @@ const omittedArgumentOf = (call: ts.Node, position: number): ts.Expression => {
 const callsOf = (flow: ValueFlowIndex) => {
   const cached = callLookups.get(flow.calls)
   if (cached) return cached
-  const declarations = new Map<ts.SignatureDeclaration | ts.JSDocSignature, FlowCallSite[]>()
-  const callees = new Map<ts.Expression, FlowCallSite[]>()
+  const declarations = new Map<ts.SignatureDeclaration | ts.JSDocSignature, CallSiteEntry>()
+  const callees = new Map<ts.Expression, CallSiteEntry>()
   // A bit per receiver over numbers the binding censuses' memos already gave
   // almost all of them: only membership is asked, of every index alive through
   // normalization (~1.25 MB of set entries each on a 48K-line app).
   const writeReceivers = new KeySet<ts.Expression>()
   for (const write of flow.allWrites) if (write.naming) writeReceivers.add(write.naming)
   for (const site of flow.calls) {
-    const uses = callees.get(site.operands.callee)
-    if (uses) uses.push(site)
-    else callees.set(site.operands.callee, [site])
-    for (const declaration of new Set([site.inferredDeclaration ?? site.checkerDeclaration, ...site.targets])) {
-      if (!declaration) continue
-      const entries = declarations.get(declaration)
-      if (entries) entries.push(site)
-      else declarations.set(declaration, [site])
-    }
+    withCallSite(callees, site.operands.callee, site)
+    for (const declaration of new Set([site.inferredDeclaration ?? site.checkerDeclaration, ...site.targets]))
+      if (declaration) withCallSite(declarations, declaration, site)
   }
-  // Each list copied to its exact length: a second `push` reserves 17 slots,
-  // and these tables stay alive with the index (~2 MB of unused slots per
-  // index on a 48K-line app).
-  for (const table of [declarations, callees] as Map<unknown, unknown[]>[])
-    for (const [key, list] of table) if (list.length > 1) table.set(key, list.slice())
-  const result = { declarations, callees, writeReceivers }
+  // Each list copied to its exact length: a `push` past the second entry
+  // reserves spare slots, and these tables stay alive with the index.
+  for (const table of [declarations, callees] as Map<unknown, CallSiteEntry>[])
+    for (const [key, entry] of table) if (Array.isArray(entry) && entry.length > 2) table.set(key, entry.slice())
+  const result = {
+    declarationSites: (declaration: ts.SignatureDeclaration | ts.JSDocSignature) =>
+      callSitesIn(declarations.get(declaration)) ?? NO_CALL_SITES,
+    calleeSites: (callee: ts.Expression) => callSitesIn(callees.get(callee)),
+    writeReceivers
+  }
   callLookups.set(flow.calls, result)
   return result
 }
@@ -2377,7 +2391,7 @@ const closedMemberCallableUses = (
       }
       return sites
     }
-    const own = [...(callsOf(flow).declarations.get(declaration) ?? [])]
+    const own = [...callsOf(flow).declarationSites(declaration)]
     const allocated = allocationMemberCallerSitesOf(declaration, false, new Set(own.map((site) => site.call)))
     if (allocated === null) return null
     for (const site of allocated) if (!own.includes(site)) own.push(site)
@@ -2454,7 +2468,7 @@ const closedMemberCallableUses = (
       const sites = [...calls]
       for (const sibling of siblings) {
         if (sibling === declaration) continue
-        for (const site of callsOf(flow).declarations.get(sibling) ?? []) if (!sites.includes(site)) sites.push(site)
+        for (const site of callsOf(flow).declarationSites(sibling)) if (!sites.includes(site)) sites.push(site)
       }
       const siblingCounted = new Set(sites.map((site) => site.call))
       const closedMember =
@@ -2725,7 +2739,7 @@ const closedMemberCallableUses = (
         ts.isCallExpression(site.call) && recordMethodCallTargetsOf(flow, site.call, computedKeyAuthority)?.includes(declaration) === true
     )
     const counted = new Set<ts.CallExpression | ts.NewExpression>(through.map((site) => site.call))
-    for (const site of callsOf(flow).declarations.get(declaration) ?? []) counted.add(site.call)
+    for (const site of callsOf(flow).declarationSites(declaration)) counted.add(site.call)
     return hasClosedMemberCallableUses(
       checker,
       flow,
@@ -4142,7 +4156,7 @@ const closedMemberCallableUses = (
       // Inferred receivers can leave the checker's member reference unbound.
       // The shared call inventory still attributes the invocation to this
       // slot; counting it consumes no claim about the argument's provenance.
-      if (ts.isFunctionLike(entry)) for (const site of callsOf(flow).declarations.get(entry) ?? []) calls.add(site.call)
+      if (ts.isFunctionLike(entry)) for (const site of callsOf(flow).declarationSites(entry)) calls.add(site.call)
       for (const reference of flow.referencesToDeclaration(entry)) {
         const access = ts.isPropertyAccessExpression(reference.parent) && reference.parent.name === reference ? reference.parent : reference
         const call = access.parent
@@ -7672,7 +7686,7 @@ const closedMemberCallableUses = (
       // Receiver publication follows the same target selection as argument
       // and result flow. The normalized callee inventory also includes reads
       // inside `.call`/`.apply`, where lookup and actual receiver differ.
-      const invocations = callsOf(flow).callees.get(parent)
+      const invocations = callsOf(flow).calleeSites(parent)
       if (invocations?.length)
         return traceReceiver(
           reference,

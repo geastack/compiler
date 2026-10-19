@@ -100,7 +100,18 @@ const importGraphOf = (checker: ts.TypeChecker, modules: StatedModuleSet): Impor
   return graph
 }
 
-/** Every identifier in `file` the checker resolves to `symbol`. */
+/**
+ * The only symbols `mentionsOf` is ever asked about: the local binding an import
+ * clause, specifier or namespace import declares.
+ */
+const isImportBinding = (symbol: ts.Symbol): boolean =>
+  (symbol.flags & ts.SymbolFlags.Alias) !== 0 &&
+  (symbol.declarations?.some(
+    (declaration) => ts.isImportClause(declaration) || ts.isImportSpecifier(declaration) || ts.isNamespaceImport(declaration)
+  ) ??
+    false)
+
+/** Every identifier in `file` the checker resolves to `symbol`, which must be an import binding. */
 const mentionsOf = (checker: ts.TypeChecker, graph: ImportGraph, file: ts.SourceFile, symbol: ts.Symbol): readonly ts.Identifier[] => {
   let index = graph.mentions.get(file)
   if (!index) {
@@ -111,7 +122,10 @@ const mentionsOf = (checker: ts.TypeChecker, graph: ImportGraph, file: ts.Source
           ts.isShorthandPropertyAssignment(node.parent) && node.parent.name === node
             ? checker.getShorthandAssignmentValueSymbol(node.parent)
             : checker.getSymbolAtLocation(node)
-        if (resolved) {
+        // Only import bindings are ever looked up, and the index lives as long as
+        // the compile; keeping every other identifier of a 48K-line app's files
+        // here held about 9 MB nobody reads.
+        if (resolved && isImportBinding(resolved)) {
           const list = built.get(resolved) ?? []
           list.push(node)
           built.set(resolved, list)

@@ -103,7 +103,7 @@ export const dependencyComponentSolver = <K, R>(
               node: expand(key),
               componentRead: false,
               componentAnswer: null,
-              groundedDomains: null,
+              groundedInNoDomain: false,
               groundedInFirstDomain: UNSETTLED
             })
           )
@@ -155,7 +155,8 @@ interface ComponentSlot {
   /** A cached answer has read this node (`invalidate` stops at a node no answer read). */
   componentRead: boolean
   componentAnswer: ComponentAnswer | null
-  groundedDomains: ReadonlySet<DependencyGroundingDomain> | null
+  /** `groundingDomainsFrom` settled on no domain, the answer nearly every node it reaches has. */
+  groundedInNoDomain: boolean
   /** `groundedFor`'s settled answer for the first domain the engine walks (`GroundedIn`). */
   groundedInFirstDomain: GroundedIn
 }
@@ -213,6 +214,11 @@ const componentEngine = <K, R, S extends ComponentSlot>(
   // cyclic component's requirement check and the published result of a node
   // someone actually asks about.
   const { existingSlotOf, localOf, dependenciesOf } = graph
+  // `groundingDomainsFrom`'s memo: a bit of the node for the empty answer and
+  // this table for any other. A field per node holding the set was ~1.8 MB on
+  // a 48K-line app's source-value solve (~224K nodes), and a table holding
+  // every answer was as large again, since ~45K of them are the empty one.
+  const domainsByRoot = new Map<K, ReadonlySet<DependencyGroundingDomain>>()
   const nodeOf = (key: K): S => {
     const slot = graph.slotOf(key)
     if (!slot.componentRead) {
@@ -370,8 +376,9 @@ const componentEngine = <K, R, S extends ComponentSlot>(
   }
   const groundingDomainsFrom = (root: K): ReadonlySet<DependencyGroundingDomain> => {
     const rootSlot = nodeOf(root)
-    const known = rootSlot.groundedDomains
-    if (known !== null) return known
+    if (rootSlot.groundedInNoDomain) return NO_DOMAINS
+    const known = domainsByRoot.get(root)
+    if (known !== undefined) return known
     const rootNode = localOf(rootSlot)
     // A node that neither witnesses a domain nor labels an edge with one can
     // only ever answer the empty set, and that is most of them: `seeded-origin`
@@ -379,7 +386,7 @@ const componentEngine = <K, R, S extends ComponentSlot>(
     // solver is built per query there. Answering without allocating a walk is
     // what keeps this off that path entirely.
     if (!rootNode.groundingSeeds?.length && !rootNode.groundingDependencies?.length && groundingKeysOf(rootNode).length === 0) {
-      rootSlot.groundedDomains = NO_DOMAINS
+      rootSlot.groundedInNoDomain = true
       return NO_DOMAINS
     }
     // The root's own seeds, whatever their domain, and each domain one of its
@@ -391,7 +398,8 @@ const componentEngine = <K, R, S extends ComponentSlot>(
     for (const dependency of groundingKeysOf(rootNode))
       if (!found.has(keyedDomain!) && groundedFor(keyedDomain!, dependency)) found.add(keyedDomain!)
     const answer = found.size === 0 ? NO_DOMAINS : found.size === 1 ? onlyDomain(found.values().next().value!) : found
-    rootSlot.groundedDomains = answer
+    if (answer === NO_DOMAINS) rootSlot.groundedInNoDomain = true
+    else domainsByRoot.set(root, answer)
     return answer
   }
 
@@ -583,7 +591,8 @@ const componentEngine = <K, R, S extends ComponentSlot>(
       if (slot === undefined || !slot.componentRead) continue
       slot.componentRead = false
       slot.componentAnswer = null
-      slot.groundedDomains = null
+      slot.groundedInNoDomain = false
+      domainsByRoot.delete(key)
       slot.groundedInFirstDomain = UNSETTLED
       explained.delete(key)
       for (const settled of groundedIn.values()) settled.delete(key)
@@ -832,6 +841,8 @@ const EXPLICIT_REQUIRED = 128
 /** `groundedInFirstDomain`, two bits of `flags`. */
 const GROUNDED_SHIFT = 8
 const GROUNDED_MASK = 3 << GROUNDED_SHIFT
+/** `groundedInNoDomain`. */
+const NO_GROUNDING_DOMAIN = 1 << 10
 /** One of the facts a state holds when it holds exactly one, told apart from the collection forms (see `FactState.facts`). */
 const isLoneFact = (value: unknown): boolean =>
   typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Set)
@@ -886,7 +897,6 @@ class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlot {
   dependents: EdgeStates<FactState<K, V, R>> | Set<FactState<K, V, R>> = null
   /** The last seal, which the component solve reads as this node's local facts. */
   sealed: FactSeal<K, R> | undefined = undefined
-  groundedDomains: ReadonlySet<DependencyGroundingDomain> | null = null
   private flags = 0
   /**
    * No fact, one fact held as itself, two to `SMALL_EDGES` facts in an
@@ -925,6 +935,12 @@ class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlot {
   }
   set groundedInFirstDomain(value: GroundedIn) {
     this.flags = (this.flags & ~GROUNDED_MASK) | (value << GROUNDED_SHIFT)
+  }
+  get groundedInNoDomain(): boolean {
+    return (this.flags & NO_GROUNDING_DOMAIN) !== 0
+  }
+  set groundedInNoDomain(value: boolean) {
+    this.flags = value ? this.flags | NO_GROUNDING_DOMAIN : this.flags & ~NO_GROUNDING_DOMAIN
   }
   get explicitRequired(): boolean {
     return (this.flags & EXPLICIT_REQUIRED) !== 0
