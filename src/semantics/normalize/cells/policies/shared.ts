@@ -1,4 +1,4 @@
-import type ts from 'typescript'
+import type ts from '#typescript'
 import { isUnusableEvidence, joinOfWrites } from '../../derived-expression-type.js'
 import { cellType, type CellValue } from '../model.js'
 import type { CellEvidenceContribution } from '../policy.js'

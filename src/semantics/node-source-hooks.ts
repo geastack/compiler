@@ -3,7 +3,7 @@
 import { registerHooks, isBuiltin } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { resolve, dirname, sep } from 'node:path'
-import ts from 'typescript'
+import ts from '#typescript'
 import { createModuleResolver } from './module-resolution.js'
 import { defaultCompilerOptions } from './program.js'
 import type { PackageSource } from './package-sources.js'

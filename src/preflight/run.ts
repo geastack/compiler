@@ -70,8 +70,10 @@ export interface PreflightComponentSummary {
 export interface PreflightReport {
   /** Every authority component that was censused, in the order it was processed. */
   readonly components: readonly ComponentId[]
-  /** Every obligation row. No caps, no top-N, no clipping -- the complete census. */
+  /** Every obligation row. No caps, no top-N, no clipping -- the complete census, rebuilt on first read. */
   readonly obligations: readonly EvaluatedObligation[]
+  /** The rows that are not `satisfied`, optional ones included, in census order. */
+  readonly failing: readonly EvaluatedObligation[]
   readonly componentSummaries: readonly PreflightComponentSummary[]
   readonly totals: { readonly mandatory: ObligationTally; readonly optional: ObligationTally }
   /** True only when every mandatory obligation is `satisfied`. Optional gaps never affect this. */
@@ -357,25 +359,26 @@ const emptyTally = (): { satisfied: number; missing: number; unsupported: number
   blockedByUpstream: 0
 })
 
+const countInto = (tally: { -readonly [K in keyof ObligationTally]: number }, obligation: EvaluatedObligation): void => {
+  switch (obligation.status) {
+    case 'satisfied':
+      tally.satisfied += 1
+      break
+    case 'missing':
+      tally.missing += 1
+      break
+    case 'unsupported':
+      tally.unsupported += 1
+      break
+    case 'blocked-by-upstream':
+      tally.blockedByUpstream += 1
+      break
+  }
+}
+
 const tallyOf = (obligations: readonly EvaluatedObligation[], optional: boolean): ObligationTally => {
   const tally = emptyTally()
-  for (const obligation of obligations) {
-    if (obligation.optional !== optional) continue
-    switch (obligation.status) {
-      case 'satisfied':
-        tally.satisfied += 1
-        break
-      case 'missing':
-        tally.missing += 1
-        break
-      case 'unsupported':
-        tally.unsupported += 1
-        break
-      case 'blocked-by-upstream':
-        tally.blockedByUpstream += 1
-        break
-    }
-  }
+  for (const obligation of obligations) if (obligation.optional === optional) countInto(tally, obligation)
   return tally
 }
 
@@ -411,19 +414,24 @@ const indexResults = (
   return results
 }
 
-export const runPreflight = (input: PreflightInput): PreflightReport => {
+/**
+ * One pass over every authority component, handing each its evaluated rows.
+ * The partition and the per-component result index are rebuilt per pass
+ * rather than captured: the deferred `obligations` getter is the only second
+ * caller, it runs rarely, and keeping both tables reachable from it cost tens
+ * of megabytes through the end of the compile on a large application.
+ */
+const censusComponents = (
+  input: PreflightInput,
+  component: (cid: ComponentId, operationCount: number, evaluated: readonly EvaluatedObligation[]) => void
+): void => {
   const { semanticGraph, representationPlan, manifest } = input
   const partition = partitionAuthorityComponents(semanticGraph)
   const indexed = indexResults(semanticGraph, partition)
-  const components: ComponentId[] = []
-  const componentSummaries: PreflightComponentSummary[] = []
-  const allObligations: EvaluatedObligation[] = []
-
   for (const [componentIndex, memberOperations] of partition.entries()) {
     const representative = memberOperations[0]
     if (representative === undefined) continue
     const cid = componentId(representative)
-    components.push(cid)
     const operationSet = new Set(memberOperations)
     const componentResults = indexed[componentIndex] ?? []
     const componentObligations: Obligation[] = []
@@ -444,23 +452,55 @@ export const runPreflight = (input: PreflightInput): PreflightReport => {
       appendAll(componentObligations, buildExternalBindingObligation(cid, resultId, operation, manifest))
     }
 
-    const evaluated = closeBlockedByUpstream(componentObligations, semanticGraph)
-    appendAll(allObligations, evaluated)
+    component(cid, memberOperations.length, closeBlockedByUpstream(componentObligations, semanticGraph))
+  }
+}
+
+/**
+ * The census keeps its tallies and its failing rows, and rebuilds the full row
+ * list only when a caller asks for it. A compile reads nothing but the failing
+ * rows (the diagnostic sweep), yet holding every satisfied row from here to
+ * the end of lowering cost about half a gigabyte on a large application --
+ * 1.27 million rows, each with its own predicate. The rebuild reads the same
+ * graph and plan the compile result already holds, so it retains nothing new
+ * and answers the same rows in the same order.
+ */
+export const runPreflight = (input: PreflightInput): PreflightReport => {
+  const components: ComponentId[] = []
+  const componentSummaries: PreflightComponentSummary[] = []
+  const failing: EvaluatedObligation[] = []
+  const mandatory = emptyTally()
+  const optional = emptyTally()
+  censusComponents(input, (cid, operationCount, evaluated) => {
+    components.push(cid)
+    for (const obligation of evaluated) {
+      countInto(obligation.optional ? optional : mandatory, obligation)
+      if (obligation.status !== 'satisfied') failing.push(obligation)
+    }
     componentSummaries.push({
       component: cid,
-      operationCount: memberOperations.length,
+      operationCount,
       obligationCount: evaluated.length,
       mandatory: tallyOf(evaluated, false),
       optional: tallyOf(evaluated, true)
     })
-  }
+  })
 
-  const totals = { mandatory: tallyOf(allObligations, false), optional: tallyOf(allObligations, true) }
+  const totals = { mandatory: Object.freeze(mandatory), optional: Object.freeze(optional) }
   const clean = totals.mandatory.missing === 0 && totals.mandatory.unsupported === 0 && totals.mandatory.blockedByUpstream === 0
+  let obligations: readonly EvaluatedObligation[] | null = null
 
   return Object.freeze({
     components: Object.freeze(components),
-    obligations: Object.freeze(allObligations),
+    get obligations(): readonly EvaluatedObligation[] {
+      if (obligations === null) {
+        const all: EvaluatedObligation[] = []
+        censusComponents(input, (_cid, _count, evaluated) => appendAll(all, evaluated))
+        obligations = Object.freeze(all)
+      }
+      return obligations
+    },
+    failing: Object.freeze(failing),
     componentSummaries: Object.freeze(componentSummaries),
     totals: Object.freeze(totals),
     clean

@@ -103,7 +103,8 @@ export const nativeCallableDataOwnerWriteProtocolOf = (
       )
     )
       return null
-    for (const blocker of owner.blockers) {
+    // Each blocker either disqualifies or is passed over, so order is free.
+    for (const blocker of [...owner.sharedBlockers, ...owner.blockers]) {
       if (blocker.kind === 'integrity') continue
       if (blocker.kind === 'unknown-key') {
         // This source fact proves a program Symbol key, never __proto__ or

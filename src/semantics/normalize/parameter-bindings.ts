@@ -1,6 +1,6 @@
 import { isRealCallableDeclaration, isModuleExportedDeclaration, isTypePositionReference, runtimeParametersOf } from './flow/targets.js'
 import { inProgramImportReferencesOf } from './flow/export-importers.js'
-import ts from 'typescript'
+import ts from '#typescript'
 import { implicitArgumentsSlotOf } from './implicit-arguments.js'
 import {
   implicitArgumentsReadTypeAt,
@@ -78,6 +78,8 @@ import { classInstanceArmsPassed, plainRecordStatementOf } from './class-instanc
 import { overrideFieldArmsOf, overrideRecordStatementOf } from './override-field-arms.js'
 import type { SpecializationCensus } from './specialization.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
+import { KeySet, NullableMemo } from './nullable-memo.js'
+import { createRoundTableSharing } from './round-tables.js'
 
 /**
  * The type a parameter the program never annotated is actually called with.
@@ -130,6 +132,18 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
  * - a rest parameter, a destructured parameter, and any argument whose own type
  *   is still `any` -- propagating `any` is what this exists to stop.
  */
+/**
+ * How many `statedTypeAt` calls up the stack are a later round asking its
+ * `upstream` for an inherited answer. Each round's published view memoizes
+ * its answers, and a later round's question used to land in every earlier
+ * round's memo on its way down the chain: on a 48K-line app the three rounds
+ * alive at the end held three equal maps of ~7 MB. The asking round memoizes
+ * the answer itself, so an earlier round keeps only what it was asked
+ * directly. A memo is a cache of a settled answer, so where it is kept changes
+ * no answer.
+ */
+const inheritedStatedLookups = { depth: 0 }
+
 export interface ParameterBindingCensus {
   /** Known executable destinations, including aliases and overrides. Positive evidence, not a proof that no opaque target exists. */
   readonly callTargetsAt?: (call: ts.CallExpression | ts.NewExpression) => readonly ts.SignatureDeclaration[] | null
@@ -1191,6 +1205,13 @@ const declaredTupleSpreadPositionAt = (checker: ts.TypeChecker, args: readonly t
   return declaredClosedTupleRestElementsOf(checker, declaration)?.[index - spreadAt] ?? null
 }
 
+/** Every round's parameter census stays alive as the next one's upstream; see `createRoundTableSharing`. */
+const shareCallTables = createRoundTableSharing<{
+  readonly callsByDeclaration: Map<ts.Declaration, (ts.CallExpression | ts.NewExpression)[]>
+  readonly callTargets: Map<ts.CallExpression | ts.NewExpression, ts.SignatureDeclaration[]>
+  readonly resolvedCallDeclarations: Map<ts.CallExpression | ts.NewExpression, ts.SignatureDeclaration | ts.JSDocSignature>
+}>()
+
 export const censusParameterBindings = (
   checker: ts.TypeChecker,
   files: readonly ts.SourceFile[],
@@ -1277,9 +1298,9 @@ export const censusParameterBindings = (
   hostProvided: ReadonlySet<string> = noHostProvidedNames
 ): ParameterBindingCensus => {
   /** Every call this program makes, grouped by the declaration its signature resolved to. */
-  const callsByDeclaration = new Map<ts.Declaration, (ts.CallExpression | ts.NewExpression)[]>()
-  const callTargets = new Map<ts.CallExpression | ts.NewExpression, ts.SignatureDeclaration[]>()
-  const resolvedCallDeclarations = new Map<ts.CallExpression | ts.NewExpression, ts.SignatureDeclaration | ts.JSDocSignature>()
+  let callsByDeclaration = new Map<ts.Declaration, (ts.CallExpression | ts.NewExpression)[]>()
+  let callTargets = new Map<ts.CallExpression | ts.NewExpression, ts.SignatureDeclaration[]>()
+  let resolvedCallDeclarations = new Map<ts.CallExpression | ts.NewExpression, ts.SignatureDeclaration | ts.JSDocSignature>()
   /**
    * A `.call`/`.apply` wrapper whose receiver's checker type gave
    * `unwrapExplicitThisCall` no call signature to unwrap statically (an
@@ -1845,7 +1866,7 @@ export const censusParameterBindings = (
     // Memoized per round: a binding learned this round changes what a later
     // question answers, so a memo that outlived the round would answer with the
     // previous round's smaller view.
-    let memo = new Map<ts.Node, ts.Type | null>()
+    let memo = new NullableMemo<ts.Node, ts.Type>()
     const resolving = new Set<ts.Node>()
 
     /**
@@ -2440,7 +2461,7 @@ export const censusParameterBindings = (
       resolve,
       known,
       reset: (): void => {
-        memo = new Map<ts.Node, ts.Type | null>()
+        memo = new NullableMemo<ts.Node, ts.Type>()
       }
     }
   }
@@ -3958,7 +3979,7 @@ export const censusParameterBindings = (
   publishing.reset()
 
   /** Answers for `statedTypeAt`, settled once the fixpoint above has stopped. */
-  const statedTypes = new Map<ts.Node, ts.Type | null>()
+  const statedTypes = new NullableMemo<ts.Node, ts.Type>()
 
   const computeStatedTypeAt = (node: ts.Node): ts.Type | null => {
     // A PRIOR ROUND's stated narrowings are forwarded, the same way `known`
@@ -3974,7 +3995,13 @@ export const censusParameterBindings = (
     // own doc above names: it is why the object this function returns keeps
     // every earlier round's `ValueFlowIndex` (and `source-value-session.ts`'s
     // ~1 GB solver session for it) reachable for the rest of the compile.
-    const inherited = upstream.statedTypeAt(node)
+    inheritedStatedLookups.depth++
+    let inherited: ts.Type | null
+    try {
+      inherited = upstream.statedTypeAt(node)
+    } finally {
+      inheritedStatedLookups.depth--
+    }
     if (inherited) return inherited
     if (ts.isParameter(node)) return statedBindings.size === 0 ? null : (statedBindings.get(node) ?? null)
     if (!ts.isIdentifier(node)) return null
@@ -4056,7 +4083,13 @@ export const censusParameterBindings = (
   /** Refused frames, for `debugReport` to print the open use behind each. */
   const implicitRefusals = new Map<ts.SignatureDeclaration, string>()
   // A `spread` edge names the spread's SOURCE, which it reads in bulk and never stores into.
-  const writeNames = new Set(valueFlow.allWrites.flatMap((write) => (write.naming && write.edge !== 'spread' ? [write.naming] : [])))
+  // Only membership is asked, and the census -- every round of it, each the
+  // next one's upstream -- stays alive through production: a `Set` of every
+  // write's naming expression was ~1.25 MB per round on a 48K-line app, where
+  // a bit each over the numbers `callsOf`'s write receivers already gave them
+  // is a few KB.
+  const writeNames = new KeySet<ts.Expression>()
+  for (const write of valueFlow.allWrites) if (write.naming && write.edge !== 'spread') writeNames.add(write.naming)
   if (process.env['GEA_IMPLICIT_FRAME_DEBUG']) console.error(`[IMPLICIT-FRAME] owners in index: ${index.implicitArgumentsUses.size}`)
   for (const [owner, uses] of index.implicitArgumentsUses) {
     const infer = (): ImplicitArgumentsInference => {
@@ -4286,6 +4319,12 @@ export const censusParameterBindings = (
     }
   }
 
+  // The sweeps above were the last to attribute calls.
+  ;({ callsByDeclaration, callTargets, resolvedCallDeclarations } = shareCallTables(checker, {
+    callsByDeclaration,
+    callTargets,
+    resolvedCallDeclarations
+  }))
   // Later composed censuses can retain earlier inferred facts. Their protocol
   // dependencies remain required while any dependent parameter facts survive.
   protocolLedger?.replace('parameter-bindings', [...upstreamProtocolRequirements, ...[...protocolRequirements.values()].flat()])
@@ -4331,10 +4370,15 @@ export const censusParameterBindings = (
       // identifier in the program reaches it, and the body below asks the
       // checker for a symbol -- the single most expensive thing this compiler
       // can ask -- once per call.
+      //
+      // Only an identifier or a parameter costs that ask. Any other node's
+      // answer is the upstream round's, forwarded with no checker question,
+      // and remembering it kept a miss per node of the program here (~160K).
+      if (!ts.isIdentifier(node) && !ts.isParameter(node)) return computeStatedTypeAt(node)
       const remembered = statedTypes.get(node)
       if (remembered !== undefined) return remembered
       const answer = computeStatedTypeAt(node)
-      statedTypes.set(node, answer)
+      if (inheritedStatedLookups.depth === 0) statedTypes.set(node, answer)
       return answer
     },
     // A parameter and every UNNARROWED read of it are one storage cell. A

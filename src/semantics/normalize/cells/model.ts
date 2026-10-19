@@ -1,4 +1,4 @@
-import type ts from 'typescript'
+import type ts from '#typescript'
 import type { DeclarationId } from '../../../identity/ids.js'
 import type { CollectionTypeArguments } from '../collection-bindings.js'
 import type { ObjectBagShape } from '../object-bag-bindings.js'

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
 import { disjointUnionTypeOf, isStandardInterfaceType, joinOfWrites, widestOf } from './derived-expression-type.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'

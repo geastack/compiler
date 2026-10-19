@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 const isNever = (type: ts.Type): boolean => (type.flags & ts.TypeFlags.Never) !== 0
 

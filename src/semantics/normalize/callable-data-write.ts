@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ProducerContext } from './producer-context.js'
 import type { PropertyOperation } from '../model/operations.js'
 import { intactIntrinsicPrototypeKeysType, intrinsicPrototypeKeyIsAbsent } from './intrinsic-prototype.js'

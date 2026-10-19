@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { definitelyReturns } from './return-paths.js'
 import { carriesUnsubstitutedGeneric, emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 import { localBindingValuesOf } from './value-provenance.js'
 import { sourceCallableObjectOf, type SourceCallableObject } from './source-callable-own-data.js'

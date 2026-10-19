@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { isStandardInterfaceType } from '../derived-expression-type.js'
 import { outermostErasureOf, unwrapErasedExpression } from '../producers/erasure.js'
 import type { ValueWrite, ValueFlowIndex } from './model.js'

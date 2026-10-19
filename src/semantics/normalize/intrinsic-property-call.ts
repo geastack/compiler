@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { intrinsicStaticMemberIsIntact } from './intrinsic-static-member.js'
 import { intrinsicObjectKeysIntact } from './host-mutation-keys.js'
 import type { ProducerContext } from './producer-context.js'

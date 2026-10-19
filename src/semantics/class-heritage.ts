@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { DeclarationId } from '../identity/ids.js'
 import type { IdentityTable, SpecializationPath } from './normalize/identities.js'
 import type { SpecializationCensus } from './normalize/specialization.js'

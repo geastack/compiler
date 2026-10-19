@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 import { sourceValueSessionOf } from './source-value-session.js'
 import { sourceInvocationFrameLayoutOf } from './source-invocation-frame-layout.js'

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * A short, stable id for a node -- the spelling of "which syntax is this" that

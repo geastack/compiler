@@ -1,6 +1,6 @@
 import { callableCompletionSummaryOf } from './flow/callable-completions.js'
 import { relative } from 'node:path'
-import ts from 'typescript'
+import ts from '#typescript'
 import type { DeclarationId } from '../../identity/ids.js'
 import { globalSymbolBehindModuleAmbientConst, isAmbientDeclaration, moduleAmbientGlobalSatisfiesDeclaration } from '../ambient.js'
 import type { IdentityTable } from './identities.js'
@@ -56,6 +56,110 @@ export type { GlobalHostMutationTaint } from './host-mutation-keys.js'
 
 // A source file named the way a reader finds it: from the directory the compiler runs in.
 const displayPath = (fileName: string): string => relative(process.cwd(), fileName)
+
+const absent: unique symbol = Symbol('absent')
+const SMALL_SET_LIST = 8
+/**
+ * The alias graph's per-node and per-component sets: a node's copy edges and
+ * seeds, a component's edges and terms. A large program builds a quarter of a
+ * million nodes and as many components, and nearly every one of those sets
+ * holds a handful of members -- while even an empty `Set` costs about two
+ * hundred bytes of hash table, which made these sets most of the census's
+ * peak. One member is held inline and up to eight in a list; a `Set` is
+ * built only beyond that.
+ * Iteration is insertion order and visits a member added while it runs,
+ * exactly as a `Set`'s does, so no visit order -- and no answer -- depends on
+ * which form a set holds.
+ */
+class SmallSet<T> implements Iterable<T> {
+  first: T | typeof absent = absent
+  /** Two to `SMALL_SET_LIST` members, in insertion order. */
+  list: T[] | null = null
+  members: Set<T> | null = null
+  get size(): number {
+    return this.members !== null ? this.members.size : this.list !== null ? this.list.length : this.first === absent ? 0 : 1
+  }
+  has(member: T): boolean {
+    return this.members !== null ? this.members.has(member) : this.list !== null ? this.list.includes(member) : this.first === member
+  }
+  add(member: T): this {
+    if (this.members !== null) this.members.add(member)
+    else if (this.list !== null) {
+      if (this.list.includes(member)) return this
+      // Rebuilt at its exact length: `push` (and a spread) would grow a
+      // two-member list to nineteen slots.
+      if (this.list.length < SMALL_SET_LIST) {
+        const list = new Array<T>(this.list.length + 1)
+        for (let index = 0; index < this.list.length; index++) list[index] = this.list[index]!
+        list[this.list.length] = member
+        this.list = list
+      } else {
+        this.members = new Set(this.list).add(member)
+        this.list = null
+      }
+    } else if (this.first === absent) this.first = member
+    else if (this.first !== member) this.list = [this.first, member]
+    return this
+  }
+  clear(): void {
+    this.first = absent
+    this.list = null
+    this.members = null
+  }
+  values(): Iterator<T> {
+    return this[Symbol.iterator]()
+  }
+  // Each form holds the earlier form's members first and in order, so a
+  // visit that sees the set grow into the next form resumes at the same
+  // position in it.
+  *[Symbol.iterator](): Iterator<T> {
+    let visited = 0
+    for (;;) {
+      if (this.members !== null) break
+      if (this.list !== null) {
+        if (visited >= this.list.length) return
+        yield this.list[visited++]!
+      } else {
+        if (visited > 0 || this.first === absent) return
+        visited = 1
+        yield this.first
+      }
+    }
+    let skipped = 0
+    for (const member of this.members as Set<T>) {
+      if (skipped < visited) skipped++
+      else yield member
+    }
+  }
+}
+
+/**
+ * A short insertion-ordered set that never changes once built: adding a member
+ * yields another list (`withTerm` in the census). The alias graph's term sets
+ * are a few hundred thousand, nearly all of two to eight members, and nearly
+ * all repeats of a few thousand distinct lists -- each held once this way
+ * instead of once per component and per selector. Iterating one visits a
+ * snapshot, which no caller can tell apart from a `SmallSet`'s live visit: no
+ * walk over a set's terms adds a term to that same set.
+ */
+class SharedList<T> implements Iterable<T> {
+  constructor(
+    readonly members: readonly T[],
+    readonly id: number
+  ) {}
+  get size(): number {
+    return this.members.length
+  }
+  has(member: T): boolean {
+    return this.members.includes(member)
+  }
+  values(): Iterator<T> {
+    return this.members.values()
+  }
+  [Symbol.iterator](): Iterator<T> {
+    return this.members.values()
+  }
+}
 
 const staticKeyOf = (node: ts.PropertyAccessExpression | ts.ElementAccessExpression): string | null => {
   if (ts.isPropertyAccessExpression(node)) return node.name.text
@@ -1144,6 +1248,7 @@ export const censusGlobalHostMutations = (
   // the prototype object's identity itself, so absence proofs and inherited
   // descriptor reads observe the same mutation through direct or aliased use.
   const intrinsicPrototypeOrigins = new Map<ts.Expression, readonly DeclarationId[]>()
+  const noIntrinsicPrototypes: readonly DeclarationId[] = []
   const intrinsicPrototypesOf = (expression: ts.Expression): readonly DeclarationId[] => {
     const root = unwrapErasedExpression(expression)
     const cached = intrinsicPrototypeOrigins.get(root)
@@ -1170,7 +1275,7 @@ export const censusGlobalHostMutations = (
       for (const write of flow.writesToDeclaration(declaration))
         if (flowSiteIsReachable(write.site) && write.slot === 'whole' && write.value !== null) pending.push(write.value)
     }
-    const result = [...identities]
+    const result = identities.size === 0 ? noIntrinsicPrototypes : [...identities]
     intrinsicPrototypeOrigins.set(root, result)
     return result
   }
@@ -2192,10 +2297,17 @@ export const censusGlobalHostMutations = (
   // edges and discharge whole components before a consumer can use a result.
   // In particular, the expected type returned while a query is active is only
   // a constraint variable: an ungrounded cycle cannot certify its own origin.
-  const publicationDependencies = new Map<ts.Expression, Set<ts.Expression>>()
+  //
+  // Only an expression that has dependencies holds an entry: one for every
+  // expression ever asked was a quarter of a million entries on a 48K-line
+  // app, nearly all of them answering "none" -- which a missing entry already
+  // says.
+  const publicationDependencies = new Map<ts.Expression, SmallSet<ts.Expression>>()
   const publicationStack: ts.Expression[] = []
+  const noPublicationDependencies: readonly ts.Expression[] = Object.freeze([])
   const publicationVerdict = seededOriginSolver<ts.Expression>((expression) => {
-    const dependencies = [...(publicationDependencies.get(expression) ?? [])]
+    const recorded = publicationDependencies.get(expression)
+    const dependencies = recorded === undefined ? noPublicationDependencies : [...recorded]
     return {
       admitted: publishedRepresentations.get(expression) != null,
       seed: (dependencies.length === 0 || publicationAllocations.has(expression)) && publishedRepresentations.get(expression) != null,
@@ -2205,7 +2317,6 @@ export const censusGlobalHostMutations = (
   publishedRepresentationOf = (expression): PublishedRepresentation | null => {
     const current = unwrapErasedExpression(expression)
     const parent = publicationStack.at(-1)
-    if (!publicationDependencies.has(current)) publicationDependencies.set(current, new Set())
     publicationStack.push(current)
     let candidate: PublishedRepresentation | null
     try {
@@ -2213,7 +2324,11 @@ export const censusGlobalHostMutations = (
     } finally {
       publicationStack.pop()
     }
-    if (parent && candidate !== null) publicationDependencies.get(parent)!.add(current)
+    if (parent && candidate !== null) {
+      let dependencies = publicationDependencies.get(parent)
+      if (!dependencies) publicationDependencies.set(parent, (dependencies = new SmallSet()))
+      dependencies.add(current)
+    }
     if (parent) return candidate
     return candidate !== null && publicationVerdict(current) === 'allocated' ? candidate : null
   }
@@ -3037,7 +3152,11 @@ export const censusGlobalHostMutations = (
   const writesOf = (declaration: ts.Node): readonly ValueWrite[] => {
     const cached = writesByDeclaration.get(declaration)
     if (cached) return cached
-    const writes = flow.writesToDeclaration(declaration).filter((write) => flowSiteIsReachable(write.site))
+    // The flow index's own list when every write is reachable, as nearly all
+    // are: a filtered copy per declaration held the same list twice.
+    const all = flow.writesToDeclaration(declaration)
+    const reachableOnly = all.filter((write) => flowSiteIsReachable(write.site))
+    const writes = reachableOnly.length === all.length ? all : reachableOnly
     writesByDeclaration.set(declaration, writes)
     return writes
   }
@@ -3202,6 +3321,33 @@ export const censusGlobalHostMutations = (
     readonly stagedBulk: readonly StagedBulkWrite[]
   }
   const indexedWritesByDeclaration = new Map<ts.Node, IndexedWrites>()
+  // Most declarations have none of most write kinds; a kept list is copied at
+  // its exact length, since `push` left each with room for seventeen.
+  const noExpressions: readonly ts.Expression[] = []
+  const noMemberWrites: ReadonlyMap<string, readonly ts.Expression[]> = new Map()
+  const keptExpressions = (values: ts.Expression[]): readonly ts.Expression[] => (values.length === 0 ? noExpressions : values.slice())
+  const noStagedMembers: readonly StagedMemberWrite[] = []
+  const noStagedBulk: readonly StagedBulkWrite[] = []
+  // A declaration with no write of any kind -- most of them -- shares one index.
+  const noIndexedWrites: IndexedWrites = {
+    whole: noExpressions,
+    members: noMemberWrites,
+    everyMember: noExpressions,
+    elements: noExpressions,
+    contained: noExpressions,
+    bulk: noExpressions,
+    stagedMembers: noStagedMembers,
+    stagedBulk: noStagedBulk
+  }
+  const isEmptyIndex = (indexed: IndexedWrites): boolean =>
+    indexed.whole.length === 0 &&
+    indexed.members.size === 0 &&
+    indexed.everyMember.length === 0 &&
+    indexed.elements.length === 0 &&
+    indexed.contained.length === 0 &&
+    indexed.bulk.length === 0 &&
+    indexed.stagedMembers.length === 0 &&
+    indexed.stagedBulk.length === 0
   const indexedWritesOf = (declaration: ts.Node): IndexedWrites => {
     const cached = indexedWritesByDeclaration.get(declaration)
     if (cached) return cached
@@ -3227,16 +3373,16 @@ export const censusGlobalHostMutations = (
       else if (write.slot === 'bulk') bulk.push(write.value)
     }
     const indexed: IndexedWrites = {
-      whole,
-      members: mutableMembers,
-      everyMember,
-      elements,
-      contained,
-      bulk,
-      stagedMembers: stagedMembers.get(declaration) ?? [],
-      stagedBulk: stagedBulk.get(declaration) ?? []
+      whole: keptExpressions(whole),
+      members: mutableMembers.size === 0 ? noMemberWrites : mutableMembers,
+      everyMember: keptExpressions(everyMember),
+      elements: keptExpressions(elements),
+      contained: keptExpressions(contained),
+      bulk: keptExpressions(bulk),
+      stagedMembers: stagedMembers.get(declaration) ?? noStagedMembers,
+      stagedBulk: stagedBulk.get(declaration) ?? noStagedBulk
     }
-    indexedWritesByDeclaration.set(declaration, indexed)
+    indexedWritesByDeclaration.set(declaration, isEmptyIndex(indexed) ? noIndexedWrites : indexed)
     return indexed
   }
   const wholeValuesOf = (declaration: ts.Node): readonly ts.Expression[] => indexedWritesOf(declaration).whole
@@ -3318,15 +3464,66 @@ export const censusGlobalHostMutations = (
     | { readonly kind: 'proxy'; readonly reads: readonly ValueNode[] }
 
   type ValueNode = {
-    readonly id: number
     readonly expression: ts.Expression | null
-    readonly out: Set<ValueNode>
-    readonly incoming: Set<ValueNode>
-    readonly seeds: Set<AliasTerm>
+    /** Set by condensation: a map from every node to its component was one more entry per node. */
+    component: Component | null
+    out: SmallSet<ValueNode>
+    incoming: SmallSet<ValueNode>
+    seeds: SmallSet<AliasTerm>
     expanded: boolean
   }
 
-  type Component = { readonly id: number; readonly nodes: readonly ValueNode[]; readonly out: Set<Component> }
+  // A component's terms live on it: a table beside it was one more entry per
+  // component for every component that ever holds a term. It holds nothing
+  // else -- its index and member list were read only by diagnostics, which keep
+  // their own (`componentNodes`, `components.indexOf`) -- since a large program
+  // builds a quarter of a million of them.
+  type Component = {
+    out: SmallSet<Component>
+    terms: TermSet | null
+  }
+  type TermSet = SharedList<AliasTerm> | SmallSet<AliasTerm>
+  // Most nodes and components never get an edge, and every node's seeds and
+  // edges are spent once the graph is condensed: an empty set is this one
+  // frozen instance, which a write would throw on, and a set is built on the
+  // first member (`ownSet`).
+  const noMembers = Object.freeze(new SmallSet<never>()) as SmallSet<never>
+  const ownSet = <T>(set: SmallSet<T>): SmallSet<T> => (set === noMembers ? new SmallSet<T>() : set)
+  const addSeed = (node: ValueNode, term: AliasTerm): void => {
+    node.seeds = ownSet(node.seeds).add(term)
+  }
+  // Each short term set is the one shared list of exactly its members in their
+  // order, reached from the list one member shorter. A transition is keyed by
+  // that list's index and the added term's, both counted up from zero.
+  const termIds = new Map<AliasTerm, number>()
+  const TERM_ID_LIMIT = 2 ** 26
+  const sharedTermLists = new Map<number, SharedList<AliasTerm>>()
+  const noTerms = new SharedList<AliasTerm>([], 0)
+  let sharedTermListCount = 1
+  const ownTerms = (terms: Iterable<AliasTerm>, term: AliasTerm): SmallSet<AliasTerm> => {
+    const own = new SmallSet<AliasTerm>()
+    for (const member of terms) own.add(member)
+    return own.add(term)
+  }
+  /** `terms` with `term` added, which it does not hold: a long set is private and grows in place. */
+  const withTerm = (terms: TermSet | null, term: AliasTerm): TermSet => {
+    const base = terms ?? noTerms
+    if (base instanceof SmallSet) return base.add(term)
+    if (base.size >= SMALL_SET_LIST) return ownTerms(base, term)
+    let termId = termIds.get(term)
+    if (termId === undefined) termIds.set(term, (termId = termIds.size))
+    if (termId >= TERM_ID_LIMIT) return ownTerms(base, term)
+    const key = base.id * TERM_ID_LIMIT + termId
+    let next = sharedTermLists.get(key)
+    if (next === undefined) {
+      // At its exact length: a spread left room for growth in every list.
+      const members = new Array<AliasTerm>(base.size + 1)
+      for (let index = 0; index < base.size; index++) members[index] = base.members[index]!
+      members[base.size] = term
+      sharedTermLists.set(key, (next = new SharedList(members, sharedTermListCount++)))
+    }
+    return next
+  }
   // Copying selects own values at this level, then exposes each copied value
   // normally. It must neither copy the source prototype nor hide the copied
   // values' prototypes by recursively downgrading them to an own-only query.
@@ -3334,7 +3531,14 @@ export const censusGlobalHostMutations = (
   const childModeOf = (mode: SelectorMode): SelectorMode => (mode === 'copied-reachable' ? 'reachable' : mode)
   const copyModeOf = (mode: SelectorMode): SelectorMode => (mode === 'own' ? 'own' : 'copied-reachable')
   type SelectorSpec = { readonly source: ValueNode; readonly key: string | null; readonly target: ValueNode; readonly mode: SelectorMode }
-  type Selector = { readonly source: Component; readonly key: string | null; readonly target: Component; readonly mode: SelectorMode }
+  type Selector = {
+    readonly source: Component
+    readonly key: string | null
+    readonly target: Component
+    readonly mode: SelectorMode
+    /** The terms already scheduled through it: one field, not a table entry per selector. */
+    expanded: TermSet | null
+  }
 
   const inheritedPrototypeTerms = new Map<DeclarationId, AliasTerm>()
   const constructorsByPrototype = new Map<DeclarationId, DeclarationId>()
@@ -3492,14 +3696,13 @@ export const censusGlobalHostMutations = (
   const allValueNodes: ValueNode[] = []
   const pendingExpansion: ValueNode[] = []
   const selectors: SelectorSpec[] = []
-  let nextValueNodeId = 0
   const newValueNode = (expression: ts.Expression | null): ValueNode => {
     const node: ValueNode = {
-      id: nextValueNodeId++,
       expression,
-      out: new Set<ValueNode>(),
-      incoming: new Set<ValueNode>(),
-      seeds: new Set<AliasTerm>(),
+      component: null,
+      out: noMembers,
+      incoming: noMembers,
+      seeds: noMembers,
       expanded: expression === null
     }
     allValueNodes.push(node)
@@ -3517,7 +3720,9 @@ export const censusGlobalHostMutations = (
   const syntheticValueNode = (): ValueNode => newValueNode(null)
   const link = (source: ValueNode, target: ValueNode): void => {
     if (source === target || source.out.has(target)) return
+    source.out = ownSet(source.out)
     source.out.add(target)
+    target.incoming = ownSet(target.incoming)
     target.incoming.add(source)
   }
   const select = (source: ValueNode, key: string | null, target: ValueNode, mode: SelectorMode = 'own'): void => {
@@ -3538,7 +3743,7 @@ export const censusGlobalHostMutations = (
     if (existing) return existing
     const storage = syntheticValueNode()
     storageValueNodes.set(declaration, storage)
-    storage.seeds.add(storageTermOf(declaration))
+    addSeed(storage, storageTermOf(declaration))
     for (const write of writesOf(declaration)) if (write.value) valueNodeOf(write.value)
     if (!isFunctionObjectDeclaration(declaration)) {
       for (const value of wholeValuesOf(declaration)) link(valueNodeOf(value), storage)
@@ -3548,7 +3753,7 @@ export const censusGlobalHostMutations = (
       else {
         const source = syntheticValueNode()
         selectPath(read.source, read.keys, source)
-        storage.seeds.add({ kind: 'rest', source, rest: read.rest })
+        addSeed(storage, { kind: 'rest', source, rest: read.rest })
       }
     }
     return storage
@@ -3767,7 +3972,7 @@ export const censusGlobalHostMutations = (
         // is a source class or registered native receiver seeds what it
         // proved instead of the unconditional unknown a frame-proof gap does
         // not, by itself, establish.
-        node.seeds.add(publishedRepresentationOf(current) !== null ? representedNonGlobalTerm : opaqueTerm)
+        addSeed(node, publishedRepresentationOf(current) !== null ? representedNonGlobalTerm : opaqueTerm)
         return
       }
       const sourceFact = ts.isCallExpression(current) && sourceFrameOwnedCalls.has(current) ? sourceInvocationFacts.get(current) : undefined
@@ -3780,7 +3985,7 @@ export const censusGlobalHostMutations = (
         for (const target of reachableTargetsOfNode.get(current) ?? []) {
           const declaration = executableDeclarationOf(target.declaration)
           if (!declaration || declaration.getSourceFile().isDeclarationFile) continue
-          if (!flow.callableBodyIsIndexed(declaration)) node.seeds.add(opaqueTerm)
+          if (!flow.callableBodyIsIndexed(declaration)) addSeed(node, opaqueTerm)
           for (const returned of observableCompletionValuesOf(declaration)) linkReturnedValue(current, returned, node)
         }
       }
@@ -3794,29 +3999,29 @@ export const censusGlobalHostMutations = (
     const storage = bindingOf(current)
     if (storage !== null) link(storageValueNodeOf(storage), node)
     const sourceContents = sourceContainmentOf(current)
-    if (sourceContents) node.seeds.add(sourceContents)
-    for (const term of inheritedPrototypesOf(current)) node.seeds.add(term)
+    if (sourceContents) addSeed(node, sourceContents)
+    for (const term of inheritedPrototypesOf(current)) addSeed(node, term)
     for (const declaration of intrinsicPrototypesOf(current)) {
       let term = prototypeTerms.get(declaration)
       if (!term) {
         term = { kind: 'INTRINSIC_OBJECT', declaration }
         prototypeTerms.set(declaration, term)
       }
-      node.seeds.add(term)
+      addSeed(node, term)
     }
     if (isProvenGlobalObject(current)) {
-      node.seeds.add(globalTerm)
+      addSeed(node, globalTerm)
       return
     }
     if (ts.isObjectLiteralExpression(current) || ts.isArrayLiteralExpression(current)) {
-      node.seeds.add(literalTermOf(current))
+      addSeed(node, literalTermOf(current))
       addLiteralChildren(current)
       return
     }
     if (!ts.isCallExpression(current) && !ts.isNewExpression(current)) {
       const representation = publishedRepresentationOf(current)
       if (representation !== null && representation !== 'object') {
-        node.seeds.add(representedNonGlobalTerm)
+        addSeed(node, representedNonGlobalTerm)
         return
       }
     }
@@ -3846,7 +4051,7 @@ export const censusGlobalHostMutations = (
         return
       }
       if (refusedSourceInvocationCalls.has(current)) {
-        node.seeds.add(opaqueTerm)
+        addSeed(node, opaqueTerm)
         return
       }
       // `require( 'optional-peer' )` of a package absent from the build never
@@ -3879,7 +4084,7 @@ export const censusGlobalHostMutations = (
             if (frame.completions.kind === 'values') for (const value of frame.completions.values) linkReturnedValue(current, value, node)
           return
         }
-        node.seeds.add(representedNonGlobalTerm)
+        addSeed(node, representedNonGlobalTerm)
         if (representation === 'object' && declaration && !declaration.getSourceFile().isDeclarationFile && body) {
           for (const returned of observableCompletionValuesOf(declaration)) linkReturnedValue(current, returned, node)
         }
@@ -3893,7 +4098,7 @@ export const censusGlobalHostMutations = (
               `type=${checker.typeToString(type)} primitive=${primitiveResult(type)} native=${nativeResult(type, current)} represented=${representedObjectResult(type)}\n`
           )
         }
-        node.seeds.add(opaqueTerm)
+        addSeed(node, opaqueTerm)
       } else {
         if (call?.thisArgument) {
           for (const thisExpression of receiverReferencesOf(declaration)) link(valueNodeOf(call.thisArgument), valueNodeOf(thisExpression))
@@ -3906,18 +4111,18 @@ export const censusGlobalHostMutations = (
       const proxy = programProxyOf(current)
       if (proxy !== null) {
         link(valueNodeOf(proxy.target), node)
-        node.seeds.add({ kind: 'proxy', reads: proxy.reads.map(valueNodeOf) })
+        addSeed(node, { kind: 'proxy', reads: proxy.reads.map(valueNodeOf) })
         return
       }
       const constructionReturns = sourceConstructionReturnsOf(current.expression)
       for (const value of constructionReturns ?? []) link(valueNodeOf(value), node)
       const declaration = executableDeclarationOf(callDeclarationAt(current))
       const body = declaration && ts.isFunctionLike(declaration) ? (declaration as ts.FunctionLikeDeclarationBase).body : undefined
-      if (publishedRepresentationOf(current) !== null) node.seeds.add(representedNonGlobalTerm)
+      if (publishedRepresentationOf(current) !== null) addSeed(node, representedNonGlobalTerm)
       else if (constructionReturns !== null && constructionReturns.length > 0) {
         // All inherited completion origins were linked above.
       } else if (!declaration || declaration.getSourceFile().isDeclarationFile || !body || !constructedChainIsSourceOwned(current))
-        node.seeds.add(opaqueTerm)
+        addSeed(node, opaqueTerm)
       // A `new` whose constructor is compiled here evaluates to an object
       // THIS program allocated. That is a statement about provenance, and it
       // does not depend on the representation layer having placed the class:
@@ -3959,11 +4164,11 @@ export const censusGlobalHostMutations = (
     // receiver, so it (and the two checks beside it) apply unchanged.
     if (current.kind === ts.SyntaxKind.ThisKeyword || current.kind === ts.SyntaxKind.SuperKeyword) {
       if (sourceClassThisIsRepresented(current)) {
-        node.seeds.add(representedNonGlobalTerm)
+        addSeed(node, representedNonGlobalTerm)
         return
       }
       if (globalObjectReceivers.has(current as ReceiverReference)) {
-        node.seeds.add(globalTerm)
+        addSeed(node, globalTerm)
         return
       }
       const receivers = enumeratedThisReceiversOf(current)
@@ -3994,9 +4199,9 @@ export const censusGlobalHostMutations = (
           !anyCallSiteMayBindThisToGlobal &&
           sourceFileIsProvablyStrict(current.getSourceFile())
         ) {
-          node.seeds.add(representedNonGlobalTerm)
+          addSeed(node, representedNonGlobalTerm)
         } else {
-          node.seeds.add(opaqueTerm)
+          addSeed(node, opaqueTerm)
         }
       } else for (const receiver of receivers) link(valueNodeOf(receiver), node)
       return
@@ -4037,7 +4242,7 @@ export const censusGlobalHostMutations = (
       // else -- `null`, or a closed-but-empty set -- still seals to
       // `OPAQUE_UNKNOWN` exactly as before this fix existed.
       if (parameterValues !== null && parameterValues.length > 0) for (const value of parameterValues) link(valueNodeOf(value), node)
-      else node.seeds.add(opaqueTerm)
+      else addSeed(node, opaqueTerm)
     }
     link(storageValueNodeOf(declaration), node)
   }
@@ -4077,7 +4282,7 @@ export const censusGlobalHostMutations = (
   }
   let expansionIndex = 0
   while (expansionIndex < pendingExpansion.length) expandValueNode(pendingExpansion[expansionIndex++]!)
-  const graphNodeCount = allValueNodes.length
+  let graphNodeCount = allValueNodes.length
   const assertGraphFrozen = (): void => {
     if (allValueNodes.length !== graphNodeCount) throw new Error('global-host mutation graph grew after discovery')
   }
@@ -4106,43 +4311,71 @@ export const censusGlobalHostMutations = (
       }
     }
   }
-  const componentOf = new Map<ValueNode, Component>()
   const components: Component[] = []
+  // A component's member list is read only by the scale debug below; without
+  // it every component, nearly all of one node, would keep an array.
+  const componentNodes = process.env['GEA_HOST_MUTATION_SCALE_DEBUG'] === '1' ? new Map<Component, readonly ValueNode[]>() : null
+  // Marks a node the walk below has claimed before its component exists.
+  const claimed: Component = { out: noMembers, terms: null }
   for (let finishIndex = finishOrder.length - 1; finishIndex >= 0; finishIndex--) {
     const root = finishOrder[finishIndex]!
-    if (componentOf.has(root)) continue
+    if (root.component !== null) continue
     const members: ValueNode[] = []
     const stack = [root]
-    componentOf.set(root, undefined as unknown as Component)
+    root.component = claimed
     while (stack.length > 0) {
       const node = stack.pop()!
       members.push(node)
       for (const incoming of node.incoming) {
-        if (componentOf.has(incoming)) continue
-        componentOf.set(incoming, undefined as unknown as Component)
+        if (incoming.component !== null) continue
+        incoming.component = claimed
         stack.push(incoming)
       }
     }
-    const component: Component = { id: components.length, nodes: members, out: new Set<Component>() }
+    const component: Component = { out: noMembers, terms: null }
     components.push(component)
-    for (const member of members) componentOf.set(member, component)
+    componentNodes?.set(component, members)
+    for (const member of members) member.component = component
   }
   for (const node of allValueNodes) {
-    const source = componentOf.get(node)!
+    const source = node.component!
     for (const targetNode of node.out) {
-      const target = componentOf.get(targetNode)!
-      if (source !== target) source.out.add(target)
+      const target = targetNode.component!
+      if (source !== target) {
+        source.out = ownSet(source.out)
+        source.out.add(target)
+      }
     }
   }
+  // The condensation is done: the node edges, the walk's own state and the
+  // expansion queue are spent, and only components carry edges from here.
+  for (const node of allValueNodes) {
+    node.out = noMembers
+    node.incoming = noMembers
+  }
+  // Every question from here names an expression and wants its component, so
+  // the tables answer that directly and the nodes go once they are seeded --
+  // a quarter of a million of them on a large program. The few a term holds
+  // (a rest source, a proxy's reads, a containment's values) stay with it.
+  const componentByExpression = new Map<ts.Expression, Component>()
+  for (const [expression, node] of valueNodes) componentByExpression.set(expression, node.component!)
+  valueNodes.clear()
+  const containsRequestComponents = new Map<ts.Expression, Component>()
+  for (const [expression, node] of containsRequests) containsRequestComponents.set(expression, node.component!)
+  containsRequests.clear()
+  visited.clear()
+  finishOrder.length = 0
+  pendingExpansion.length = 0
   if (process.env['GEA_HOST_MUTATION_SCALE_DEBUG'] === '1') {
-    const biggest = components.reduce((max, candidate) => (candidate.nodes.length > max.nodes.length ? candidate : max))
+    const sizeOf = (component: Component): number => componentNodes?.get(component)?.length ?? 0
+    const biggest = components.reduce((max, candidate) => (sizeOf(candidate) > sizeOf(max) ? candidate : max))
     process.stderr.write(
-      `[HOST-MUTATION-SCALE] components=${components.length} allValueNodes=${allValueNodes.length} biggest component id=${biggest.id} nodes=${biggest.nodes.length}\n`
+      `[HOST-MUTATION-SCALE] components=${components.length} allValueNodes=${allValueNodes.length} biggest component id=${components.indexOf(biggest)} nodes=${sizeOf(biggest)}\n`
     )
     let shown = 0
     let total = 0
     for (const [declaration, node] of storageValueNodes) {
-      if (componentOf.get(node) !== biggest) continue
+      if (node.component !== biggest) continue
       total++
       if (shown >= 20) continue
       shown++
@@ -4154,16 +4387,26 @@ export const censusGlobalHostMutations = (
     }
     process.stderr.write(`  total storage declarations mapping to biggest component: ${total} of ${storageValueNodes.size}\n`)
   }
+  storageValueNodes.clear()
+  storageSelectionNodes.clear()
 
-  const termsByComponent = new Map<Component, Set<AliasTerm>>()
   const selectorTargets = new Map<Component, Selector[]>()
-  const dynamicOut = new Map<Component, Set<Component>>()
-  const pendingTerms: { readonly component: Component; readonly term: AliasTerm }[] = []
+  const dynamicOut = new Map<Component, SmallSet<Component>>()
+  // Each worklist is two parallel columns rather than an array of pairs: a
+  // pair object per entry was most of a queue's size.
+  const pendingTermComponents: Component[] = []
+  const pendingTerms: AliasTerm[] = []
   let pendingIndex = 0
-  const pendingSelections: { readonly selector: Selector; readonly term: AliasTerm }[] = []
+  const pendingSelectors: Selector[] = []
+  const pendingSelections: AliasTerm[] = []
   let pendingSelectionIndex = 0
-  const expandedSelections = new Map<Selector, Set<AliasTerm>>()
-  const selectorTargetsByKey = new Map<Component, Map<string | null, Map<SelectorMode, Set<Component>>>>()
+  // Per (source, key), the known targets of each mode in a three-slot list --
+  // kept only for a source with many selectors. Nearly every source has one
+  // or two, and a key map per source was the largest table the census held;
+  // a short list is scanned instead, which answers the same question.
+  const selectorTargetsByKey = new Map<Component, Map<string | null, (SmallSet<Component> | undefined)[]>>()
+  const SELECTOR_SCAN_LIMIT = 16
+  const selectorModeSlot = { own: 0, reachable: 1, 'copied-reachable': 2 } as const
   // GEA_HOST_MUTATION_SCALE_DEBUG=1: rank which components are the source of
   // the most SCHEDULED (selector, term) expansions, to find a blowup without
   // guessing. Never gated into the solve loop itself.
@@ -4171,14 +4414,14 @@ export const censusGlobalHostMutations = (
   const scheduleCountBySource = new Map<Component, number>()
   const functionWalkCounts = new Map<ts.Node, number>()
   const sampleTextOf = (component: Component): string => {
-    for (const node of component.nodes) {
+    for (const node of componentNodes?.get(component) ?? []) {
       if (node.expression) {
         const file = node.expression.getSourceFile()
         const { line, character } = file.getLineAndCharacterOfPosition(node.expression.getStart(file))
         return `${displayPath(file.fileName)}:${line + 1}:${character + 1} ${node.expression.getText(file).slice(0, 80)}`
       }
     }
-    return `<synthetic component ${component.id}>`
+    return `<synthetic component ${components.indexOf(component)}>`
   }
   let scheduleDebugCount = 0
   const reportScaleDebug = (): void => {
@@ -4186,11 +4429,11 @@ export const censusGlobalHostMutations = (
     if (scheduleDebugCount % 200000 !== 0) return
     const top = [...scheduleCountBySource.entries()].sort((left, right) => right[1] - left[1]).slice(0, 10)
     process.stderr.write(
-      `[HOST-MUTATION-SCALE] scheduled=${scheduleDebugCount} pendingSelections=${pendingSelections.length} distinctSelectors=${expandedSelections.size} distinctSources=${scheduleCountBySource.size}\n`
+      `[HOST-MUTATION-SCALE] scheduled=${scheduleDebugCount} pendingSelections=${pendingSelections.length} distinctSources=${scheduleCountBySource.size}\n`
     )
     for (const [component, count] of top) {
       process.stderr.write(
-        `  count=${count} selectors=${selectorTargets.get(component)?.length ?? 0} terms=${termsByComponent.get(component)?.size ?? 0} :: ${sampleTextOf(component)}\n`
+        `  count=${count} selectors=${selectorTargets.get(component)?.length ?? 0} terms=${component.terms?.size ?? 0} :: ${sampleTextOf(component)}\n`
       )
     }
     if (top[0]) {
@@ -4199,7 +4442,7 @@ export const censusGlobalHostMutations = (
       const sample = list.slice(-8)
       for (const selector of sample) {
         process.stderr.write(
-          `  [WORST-SAMPLE] key=${JSON.stringify(selector.key)} mode=${selector.mode} target.id=${selector.target.id} targetSample=${sampleTextOf(selector.target)}\n`
+          `  [WORST-SAMPLE] key=${JSON.stringify(selector.key)} mode=${selector.mode} target.id=${components.indexOf(selector.target)} targetSample=${sampleTextOf(selector.target)}\n`
         )
       }
     }
@@ -4214,49 +4457,41 @@ export const censusGlobalHostMutations = (
   }
   const componentOfExpression = (expression: ts.Expression): Component => {
     const current = unwrapErasedExpression(expression)
-    const node = valueNodes.get(current)
-    if (!node) {
+    const component = componentByExpression.get(current)
+    if (component === undefined) {
       const file = current.getSourceFile()
       const { line, character } = file.getLineAndCharacterOfPosition(current.getStart())
       throw new Error(
         `global-host mutation graph was not closed for ${ts.SyntaxKind[current.kind]} \`${current.getText()}\` at ${file.fileName}:${line + 1}:${character + 1}`
       )
     }
-    const component = componentOf.get(node)
-    if (!component) throw new Error(`global-host mutation graph has no component for ${current.kind}`)
     return component
   }
   const addTerm = (component: Component, term: AliasTerm): void => {
-    let terms = termsByComponent.get(component)
-    if (!terms) {
-      terms = new Set<AliasTerm>()
-      termsByComponent.set(component, terms)
-    }
-    if (!terms.has(term)) {
-      terms.add(term)
-      pendingTerms.push({ component, term })
+    const terms = component.terms
+    if (terms === null || !terms.has(term)) {
+      component.terms = withTerm(terms, term)
+      pendingTermComponents.push(component)
+      pendingTerms.push(term)
     }
   }
   const addFlow = (source: Component, target: Component): void => {
     if (source === target) return
     let targets = dynamicOut.get(source)
     if (!targets) {
-      targets = new Set<Component>()
+      targets = new SmallSet<Component>()
       dynamicOut.set(source, targets)
     }
     if (targets.has(target)) return
     targets.add(target)
-    for (const term of termsByComponent.get(source) ?? []) addTerm(target, term)
+    for (const term of source.terms ?? []) addTerm(target, term)
   }
   const scheduleSelection = (selector: Selector, term: AliasTerm): void => {
-    let expanded = expandedSelections.get(selector)
-    if (!expanded) {
-      expanded = new Set<AliasTerm>()
-      expandedSelections.set(selector, expanded)
-    }
-    if (expanded.has(term)) return
-    expanded.add(term)
-    pendingSelections.push({ selector, term })
+    const expanded = selector.expanded
+    if (expanded !== null && expanded.has(term)) return
+    selector.expanded = withTerm(expanded, term)
+    pendingSelectors.push(selector)
+    pendingSelections.push(term)
     if (scaleDebug) {
       scheduleCountBySource.set(selector.source, (scheduleCountBySource.get(selector.source) ?? 0) + 1)
       reportScaleDebug()
@@ -4270,45 +4505,57 @@ export const censusGlobalHostMutations = (
   // One synthetic component per source holds the answer -- it carries the
   // source's only null selector, and every other null-key selection on that
   // source, an asker's or a containing value's, is a flow out of it.
-  const deepComponents = new Map<Component, Map<SelectorMode, Component>>()
+  // Per source, its deep component for each mode, in a three-slot list.
+  const deepComponents = new Map<Component, (Component | undefined)[]>()
   const deepOf = (source: Component, mode: SelectorMode): Component => {
     let modes = deepComponents.get(source)
-    if (!modes) deepComponents.set(source, (modes = new Map()))
-    const existing = modes.get(mode)
+    if (!modes) deepComponents.set(source, (modes = [undefined, undefined, undefined]))
+    const existing = modes[selectorModeSlot[mode]]
     if (existing) return existing
-    const deep: Component = { id: components.length, nodes: [], out: new Set<Component>() }
+    const deep: Component = { out: noMembers, terms: null }
     components.push(deep)
-    modes.set(mode, deep)
+    modes[selectorModeSlot[mode]] = deep
     addSelector(source, null, deep, mode)
     return deep
   }
+  const knownTargetsOf = (
+    byKey: Map<string | null, (SmallSet<Component> | undefined)[]>,
+    key: string | null,
+    mode: SelectorMode
+  ): SmallSet<Component> => {
+    let byMode = byKey.get(key)
+    if (!byMode) {
+      byMode = [undefined, undefined, undefined]
+      byKey.set(key, byMode)
+    }
+    let knownTargets = byMode[selectorModeSlot[mode]]
+    if (!knownTargets) {
+      knownTargets = new SmallSet<Component>()
+      byMode[selectorModeSlot[mode]] = knownTargets
+    }
+    return knownTargets
+  }
   const addSelector = (source: Component, key: string | null, target: Component, mode: SelectorMode = 'own'): void => {
-    if (key === null && deepComponents.get(source)?.get(mode) !== target) {
+    if (key === null && deepComponents.get(source)?.[selectorModeSlot[mode]] !== target) {
       addFlow(deepOf(source, mode), target)
       return
     }
+    const targets = selectorTargets.get(source)
     let byKey = selectorTargetsByKey.get(source)
-    if (!byKey) {
-      byKey = new Map<string | null, Map<SelectorMode, Set<Component>>>()
+    if (byKey === undefined && targets !== undefined && targets.length >= SELECTOR_SCAN_LIMIT) {
+      byKey = new Map<string | null, (SmallSet<Component> | undefined)[]>()
+      for (const known of targets) knownTargetsOf(byKey, known.key, known.mode).add(known.target)
       selectorTargetsByKey.set(source, byKey)
     }
-    let byMode = byKey.get(key)
-    if (!byMode) {
-      byMode = new Map<SelectorMode, Set<Component>>()
-      byKey.set(key, byMode)
-    }
-    let knownTargets = byMode.get(mode)
-    if (!knownTargets) {
-      knownTargets = new Set<Component>()
-      byMode.set(mode, knownTargets)
-    }
-    if (knownTargets.has(target)) return
-    knownTargets.add(target)
-    const selector: Selector = { source, key, target, mode }
-    const targets = selectorTargets.get(source)
+    if (byKey !== undefined) {
+      const knownTargets = knownTargetsOf(byKey, key, mode)
+      if (knownTargets.has(target)) return
+      knownTargets.add(target)
+    } else if (targets?.some((known) => known.key === key && known.target === target && known.mode === mode)) return
+    const selector: Selector = { source, key, target, mode, expanded: null }
     if (targets) targets.push(selector)
     else selectorTargets.set(source, [selector])
-    for (const term of termsByComponent.get(source) ?? []) scheduleSelection(selector, term)
+    for (const term of source.terms ?? []) scheduleSelection(selector, term)
   }
   const addLiteralSelection = (
     literal: ts.ObjectLiteralExpression | ts.ArrayLiteralExpression,
@@ -4396,7 +4643,7 @@ export const censusGlobalHostMutations = (
       // trap a read forwards to the target, whose terms this proxy's node
       // already carries.
       for (const value of term.reads) {
-        const source = componentOf.get(value)
+        const source = value.component
         if (!source) throw new Error('global-host mutation proxy read was not condensed')
         if (selector.key === null) addSelector(source, null, target, childModeOf(selector.mode))
         else addFlow(source, target)
@@ -4406,7 +4653,7 @@ export const censusGlobalHostMutations = (
     if (term.kind === 'source-containment') {
       if (selector.key === null) {
         for (const value of selector.mode === 'copied-reachable' ? term.ownValues : term.values) {
-          const source = componentOf.get(value)
+          const source = value.component
           if (!source) throw new Error('global-host mutation source containment was not condensed')
           addSelector(source, null, target, childModeOf(selector.mode))
         }
@@ -4491,7 +4738,7 @@ export const censusGlobalHostMutations = (
     if (term.kind === 'literal') addLiteralSelection(term.literal, selector.key, target, selector.mode)
     else if (term.kind === 'storage') addStorageSelection(term.declaration, selector.key, target, selector.mode)
     else {
-      const source = componentOf.get(term.source)
+      const source = term.source.component
       if (!source) throw new Error('global-host mutation rest source was not condensed')
       if (selector.key === null) addSelector(source, null, target, selector.mode)
       else if (term.rest.kind === 'object') {
@@ -4508,7 +4755,7 @@ export const censusGlobalHostMutations = (
           // selector is the terminating answer: it matches EVERY key, so it
           // over-approximates the enumeration it replaces rather than dropping
           // any of it.
-          if (term.rest.offset > 0 && termsByComponent.get(source)?.has(term)) addSelector(source, null, target, selector.mode)
+          if (term.rest.offset > 0 && source.terms?.has(term)) addSelector(source, null, target, selector.mode)
           else addSelector(source, String(index + term.rest.offset), target, selector.mode)
         }
       }
@@ -4517,34 +4764,53 @@ export const censusGlobalHostMutations = (
   // The worklists only ever grow; entries behind the read index are dead.
   // Dropping them once they outnumber the live tail keeps each array within
   // V8's element limit at amortized constant cost.
-  const compact = <T>(queue: T[], index: number): number => {
-    if (index < 1 << 20 || index * 2 < queue.length) return index
-    queue.splice(0, index)
+  const compact = <A, B>(first: A[], second: B[], index: number): number => {
+    if (index < 1 << 20 || index * 2 < first.length) return index
+    first.splice(0, index)
+    second.splice(0, index)
     return 0
   }
   const solve = (): void => {
     while (pendingIndex < pendingTerms.length || pendingSelectionIndex < pendingSelections.length) {
-      pendingIndex = compact(pendingTerms, pendingIndex)
-      pendingSelectionIndex = compact(pendingSelections, pendingSelectionIndex)
+      pendingIndex = compact(pendingTermComponents, pendingTerms, pendingIndex)
+      pendingSelectionIndex = compact(pendingSelectors, pendingSelections, pendingSelectionIndex)
       if (pendingIndex < pendingTerms.length) {
-        const { component, term } = pendingTerms[pendingIndex++]!
-        if (!(termsByComponent.get(component)?.has(term) ?? false)) continue
+        const component = pendingTermComponents[pendingIndex]!
+        const term = pendingTerms[pendingIndex++]!
+        if (!(component.terms?.has(term) ?? false)) continue
         for (const target of component.out) addTerm(target, term)
         for (const target of dynamicOut.get(component) ?? []) addTerm(target, term)
         for (const selector of selectorTargets.get(component) ?? []) scheduleSelection(selector, term)
         continue
       }
-      const { selector, term } = pendingSelections[pendingSelectionIndex++]!
+      const selector = pendingSelectors[pendingSelectionIndex]!
+      const term = pendingSelections[pendingSelectionIndex++]!
       expandSelector(selector, term)
     }
+    // Every entry is behind its read index now. The census's answers outlive
+    // the solve through the closures this function returns, and so would two
+    // queues of nothing but spent entries -- most of a million on a large
+    // program.
+    pendingTermComponents.length = 0
+    pendingTerms.length = 0
+    pendingIndex = 0
+    pendingSelectors.length = 0
+    pendingSelections.length = 0
+    pendingSelectionIndex = 0
   }
   assertGraphFrozen()
-  for (const selector of selectors)
-    addSelector(componentOf.get(selector.source)!, selector.key, componentOf.get(selector.target)!, selector.mode)
+  for (const selector of selectors) addSelector(selector.source.component!, selector.key, selector.target.component!, selector.mode)
+  selectors.length = 0
   for (const node of allValueNodes) {
-    const component = componentOf.get(node)!
+    const component = node.component!
     for (const seed of node.seeds) addTerm(component, seed)
+    node.seeds = noMembers
   }
+  // Every node is seeded and reached through its expression's entry from
+  // here; the list is kept only as the frozen graph's size, which a node
+  // minted now would still change.
+  allValueNodes.length = 0
+  graphNodeCount = 0
   solve()
   type AliasFacts = {
     readonly global: boolean
@@ -4553,6 +4819,13 @@ export const censusGlobalHostMutations = (
     readonly prototypes: ReadonlySet<DeclarationId>
   }
   const factsByComponent = new Map<Component, AliasFacts>()
+  // Nearly every component reaches no intrinsic object, and its facts are
+  // then one of eight flag combinations: they are shared, with one shared
+  // empty prototype set, instead of an object and a `Set` per component.
+  const noPrototypes: ReadonlySet<DeclarationId> = new Set()
+  const plainFacts: AliasFacts[] = []
+  for (let flags = 0; flags < 8; flags++)
+    plainFacts.push({ global: (flags & 1) !== 0, opaque: (flags & 2) !== 0, represented: (flags & 4) !== 0, prototypes: noPrototypes })
   // The contains census -- a null-key selection through every member an
   // argument can reach -- answers one question, asked once below at
   // `global contained in unknown call argument`: for a call whose callee this
@@ -4569,30 +4842,42 @@ export const censusGlobalHostMutations = (
       if (!ts.isCallExpression(node) || !callAsksContainsGlobal(node)) continue
       for (const argument of node.arguments) {
         const current = unwrapErasedExpression(argument)
-        const target = containsRequests.get(current)
+        const target = containsRequestComponents.get(current)
         if (!target) throw new Error(`global-host contains census has no request for ${ts.SyntaxKind[current.kind]}`)
         containsCensused.add(current)
-        addSelector(componentOfExpression(current), null, componentOf.get(target)!, 'reachable')
+        addSelector(componentOfExpression(current), null, target, 'reachable')
       }
     }
     solve()
     assertGraphFrozen()
+    // The census is closed: nothing adds a selector or a flow after this, so
+    // the solver's own indexes and the copy graph's edges are spent. Only the
+    // terms are read again, through the node-to-component map.
+    selectorTargets.clear()
+    selectorTargetsByKey.clear()
+    dynamicOut.clear()
+    for (const component of components) component.out = noMembers
     for (const component of components) {
       let global = false
       let opaque = false
       let represented = false
-      const prototypes = new Set<DeclarationId>()
-      for (const term of termsByComponent.get(component) ?? []) {
+      let prototypes: Set<DeclarationId> | null = null
+      for (const term of component.terms ?? []) {
         opaque ||= term.kind === 'OPAQUE_UNKNOWN'
         global ||= term.kind === 'GLOBAL_TRUE'
         represented ||= term.kind === 'REPRESENTED_NON_GLOBAL'
-        if (term.kind === 'INTRINSIC_OBJECT') prototypes.add(term.declaration)
+        if (term.kind === 'INTRINSIC_OBJECT') (prototypes ??= new Set()).add(term.declaration)
       }
-      factsByComponent.set(component, { global, opaque, represented, prototypes })
+      factsByComponent.set(
+        component,
+        prototypes === null
+          ? plainFacts[(global ? 1 : 0) | (opaque ? 2 : 0) | (represented ? 4 : 0)]!
+          : { global, opaque, represented, prototypes }
+      )
     }
   }
   // `finishCensus` (below) sets `factsByComponent` for every member of
-  // `components`, and `componentOfExpression`/`componentOf.get` can only ever
+  // `components`, and `componentOfExpression`/`node.component` can only ever
   // hand back a component that is a member of `components` -- both already
   // throw rather than return an unknown component. A missing entry here is
   // therefore not a value this census failed to reach; it is `aliasFacts` or
@@ -4604,7 +4889,7 @@ export const censusGlobalHostMutations = (
   const aliasFacts = (expression: ts.Expression): AliasFacts => {
     const component = componentOfExpression(expression)
     const facts = factsByComponent.get(component)
-    if (!facts) throw new Error(`global-host mutation graph has no alias facts for component ${component.id}`)
+    if (!facts) throw new Error(`global-host mutation graph has no alias facts for component ${components.indexOf(component)}`)
     return facts
   }
   /**
@@ -4931,13 +5216,12 @@ export const censusGlobalHostMutations = (
   /** Does this value, including concrete object/array fields, retain or obscure the global object? */
   const containsGlobal = (expression: ts.Expression): boolean => {
     const current = unwrapErasedExpression(expression)
-    const target = containsRequests.get(current)
-    if (!target || !containsCensused.has(current)) {
+    const component = containsRequestComponents.get(current)
+    if (!component || !containsCensused.has(current)) {
       throw new Error(`global-host contains census was not filed for ${ts.SyntaxKind[current.kind]}`)
     }
-    const component = componentOf.get(target)!
     const facts = factsByComponent.get(component)
-    if (!facts) throw new Error(`global-host mutation graph has no alias facts for component ${component.id}`)
+    if (!facts) throw new Error(`global-host mutation graph has no alias facts for component ${components.indexOf(component)}`)
     if (facts.global) return true
     if (!facts.opaque || publishedRepresentationOf(current) !== null) return false
     // Same precondition `mayAliasGlobal` states: where the global object never
@@ -5037,11 +5321,11 @@ export const censusGlobalHostMutations = (
     const cached = ownKeysByComponent.get(root)
     if (cached) return cached
     const keys = new Set<string>()
-    const pending: AliasTerm[] = [...(termsByComponent.get(root) ?? [])]
+    const pending: AliasTerm[] = [...(root.terms ?? [])]
     const seen = new Set<AliasTerm>()
     let unknown = false
     const addExpression = (value: ts.Expression): void => {
-      for (const term of termsByComponent.get(componentOfExpression(value)) ?? []) pending.push(term)
+      for (const term of componentOfExpression(value).terms ?? []) pending.push(term)
     }
     while (pending.length > 0) {
       const term = pending.pop()!
@@ -5634,7 +5918,7 @@ export const censusGlobalHostMutations = (
     // `const { initialize } = optional`, where `optional` only ever holds the
     // program's own `{ kModuleError }` stub for a types-only peer package.
     // A source the alias graph never modelled proves nothing either way.
-    const receiver = valueNodes.has(unwrapErasedExpression(source)) ? aliasFacts(source) : null
+    const receiver = componentByExpression.has(unwrapErasedExpression(source)) ? aliasFacts(source) : null
     if (receiver && !receiver.opaque && !receiver.global && !receiver.represented && receiver.prototypes.size === 0) return null
     const name = element.propertyName ?? element.name
     if (!ts.isIdentifier(name) && !ts.isStringLiteralLike(name)) return null
@@ -6411,8 +6695,8 @@ export const censusGlobalHostMutations = (
         const scalarParameters = hostNativeScalarParametersOf(node)
         for (const [position, argument] of node.arguments.entries()) {
           const current = unwrapErasedExpression(argument)
-          const target = containsRequests.get(current)
-          const component = target ? factsByComponent.get(componentOf.get(target)!) : undefined
+          const target = containsRequestComponents.get(current)
+          const component = target ? factsByComponent.get(target) : undefined
           // A scalar host parameter reaches what its primitive reaches, and
           // nothing else of the cell's component (`hostNativeScalarParametersOf`).
           const scalar = scalarParameters.get(position)

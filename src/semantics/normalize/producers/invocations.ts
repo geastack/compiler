@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { staticRequireOutcomeOf } from '../commonjs-require.js'
 import { isNullBlindParameter } from '../null-blind-parameter.js'
 import { intrinsicPropertyCallOf } from '../intrinsic-property-call.js'

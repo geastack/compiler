@@ -254,6 +254,8 @@ export const runEmit = async (argv: readonly string[], moduleGraph = false): Pro
     debugSource: parsed.debugSource,
     translationUnits: parsed.translationUnits,
     unitBaseName: unitStemOf(parsed.input),
+    // A build: nothing past the point emission became impossible is read.
+    stopWhenUnemittable: true,
     ...(parsed.entrySymbol === null ? {} : { entrySymbol: parsed.entrySymbol })
   })
 
@@ -290,6 +292,7 @@ const runModuleGraph = (parsed: EmitRequest, plugins: readonly CompilerPlugin[])
     debugSource: parsed.debugSource,
     translationUnits: parsed.translationUnits,
     unitBaseName: unitStemOf(graph.entry),
+    stopWhenUnemittable: true,
     ...(parsed.entrySymbol === null ? {} : { entrySymbol: parsed.entrySymbol })
   })
   return report(result, parsed.outDir)
@@ -375,6 +378,7 @@ const report = (result: CompileResult, outDirName: string): number => {
         : `compile: certified but nothing emitted; ${result.loweringBlockers.length} lowering blocker(s), ` +
             `${result.emissionRefusals.length} emission refusal(s)\n`
     )
+    for (const blocker of result.abiBlockers) process.stderr.write(`  abi       ${blocker.functionId}: ${blocker.reason}\n`)
     for (const blocker of result.loweringBlockers) process.stderr.write(`  lowering  ${blocker.owner}: ${blocker.reason}\n`)
     // The owner is an ordinal into the TRANSFORMED source, which no reader can
     // walk back by hand once a source transform has added nodes; the cited

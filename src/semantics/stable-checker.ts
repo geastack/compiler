@@ -1,5 +1,17 @@
-import type ts from 'typescript'
+import type ts from '#typescript'
 import { createCallInvalidatedNarrowing } from './call-invalidated-narrowing.js'
+
+/** Each stable checker's memo of `getTypeAtLocation`, readable without asking. */
+const typeMemos = new WeakMap<ts.TypeChecker, WeakMap<ts.Node, ts.Type>>()
+
+/**
+ * The type `checker.getTypeAtLocation(node)` already answered, without asking
+ * it: `undefined` for a node it was never asked about, or a checker that is not
+ * one `withStableTypeQueries` made. A memo whose answer is this one can say so
+ * instead of holding it again, since the stable checker gives the same type for
+ * the node every time it is asked.
+ */
+export const memoizedTypeAt = (checker: ts.TypeChecker, node: ts.Node): ts.Type | undefined => typeMemos.get(checker)?.get(node)
 
 /**
  * The program and checker are immutable inputs to census inference. TypeScript
@@ -121,18 +133,27 @@ export const withStableTypeQueries = (checker: ts.TypeChecker, program?: ts.Prog
     return signatures
   }
   // Preserve the checker's full surface, including capability-checked internal
-  // constructors used by existing inference producers, without copying it: the
-  // checker is the prototype, so every other member is the checker's own. Not
-  // a `Proxy` -- every checker call the frontend makes goes through this
-  // object, and a proxy's `get` trap was a measurable share of normalization.
-  return Object.assign(Object.create(checker) as ts.TypeChecker, {
-    getTypeAtLocation,
-    getSymbolAtLocation,
-    getApparentType,
-    getNonNullableType,
-    getPropertiesOfType,
-    getBaseTypes,
-    getPropertyOfType,
-    getSignaturesOfType
-  })
+  // members used by existing inference producers, by copying its own members:
+  // TypeScript's checker is one object literal of functions. Not a `Proxy` --
+  // every checker call the frontend makes goes through this object, and a
+  // proxy's `get` trap was a measurable share of normalization. Not
+  // `Object.create(checker)` either: that makes the checker a prototype, and V8
+  // keeps maps its optimized code embedded alive, prototypes included, for a
+  // GC or two after last use, so the checker, the program and every AST
+  // (0.27 GB on a 48K-line app) outlived the frontend into the backend.
+  const stable = Object.assign(
+    { ...checker },
+    {
+      getTypeAtLocation,
+      getSymbolAtLocation,
+      getApparentType,
+      getNonNullableType,
+      getPropertiesOfType,
+      getBaseTypes,
+      getPropertyOfType,
+      getSignaturesOfType
+    }
+  )
+  typeMemos.set(stable, types)
+  return stable
 }

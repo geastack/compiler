@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'

@@ -58,6 +58,7 @@ array-sort-merges-runs-stably.runtime.ts.cpp 95a445dcec4b
 array-spread-into-fixed-formals.runtime.ts.cpp c3864c163aa4
 arrow-contextual-this.runtime.ts.cpp a843e0084f3f
 arrow-this-passed-and-used-as-receiver-keeps-this.runtime.ts.cpp 076674923015
+as-const-tuple-array-literal-for-of-destructuring.runtime.ts.cpp 138439bd20c3
 asserted-arm-into-interface-slot.ts.cpp 9489ad3371a6
 asserted-arrow-drops-optional-parameter-and-narrows-result.runtime.ts.cpp fa50c994d6a7
 asserted-class-over-class-or-array-union-writes-the-class-arm.runtime.ts.cpp 59217433950d
@@ -575,6 +576,7 @@ implicit-arguments-number.js.cpp d964cd21c853
 implicit-arguments-returned-member.js.cpp 546662efc5d2
 in-boxed-key-over-string-dictionary.ts.cpp 68c9a92c414a
 in-boxed-key.ts.cpp 83e25fae7fb4
+in-dynamic-key-on-guarded-open-interface.runtime.ts.cpp a8996bd9ba5e
 in-over-error-or-interface-extending-error.runtime.ts.cpp 04cd8e5d3bb2
 in-unique-symbol-key-sidecar.ts.cpp 83051dca530a
 indexed-absence-forwarded-cache.runtime.js.cpp adbfb47d3c65
@@ -671,6 +673,7 @@ json-stringify-of-undefined-is-undefined.runtime.ts.cpp 6338f7f22c79
 json-stringify-record-with-dynamic-dictionary-field.runtime.ts.cpp b1010dfc124a
 json-stringify-replacer.ts.cpp f6dfc12166dc
 json-stringify-tuples-are-arrays.ts.cpp 58af76ba0b96
+jsx-class-component-inherited-props-unread-template.tsx.cpp bfc1a9c4fb5e
 jsx-class-map.tsx.cpp 32c70926c421
 jsx-component-timer-initialization.tsx.cpp 6169a2a334a6
 jsx-conditional-reactive-class.tsx.cpp f5548faa2aa8
@@ -700,6 +703,7 @@ literal-method-result-instantiates-generic-member.runtime.ts.cpp 48a8249c72df
 literal-read-miss-cache-rechecks-the-expando.runtime.ts.cpp c75defa1ee80
 literal-reads-of-arrays-and-documents-keep-their-answers.runtime.ts.cpp 3a83dd944e84
 live-view-enumeration-matches-the-original.runtime.js.cpp 74908e4a42f2
+live-view-nested-record-field-read.runtime.ts.cpp a983036a0289
 live-view-open-key-writes-reach-the-original.runtime.js.cpp 6bc026eb18d8
 live-view-value-walks-read-the-original.runtime.js.cpp c3391c26c450
 local-iteration.ts.cpp 6251f747d830
@@ -930,6 +934,7 @@ object-literal-into-intersection-or-array-union.runtime.ts.cpp 1729e8505e74
 object-literal-into-union-with-tuple-and-array-arms.runtime.ts.cpp 1900c0922b16
 object-literal-out-of-order-states-its-order-once.runtime.ts.cpp 6f8aeb4e38e1
 object-literal-spreading-generic-rest-element.runtime.ts.cpp 37633dc868c5
+object-parameter-receives-record-or-class-state.runtime.ts.cpp 971f76ea95cc
 object-pattern-numeric-key-over-array.ts.cpp 743d4fe31321
 object-prototype-tag.runtime.js.cpp aecb255989dd
 object-spread-any-dictionary-into-typed-options.runtime.ts.cpp bbf33dee1eda

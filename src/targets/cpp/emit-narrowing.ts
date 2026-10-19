@@ -1861,7 +1861,18 @@ const fieldIndexOf = (record: Extract<Representation, { kind: 'record' }>): Read
 const recordRecastPending = new WeakMap<Representation, WeakSet<Representation>>()
 
 /** Top-level `recordsRecastable` answers, per (source, target) carrier pair. */
-const recordRecastAnswers = new WeakMap<Representation, WeakMap<Representation, boolean>>()
+let recordRecastAnswers = new WeakMap<Representation, WeakMap<Representation, boolean>>()
+
+/**
+ * Drops every remembered top-level answer. Called once lowering is done: the
+ * eager graph asks about every ordered pair of record carriers while it is
+ * built -- over a million answers on a large application, some 37 MB of
+ * nested tables -- and afterwards only the printer asks, for the pairs the
+ * graph kept, each of which it answers again from the same carriers.
+ */
+export const forgetRecordRecastAnswers = (): void => {
+  recordRecastAnswers = new WeakMap()
+}
 
 /**
  * `seen` is the coinductive cycle guard: `null` at the top level, and the set

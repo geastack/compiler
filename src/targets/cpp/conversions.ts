@@ -705,6 +705,12 @@ const heldPairUnusedOf =
     }
   }
 
+// A pair's classifier and materializer name their domain with ONE string
+// (`pairedDomain`). The conversion layer checks the two are equal, and V8
+// compares two distinct concatenated strings by flattening each into a
+// private copy of its whole text -- for a recast or class view that is the
+// pair's full source and target representation keys, twice per node: about
+// 130 MB of a 48K-line app's census. One shared string compares by identity.
 const cppConversionTables = (
   layouts: RecordLayoutPolicy,
   nativeNarrowing: (source: Representation, target: Representation) => NativeNarrowingContract,
@@ -1170,11 +1176,12 @@ const cppConversionTables = (
       // AGREEING: an `optional(T,undefined)` narrowed by `x === null` is not this
       // pair, and the checker would not have produced it.
       if (source.kind === 'optional' && target.kind === source.absence) {
+        const pairedDomain = `absent-optional:${source.absence}`
         return {
-          classifier: { id: 'gea::Optional::has_value', domain: `absent-optional:${source.absence}` },
+          classifier: { id: 'gea::Optional::has_value', domain: pairedDomain },
           materializer: {
             id: 'gea::constant',
-            domain: `absent-optional:${source.absence}`,
+            domain: pairedDomain,
             allocates: false,
             nativeFieldProtocol: 'unused',
             ...nativeClassReferenceIdentityOf(source, target)
@@ -1251,11 +1258,12 @@ const cppConversionTables = (
       // `static_cast<Derived*>` of the SAME pointee: the payload travels as the
       // object it already was, so payload transport is preserved as well.
       if (downcastsToDerived(source, target)) {
+        const pairedDomain = `class-descendant:${representationKey(target)}`
         return {
-          classifier: { id: 'gea::host::hasNativeClassLayoutRef', domain: `class-descendant:${representationKey(target)}` },
+          classifier: { id: 'gea::host::hasNativeClassLayoutRef', domain: pairedDomain },
           materializer: {
             id: 'gea::host::downcastClassRef',
-            domain: `class-descendant:${representationKey(target)}`,
+            domain: pairedDomain,
             allocates: false,
             requiresSourceGuard: true,
             nativeFieldProtocol: 'unused',
@@ -1272,11 +1280,12 @@ const cppConversionTables = (
       // `classFamilyLoadText`. `conversion/build.ts` owns the predicate and this
       // imports it, so the pair this admits is exactly the pair that proposed it.
       if (narrowsToDescendantClassUnion(source, target)) {
+        const pairedDomain = `class-descendant-union:${representationKey(target)}`
         return {
-          classifier: { id: 'gea::host::hasNativeClassLayoutRef', domain: `class-descendant-union:${representationKey(target)}` },
+          classifier: { id: 'gea::host::hasNativeClassLayoutRef', domain: pairedDomain },
           materializer: {
             id: 'gea::host::downcastClassRef',
-            domain: `class-descendant-union:${representationKey(target)}`,
+            domain: pairedDomain,
             allocates: false,
             requiresSourceGuard: true,
             nativeFieldProtocol: 'unused',
@@ -1301,11 +1310,12 @@ const cppConversionTables = (
         target.kind === 'class-ref' &&
         narrowingReachesTarget(source, target)
       ) {
+        const pairedDomain = `class-descendant-sum:${representationKey(target)}`
         return {
-          classifier: { id: 'gea::host::hasNativeClassLayoutRef', domain: `class-descendant-sum:${representationKey(target)}` },
+          classifier: { id: 'gea::host::hasNativeClassLayoutRef', domain: pairedDomain },
           materializer: {
             id: 'gea::host::downcastClassRef',
-            domain: `class-descendant-sum:${representationKey(target)}`,
+            domain: pairedDomain,
             allocates: false,
             requiresSourceGuard: true,
             // Presence and sum selection over native class handles never reads
@@ -1369,11 +1379,12 @@ const cppConversionTables = (
         if (!installed) return null
         const selection = nativeSubsetSelectionRecipeOf(source, target)
         if (selection) return nativeSelectionConversion(source, target, selection)
+        const pairedDomain = `live-arm-subset:${targetKey}`
         return {
-          classifier: { id: 'gea::TaggedUnion::is', domain: `live-arm-subset:${targetKey}` },
+          classifier: { id: 'gea::TaggedUnion::is', domain: pairedDomain },
           materializer: {
             id: 'gea::TaggedUnion::ofArm',
-            domain: `live-arm-subset:${targetKey}`,
+            domain: pairedDomain,
             allocates: false,
             // The discriminant selects; each candidate leaf's own contract says
             // whether the selected payload travels natively.
@@ -1398,11 +1409,12 @@ const cppConversionTables = (
       // arm's own optional. `emit-narrowing.ts`'s `narrowedLoadText` renders the
       // arm test as the presence test; this installs the capability it needs.
       if (target.kind === 'optional' && union.arms.some((arm) => representationKey(arm.value) === representationKey(target.payload))) {
+        const pairedDomain = `live-arm-optional:${targetKey}`
         return {
-          classifier: { id: 'gea::TaggedUnion::is', domain: `live-arm-optional:${targetKey}` },
+          classifier: { id: 'gea::TaggedUnion::is', domain: pairedDomain },
           materializer: {
             id: 'gea::TaggedUnion::get',
-            domain: `live-arm-optional:${targetKey}`,
+            domain: pairedDomain,
             allocates: false,
             armSelection: 'guarded-load',
             ...nativeNarrowing(source, target)
@@ -1420,22 +1432,24 @@ const cppConversionTables = (
         // offers, and `emit-narrowing.ts`'s `taggedUnionArmText` recurses through
         // `narrowedLoadText` to render exactly the step this admits.
         if (!narrowingReachesTarget(source, target)) return null
+        const pairedDomain = `live-arm-nested:${targetKey}`
         return {
-          classifier: { id: 'gea::TaggedUnion::is', domain: `live-arm-nested:${targetKey}` },
+          classifier: { id: 'gea::TaggedUnion::is', domain: pairedDomain },
           materializer: {
             id: 'gea::TaggedUnion::get',
-            domain: `live-arm-nested:${targetKey}`,
+            domain: pairedDomain,
             allocates: false,
             armSelection: 'guarded-load',
             ...nativeNarrowing(source, target)
           }
         }
       }
+      const pairedDomain = `live-arm:${targetKey}`
       return {
-        classifier: { id: 'gea::TaggedUnion::is', domain: `live-arm:${targetKey}` },
+        classifier: { id: 'gea::TaggedUnion::is', domain: pairedDomain },
         materializer: {
           id: 'gea::TaggedUnion::get',
-          domain: `live-arm:${targetKey}`,
+          domain: pairedDomain,
           allocates: false,
           armSelection: 'guarded-load',
           ...nativeNarrowing(source, target)
@@ -1454,18 +1468,20 @@ const cppConversionTables = (
     widening: (source: Representation, target: Representation) => {
       if (!isSpellable(target)) return null
       const nativeAbsence = nativeReferenceAbsenceOf(source, target)
-      if (nativeAbsence !== null)
+      if (nativeAbsence !== null) {
+        const pairedDomain = `absence:${nativeAbsence}`
         return {
-          classifier: { id: NATIVE_REFERENCE_ABSENCE, domain: `absence:${nativeAbsence}` },
+          classifier: { id: NATIVE_REFERENCE_ABSENCE, domain: pairedDomain },
           materializer: {
             id: NATIVE_REFERENCE_ABSENCE,
-            domain: `absence:${nativeAbsence}`,
+            domain: pairedDomain,
             allocates: false,
             nativeFieldProtocol: 'unused',
             nativePayloadTransport: 'preserved',
             ...nativeClassReferenceIdentityOf(source, target)
           }
         }
+      }
       const nativeSum = nativeSumConversion(source, target)
       if (nativeSum) return nativeSum
       const totalSelection = nativeTotalSelectionRecipeOf(source, target)
@@ -1523,11 +1539,12 @@ const cppConversionTables = (
       if (upcastsToBase(source, target)) {
         const sourceKey = representationKey(source)
         const targetKey = representationKey(target)
+        const pairedDomain = `class-upcast:${sourceKey}->${targetKey}`
         return {
-          classifier: { id: 'gea::Ref::converting-ctor', domain: `class-upcast:${sourceKey}->${targetKey}` },
+          classifier: { id: 'gea::Ref::converting-ctor', domain: pairedDomain },
           materializer: {
             id: 'gea::Ref::converting-ctor',
-            domain: `class-upcast:${sourceKey}->${targetKey}`,
+            domain: pairedDomain,
             allocates: false,
             nativeFieldProtocol: 'unused',
             // `Ref<Base>(derived)` retains the same pointee.
@@ -1539,11 +1556,12 @@ const cppConversionTables = (
       if (dropsUnboundParameters(source, target)) {
         const sourceKey = representationKey(source)
         const targetKey = representationKey(target)
+        const pairedDomain = `callable-prefix:${sourceKey}->${targetKey}`
         return {
-          classifier: { id: 'gea::CallableObject::converting-ctor', domain: `callable-prefix:${sourceKey}->${targetKey}` },
+          classifier: { id: 'gea::CallableObject::converting-ctor', domain: pairedDomain },
           materializer: {
             id: 'gea::CallableObject::converting-ctor',
-            domain: `callable-prefix:${sourceKey}->${targetKey}`,
+            domain: pairedDomain,
             allocates: true,
             ...nativeCallableTransport(source, target)
           }
@@ -1559,11 +1577,12 @@ const cppConversionTables = (
       if (dropsAllParametersIntoResultArm(source, target)) {
         const sourceKey = representationKey(source)
         const targetKey = representationKey(target)
+        const pairedDomain = `callable-result-arm:${sourceKey}->${targetKey}`
         return {
-          classifier: { id: 'gea::CallableObject::result-arm-ctor', domain: `callable-result-arm:${sourceKey}->${targetKey}` },
+          classifier: { id: 'gea::CallableObject::result-arm-ctor', domain: pairedDomain },
           materializer: {
             id: 'gea::CallableObject::result-arm-ctor',
-            domain: `callable-result-arm:${sourceKey}->${targetKey}`,
+            domain: pairedDomain,
             allocates: true,
             ...nativeCallableTransport(source, target)
           }
@@ -1579,14 +1598,15 @@ const cppConversionTables = (
       if (widensResultIntoArm(source, target)) {
         const sourceKey = representationKey(source)
         const targetKey = representationKey(target)
+        const pairedDomain = `callable-result-arm-fixed:${sourceKey}->${targetKey}`
         return {
           classifier: {
             id: 'gea::CallableObject::same-arity-result-arm-ctor',
-            domain: `callable-result-arm-fixed:${sourceKey}->${targetKey}`
+            domain: pairedDomain
           },
           materializer: {
             id: 'gea::CallableObject::same-arity-result-arm-ctor',
-            domain: `callable-result-arm-fixed:${sourceKey}->${targetKey}`,
+            domain: pairedDomain,
             allocates: true,
             ...nativeCallableTransport(source, target)
           }
@@ -1600,11 +1620,12 @@ const cppConversionTables = (
       if (rebasesRestOverLeadingParameters(source, target)) {
         const sourceKey = representationKey(source)
         const targetKey = representationKey(target)
+        const pairedDomain = `callable-rest-rebase:${sourceKey}->${targetKey}`
         return {
-          classifier: { id: 'gea::CallableObject::rest-rebase-ctor', domain: `callable-rest-rebase:${sourceKey}->${targetKey}` },
+          classifier: { id: 'gea::CallableObject::rest-rebase-ctor', domain: pairedDomain },
           materializer: {
             id: 'gea::CallableObject::rest-rebase-ctor',
-            domain: `callable-rest-rebase:${sourceKey}->${targetKey}`,
+            domain: pairedDomain,
             allocates: true
           }
         }
@@ -1665,9 +1686,10 @@ const cppConversionTables = (
         if (source.kind === 'optional') {
           const payload = source.payload
           if (!boxable(payload)) return null
+          const pairedDomain = `box:optional:${representationKey(payload)}`
           return {
-            classifier: { id: 'gea::Value::box', domain: `box:optional:${representationKey(payload)}` },
-            materializer: { id: 'gea::Value::box', domain: `box:optional:${representationKey(payload)}`, allocates: true }
+            classifier: { id: 'gea::Value::box', domain: pairedDomain },
+            materializer: { id: 'gea::Value::box', domain: pairedDomain, allocates: true }
           }
         }
         // A tagged union is the other sum carrier, and it boxes on exactly the
@@ -1680,9 +1702,10 @@ const cppConversionTables = (
         // bare `tagged-union(A|B)` did not.
         if (source.kind === 'tagged-union') {
           if (!boxable(source)) return null
+          const pairedDomain = `box:sum:${representationKey(source)}`
           return {
-            classifier: { id: 'gea::Value::box', domain: `box:sum:${representationKey(source)}` },
-            materializer: { id: 'gea::Value::box', domain: `box:sum:${representationKey(source)}`, allocates: true }
+            classifier: { id: 'gea::Value::box', domain: pairedDomain },
+            materializer: { id: 'gea::Value::box', domain: pairedDomain, allocates: true }
           }
         }
         const tag = dynamicTagFor(source)
@@ -1691,11 +1714,12 @@ const cppConversionTables = (
         // to allocate, inspect or publish. In particular, an omitted any formal
         // must not turn an otherwise known constructor into an external entry.
         const absent = source.kind === 'undefined' || source.kind === 'null'
+        const pairedDomain = `box:${tag}`
         return {
-          classifier: { id: 'gea::Value::box', domain: `box:${tag}` },
+          classifier: { id: 'gea::Value::box', domain: pairedDomain },
           materializer: {
             id: 'gea::Value::box',
-            domain: `box:${tag}`,
+            domain: pairedDomain,
             allocates: !absent,
             ...(['scalar', 'string', 'symbol', 'null', 'undefined'].includes(source.kind)
               ? { primitiveIdentityTransport: 'preserved' as const }
@@ -1715,11 +1739,12 @@ const cppConversionTables = (
       // `null` reaching an `undefined`-absent optional is a real semantic
       // mismatch `emptyOptionalText` itself refuses, not a spelling gap.
       if ((source.kind === 'null' || source.kind === 'undefined') && target.kind === 'optional' && source.kind === target.absence) {
+        const pairedDomain = `absence:${target.absence}`
         return {
-          classifier: { id: 'gea::Optional::empty', domain: `absence:${target.absence}` },
+          classifier: { id: 'gea::Optional::empty', domain: pairedDomain },
           materializer: {
             id: 'gea::Optional::empty',
-            domain: `absence:${target.absence}`,
+            domain: pairedDomain,
             allocates: false,
             nativeFieldProtocol: 'unused',
             nativePayloadTransport: 'preserved',
@@ -1759,11 +1784,12 @@ const cppConversionTables = (
       if (source.kind === 'optional') {
         const payloadKey = representationKey(source.payload)
         if (target.kind === 'optional' && representationKey(target.payload) === payloadKey) {
+          const pairedDomain = `optional-payload:${payloadKey}`
           return {
-            classifier: { id: 'gea::Optional::converting-ctor', domain: `optional-payload:${payloadKey}` },
+            classifier: { id: 'gea::Optional::converting-ctor', domain: pairedDomain },
             materializer: {
               id: 'gea::Optional::converting-ctor',
-              domain: `optional-payload:${payloadKey}`,
+              domain: pairedDomain,
               allocates: false,
               nativeFieldProtocol: 'unused',
               ...nativeClassReferenceIdentityOf(source, target)
@@ -1773,11 +1799,12 @@ const cppConversionTables = (
         const wrappedUnion = target.kind === 'optional' ? target.payload : target
         if (wrappedUnion.kind !== 'tagged-union') return null
         if (!wrappedUnion.arms.some((arm) => representationKey(arm.value) === payloadKey)) return null
+        const pairedDomain = `optional-arm:${payloadKey}`
         return {
-          classifier: { id: 'gea::TaggedUnion::ofArm', domain: `optional-arm:${payloadKey}` },
+          classifier: { id: 'gea::TaggedUnion::ofArm', domain: pairedDomain },
           materializer: {
             id: 'gea::TaggedUnion::ofArm',
-            domain: `optional-arm:${payloadKey}`,
+            domain: pairedDomain,
             allocates: false,
             nativeFieldProtocol: 'unused',
             ...nativeClassReferenceIdentityOf(source, target)
@@ -1789,11 +1816,12 @@ const cppConversionTables = (
       // `gea::Optional<T>` declares a converting constructor from `T`, so this
       // needs no tagged union and no arm index at all.
       if (target.kind === 'optional' && representationKey(target.payload) === sourceKey) {
+        const pairedDomain = `payload:${sourceKey}`
         return {
-          classifier: { id: 'gea::Optional::converting-ctor', domain: `payload:${sourceKey}` },
+          classifier: { id: 'gea::Optional::converting-ctor', domain: pairedDomain },
           materializer: {
             id: 'gea::Optional::converting-ctor',
-            domain: `payload:${sourceKey}`,
+            domain: pairedDomain,
             allocates: false,
             nativeFieldProtocol: 'unused',
             nativePayloadTransport: 'preserved',
@@ -1857,11 +1885,12 @@ const cppConversionTables = (
       const union = target.kind === 'optional' ? target.payload : target
       if (union.kind !== 'tagged-union') return null
       if (union.arms.some((arm) => representationKey(arm.value) === sourceKey)) {
+        const pairedDomain = `arm:${sourceKey}`
         return {
-          classifier: { id: 'gea::TaggedUnion::ofArm', domain: `arm:${sourceKey}` },
+          classifier: { id: 'gea::TaggedUnion::ofArm', domain: pairedDomain },
           materializer: {
             id: 'gea::TaggedUnion::ofArm',
-            domain: `arm:${sourceKey}`,
+            domain: pairedDomain,
             allocates: false,
             nativeFieldProtocol: 'unused',
             ...nativeClassReferenceIdentityOf(source, target)
@@ -1992,11 +2021,12 @@ const cppConversionTables = (
         source.ownership === target.ownership &&
         samePhysicalCarrier(source, target)
       ) {
+        const pairedDomain = `native-identity:${source.native}:${source.ownership}`
         return {
-          classifier: { id: 'gea::native-record::identity', domain: `native-identity:${source.native}:${source.ownership}` },
+          classifier: { id: 'gea::native-record::identity', domain: pairedDomain },
           materializer: {
             id: 'gea::native-record::identity',
-            domain: `native-identity:${source.native}:${source.ownership}`,
+            domain: pairedDomain,
             allocates: false
           }
         }
@@ -2015,9 +2045,10 @@ const cppConversionTables = (
       // before this the conversion graph had no node for it even though there
       // was nothing to convert.
       if (source.kind === 'dynamic' && target.kind === 'dynamic') {
+        const pairedDomain = `dynamic-reason:${pairKey()}`
         return {
-          classifier: { id: 'gea::Value::identity', domain: `dynamic-reason:${pairKey()}` },
-          materializer: { id: 'gea::Value::identity', domain: `dynamic-reason:${pairKey()}`, allocates: false }
+          classifier: { id: 'gea::Value::identity', domain: pairedDomain },
+          materializer: { id: 'gea::Value::identity', domain: pairedDomain, allocates: false }
         }
       }
       // The plain array and the array an interface extended with typed fields
@@ -2036,13 +2067,14 @@ const cppConversionTables = (
         representationKey(source.element) === representationKey(target.element) &&
         arrayExtensionKey(source.extension) !== arrayExtensionKey(target.extension)
       ) {
+        const pairedDomain = `array-extension:${pairKey()}`
         return {
-          classifier: { id: 'gea::ArrayObject::identity', domain: `array-extension:${pairKey()}` },
+          classifier: { id: 'gea::ArrayObject::identity', domain: pairedDomain },
           // The extension is a typed native sidecar struct, never the field
           // protocol: the elements and the fields cross unchanged.
           materializer: {
             id: 'gea::ArrayObject::identity',
-            domain: `array-extension:${pairKey()}`,
+            domain: pairedDomain,
             allocates: false,
             nativeFieldProtocol: 'unused',
             nativePayloadTransport: 'preserved'
@@ -2072,9 +2104,10 @@ const cppConversionTables = (
         target.ownership === 'shared-refcount' &&
         (target.element.kind === 'dynamic' || carriesNativeUndefined(target.element) || !carriesUndefined(target.element))
       ) {
+        const pairedDomain = `empty-array:${pairKey()}`
         return {
-          classifier: { id: 'gea::emptyArraySentinel', domain: `empty-array:${pairKey()}` },
-          materializer: { id: 'gea::emptyArraySentinel', domain: `empty-array:${pairKey()}`, allocates: false }
+          classifier: { id: 'gea::emptyArraySentinel', domain: pairedDomain },
+          materializer: { id: 'gea::emptyArraySentinel', domain: pairedDomain, allocates: false }
         }
       }
       // ⛔ NO CONVERSION IS INSTALLED between two `array-object` carriers whose
@@ -2175,11 +2208,12 @@ const cppConversionTables = (
             // reflection, and refused each `this.method.bind(this)` in those
             // subclasses as `call-abi:bind-shadowable`.
             const plan = conversionRecipeOf(source, target)?.renders === true ? null : viewPlanFor(layouts, source, target)
+            const pairedDomain = `class-view:${pairKey()}`
             return {
-              classifier: { id: 'gea::record::classStructuralView', domain: `class-view:${pairKey()}` },
+              classifier: { id: 'gea::record::classStructuralView', domain: pairedDomain },
               materializer: {
                 id: 'gea::record::classStructuralView',
-                domain: `class-view:${pairKey()}`,
+                domain: pairedDomain,
                 allocates: target.ownership === 'shared-refcount',
                 ...(plan !== null ? viewProtocolOf(plan) : {})
               }
@@ -2203,9 +2237,10 @@ const cppConversionTables = (
         source.accessors.length === 0 &&
         (target.kind === 'native-record-ref' || (target.kind === 'record-with-index' && target.fields.every((field) => !field.required)))
       ) {
+        const pairedDomain = `empty:${pairKey()}`
         return {
-          classifier: { id: 'gea::record::emptyNative', domain: `empty:${pairKey()}` },
-          materializer: { id: 'gea::record::emptyNative', domain: `empty:${pairKey()}`, allocates: target.ownership === 'shared-refcount' }
+          classifier: { id: 'gea::record::emptyNative', domain: pairedDomain },
+          materializer: { id: 'gea::record::emptyNative', domain: pairedDomain, allocates: target.ownership === 'shared-refcount' }
         }
       }
       if (source.kind === 'record-with-index' && target.kind === 'native-record-ref' && target.native === null) {
@@ -2235,11 +2270,12 @@ const cppConversionTables = (
           }) &&
           recordsRecastable(sourceFields, targetFieldsView)
         ) {
+          const pairedDomain = `recast-index:${pairKey()}`
           return {
-            classifier: { id: 'gea::record::recastWithIndex', domain: `recast-index:${pairKey()}` },
+            classifier: { id: 'gea::record::recastWithIndex', domain: pairedDomain },
             materializer: {
               id: 'gea::record::recastWithIndex',
-              domain: `recast-index:${pairKey()}`,
+              domain: pairedDomain,
               allocates: target.ownership === 'shared-refcount'
             }
           }
@@ -2272,9 +2308,10 @@ const cppConversionTables = (
           plainTargetView !== null &&
           recordsRecastable(sourceFields, plainTargetView)
         ) {
+          const pairedDomain = `recast-expando:${pairKey()}`
           return {
-            classifier: { id: 'gea::record::recastWithExpando', domain: `recast-expando:${pairKey()}` },
-            materializer: { id: 'gea::record::recastWithExpando', domain: `recast-expando:${pairKey()}`, allocates: true }
+            classifier: { id: 'gea::record::recastWithExpando', domain: pairedDomain },
+            materializer: { id: 'gea::record::recastWithExpando', domain: pairedDomain, allocates: true }
           }
         }
       }
@@ -2285,9 +2322,10 @@ const cppConversionTables = (
       // the class evaluation's own record for the shape, so a write through one
       // view is every later view's read (`gea::constructorStaticView`).
       if (constructorStaticViewAdmitted(source, target, target.kind === 'native-record-ref' ? layouts.forShape(target.shapeId) : null)) {
+        const pairedDomain = `constructor-view:${pairKey()}`
         return {
-          classifier: { id: CONSTRUCTOR_STATIC_VIEW, domain: `constructor-view:${pairKey()}` },
-          materializer: { id: CONSTRUCTOR_STATIC_VIEW, domain: `constructor-view:${pairKey()}`, allocates: true }
+          classifier: { id: CONSTRUCTOR_STATIC_VIEW, domain: pairedDomain },
+          materializer: { id: CONSTRUCTOR_STATIC_VIEW, domain: pairedDomain, allocates: true }
         }
       }
       // The provisional layout pair is sealed into exact deferred field routes
@@ -2303,9 +2341,10 @@ const cppConversionTables = (
         named.kind === 'native-record-ref' &&
         dynamicDictionaryToNamedRecordAdmitted(document, named, layouts.forShape(named.shapeId), layouts.indexesForShape(named.shapeId))
       ) {
+        const pairedDomain = `dictionary-record:${pairKey()}`
         return {
-          classifier: { id: DYNAMIC_DICTIONARY_TO_NAMED_RECORD, domain: `dictionary-record:${pairKey()}` },
-          materializer: { id: DYNAMIC_DICTIONARY_TO_NAMED_RECORD, domain: `dictionary-record:${pairKey()}`, allocates: true }
+          classifier: { id: DYNAMIC_DICTIONARY_TO_NAMED_RECORD, domain: pairedDomain },
+          materializer: { id: DYNAMIC_DICTIONARY_TO_NAMED_RECORD, domain: pairedDomain, allocates: true }
         }
       }
       if ((source.kind === 'record' || source.kind === 'native-record-ref') && target.kind === 'native-record-ref') {
@@ -2313,11 +2352,12 @@ const cppConversionTables = (
         const viewedTarget = asRecord(target)
         if (viewedTarget.kind !== 'record' || viewed.kind !== 'record') return null
         if (!recordsRecastable(viewed, viewedTarget)) return null
+        const pairedDomain = `recast:${pairKey()}`
         return {
-          classifier: { id: 'gea::record::recast', domain: `recast:${pairKey()}` },
+          classifier: { id: 'gea::record::recast', domain: pairedDomain },
           materializer: {
             id: 'gea::record::recast',
-            domain: `recast:${pairKey()}`,
+            domain: pairedDomain,
             allocates: target.ownership === 'shared-refcount',
             // Unused only while no field crosses the dynamic boundary; a boxed
             // field is read through the payload's protocol later
@@ -2342,11 +2382,12 @@ const cppConversionTables = (
         const recastable = target.arms.map((arm) => arm.value).filter((arm) => arm.kind === 'record' && recordsRecastable(source, arm))
         const sole = recastable[0]
         if (!sole || sole.kind !== 'record') return null
+        const pairedDomain = `arm-recast:${pairKey()}`
         return {
-          classifier: { id: 'gea::TaggedUnion::ofArm', domain: `arm-recast:${pairKey()}` },
+          classifier: { id: 'gea::TaggedUnion::ofArm', domain: pairedDomain },
           materializer: {
             id: 'gea::TaggedUnion::ofArm',
-            domain: `arm-recast:${pairKey()}`,
+            domain: pairedDomain,
             allocates: sole.ownership === 'shared-refcount',
             nativeFieldProtocol: 'unused'
           }
@@ -2354,11 +2395,12 @@ const cppConversionTables = (
       }
       if (source.kind === 'record' && target.kind === 'record') {
         if (!recordsRecastable(source, target)) return null
+        const pairedDomain = `recast:${pairKey()}`
         return {
-          classifier: { id: 'gea::record::recast', domain: `recast:${pairKey()}` },
+          classifier: { id: 'gea::record::recast', domain: pairedDomain },
           materializer: {
             id: 'gea::record::recast',
-            domain: `recast:${pairKey()}`,
+            domain: pairedDomain,
             allocates: target.ownership === 'shared-refcount',
             // This renderer only copies fields, injects native alternatives and
             // recursively rebuilds records. It never asks a dynamic field table
@@ -2396,23 +2438,26 @@ const cppConversionTables = (
       const indexedView = indexedRecordViewOf(source, layouts)
       if (indexedView !== null && target.kind === 'dictionary') {
         if (!indexedRecordCastableToDictionary(indexedView, target)) return null
+        const pairedDomain = `recast:${pairKey()}`
         return {
-          classifier: { id: INDEXED_RECORD_TO_DICTIONARY, domain: `recast:${pairKey()}` },
-          materializer: { id: INDEXED_RECORD_TO_DICTIONARY, domain: `recast:${pairKey()}`, allocates: true }
+          classifier: { id: INDEXED_RECORD_TO_DICTIONARY, domain: pairedDomain },
+          materializer: { id: INDEXED_RECORD_TO_DICTIONARY, domain: pairedDomain, allocates: true }
         }
       }
       if (indexedView !== null && target.kind === 'tagged-union' && indexedRecordDictionaryArmOf(indexedView, target) !== null) {
+        const pairedDomain = `arm-recast:${pairKey()}`
         return {
-          classifier: { id: INDEXED_RECORD_INTO_DICTIONARY_ARM, domain: `arm-recast:${pairKey()}` },
-          materializer: { id: INDEXED_RECORD_INTO_DICTIONARY_ARM, domain: `arm-recast:${pairKey()}`, allocates: true }
+          classifier: { id: INDEXED_RECORD_INTO_DICTIONARY_ARM, domain: pairedDomain },
+          materializer: { id: INDEXED_RECORD_INTO_DICTIONARY_ARM, domain: pairedDomain, allocates: true }
         }
       }
       if ((source.kind === 'record' || (source.kind === 'native-record-ref' && !source.recursive)) && target.kind === 'dictionary') {
         const viewed = asRecord(source)
         if (viewed.kind !== 'record' || !recordCastableToDictionary(viewed, target)) return null
+        const pairedDomain = `recast:${pairKey()}`
         return {
-          classifier: { id: 'gea::record::recastToDictionary', domain: `recast:${pairKey()}` },
-          materializer: { id: 'gea::record::recastToDictionary', domain: `recast:${pairKey()}`, allocates: true }
+          classifier: { id: 'gea::record::recastToDictionary', domain: pairedDomain },
+          materializer: { id: 'gea::record::recastToDictionary', domain: pairedDomain, allocates: true }
         }
       }
       // Structural recipes publish live dictionary views with checked reads
@@ -2436,12 +2481,13 @@ const cppConversionTables = (
           // Payload already identical: the only difference is which falsy value
           // spends the absence, so this is `rebrandAbsence` alone (see above).
           if (source.absence === target.absence) return null
+          const pairedDomain = `recast:${pairKey()}`
           return {
-            classifier: { id: 'gea::Optional::rebrandAbsence', domain: `recast:${pairKey()}` },
+            classifier: { id: 'gea::Optional::rebrandAbsence', domain: pairedDomain },
             // Same payload, only the absence tag is renamed: no field is read.
             materializer: {
               id: 'gea::Optional::rebrandAbsence',
-              domain: `recast:${pairKey()}`,
+              domain: pairedDomain,
               allocates: false,
               nativeFieldProtocol: 'unused',
               nativePayloadTransport: 'preserved'
@@ -2463,11 +2509,12 @@ const cppConversionTables = (
           source.absence === target.absence &&
           recordsRecastable(source.payload, target.payload)
         ) {
+          const pairedDomain = `recast:${pairKey()}`
           return {
-            classifier: { id: 'gea::Optional::has_value', domain: `recast:${pairKey()}` },
+            classifier: { id: 'gea::Optional::has_value', domain: pairedDomain },
             materializer: {
               id: 'gea::Optional::recastPayload',
-              domain: `recast:${pairKey()}`,
+              domain: pairedDomain,
               allocates: target.payload.ownership === 'shared-refcount',
               nativeFieldProtocol: 'unused'
             }
@@ -2486,13 +2533,14 @@ const cppConversionTables = (
         if (source.absence !== target.absence) return null
         const payloadTargetKeys = target.payload.arms.map((arm) => representationKey(arm.value))
         if (!source.payload.arms.every((arm) => payloadTargetKeys.includes(representationKey(arm.value)))) return null
+        const pairedDomain = `recast:${pairKey()}`
         return {
-          classifier: { id: 'gea::TaggedUnion::is', domain: `recast:${pairKey()}` },
+          classifier: { id: 'gea::TaggedUnion::is', domain: pairedDomain },
           // Every source arm is a target arm BY KEY, so `recastedUnionText`
           // homes each one exact (`ofArm<j>(get<i>())`): a re-tag, no field read.
           materializer: {
             id: 'gea::TaggedUnion::ofArm',
-            domain: `recast:${pairKey()}`,
+            domain: pairedDomain,
             allocates: false,
             nativeFieldProtocol: 'unused',
             nativePayloadTransport: 'preserved'
@@ -2513,20 +2561,22 @@ const cppConversionTables = (
         target.absence === 'undefined' &&
         sumIntoPayloadText(source, target.payload, 'gea_sum', (arm) => arm) !== null
       ) {
+        const pairedDomain = `sum-into-payload:${pairKey()}`
         return {
-          classifier: { id: 'gea::TaggedUnion::is', domain: `sum-into-payload:${pairKey()}` },
-          materializer: { id: 'gea::TaggedUnion::intoPayload', domain: `sum-into-payload:${pairKey()}`, allocates: false }
+          classifier: { id: 'gea::TaggedUnion::is', domain: pairedDomain },
+          materializer: { id: 'gea::TaggedUnion::intoPayload', domain: pairedDomain, allocates: false }
         }
       }
       if (source.kind !== 'tagged-union' || target.kind !== 'tagged-union') return null
       const targetKeys = target.arms.map((arm) => representationKey(arm.value))
       if (!source.arms.every((arm) => targetKeys.includes(representationKey(arm.value)))) return null
+      const pairedDomain = `recast:${pairKey()}`
       return {
-        classifier: { id: 'gea::TaggedUnion::is', domain: `recast:${pairKey()}` },
+        classifier: { id: 'gea::TaggedUnion::is', domain: pairedDomain },
         // A pure re-tag, as the optional-wrapped twin above.
         materializer: {
           id: 'gea::TaggedUnion::ofArm',
-          domain: `recast:${pairKey()}`,
+          domain: pairedDomain,
           allocates: false,
           nativeFieldProtocol: 'unused',
           nativePayloadTransport: 'preserved'

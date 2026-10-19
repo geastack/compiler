@@ -1,4 +1,5 @@
-import ts from 'typescript'
+import ts from '#typescript'
+import { uncachedJsDocTags } from './uncached-jsdoc-tags.js'
 import { existsSync, readFileSync } from 'fs'
 import { basename, dirname, join, relative, resolve, sep } from 'path'
 
@@ -2306,7 +2307,7 @@ const memberOverlay = (input: {
     edits.push({ at: typeNode.getStart(file), end: typeNode.getEnd(), text: spelled })
   }
   const scanJsDoc = (node: ts.Node): void => {
-    for (const tag of ts.getJSDocTags(node)) {
+    for (const tag of uncachedJsDocTags(node)) {
       const typeExpression = (tag as { readonly typeExpression?: ts.JSDocTypeExpression | ts.JSDocSignature }).typeExpression
       if (typeExpression && ts.isJSDocTypeExpression(typeExpression)) considerStatedType(typeExpression.type)
     }

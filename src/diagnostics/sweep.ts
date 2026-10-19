@@ -107,7 +107,7 @@ const preflightDiagnostics = (report: PreflightReport, locate: Locate): readonly
   // obligation names a fast path the mandatory generic one already covers, so
   // an unbuilt devirtualization is not a defect in the program or the backend
   // -- and a report that fails a build over one trains its reader to ignore it.
-  const rows = report.obligations.filter((obligation) => !obligation.optional && obligation.status !== 'satisfied')
+  const rows = report.failing.filter((obligation) => !obligation.optional)
   // A blocked row is explained by the failing rows of its own component, so the
   // roots are collected per component before the derived rows cite them.
   const rootsByComponent = new Map<ComponentId, string[]>()

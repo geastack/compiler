@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 import { closedScriptScopeOf } from './targets.js'
 import { deferredIntrinsicProtocolLedgerOf, sourceGlobalBindingSymbolOf } from '../deferred-intrinsic-protocols.js'

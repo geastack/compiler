@@ -77,6 +77,8 @@ export interface NativeObjectDataSlotCensus {
 export type NativeObjectDataAllocation = AllocationOperation | (InvocationOperation & { readonly freshOrdinaryObject: true })
 
 const censuses = new WeakMap<SemanticGraph, NativeObjectDataSlotCensus>()
+/** The one empty row list every schema without writers, reads, blockers or observers shares. */
+const noRows: readonly never[] = Object.freeze([])
 const keyOf = (value: SemanticOperand | undefined): string | null =>
   value?.source.kind === 'constant' && (value.source.literal === 'string' || value.source.literal === 'number') ? value.source.text : null
 
@@ -721,11 +723,11 @@ export const nativeObjectDataSlotSchemasOf = (graph: SemanticGraph): NativeObjec
           {
             allocation,
             key,
-            writers: writers.get(allocation)?.get(key) ?? [],
+            writers: writers.get(allocation)?.get(key) ?? noRows,
             ...(stored?.has(key) === true ? { storedValues: stored.get(key)! } : {}),
-            reads: reads.get(allocation)?.get(key) ?? [],
-            blockers: blockers.get(allocation) ?? [],
-            observers: observers.get(allocation) ?? []
+            reads: reads.get(allocation)?.get(key) ?? noRows,
+            blockers: blockers.get(allocation) ?? noRows,
+            observers: observers.get(allocation) ?? noRows
           }
         ])
       )
@@ -745,6 +747,17 @@ export const nativeObjectDataSlotSchemasOf = (graph: SemanticGraph): NativeObjec
     const key = source.text
     if (objectPrototypeMemberNames.has(key) || key === '__proto__' || canonicalIndexLiteral(key) !== null) continue
     namedDataDefinitions.set(operation.id, key)
+  }
+  // The fixpoint is done growing alias sets, and nearly every result holds one
+  // allocation: share one set per allocation rather than keep one per result
+  // for the rest of the compile.
+  const singletons = new Map<NativeObjectDataAllocation, Set<NativeObjectDataAllocation>>()
+  for (const [result, held] of aliases) {
+    if (held.size !== 1) continue
+    const allocation = held.values().next().value as NativeObjectDataAllocation
+    const shared = singletons.get(allocation)
+    if (shared === undefined) singletons.set(allocation, held)
+    else aliases.set(result, shared)
   }
   const census = { origins, aliases, complete, schemas, namedDataDefinitions }
   censuses.set(graph, census)

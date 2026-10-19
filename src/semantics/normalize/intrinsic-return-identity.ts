@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ProducerContext } from './producer-context.js'
 import { intrinsicStaticMemberIsIntact } from './intrinsic-static-member.js'
 import { isGlobalObjectConstructor } from './derived-expression-type.js'

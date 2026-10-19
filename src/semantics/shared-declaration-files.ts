@@ -1,6 +1,6 @@
 import { statSync } from 'node:fs'
 import { basename, dirname, resolve } from 'node:path'
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * A process-wide cache of the PARSED declaration files every program re-reads:

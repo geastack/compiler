@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 import { unwrapErasedExpression } from '../producers/erasure.js'
 import { definitelyReturns } from '../return-paths.js'

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { StructuralTypeId } from '../../../identity/ids.js'
 import { classOfConstructorType } from '../derived-expression-type.js'
 import { keptLeftPartTypeOf } from '../logical-result-type.js'

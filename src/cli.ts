@@ -11,6 +11,18 @@ import { preflightReportLines } from './preflight/report.js'
 import { structuralShapeKey } from './semantics/model/structural-types.js'
 import { closeSync, openSync, writeSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { setFlagsFromString } from 'node:v8'
+
+// V8 grows the heap after each collection by up to four times what survived
+// it, bounded only by the old-space limit -- which builds raise to 32 GB so a
+// large program cannot fail on the default. A compile allocates fast and keeps
+// a few GB live, so with that headroom a large app's compile held 15.8 GB of
+// resident memory for 3.3 GB of live data. A 25% margin bounded it at 4.6 GB
+// for 9% more wall time. A caller that states its own percentage keeps it.
+const statedGrowth = [...process.execArgv, ...(process.env['NODE_OPTIONS'] ?? '').split(/\s+/)].some((flag) =>
+  /^--heap[-_]growing[-_]percent/.test(flag)
+)
+if (!statedGrowth) setFlagsFromString('--heap-growing-percent=25')
 
 /**
  * The command line.

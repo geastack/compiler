@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * Declared, never defined: what a host owns.

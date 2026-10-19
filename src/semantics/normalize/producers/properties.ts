@@ -1,7 +1,7 @@
 import { isObjectTagCalleePart } from './object-tag.js'
 import { contributeIntrinsicAccessorGetter } from './intrinsic-accessor-getter.js'
 import { isIntrinsicAccessorGetterPart } from '../intrinsic-accessor-getter.js'
-import ts from 'typescript'
+import ts from '#typescript'
 import { operationId, semanticResultId, type DeclarationId, type StructuralTypeId } from '../../../identity/ids.js'
 import type { PrimitiveFamily } from '../../model/coverage.js'
 import type { SemanticEdge } from '../../model/edges.js'

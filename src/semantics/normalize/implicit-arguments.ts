@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /** The checker-synthesized trailing slot, keyed by its owning signature. */
 export interface ImplicitArgumentsSlot {

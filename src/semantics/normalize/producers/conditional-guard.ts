@@ -1,4 +1,4 @@
-import type ts from 'typescript'
+import type ts from '#typescript'
 import { operationId, semanticResultId } from '../../../identity/ids.js'
 import type { CitationFacts } from './references.js'
 

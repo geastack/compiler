@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 import { isVacuousOrigin, seededOriginSolver } from './seeded-origins.js'
 import { isModuleExportedDeclaration, isTypePositionReference, resolveFlowSymbolAlias, unwrapNaming } from './targets.js'

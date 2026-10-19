@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { dirname, resolve, relative, sep } from 'node:path'
 
 export interface PackageSource {

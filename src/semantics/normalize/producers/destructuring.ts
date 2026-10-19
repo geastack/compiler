@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { isUnusableEvidence } from '../derived-expression-type.js'
 import {
   arrayAssignmentSource,

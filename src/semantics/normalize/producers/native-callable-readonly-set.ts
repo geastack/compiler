@@ -1,4 +1,4 @@
-import type ts from 'typescript'
+import type ts from '#typescript'
 import type { NativeCallableReadonlySetSource } from '../../native-callable-readonly-set.js'
 import type { OperandSource } from '../../model/operands.js'
 import type { ProducerContext } from '../producer-context.js'

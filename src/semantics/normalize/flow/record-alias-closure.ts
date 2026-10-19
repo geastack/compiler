@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 import { outermostErasureOf, unwrapErasedExpression } from '../producers/erasure.js'
 import { constructionYieldsCompletionOf } from './callable-completions.js'

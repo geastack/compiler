@@ -1,5 +1,5 @@
 import { sourceNativeOriginIsClosed } from './flow/source-native-origin.js'
-import ts from 'typescript'
+import ts from '#typescript'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import type { NativeIterableProvider } from '../../plugins/native-iterable-providers.js'
 import type { ProducerContext } from './producer-context.js'
@@ -24,7 +24,8 @@ export interface SourceNativeIterable {
 }
 
 export const sourceNativeIterableOf = (
-  context: ProducerContext,
+  // Without the ordinal counters: it mints nothing, and the frontend's shared context does not carry them.
+  context: Omit<ProducerContext, 'ordinals' | 'evaluationOrdinals'>,
   flow: ValueFlowIndex,
   providers: ReadonlyMap<string, NativeIterableProvider>,
   source: ts.Expression,

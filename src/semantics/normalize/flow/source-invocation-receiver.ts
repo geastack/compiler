@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { isStrictContext } from '../producers/shared.js'
 import { unwrapErasedExpression } from '../producers/erasure.js'
 import type { FlowInvocationOperands, ValueFlowIndex } from './model.js'

@@ -31,6 +31,7 @@ import { nativeRecordProductsOf } from '../conversion/native-record-products.js'
 import { nativeFieldViewCarrierNeedsReceipt, nativeFieldViewBodyCitationsOf } from './native-field-view-facts.js'
 import {
   nativeFieldViewDomainsOf,
+  type NativeFieldViewDomains,
   nativeFieldViewOpenWriteHomesOf,
   nativeFieldViewForwardedWriteKey,
   nativeFieldViewPlansByTargetOf,
@@ -67,43 +68,496 @@ import { observesNativeCarrierOnly, operandsOfIrOperation, resultOfIrOperation }
 import type { ProgramConversionRecipe } from './program-conversions.js'
 import { nativeCallablePrimitiveDataWritePreservesOwner } from './native-callable-data-flow.js'
 
-interface OriginCell {
-  readonly index: number
-  readonly incoming: Set<OriginCell>
-  queued: boolean
-  readonly functions: Set<FunctionId>
-  readonly heaps: Set<NativeHeap>
-  /** Null transfers every origin; native selection can exclude incompatible heaps. */
-  readonly edges: Map<OriginCell, readonly NativeHeap[] | null>
-  readonly documents: Map<string, Representation>
+/**
+ * The collections an origin cell starts with. There is one cell per IR value
+ * and binding, and most of their eleven collections never receive an entry:
+ * allocating them eagerly held gigabytes of empty `Set`s and `Map`s on a large
+ * program and ran it out of memory. Every cell shares these until its first
+ * write installs its own (`ownSet`/`ownMap`, and `ownCellSet`/`ownCellMap`/
+ * `ownSourceSet` for the frozen empties below), and they throw on mutation, so
+ * a write that bypasses the installers fails instead of corrupting every other
+ * cell.
+ */
+const sharedEmpty = (): never => {
+  throw new Error('a shared empty origin-cell collection was written in place')
+}
+const emptySet: Set<never> = Object.assign(new Set<never>(), { add: sharedEmpty, delete: sharedEmpty, clear: sharedEmpty })
+const emptyMap: Map<never, never> = Object.assign(new Map<never, never>(), { set: sharedEmpty, delete: sharedEmpty, clear: sharedEmpty })
+const ownSet = <T>(current: Set<T>, install: (own: Set<T>) => void): Set<T> => {
+  if (current !== emptySet) return current
+  const own = new Set<T>()
+  install(own)
+  return own
+}
+const ownMap = <K, V>(current: Map<K, V>, install: (own: Map<K, V>) => void): Map<K, V> => {
+  if (current !== emptyMap) return current
+  const own = new Map<K, V>()
+  install(own)
+  return own
+}
+
+const absent: unique symbol = Symbol('absent')
+/**
+ * An origin cell's hot sets. Four in five of the incoming, heap, function and
+ * escape-source sets that get a member never get a second, and a one-member
+ * `Set` costs several times the inline slot that holds it here; a `Set` is
+ * built only for a second member. Iteration is insertion order and visits a
+ * member added while it runs, exactly as a `Set`'s does, so no visit order --
+ * and no answer -- depends on which form a cell holds.
+ */
+class CellSet<T> implements Iterable<T> {
+  first: T | typeof absent = absent
+  members: Set<T> | null = null
+  /** Held by more than one cell (`shareHeaps`): the next write copies it first. */
+  shared = false
+  get size(): number {
+    return this.members !== null ? this.members.size : this.first === absent ? 0 : 1
+  }
+  has(member: T): boolean {
+    return this.members !== null ? this.members.has(member) : this.first === member
+  }
+  add(member: T): this {
+    if (this.members !== null) this.members.add(member)
+    else if (this.first === absent) this.first = member
+    else if (this.first !== member) this.members = new Set([this.first, member])
+    return this
+  }
+  *[Symbol.iterator](): Iterator<T> {
+    if (this.members === null) {
+      if (this.first === absent) return
+      yield this.first
+      if (this.members === null) return
+      let skipped = false
+      for (const member of this.members as Set<T>) {
+        if (skipped) yield member
+        skipped = true
+      }
+      return
+    }
+    yield* this.members
+  }
+}
+/** `CellSet` for the edge map: one target inline, a `Map` from the second. */
+class CellMap<K, V> implements Iterable<[K, V]> {
+  key: K | typeof absent = absent
+  value: V | undefined = undefined
+  entries: Map<K, V> | null = null
+  get size(): number {
+    return this.entries !== null ? this.entries.size : this.key === absent ? 0 : 1
+  }
+  get(key: K): V | undefined {
+    return this.entries !== null ? this.entries.get(key) : this.key === key ? this.value : undefined
+  }
+  has(key: K): boolean {
+    return this.entries !== null ? this.entries.has(key) : this.key === key
+  }
+  set(key: K, value: V): this {
+    if (this.entries !== null) this.entries.set(key, value)
+    else if (this.key === absent || this.key === key) {
+      this.key = key
+      this.value = value
+    } else
+      this.entries = new Map<K, V>([
+        [this.key, this.value as V],
+        [key, value]
+      ])
+    return this
+  }
+  *[Symbol.iterator](): Iterator<[K, V]> {
+    if (this.entries === null) {
+      if (this.key === absent) return
+      yield [this.key, this.value as V]
+      if (this.entries === null) return
+      let skipped = false
+      for (const entry of this.entries as Map<K, V>) {
+        if (skipped) yield entry
+        skipped = true
+      }
+      return
+    }
+    yield* this.entries
+  }
+}
+/**
+ * Escape sources: a `CellSet` that also answers by insertion index, which an
+ * absorber resumes from (`escapeAbsorbed`). The index is kept only once there
+ * are two, beside the `Set` -- the separate list every escaped cell carried
+ * was a seventeen-slot array for its one source.
+ */
+class SourceSet<T> implements Iterable<T> {
+  first: T | typeof absent = absent
+  list: T[] | null = null
+  members: Set<T> | null = null
+  get size(): number {
+    return this.list !== null ? this.list.length : this.first === absent ? 0 : 1
+  }
+  has(member: T): boolean {
+    return this.members !== null ? this.members.has(member) : this.first === member
+  }
+  at(index: number): T {
+    return this.list !== null ? this.list[index]! : (this.first as T)
+  }
+  add(member: T): this {
+    if (this.members !== null) {
+      if (!this.members.has(member)) {
+        this.members.add(member)
+        this.list!.push(member)
+      }
+    } else if (this.first === absent) this.first = member
+    else if (this.first !== member) {
+      this.list = [this.first, member]
+      this.members = new Set(this.list)
+    }
+    return this
+  }
+  *[Symbol.iterator](): Iterator<T> {
+    for (let index = 0; index < this.size; index++) yield this.at(index)
+  }
+}
+const emptyCellSet = Object.freeze(new CellSet<never>()) as CellSet<never>
+const emptyCellMap = Object.freeze(new CellMap<never, never>()) as CellMap<never, never>
+const emptySourceSet = Object.freeze(new SourceSet<never>()) as SourceSet<never>
+const ownCellSet = <T>(current: CellSet<T>, install: (own: CellSet<T>) => void): CellSet<T> => {
+  if (current !== emptyCellSet && !current.shared) return current
+  const own = new CellSet<T>()
+  if (current !== emptyCellSet) {
+    own.first = current.first
+    own.members = current.members === null ? null : new Set(current.members)
+  }
+  install(own)
+  return own
+}
+const ownSourceSet = <T>(current: SourceSet<T>, install: (own: SourceSet<T>) => void): SourceSet<T> => {
+  if (current !== emptySourceSet) return current
+  const own = new SourceSet<T>()
+  install(own)
+  return own
+}
+
+/**
+ * A table keyed by SSA value id. `irValueId` spells a value as its defining
+ * body and an ordinal, so the table keeps one array per body, indexed by the
+ * ordinal: a `Map` over the program's every value costs about forty bytes an
+ * entry, and the solve held two of them through its peak. An id of any other
+ * spelling goes to a `Map`. Iteration is insertion order and visits an entry
+ * added while it runs, as a `Map`'s does.
+ */
+class ValueTable<T extends object> implements Iterable<[IrValueId, T]> {
+  private readonly byBody = new Map<string, (T | undefined)[]>()
+  private readonly other = new Map<IrValueId, T>()
+  private readonly order: IrValueId[] = []
+  private lastBody = ''
+  private lastSlots: (T | undefined)[] | null = null
+  private ordinal = 0
+  /** `order` is kept only for a table that is iterated. */
+  constructor(private readonly ordered: boolean) {}
+  /** The body's slots with `ordinal` set; undefined for an id of another spelling, null for an unknown body. */
+  private slotsOf(id: IrValueId, create: boolean): (T | undefined)[] | null | undefined {
+    const bar = id.lastIndexOf('|')
+    const end = id.length
+    if (bar <= 4 || end - bar - 1 > 9 || bar + 1 === end || (id.charCodeAt(bar + 1) === 48 && end > bar + 2) || !id.startsWith('ssa|'))
+      return undefined
+    let ordinal = 0
+    for (let at = bar + 1; at < end; at++) {
+      const digit = id.charCodeAt(at) - 48
+      if (digit < 0 || digit > 9) return undefined
+      ordinal = ordinal * 10 + digit
+    }
+    this.ordinal = ordinal
+    if (this.lastSlots !== null && bar === 4 + this.lastBody.length && id.startsWith(this.lastBody, 4)) return this.lastSlots
+    const body = id.slice(4, bar)
+    let slots = this.byBody.get(body)
+    if (slots === undefined) {
+      if (!create) return null
+      slots = []
+      this.byBody.set(body, slots)
+    }
+    this.lastBody = body
+    this.lastSlots = slots
+    return slots
+  }
+  get(id: IrValueId): T | undefined {
+    const slots = this.slotsOf(id, false)
+    return slots === undefined ? this.other.get(id) : slots === null ? undefined : slots[this.ordinal]
+  }
+  has(id: IrValueId): boolean {
+    return this.get(id) !== undefined
+  }
+  set(id: IrValueId, entry: T): void {
+    const slots = this.slotsOf(id, true)
+    if (slots === undefined) {
+      if (this.ordered && !this.other.has(id)) this.order.push(id)
+      this.other.set(id, entry)
+      return
+    }
+    if (this.ordered && slots![this.ordinal] === undefined) this.order.push(id)
+    slots![this.ordinal] = entry
+  }
+  clear(): void {
+    this.byBody.clear()
+    this.other.clear()
+    this.order.length = 0
+    this.lastBody = ''
+    this.lastSlots = null
+  }
+  *[Symbol.iterator](): Iterator<[IrValueId, T]> {
+    for (let at = 0; at < this.order.length; at++) yield [this.order[at]!, this.get(this.order[at]!)!]
+  }
+}
+
+const QUEUED = 1
+const DOCUMENT_INSTALLED = 2
+const DOCUMENT_BLOCKED = 4
+const UNKNOWN = 8
+const ESCAPED = 16
+const LOGICAL_RECEIVER = 32
+const DYNAMIC_RECEIVER = 64
+const IGNORES_LOGICAL_RECEIVER = 128
+const UNRESTRICTED_UNKNOWN_HEAPS = 256
+/** `OriginCell.state` keeps the flags below this and the version above it. */
+const FLAG_SPAN = 512
+
+/** What few cells ever hold: under one cell in thirty gets any of these. */
+interface OriginCellRare {
+  unknownHeaps: Set<NativeHeap> | undefined
+  documents: Map<string, Representation>
+  arrayViews: Set<string>
+  descriptorSnapshots: Set<IrValueId>
+  fieldViews: Set<ConversionNodeId>
+  escapeAbsorbed: Map<OriginCell, number> | undefined
+  unknownReason: string | undefined
+  escapeReason: string | undefined
+}
+
+/**
+ * One per IR value and binding, so the solve holds hundreds of thousands at
+ * once, at the peak of a large program's compile. The cell keeps its eight
+ * flags in one word and moves what few cells ever hold to `rare`, behind the
+ * same property names, so every reader and writer below is unchanged: a
+ * plain object of twenty-one properties was twice the size.
+ */
+class OriginCell {
+  /** The cells with an edge into this one (`incomingAdd`, `incomingEach`). */
+  incoming: IncomingCells = null
+  functions: CellSet<FunctionId> = emptyCellSet
+  heaps: CellSet<NativeHeap> = emptyCellSet
+  /**
+   * Null transfers every origin; native selection can exclude incompatible
+   * heaps. A lone unrestricted edge is the target cell itself (`edgeGet`,
+   * `edgeSet`, `edgesOf`): most cells with an edge have just that one.
+   */
+  edges: CellMap<OriginCell, readonly NativeHeap[] | null> | OriginCell = emptyCellMap
+  escapeSources: SourceSet<IrOperation | null> = emptySourceSet
+  /** The flags, and above `FLAG_SPAN` the version bumped by every `changed(cell)` (see `heapEffect`). */
+  private state = 0
+  private rare: OriginCellRare | null = null
+  constructor(readonly index: number) {}
+  get version(): number {
+    return Math.floor(this.state / FLAG_SPAN)
+  }
+  set version(version: number) {
+    this.state = version * FLAG_SPAN + (this.state % FLAG_SPAN)
+  }
+  private flag(bit: number): boolean {
+    return ((this.state % FLAG_SPAN) & bit) !== 0
+  }
+  private setFlag(bit: number, on: boolean): void {
+    const flags = this.state % FLAG_SPAN
+    this.state += (on ? flags | bit : flags & ~bit) - flags
+  }
+  /**
+   * Null is unrestricted; a canonical checked sum can bound its unknown normal
+   * destinations. Under one cell in three hundred bounds them, so the set
+   * lives in `rare` and unrestricted is a flag.
+   */
+  get unknownHeaps(): Set<NativeHeap> | null {
+    return this.flag(UNRESTRICTED_UNKNOWN_HEAPS) ? null : (this.rare?.unknownHeaps ?? emptySet)
+  }
+  set unknownHeaps(own: Set<NativeHeap> | null) {
+    this.setFlag(UNRESTRICTED_UNKNOWN_HEAPS, own === null)
+    if (own !== null && (own !== emptySet || this.rare !== null)) this.own().unknownHeaps = own
+  }
+  private own(): OriginCellRare {
+    return (this.rare ??= {
+      unknownHeaps: undefined,
+      documents: emptyMap,
+      arrayViews: emptySet,
+      descriptorSnapshots: emptySet,
+      fieldViews: emptySet,
+      escapeAbsorbed: undefined,
+      unknownReason: undefined,
+      escapeReason: undefined
+    })
+  }
+  get queued(): boolean {
+    return this.flag(QUEUED)
+  }
+  set queued(on: boolean) {
+    this.setFlag(QUEUED, on)
+  }
+  get documentInstalled(): boolean {
+    return this.flag(DOCUMENT_INSTALLED)
+  }
+  set documentInstalled(on: boolean) {
+    this.setFlag(DOCUMENT_INSTALLED, on)
+  }
+  get documentBlocked(): boolean {
+    return this.flag(DOCUMENT_BLOCKED)
+  }
+  set documentBlocked(on: boolean) {
+    this.setFlag(DOCUMENT_BLOCKED, on)
+  }
+  get unknown(): boolean {
+    return this.flag(UNKNOWN)
+  }
+  set unknown(on: boolean) {
+    this.setFlag(UNKNOWN, on)
+  }
+  get escaped(): boolean {
+    return this.flag(ESCAPED)
+  }
+  set escaped(on: boolean) {
+    this.setFlag(ESCAPED, on)
+  }
+  get logicalReceiver(): boolean {
+    return this.flag(LOGICAL_RECEIVER)
+  }
+  set logicalReceiver(on: boolean) {
+    this.setFlag(LOGICAL_RECEIVER, on)
+  }
+  get dynamicReceiver(): boolean {
+    return this.flag(DYNAMIC_RECEIVER)
+  }
+  set dynamicReceiver(on: boolean) {
+    this.setFlag(DYNAMIC_RECEIVER, on)
+  }
+  get ignoresLogicalReceiver(): boolean {
+    return this.flag(IGNORES_LOGICAL_RECEIVER)
+  }
+  set ignoresLogicalReceiver(on: boolean) {
+    this.setFlag(IGNORES_LOGICAL_RECEIVER, on)
+  }
+  get documents(): Map<string, Representation> {
+    return this.rare?.documents ?? emptyMap
+  }
+  set documents(own: Map<string, Representation>) {
+    this.own().documents = own
+  }
   /** Possible installed array callbacks survive unknown/mixed aliases too. */
-  readonly arrayViews: Set<string>
-  readonly descriptorSnapshots: Set<IrValueId>
+  get arrayViews(): Set<string> {
+    return this.rare?.arrayViews ?? emptySet
+  }
+  set arrayViews(own: Set<string>) {
+    this.own().arrayViews = own
+  }
+  get descriptorSnapshots(): Set<IrValueId> {
+    return this.rare?.descriptorSnapshots ?? emptySet
+  }
+  set descriptorSnapshots(own: Set<IrValueId>) {
+    this.own().descriptorSnapshots = own
+  }
   /** Installed readers can retain an allocation while changing its access protocol. */
-  readonly fieldViews: Set<ConversionNodeId>
-  documentInstalled: boolean
-  documentBlocked: boolean
-  unknown: boolean
-  /** Null is unrestricted; a canonical checked sum can bound its unknown normal destinations. */
-  unknownHeaps: Set<NativeHeap> | null
-  escaped: boolean
-  readonly escapeSources: Set<IrOperation | null>
+  get fieldViews(): Set<ConversionNodeId> {
+    return this.rare?.fieldViews ?? emptySet
+  }
+  set fieldViews(own: Set<ConversionNodeId>) {
+    this.own().fieldViews = own
+  }
   /**
    * How many of each escaped alias target's `escapeSources` this cell has
    * already absorbed. The set only grows, so an unchanged size means nothing
    * new to absorb: re-walking every target's whole set on every pop was nearly a
    * third of a large program's compile time.
    */
-  escapeAbsorbed?: Map<OriginCell, number>
-  /** `escapeSources` in insertion order, so an absorber can resume where it stopped. */
-  readonly escapeSourceList: (IrOperation | null)[]
-  logicalReceiver: boolean
-  dynamicReceiver: boolean
-  ignoresLogicalReceiver: boolean
-  unknownReason?: string
-  escapeReason?: string
-  /** Bumped by every `changed(cell)`; see `heapEffect`. */
-  version: number
+  get escapeAbsorbed(): Map<OriginCell, number> | undefined {
+    return this.rare?.escapeAbsorbed
+  }
+  set escapeAbsorbed(own: Map<OriginCell, number> | undefined) {
+    this.own().escapeAbsorbed = own
+  }
+  get unknownReason(): string | undefined {
+    return this.rare?.unknownReason
+  }
+  set unknownReason(reason: string | undefined) {
+    this.own().unknownReason = reason
+  }
+  get escapeReason(): string | undefined {
+    return this.rare?.escapeReason
+  }
+  set escapeReason(reason: string | undefined) {
+    this.own().escapeReason = reason
+  }
+}
+
+/**
+ * The cells with an edge into one cell: none, the one cell itself, a list of
+ * up to eight in insertion order, or a `Set` from the ninth. Most cells with
+ * an incoming edge have one and nearly all the rest two to four, where a
+ * `Set` cost several times its members.
+ */
+type IncomingCells = OriginCell | OriginCell[] | Set<OriginCell> | null
+const incomingListLimit = 8
+const incomingAdd = (to: OriginCell, from: OriginCell): void => {
+  const current = to.incoming
+  if (current === null) to.incoming = from
+  else if (current instanceof OriginCell) {
+    if (current !== from) to.incoming = [current, from]
+  } else if (Array.isArray(current)) {
+    if (current.includes(from)) return
+    if (current.length < incomingListLimit) {
+      const next = new Array<OriginCell>(current.length + 1)
+      for (let at = 0; at < current.length; at++) next[at] = current[at]!
+      next[current.length] = from
+      to.incoming = next
+    } else to.incoming = new Set([...current, from])
+  } else current.add(from)
+}
+const incomingEach = (cell: OriginCell, visit: (incoming: OriginCell) => void): void => {
+  const current = cell.incoming
+  if (current === null) return
+  if (current instanceof OriginCell) visit(current)
+  else for (const incoming of current) visit(incoming)
+}
+const edgeGet = (from: OriginCell, to: OriginCell): readonly NativeHeap[] | null | undefined => {
+  const edges = from.edges
+  return edges instanceof OriginCell ? (edges === to ? null : undefined) : edges.get(to)
+}
+const edgeHas = (from: OriginCell, to: OriginCell): boolean => {
+  const edges = from.edges
+  return edges instanceof OriginCell ? edges === to : edges.has(to)
+}
+const edgeSet = (from: OriginCell, to: OriginCell, allowed: readonly NativeHeap[] | null): void => {
+  const edges = from.edges
+  if (edges instanceof OriginCell) {
+    if (edges === to && allowed === null) return
+    const own = new CellMap<OriginCell, readonly NativeHeap[] | null>()
+    own.set(edges, null)
+    own.set(to, allowed)
+    from.edges = own
+  } else if (edges === emptyCellMap) {
+    if (allowed === null) from.edges = to
+    else from.edges = new CellMap<OriginCell, readonly NativeHeap[] | null>().set(to, allowed)
+  } else edges.set(to, allowed)
+}
+/**
+ * The edges out of a cell, in insertion order, visiting an edge added while
+ * this runs exactly as iterating the cell's `CellMap` did: a lone edge that
+ * grows into a map continues past the entry already visited.
+ */
+function* edgesOf(cell: OriginCell): Generator<[OriginCell, readonly NativeHeap[] | null]> {
+  const edges = cell.edges
+  if (!(edges instanceof OriginCell)) {
+    yield* edges
+    return
+  }
+  yield [edges, null]
+  const grown = cell.edges
+  if (grown instanceof OriginCell || grown === emptyCellMap) return
+  let skipped = false
+  for (const entry of grown) {
+    if (skipped) yield entry
+    skipped = true
+  }
 }
 
 interface NativeHeap {
@@ -175,6 +629,15 @@ export interface NativeCallableFlow {
  * which that demand needs. Unsupported transports fail closed. In particular,
  * an arbitrary matching callable signature is never an implementation source.
  */
+const ownedOperationKinds: ReadonlySet<IrOperation['kind']> = new Set<IrOperation['kind']>([
+  'get',
+  'set',
+  'define-own-property',
+  'receiver',
+  'return',
+  'super-initialize'
+])
+
 const computeNativeCallableFlow = (
   bodies: readonly IrBody[],
   placements: ReadonlyMap<DeclarationId, BindingPlacement>,
@@ -248,12 +711,12 @@ const computeNativeCallableFlow = (
       changed(cell)
     }
     if (cell.functions.has(id)) return
-    cell.functions.add(id)
+    ownCellSet(cell.functions, (own) => (cell.functions = own)).add(id)
     changed(cell)
   }
   const addHeap = (cell: OriginCell, heap: NativeHeap): void => {
     if (cell.heaps.has(heap)) return
-    cell.heaps.add(heap)
+    ownCellSet(cell.heaps, (own) => (cell.heaps = own)).add(heap)
     changed(cell)
   }
   const markUnknown = (cell: OriginCell, reason?: string, admitted?: readonly NativeHeap[], installedDocumentSource = false): void => {
@@ -285,13 +748,12 @@ const computeNativeCallableFlow = (
     cell.escaped = true
     for (const source of sources)
       if (!cell.escapeSources.has(source)) {
-        cell.escapeSources.add(source)
-        cell.escapeSourceList.push(source)
+        ownSourceSet(cell.escapeSources, (own) => (cell.escapeSources = own)).add(source)
         grew = true
       }
     if (grew) {
       changed(cell)
-      for (const incoming of cell.incoming) schedule(incoming)
+      incomingEach(cell, schedule)
     }
     if (trace && reason !== undefined) cell.escapeReason ??= reason
   }
@@ -308,14 +770,14 @@ const computeNativeCallableFlow = (
       if (!cell.escaped) {
         cell.escaped = true
         changed(cell)
-        for (const incoming of cell.incoming) schedule(incoming)
+        incomingEach(cell, schedule)
       }
       if (trace && target.escapeReason !== undefined) cell.escapeReason ??= target.escapeReason
       return
     }
-    const list = target.escapeSourceList
+    const list = target.escapeSources
     const from = cell.escapeAbsorbed?.get(target) ?? 0
-    if (from === list.length && cell.escaped) {
+    if (from === list.size && cell.escaped) {
       if (trace && target.escapeReason !== undefined) cell.escapeReason ??= target.escapeReason
       return
     }
@@ -324,20 +786,19 @@ const computeNativeCallableFlow = (
     // and it adds them in the same order.
     let grew = !cell.escaped
     cell.escaped = true
-    for (let at = from; at < list.length; at++) {
-      const source = list[at]!
+    for (let at = from; at < list.size; at++) {
+      const source = list.at(at)
       if (!cell.escapeSources.has(source)) {
-        cell.escapeSources.add(source)
-        cell.escapeSourceList.push(source)
+        ownSourceSet(cell.escapeSources, (own) => (cell.escapeSources = own)).add(source)
         grew = true
       }
     }
     if (grew) {
       changed(cell)
-      for (const incoming of cell.incoming) schedule(incoming)
+      incomingEach(cell, schedule)
     }
     if (trace && target.escapeReason !== undefined) cell.escapeReason ??= target.escapeReason
-    ;(cell.escapeAbsorbed ??= new Map()).set(target, list.length)
+    ;(cell.escapeAbsorbed ??= new Map()).set(target, list.size)
   }
   const markLogicalReceiver = (cell: OriginCell, dynamic = false): void => {
     if (!cell.logicalReceiver) {
@@ -356,33 +817,11 @@ const computeNativeCallableFlow = (
     }
   }
   const fresh = (): OriginCell => {
-    const cell: OriginCell = {
-      index: cells.length,
-      incoming: new Set(),
-      queued: false,
-      functions: new Set(),
-      heaps: new Set(),
-      edges: new Map(),
-      documents: new Map(),
-      arrayViews: new Set(),
-      descriptorSnapshots: new Set(),
-      fieldViews: new Set(),
-      documentInstalled: false,
-      documentBlocked: false,
-      unknown: false,
-      unknownHeaps: new Set(),
-      escaped: false,
-      escapeSources: new Set(),
-      escapeSourceList: [],
-      version: 0,
-      logicalReceiver: false,
-      dynamicReceiver: false,
-      ignoresLogicalReceiver: false
-    }
+    const cell = new OriginCell(cells.length)
     cells.push(cell)
     return cell
   }
-  const values = new Map<IrValueId, OriginCell>()
+  const values = new ValueTable<OriginCell>(true)
   const value = (id: IrValueId): OriginCell => {
     const found = values.get(id)
     if (found) return found
@@ -494,8 +933,7 @@ const computeNativeCallableFlow = (
       viewMethodFields.set(fields.target.shapeId, methods)
     }
   }
-  const valueCarriers = new Map(bodies.flatMap((body) => [...body.values]))
-  const producers = new Map<IrValueId, IrOperation>()
+  const producers = new ValueTable<IrOperation>(false)
   const bodyById = new Map<FunctionId, IrBody | null>()
   const physicalBodiesBySource = new Map<FunctionId, IrBody[]>()
   const returns = new Map<FunctionId, OriginCell>()
@@ -503,8 +941,19 @@ const computeNativeCallableFlow = (
   // and lowering therefore produces no receiver SSA operation.
   const frameReceivers = new Map<FunctionId, OriginCell>()
   const parameters = new Map<FunctionId, Extract<IrOperation, { kind: 'parameter' | 'receiver' }>[]>()
-  const owner = new Map<IrOperation, FunctionId>()
+  // An operation's source owner is its physical body's: one table, not a
+  // second of the same half million operations. Only the kinds asked about
+  // are entered -- reads, writes and definitions for their presence guards, and frame
+  // entries and returns -- about one operation in nine; asking about any
+  // other kind is a defect here, not an absent owner.
   const physicalOwner = new Map<IrOperation, IrBody>()
+  const physicalOwnerOf = (operation: IrOperation): IrBody | undefined => {
+    if (!ownedOperationKinds.has(operation.kind)) throw new Error(`callable flow: no owner is recorded for a ${operation.kind} operation`)
+    return physicalOwner.get(operation)
+  }
+  const owner = {
+    get: (operation: IrOperation): FunctionId | undefined => physicalOwnerOf(operation)?.sourceOwner as FunctionId | undefined
+  }
   for (const body of bodies) {
     const id = body.sourceOwner as FunctionId
     const physicalBodies = physicalBodiesBySource.get(id) ?? []
@@ -516,8 +965,7 @@ const computeNativeCallableFlow = (
     const inputs: Extract<IrOperation, { kind: 'parameter' | 'receiver' }>[] = []
     for (const block of body.blocks.values())
       for (const operation of [...block.operations, block.terminator]) {
-        owner.set(operation, id)
-        physicalOwner.set(operation, body)
+        if (ownedOperationKinds.has(operation.kind)) physicalOwner.set(operation, body)
         if (operation.kind === 'parameter' || operation.kind === 'receiver') inputs.push(operation)
       }
     parameters.set(id, inputs)
@@ -543,23 +991,24 @@ const computeNativeCallableFlow = (
   }
   const arrayInsertions = new Map<IrOperation, NativeArrayInsertion>()
   const insertionReads = new Set<IrOperation>()
-  const uses = new Map<IrValueId, Set<IrOperation>>()
   for (const operation of operations) {
-    for (const operand of operandsOfIrOperation(operation)) {
-      const users = uses.get(operand.value) ?? new Set<IrOperation>()
-      users.add(operation)
-      uses.set(operand.value, users)
-    }
     if (operation.kind !== 'call') continue
     const insertion = nativeArrayInsertionOf(operation, (id) => producers.get(id) ?? null, classes, conversions)
     if (insertion !== null) arrayInsertions.set(operation, insertion)
   }
+  // Only the users of an insertion's extracted read are asked about: a table
+  // of every value's users was a `Set` per value of the program, held through
+  // the whole solve.
+  const uses = new Map<IrValueId, Set<IrOperation>>()
+  for (const insertion of arrayInsertions.values()) uses.set(insertion.read.result.id, new Set())
+  if (uses.size > 0)
+    for (const operation of operations) for (const operand of operandsOfIrOperation(operation)) uses.get(operand.value)?.add(operation)
   // An extracted method can be published or rebound. Only the exact fused
   // uses above can keep its receiver's allocation closed.
   for (const insertion of arrayInsertions.values()) {
-    const users = uses.get(insertion.read.result.id)
+    const users = uses.get(insertion.read.result.id)!
     if (
-      users !== undefined &&
+      users.size > 0 &&
       [...users].every((user) => user.kind === 'call' && user.callee.value === insertion.read.result.id && arrayInsertions.has(user))
     )
       insertionReads.add(insertion.read)
@@ -780,7 +1229,7 @@ const computeNativeCallableFlow = (
     if (at === undefined || cell.unknown || cell.escaped || heaps.length === 0 || !heaps.every(ordinaryAllocated))
       return { heaps, present: false }
     presenceConsulted = true
-    const guard = propertyPresence.get(physicalOwner.get(at)!)?.(receiver, key, at, (operation, guard) =>
+    const guard = propertyPresence.get(physicalOwnerOf(at)!)?.(receiver, key, at, (operation, guard) =>
       preservesPresence(operation, key, guard)
     )
     if (guard === undefined || guard === null) return { heaps, present: false }
@@ -840,9 +1289,9 @@ const computeNativeCallableFlow = (
     markEscaped(cell, reason, [operation ?? null])
   }
   const link = (from: OriginCell, to: OriginCell): void => {
-    if (from.edges.get(to) === null) return
-    from.edges.set(to, null)
-    to.incoming.add(from)
+    if (edgeGet(from, to) === null) return
+    edgeSet(from, to, null)
+    incomingAdd(to, from)
     changed(from)
   }
   const linkPayload = (from: OriginCell, to: OriginCell, representations: readonly Representation[]): void => {
@@ -850,13 +1299,14 @@ const computeNativeCallableFlow = (
     // Only a sealed payload-preserving conversion calls this. Layouts bound
     // which input allocations can survive its native tag/identity selection;
     // they never create an origin for an allocation not present in the input.
-    if (references.some((reference) => !reference.complete) || from.edges.has(to)) link(from, to)
+    if (references.some((reference) => !reference.complete) || edgeHas(from, to)) link(from, to)
     else {
-      from.edges.set(
+      edgeSet(
+        from,
         to,
         references.flatMap((reference) => reference.heaps)
       )
-      to.incoming.add(from)
+      incomingAdd(to, from)
       changed(from)
     }
   }
@@ -1830,7 +2280,7 @@ const computeNativeCallableFlow = (
         ) {
           const cell = value(operation.result.id)
           if (!cell.fieldViews.has(node.id)) {
-            cell.fieldViews.add(node.id)
+            ownSet(cell.fieldViews, (own) => (cell.fieldViews = own)).add(node.id)
             changed(cell)
           }
         } else if (node && (to.kind === 'optional' || to.kind === 'borrowed-ref')) {
@@ -1855,7 +2305,7 @@ const computeNativeCallableFlow = (
               representationKey(child.target) === representationKey(payload) &&
               !cell.fieldViews.has(child.id)
             ) {
-              cell.fieldViews.add(child.id)
+              ownSet(cell.fieldViews, (own) => (cell.fieldViews = own)).add(child.id)
               changed(cell)
             }
         }
@@ -1871,7 +2321,7 @@ const computeNativeCallableFlow = (
           cell.documentInstalled = true
           cell.documentBlocked = false
           if (!cell.documents.has(node.id)) {
-            cell.documents.set(node.id, document)
+            ownMap(cell.documents, (own) => (cell.documents = own)).set(node.id, document)
             changed(cell)
           }
         }
@@ -1885,7 +2335,7 @@ const computeNativeCallableFlow = (
           if (conversions && nativeArrayRootViewPlansOf(node, conversions.nodeById).length > 0) {
             const cell = value(operation.result.id)
             if (!cell.arrayViews.has(node.id)) {
-              cell.arrayViews.add(node.id)
+              ownSet(cell.arrayViews, (own) => (cell.arrayViews = own)).add(node.id)
               changed(cell)
             }
           }
@@ -2041,7 +2491,7 @@ const computeNativeCallableFlow = (
             representationKey(node.target) === representationKey(operation.result.representation)
           ) {
             const snapshot = value(operation.result.id)
-            snapshot.descriptorSnapshots.add(operation.result.id)
+            ownSet(snapshot.descriptorSnapshots, (own) => (snapshot.descriptorSnapshots = own)).add(operation.result.id)
             changed(snapshot)
             break
           }
@@ -2175,20 +2625,20 @@ const computeNativeCallableFlow = (
       while (pendingCells.length > 0) {
         const cell = popCell()
         sweepIndex = cell.index
-        for (const [target, allowed] of cell.edges) {
+        for (const [target, allowed] of edgesOf(cell)) {
           for (const id of cell.fieldViews)
             if (!target.fieldViews.has(id)) {
-              target.fieldViews.add(id)
+              ownSet(target.fieldViews, (own) => (target.fieldViews = own)).add(id)
               changed(target)
             }
           for (const id of cell.descriptorSnapshots)
             if (!target.descriptorSnapshots.has(id)) {
-              target.descriptorSnapshots.add(id)
+              ownSet(target.descriptorSnapshots, (own) => (target.descriptorSnapshots = own)).add(id)
               changed(target)
             }
           for (const id of cell.arrayViews)
             if (!target.arrayViews.has(id)) {
-              target.arrayViews.add(id)
+              ownSet(target.arrayViews, (own) => (target.arrayViews = own)).add(id)
               changed(target)
             }
           if (!target.documentInstalled) {
@@ -2198,7 +2648,7 @@ const computeNativeCallableFlow = (
             }
             for (const [id, entry] of cell.documents)
               if (!target.documents.has(id)) {
-                target.documents.set(id, entry)
+                ownMap(target.documents, (own) => (target.documents = own)).set(id, entry)
                 changed(target)
               }
           }
@@ -2208,8 +2658,16 @@ const computeNativeCallableFlow = (
           // origin is any allocation of another layout: `ContextLike | null`
           // holding a class instance behind a record view. Dropping that origin
           // left the record arm the sole implementation of a field it never held.
-          for (const heap of cell.heaps)
-            if (allowed === null || cell.fieldViews.size > 0 || heapAdmitted(heap, allowed)) addHeap(target, heap)
+          // A target with no allocation of its own that takes every one of
+          // this cell's holds the very same set until either writes it: most
+          // multi-allocation cells hold exactly the set of a cell before them.
+          if (target.heaps === emptyCellSet && target !== cell && cell.heaps.size > 0 && (allowed === null || cell.fieldViews.size > 0)) {
+            cell.heaps.shared = true
+            target.heaps = cell.heaps
+            changed(target)
+          } else
+            for (const heap of cell.heaps)
+              if (allowed === null || cell.fieldViews.size > 0 || heapAdmitted(heap, allowed)) addHeap(target, heap)
           if (cell.unknown) {
             const admitted =
               cell.unknownHeaps === null
@@ -2406,6 +2864,12 @@ const computeNativeCallableFlow = (
     )
       break
   }
+  // The solve is settled and nothing below replays a heap effect. The answers
+  // built from here on are the backend's peak, so the solve-only effect list
+  // goes first and the program-wide carrier table is built only now.
+  heapEffects.length = 0
+  releasePropagation(cells)
+  const valueCarriers = valueCarriersOf(bodies)
   const result = new Map<IrValueId, CallCalleeIdentity>()
   // Presence is checked by the later optional conversion. This fact names
   // possible implementations, never a physical call ABI or a non-null value.
@@ -2490,18 +2954,37 @@ const computeNativeCallableFlow = (
     IrValueId,
     ReadonlyMap<string, readonly { read: Representation; write: Representation | null }[]>
   >()
+  // The fields every heap of a value has in common are a function of the heap
+  // set alone, and most values share theirs with many others: one table per
+  // distinct set, not per value, which was half a million tables on a large
+  // program for a few thousand distinct answers.
+  const heapNumbers = new Map<object, number>()
+  const commonByHeaps = new Map<string, ReadonlyMap<string, readonly Representation[]>>()
+  const accessorsByHeaps = new Map<string, ReadonlyMap<string, readonly { read: Representation; write: Representation | null }[]>>()
   for (const [id, cell] of values) {
     if (cell.unknown || cell.heaps.size === 0 || [...cell.heaps].some((heap) => !heap.valid || heap.proxy)) continue
-    const common = new Map<string, Representation[]>()
-    for (const heap of cell.heaps) {
-      for (const [key, slot] of heap.fields) {
-        const members = common.get(key) ?? []
-        if (!members.some((member) => representationKey(member) === representationKey(slot.representation)))
-          members.push(slot.representation)
-        common.set(key, members)
+    const heapsKey = [...cell.heaps]
+      .map((heap) => {
+        let number = heapNumbers.get(heap)
+        if (number === undefined) heapNumbers.set(heap, (number = heapNumbers.size))
+        return number
+      })
+      .sort((left, right) => left - right)
+      .join(',')
+    let common = commonByHeaps.get(heapsKey)
+    if (common === undefined) {
+      const fields = new Map<string, Representation[]>()
+      for (const heap of cell.heaps) {
+        for (const [key, slot] of heap.fields) {
+          const members = fields.get(key) ?? []
+          if (!members.some((member) => representationKey(member) === representationKey(slot.representation)))
+            members.push(slot.representation)
+          fields.set(key, members)
+        }
       }
+      for (const key of [...fields.keys()]) if ([...cell.heaps].some((heap) => !heap.fields.has(key))) fields.delete(key)
+      commonByHeaps.set(heapsKey, (common = fields))
     }
-    for (const key of [...common.keys()]) if ([...cell.heaps].some((heap) => !heap.fields.has(key))) common.delete(key)
     nativeFieldStorageValues.set(id, common)
     const carrier = valueCarriers.get(id)
     const methods = carrier && 'shapeId' in carrier ? viewMethodFields.get(carrier.shapeId) : undefined
@@ -2510,33 +2993,38 @@ const computeNativeCallableFlow = (
       for (const key of admitted.keys())
         if ([...cell.heaps].some((heap) => heap.declaration === null || classMemberOf(classes, heap.declaration, key)?.kind !== 'method'))
           admitted.delete(key)
-      nativeFieldMethodValues.set(id, admitted)
+      nativeFieldMethodValues.set(id, admitted.size === 0 ? emptyMap : admitted)
     }
-    const accessors = new Map<string, { read: Representation; write: Representation | null }[]>()
-    for (const heap of cell.heaps) {
-      if (heap.declaration === null) continue
-      const seen = new Set<DeclarationId>()
-      for (
-        let current: DeclarationId | null = heap.declaration;
-        current !== null && !seen.has(current);
-        current = classes.get(current)?.base ?? null
-      ) {
-        seen.add(current)
-        for (const accessor of classes.get(current)?.accessors ?? []) {
-          const selected = classMemberOf(classes, heap.declaration, accessor.key)
-          if (selected?.kind !== 'accessor' || selected.owner !== current) continue
-          const getter = accessor.getter === null ? null : bodyById.get(accessor.getter)?.abi
-          const setter = accessor.setter === null ? null : bodyById.get(accessor.setter)?.abi
-          if (!getter) continue
-          const entries = accessors.get(accessor.key) ?? []
-          entries.push({ read: getter.result, write: setter?.parameters[0]?.value ?? null })
-          accessors.set(accessor.key, entries)
+    let accessors = accessorsByHeaps.get(heapsKey)
+    if (accessors === undefined) {
+      const built = new Map<string, { read: Representation; write: Representation | null }[]>()
+      for (const heap of cell.heaps) {
+        if (heap.declaration === null) continue
+        const seen = new Set<DeclarationId>()
+        for (
+          let current: DeclarationId | null = heap.declaration;
+          current !== null && !seen.has(current);
+          current = classes.get(current)?.base ?? null
+        ) {
+          seen.add(current)
+          for (const accessor of classes.get(current)?.accessors ?? []) {
+            const selected = classMemberOf(classes, heap.declaration, accessor.key)
+            if (selected?.kind !== 'accessor' || selected.owner !== current) continue
+            const getter = accessor.getter === null ? null : bodyById.get(accessor.getter)?.abi
+            const setter = accessor.setter === null ? null : bodyById.get(accessor.setter)?.abi
+            if (!getter) continue
+            const entries = built.get(accessor.key) ?? []
+            entries.push({ read: getter.result, write: setter?.parameters[0]?.value ?? null })
+            built.set(accessor.key, entries)
+          }
         }
       }
+      for (const key of [...built.keys()])
+        if ([...cell.heaps].some((heap) => heap.declaration === null || classMemberOf(classes, heap.declaration, key)?.kind !== 'accessor'))
+          built.delete(key)
+      // Under one heap set in a hundred has an accessor: the rest share one empty table.
+      accessorsByHeaps.set(heapsKey, (accessors = built.size === 0 ? emptyMap : built))
     }
-    for (const key of [...accessors.keys()])
-      if ([...cell.heaps].some((heap) => heap.declaration === null || classMemberOf(classes, heap.declaration, key)?.kind !== 'accessor'))
-        accessors.delete(key)
     nativeAccessorStorageValues.set(id, accessors)
   }
   // What a spread's copy left natively in an allocation's expando, by the
@@ -2612,28 +3100,20 @@ const computeNativeCallableFlow = (
       for (const home of open.homes)
         for (const key of extending ? keys : forwardedKeys) storeExpando(home, key, operation.value.representation)
     }
-  const expandoStoredOf = (shapeId: string, key: string | null): readonly Representation[] => {
-    const byKey = expandoStored.get(shapeId)
-    if (byKey === undefined) return []
-    // `null`: whatever any key may hold -- an open runtime key reads them all.
-    if (key === null) {
-      const all: Representation[] = []
-      for (const values of byKey.values())
-        for (const value of values) if (!all.some((one) => representationKey(one) === representationKey(value))) all.push(value)
-      return all
-    }
-    const keyed = byKey.get(key) ?? []
-    const any = byKey.get(null) ?? []
-    return [...keyed, ...any.filter((value) => !keyed.some((one) => representationKey(one) === representationKey(value)))]
-  }
+  const expandoStoredOf = expandoStoredReaderOf(expandoStored)
   const nativeFieldViewStorageValues = new Map<IrValueId, ReadonlyMap<string, readonly NativeFieldStorageDomain[]>>()
-  const descriptorDomainsOf = nativeFieldViewDomainsOf(viewNodes, deriver, (id) => bodyById.get(id)?.abi ?? null, classes, expandoStoredOf)
+  const descriptorDomainsOf = descriptorDomainsOver(viewNodes, deriver, bodyById, classes, expandoStored)
   for (const [id, carrier] of valueCarriers) {
     const fields = descriptorDomainsOf(carrier)
     if (fields !== null) nativeFieldViewStorageValues.set(id, fields)
   }
   const nativeFieldOperationStorageValues = new Map<IrOperation, ReadonlyMap<string, readonly NativeFieldStorageDomain[]>>()
   const originDomains = new Map<string, ReturnType<typeof nativeFieldViewDomainsOf>>()
+  // The fields every selected heap holds are a function of the selection
+  // alone, and thousands of reads select the same few: one table per
+  // selection, which a read copies only to add what is its own.
+  const selectionNumbers = new Map<NativeHeap, number>()
+  const fieldsBySelection = new Map<string, ReadonlyMap<string, readonly NativeFieldStorageDomain[]>>()
   for (const operation of operations) {
     if (operation.kind !== 'get' && operation.kind !== 'set') continue
     const key = keyOf(operation.key)
@@ -2641,16 +3121,30 @@ const computeNativeCallableFlow = (
     if (key === null || receiver.unknown || receiver.heaps.size === 0) continue
     const { heaps, present } = heapSelectionAt(operation.receiver, key, operation)
     if (heaps === null || heaps.length === 0 || !heaps.every(ordinaryAllocated)) continue
-    const domains = new Map<string, NativeFieldStorageDomain[]>()
-    for (const name of heaps[0]!.fields.keys()) {
-      if (!heaps.every((heap) => heap.fields.has(name))) continue
-      const entries = new Map<string, NativeFieldStorageDomain>()
-      for (const heap of heaps) {
-        const stored = heap.fields.get(name)!.representation
-        entries.set(representationKey(stored), { read: stored, write: stored })
+    const selection = heaps
+      .map((heap) => {
+        let number = selectionNumbers.get(heap)
+        if (number === undefined) selectionNumbers.set(heap, (number = selectionNumbers.size))
+        return number
+      })
+      .join(',')
+    let shared = fieldsBySelection.get(selection)
+    if (shared === undefined) {
+      const built = new Map<string, NativeFieldStorageDomain[]>()
+      for (const name of heaps[0]!.fields.keys()) {
+        if (!heaps.every((heap) => heap.fields.has(name))) continue
+        const entries = new Map<string, NativeFieldStorageDomain>()
+        for (const heap of heaps) {
+          const stored = heap.fields.get(name)!.representation
+          entries.set(representationKey(stored), { read: stored, write: stored })
+        }
+        built.set(name, [...entries.values()])
       }
-      domains.set(name, [...entries.values()])
+      fieldsBySelection.set(selection, (shared = built))
     }
+    let domains: ReadonlyMap<string, readonly NativeFieldStorageDomain[]> = shared
+    const writable = (): Map<string, readonly NativeFieldStorageDomain[]> =>
+      (domains === shared ? (domains = new Map(shared)) : domains) as Map<string, readonly NativeFieldStorageDomain[]>
     if (
       operation.kind === 'get' &&
       heaps.some((heap) => !heap.fields.has(key)) &&
@@ -2665,7 +3159,7 @@ const computeNativeCallableFlow = (
             : { read: slot.representation, write: slot.representation }
         )
       }
-      domains.set(key, entries)
+      writable().set(key, entries)
     }
     // A receiver that may hold a live view also holds, in this cell, the
     // allocations behind each view -- of another layout, which the plain
@@ -2690,7 +3184,7 @@ const computeNativeCallableFlow = (
               : { read: slot.representation, write: slot.representation }
           entries.set(`${representationKey(entry.read)}:${entry.originalAbsent === true}`, entry)
         }
-        domains.set(key, [...entries.values()])
+        writable().set(key, [...entries.values()])
       }
     }
     if (receiver.fieldViews.size > 0) {
@@ -2717,7 +3211,7 @@ const computeNativeCallableFlow = (
         // absence; a union arm's certified absence is the unknown-receiver
         // answer (`native-field-view-domains.ts`) and is no route behind them.
         if (routes.some((route) => route.originalAbsent === true || route.dynamicGet === true || route.nativeData === true)) continue
-        domains.set(name, [
+        writable().set(name, [
           ...(domains.get(name) ?? []),
           ...(present && name === key ? routes.filter((route) => route.sourceAbsent !== true) : routes)
         ])
@@ -2725,6 +3219,8 @@ const computeNativeCallableFlow = (
     }
     nativeFieldOperationStorageValues.set(operation, domains)
   }
+  // `keyOf` above was the last reader of the producer table.
+  producers.clear()
   const callableIdentityOrigins = new Map<IrValueId, readonly FunctionId[]>()
   const callablePublications = new Map<FunctionId, Set<IrOperation | null>>()
   for (const cell of cells)
@@ -2802,10 +3298,7 @@ const computeNativeCallableFlow = (
     nativeFieldViewStorageValues,
     nativeFieldViewOpenWriteValues,
     nativeFieldViewForwardedWrites,
-    nativeFieldViewAbsentRoutesOf: (receiver: IrValueId, key: string | null) => {
-      const carrier = valueCarriers.get(receiver)
-      return carrier === undefined ? null : descriptorDomainsOf.absentRoutesOf(carrier, key)
-    },
+    nativeFieldViewAbsentRoutesOf: absentRoutesReaderOf(valueCarriers, viewShapes, descriptorDomainsOf),
     nativeFieldStorageValues,
     nativeFieldMethodValues,
     nativeAccessorStorageValues,
@@ -2933,19 +3426,225 @@ const flowOverCopy = (flow: NativeCallableFlow, pairs: ReadonlyMap<object, objec
   if (fresh.reached) return null
   const answer = { ...moved, callables: callees }
   if (absentRoutesOf === undefined) return answer
+  return { ...answer, nativeFieldViewAbsentRoutesOf: repointedAbsentRoutesOf(absentRoutesOf, pairs) }
+}
+
+type AbsentRoutesReader = NonNullable<NativeCallableFlow['nativeFieldViewAbsentRoutesOf']>
+/** The solved reader and the one pairing a re-pointed reader applies to its answers. */
+const repointedReaders = new WeakMap<
+  AbsentRoutesReader,
+  { readonly base: AbsentRoutesReader; readonly pairs: ReadonlyMap<object, object> }
+>()
+
+/**
+ * Outside `flowOverCopy` for the reason `expandoStoredReaderOf` states: an
+ * arrow made there shared its context with `seen` and `fresh`, every object of
+ * both programs.
+ *
+ * A reader re-pointed again is not wrapped again: the two pairings are
+ * composed into one over the solved reader's own program. Wrapping kept every
+ * intermediate copy's pairing -- and through it every intermediate program --
+ * alive for as long as the newest flow was remembered. Composing is exact:
+ * re-pointing through the first pairing and then the second is re-pointing
+ * each first-pairing partner through the second, and leaving every object the
+ * first did not pair to the second.
+ */
+const repointedAbsentRoutesOf = (absentRoutesOf: AbsentRoutesReader, pairs: ReadonlyMap<object, object>): AbsentRoutesReader => {
+  const earlier = repointedReaders.get(absentRoutesOf)
+  const base = earlier?.base ?? absentRoutesOf
+  let composed: ReadonlyMap<object, object> = answerReachablePairsOf(pairs)
+  if (earlier !== undefined) {
+    const seen = new Map<object, unknown>()
+    const unreached = { objects: new Set<object>(), reached: false }
+    const both = new Map<object, object>()
+    for (const [old, partner] of earlier.pairs) both.set(old, repointed(partner, pairs, seen, unreached) as object)
+    for (const [old, partner] of composed) if (!both.has(old)) both.set(old, partner)
+    composed = both
+  }
+  const reader = absentRoutesReaderOver(base, composed)
+  repointedReaders.set(reader, { base, pairs: composed })
+  return reader
+}
+
+/**
+ * The part of a pairing an absent-routes answer can reach. An answer holds
+ * storage domains over representations and conversion nodes, and none of those
+ * ever holds an IR operation, block or body, or a container of one. So the
+ * pairing's entries for the program's own structure are never consulted when
+ * an answer is re-pointed. Kept whole, a reader pinned both programs it paired
+ * -- every block, operation and operand list, up to a million entries per
+ * reader on a large app -- for the rest of the compile.
+ */
+const answerReachablePairsOf = (pairs: ReadonlyMap<object, object>): ReadonlyMap<object, object> => {
+  const structural = new Map<object, boolean>()
+  const isStructure = (value: unknown): boolean => {
+    if (typeof value !== 'object' || value === null) return false
+    const known = structural.get(value)
+    if (known !== undefined) return known
+    structural.set(value, false)
+    let answer: boolean
+    if (Array.isArray(value)) answer = value.some(isStructure)
+    else if (value instanceof Map) answer = [...value.values()].some(isStructure) || [...value.keys()].some(isStructure)
+    else if (value instanceof Set) answer = [...value].some(isStructure)
+    else answer = 'lineage' in value || ('operations' in value && 'terminator' in value) || ('blocks' in value && 'sourceOwner' in value)
+    structural.set(value, answer)
+    return answer
+  }
+  const kept = new Map<object, object>()
+  for (const [old, partner] of pairs) if (!isStructure(old)) kept.set(old, partner)
+  return kept
+}
+
+const absentRoutesReaderOver =
+  (base: AbsentRoutesReader, pairs: ReadonlyMap<object, object>): AbsentRoutesReader =>
+  (receiver, key) =>
+    repointed(base(receiver, key), pairs, new Map(), { objects: new Set(), reached: false }) as ReturnType<AbsentRoutesReader>
+
+/**
+ * The readers a flow hands back are built here, outside the solve, because V8
+ * gives every closure one function creates a single shared context: an arrow
+ * made inside `computeNativeCallableFlow` kept its whole scope -- every origin
+ * cell, value and heap -- alive for as long as the remembered flow was, which
+ * held gigabytes on a large program. Each captures only what it reads.
+ */
+const expandoStoredReaderOf =
+  (expandoStored: ReadonlyMap<string, ReadonlyMap<string | null, readonly Representation[]>>) =>
+  (shapeId: string, key: string | null): readonly Representation[] => {
+    const byKey = expandoStored.get(shapeId)
+    if (byKey === undefined) return []
+    // `null`: whatever any key may hold -- an open runtime key reads them all.
+    if (key === null) {
+      const all: Representation[] = []
+      for (const values of byKey.values())
+        for (const value of values) if (!all.some((one) => representationKey(one) === representationKey(value))) all.push(value)
+      return all
+    }
+    const keyed = byKey.get(key) ?? []
+    const any = byKey.get(null) ?? []
+    return [...keyed, ...any.filter((value) => !keyed.some((one) => representationKey(one) === representationKey(value)))]
+  }
+
+const descriptorDomainsOver = (
+  viewNodes: Iterable<ConversionNode>,
+  deriver: Pick<RepresentationDeriver, 'layoutOf'> | null | undefined,
+  bodyById: ReadonlyMap<FunctionId, IrBody | null>,
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  expandoStored: ReadonlyMap<string, ReadonlyMap<string | null, readonly Representation[]>>
+): NativeFieldViewDomains => {
+  // The domains outlive the solve inside every remembered and re-pointed
+  // reader, so they keep the ABIs rather than `bodyById`, which held the
+  // solved body generation for as long as any reader did.
+  const abis = new Map<FunctionId, CallableAbi | null>()
+  for (const [id, body] of bodyById) abis.set(id, body?.abi ?? null)
+  return nativeFieldViewDomainsOf(viewNodes, deriver, (id) => abis.get(id) ?? null, classes, expandoStoredReaderOf(expandoStored))
+}
+
+interface ValueCarriers extends Iterable<readonly [IrValueId, Representation]> {
+  get(id: IrValueId): Representation | undefined
+}
+
+/** Whether `id` is `irValueId(owner, n)` for some ordinal, read without slicing it. */
+/**
+ * Ends a settled solve's propagation state. The edges, the cells feeding each
+ * cell and the escape-absorption marks carry propagation only, and nothing
+ * propagates once the solve has settled; held through the answers built
+ * after it, they made those answers the solve's peak. A heap set equal, in
+ * members and order, to an earlier cell's becomes that one set, shared (and
+ * copied on any later write): most cells holding several allocations hold
+ * exactly another's.
+ */
+const releasePropagation = (cells: readonly OriginCell[]): void => {
+  const sets = new Map<string, CellSet<NativeHeap>[]>()
+  const numbers = new Map<NativeHeap, number>()
+  const numberOf = (heap: NativeHeap): number => {
+    let number = numbers.get(heap)
+    if (number === undefined) numbers.set(heap, (number = numbers.size))
+    return number
+  }
+  const sameMembers = (left: CellSet<NativeHeap>, right: CellSet<NativeHeap>): boolean => {
+    const theirs = right[Symbol.iterator]()
+    for (const heap of left) if (theirs.next().value !== heap) return false
+    return true
+  }
+  for (const cell of cells) {
+    cell.edges = emptyCellMap
+    cell.incoming = null
+    if (cell.escapeAbsorbed !== undefined) cell.escapeAbsorbed = undefined
+    const heaps = cell.heaps
+    if (heaps.members === null) continue
+    let last: NativeHeap | undefined
+    for (const heap of heaps.members) last = heap
+    const key = `${heaps.size}:${numberOf(heaps.first as NativeHeap)}:${numberOf(last!)}`
+    const candidates = sets.get(key)
+    const found = candidates?.find((candidate) => candidate === heaps || sameMembers(candidate, heaps))
+    if (found !== undefined) cell.heaps = found
+    else {
+      heaps.shared = true
+      if (candidates === undefined) sets.set(key, [heaps])
+      else candidates.push(heaps)
+    }
+  }
+}
+
+const valueOwnedBy = (id: string, owner: string): boolean =>
+  id.startsWith('ssa|') && id.startsWith(owner, 4) && id.charCodeAt(4 + owner.length) === 124 && id.indexOf('|', 5 + owner.length) === -1
+
+/**
+ * Every SSA value's carrier, read through the bodies rather than copied into
+ * one table: a table of the program's every value, built at the solve's end,
+ * was the largest single thing the solve allocated beside its answers. A value
+ * names the body that defines it (`irValueId`), so a lookup goes straight to
+ * that body. Bodies whose values do not all name them, or two bodies of one
+ * id, fall back to the table, which then answers exactly as before.
+ */
+const valueCarriersOf = (bodies: readonly IrBody[]): ValueCarriers => {
+  const byOwner = new Map<string, IrBody>()
+  let owned = true
+  for (const body of bodies) {
+    const ownerId = String(body.owner)
+    if (byOwner.has(ownerId)) owned = false
+    byOwner.set(ownerId, body)
+    if (owned) for (const id of body.values.keys()) if (!valueOwnedBy(id, ownerId)) owned = false
+    if (!owned) break
+  }
+  if (!owned) return new Map(bodies.flatMap((body) => [...body.values]))
   return {
-    ...answer,
-    nativeFieldViewAbsentRoutesOf: (receiver, key) =>
-      repointed(absentRoutesOf(receiver, key), pairs, new Map(), { objects: new Set(), reached: false }) as ReturnType<
-        typeof absentRoutesOf
-      >
+    get: (id) => byOwner.get(id.slice(4, id.lastIndexOf('|')))?.values.get(id),
+    *[Symbol.iterator]() {
+      for (const body of bodies) yield* body.values
+    }
+  }
+}
+
+/**
+ * `absentRoutesOf` answers null for any carrier that is not, under its
+ * optional and borrowed wrappers, one of `viewShapes` -- a shape some view
+ * installs a plan for. The reader keeps only the values whose carrier can
+ * answer: every value of the program was a table per remembered flow.
+ */
+const absentRoutesReaderOf = (
+  valueCarriers: ValueCarriers,
+  viewShapes: ReadonlySet<string>,
+  domains: NativeFieldViewDomains
+): ((receiver: IrValueId, key: string | null) => readonly NativeFieldStorageDomain[] | null) => {
+  const viewed = new Map<IrValueId, Representation>()
+  if (viewShapes.size > 0)
+    for (const [id, carrier] of valueCarriers) {
+      let unwrapped = carrier
+      while (unwrapped.kind === 'optional' || unwrapped.kind === 'borrowed-ref')
+        unwrapped = unwrapped.kind === 'optional' ? unwrapped.payload : unwrapped.referent
+      if ('shapeId' in unwrapped && viewShapes.has(unwrapped.shapeId)) viewed.set(id, carrier)
+    }
+  return (receiver, key) => {
+    const carrier = viewed.get(receiver)
+    return carrier === undefined ? null : domains.absentRoutesOf(carrier, key)
   }
 }
 
 /**
  * The flow's answer is a function of its inputs' data -- the conversion census
  * it consults is append-only and `nodeFor` is idempotent per pair -- so a
- * recent answer per class map is reused when every input is the same. The
+ * recent answer for the class map is reused when every input is the same. The
  * same objects reuse it directly. The publish passes between two solves
  * rebuild every body and operation even when they change nothing, so an input
  * that is the same DATA reuses the answer re-pointed at the new objects, since
@@ -2955,19 +3654,40 @@ const flowOverCopy = (flow: NativeCallableFlow, pairs: ReadonlyMap<object, objec
  * differ in what the flow reads (`logicalReceiver`, `closedCallable`,
  * `presence`, recipe lists). A traced run reports reads as it solves and is
  * always solved.
+ *
+ * Only the class map asked last keeps answers. Each answer holds its flow and
+ * the body generation it was solved over, a few hundred megabytes on a large
+ * program, and the pipeline moves to a new class map without returning to
+ * the old one: kept per map, a dead map's answers stayed for the rest of the
+ * compile. Held weakly, so nothing outlives the class map it answers.
  */
 const rememberedFlows = new WeakMap<ReadonlyMap<DeclarationId, ClassLayout>, RememberedCallableFlow[]>()
-/** Callers alternate between asking with and without program conversions, so one remembered answer per class map was always the other kind. */
-const REMEMBERED_FLOWS = 3
+let rememberedClasses: WeakRef<ReadonlyMap<DeclarationId, ClassLayout>> | null = null
+/**
+ * Callers alternate between asking with and without program conversions, so
+ * one answer is kept per kind: a single remembered answer was always the
+ * other kind. A newer answer of the same kind replaces the older one, which
+ * was solved over an earlier body generation and is only ever a worse match.
+ */
+const flowKindOf = (programConversions: unknown, constructionTopology: unknown): number =>
+  (programConversions == null ? 0 : 1) + (constructionTopology == null ? 0 : 2)
 
 export const nativeCallableFlowOf = (...args: Parameters<typeof computeNativeCallableFlow>): NativeCallableFlow => {
   const [bodies, placements, classes, conversions, trace, deriver, programConversions, constructionTopology] = args
   if (trace !== undefined) return computeNativeCallableFlow(...args)
+  const previous = rememberedClasses?.deref()
+  if (previous !== classes) {
+    if (previous !== undefined) rememberedFlows.delete(previous)
+    rememberedClasses = new WeakRef(classes)
+  }
   let held = rememberedFlows.get(classes)
   if (held === undefined) rememberedFlows.set(classes, (held = []))
   const entries = held
   const remember = (flow: NativeCallableFlow, replaced: number): NativeCallableFlow => {
     if (replaced !== -1) entries.splice(replaced, 1)
+    const kind = flowKindOf(programConversions, constructionTopology)
+    for (let index = entries.length - 1; index >= 0; index--)
+      if (flowKindOf(entries[index]!.programConversions, entries[index]!.constructionTopology) === kind) entries.splice(index, 1)
     entries.unshift({
       bodies,
       placements,
@@ -2977,40 +3697,54 @@ export const nativeCallableFlowOf = (...args: Parameters<typeof computeNativeCal
       constructionTopology: constructionTopology ?? null,
       flow
     })
-    entries.length = Math.min(entries.length, REMEMBERED_FLOWS)
     return flow
   }
   const sameContext = (entry: RememberedCallableFlow): boolean =>
     entry.placements === placements && entry.conversions === conversions && entry.deriver === (deriver ?? null)
-  for (const entry of entries)
-    if (
-      sameContext(entry) &&
-      entry.programConversions === (programConversions ?? null) &&
-      entry.constructionTopology === (constructionTopology ?? null) &&
-      entry.bodies.length === bodies.length &&
-      entry.bodies.every((body, index) => body === bodies[index])
-    )
-      return entry.flow
-  for (let index = 0; index < entries.length; index++) {
-    const entry = entries[index]!
-    if (
-      !sameContext(entry) ||
-      entry.bodies.length !== bodies.length ||
-      (entry.programConversions === null) !== (programConversions === undefined) ||
-      (entry.constructionTopology === null) !== (constructionTopology === undefined)
-    )
-      continue
-    const pairs = new Map<object, object>()
-    if (
-      !pairSameData(entry.bodies, bodies, pairs) ||
-      !pairSameData(entry.programConversions, programConversions ?? null, pairs) ||
-      !pairSameData(entry.constructionTopology, constructionTopology ?? null, pairs)
-    )
-      continue
-    const reused = flowOverCopy(entry.flow, pairs)
-    if (reused === null) continue
-    return remember(reused, index)
-  }
+  // The search runs in its own frame: a failed pairing's map pairs both
+  // programs object for object, and the loop's last `pairs` and `entry`
+  // registers kept it, and the entry about to be replaced, alive through the
+  // solve below -- the compile's peak.
+  const found = ((): NativeCallableFlow | null => {
+    for (const entry of entries)
+      if (
+        sameContext(entry) &&
+        entry.programConversions === (programConversions ?? null) &&
+        entry.constructionTopology === (constructionTopology ?? null) &&
+        entry.bodies.length === bodies.length &&
+        entry.bodies.every((body, index) => body === bodies[index])
+      )
+        return entry.flow
+    for (let index = 0; index < entries.length; index++) {
+      const entry = entries[index]!
+      if (
+        !sameContext(entry) ||
+        entry.bodies.length !== bodies.length ||
+        (entry.programConversions === null) !== (programConversions === undefined) ||
+        (entry.constructionTopology === null) !== (constructionTopology === undefined)
+      )
+        continue
+      const pairs = new Map<object, object>()
+      if (
+        !pairSameData(entry.bodies, bodies, pairs) ||
+        !pairSameData(entry.programConversions, programConversions ?? null, pairs) ||
+        !pairSameData(entry.constructionTopology, constructionTopology ?? null, pairs)
+      )
+        continue
+      const reused = flowOverCopy(entry.flow, pairs)
+      if (reused === null) continue
+      return remember(reused, index)
+    }
+    return null
+  })()
+  if (found !== null) return found
+  // A solve forgets every remembered answer first, not only the one of its
+  // own kind that `remember` replaces: each holds its flow and the body
+  // generation it was solved over, and the other kind's was most of what a
+  // solve -- the compile's peak -- held beside its own state. An answer of the
+  // other kind is still reused when no solve comes between, which is most
+  // reuses; on a large program two more are solved.
+  entries.length = 0
   const flow = computeNativeCallableFlow(...args)
   return remember(flow, -1)
 }

@@ -18,14 +18,88 @@ export interface OrdinalCounter {
 }
 
 export const createOrdinalCounter = (): OrdinalCounter => {
-  const used = new Map<string, number>()
+  // By family, then by node: a node id is a string the census already holds,
+  // while a joined `${source}|${family}` key was a fresh string per operation
+  // (~30 MB on a 48K-line app). A family name holds no `|`, so the joined key
+  // was injective and this counts exactly the same pairs.
+  //
+  // Nearly every pair mints once, so a pair is first only remembered as used
+  // (`MintedSources`) and given a count when it mints a second time.
+  const once = new Map<OperationFamily, MintedSources>()
+  const more = new Map<OperationFamily, Map<NodeId, number>>()
   return {
     next: (source, family) => {
-      const key = `${source}|${family}`
-      const ordinal = used.get(key) ?? 0
-      used.set(key, ordinal + 1)
+      let used = once.get(family)
+      if (!used) once.set(family, (used = new MintedSources()))
+      if (used.add(source)) return 0
+      let counts = more.get(family)
+      if (!counts) more.set(family, (counts = new Map()))
+      const ordinal = counts.get(source) ?? 1
+      counts.set(source, ordinal + 1)
       return ordinal
     }
+  }
+}
+
+/**
+ * The (file, ordinal) coordinate of an unspecialized `node|f<file>|<kind>|<ordinal>`
+ * identity as one number, or -1 for any other spelling. The kind is left out:
+ * `nodeId` is minted only from a node's own kind, so the coordinate already
+ * names it. Digits with a leading zero are refused, so no two spellings share a
+ * coordinate.
+ */
+const plainCoordinate = (id: string): number => {
+  if (!id.startsWith('node|f')) return -1
+  const fileEnd = id.indexOf('|', 6)
+  const ordinalStart = id.lastIndexOf('|') + 1
+  if (fileEnd < 0 || ordinalStart <= fileEnd + 1) return -1
+  const file = decimalAt(id, 6, fileEnd)
+  const ordinal = decimalAt(id, ordinalStart, id.length)
+  return file < 0 || ordinal < 0 || file >= coordinateSpan || ordinal >= coordinateSpan ? -1 : file * coordinateSpan + ordinal
+}
+const coordinateSpan = 2 ** 26
+const decimalAt = (text: string, from: number, to: number): number => {
+  if (to <= from || to - from > 8 || (to - from > 1 && text.charCodeAt(from) === 48)) return -1
+  let value = 0
+  for (let at = from; at < to; at++) {
+    const digit = text.charCodeAt(at) - 48
+    if (digit < 0 || digit > 9) return -1
+    value = value * 10 + digit
+  }
+  return value
+}
+
+/**
+ * The sources one family has minted from: a bit per (file, ordinal) for an
+ * unspecialized node identity -- nearly every source -- and the spelling of
+ * any other. A set entry per pair was ~9 MB on a 48K-line app, alive to the
+ * end of production, the frontend's peak.
+ */
+class MintedSources {
+  readonly #files: (Uint32Array | undefined)[] = []
+  readonly #others = new Set<NodeId>()
+
+  /** Whether `source` was new, remembering it either way. */
+  add(source: NodeId): boolean {
+    const coordinate = plainCoordinate(source)
+    if (coordinate < 0) {
+      if (this.#others.has(source)) return false
+      this.#others.add(source)
+      return true
+    }
+    const file = Math.floor(coordinate / coordinateSpan)
+    const ordinal = coordinate % coordinateSpan
+    const word = ordinal >>> 5
+    let bits = this.#files[file]
+    if (bits === undefined || word >= bits.length) {
+      const grown = new Uint32Array(Math.max(word + 1, (bits?.length ?? 0) * 2, 64))
+      if (bits !== undefined) grown.set(bits)
+      this.#files[file] = bits = grown
+    }
+    const bit = 1 << (ordinal & 31)
+    if ((bits[word]! & bit) !== 0) return false
+    bits[word]! |= bit
+    return true
   }
 }
 
@@ -64,12 +138,15 @@ export const mintResult = (operation: OperationId, role: ResultRole, type: Struc
   type
 })
 
+/** Shared: an operand's evaluation is read and never written, and nearly every operand is `runtime`. */
+const runtimeEvaluation: OperandEvaluation = Object.freeze({ kind: 'runtime' })
+
 export const operand = (
   role: string,
   ordinal: number,
   source: OperandSource,
   type: StructuralTypeId,
-  evaluation: OperandEvaluation = { kind: 'runtime' }
+  evaluation: OperandEvaluation = runtimeEvaluation
 ): SemanticOperand => ({ role, ordinal, source, type, evaluation })
 
 /**

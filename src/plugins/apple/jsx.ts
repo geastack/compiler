@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { PluginSourceFile } from '../model.js'
 import { appleNativeTypes } from './host.js'
 import { appleHostMembers, appleMethodParameters } from './members.js'

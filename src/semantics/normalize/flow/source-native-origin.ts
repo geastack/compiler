@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 import { sourceBindingValuesOf } from './value-provenance.js'
 import { sourceValueSessionOf } from './source-value-session.js'

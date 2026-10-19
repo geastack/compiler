@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { SourceTransformExport, SourceTransformModule } from './source-transform-protocol.js'
 
 type Answer =

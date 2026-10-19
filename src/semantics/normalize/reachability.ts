@@ -1,5 +1,6 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { typeOnlyModuleUse } from '../module-resolution.js'
+import { uncachedJsDocTags } from '../uncached-jsdoc-tags.js'
 import { namespaceMembersUnderClosedKeyOf } from './flow/targets.js'
 
 /**
@@ -1243,7 +1244,7 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
    * comment.
    */
   const markJsDocNamedClasses = (node: ts.Node): void => {
-    for (const tag of ts.getJSDocTags(node)) {
+    for (const tag of uncachedJsDocTags(node)) {
       if (ts.isJSDocAugmentsTag(tag) || ts.isJSDocImplementsTag(tag)) {
         markTypeNamedClasses(tag.class)
         continue

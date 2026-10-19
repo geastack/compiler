@@ -12,7 +12,7 @@ import type {
 } from '../plugins/model.js'
 import { censusNativeFunctionSignatures, type NativeFunctionSignatureCensus } from './native-function-signatures.js'
 import { anyKeyedWriteTypes, prototypeMutatedConstructorTypes, proxyFallbackTypes } from './dynamic-fallback.js'
-import ts from 'typescript'
+import ts from '#typescript'
 import { structuralShapeKey } from './model/structural-types.js'
 import { createPackageDeclarationNames, resolveHostMethod, type HostMethodBindingTable } from './host-methods.js'
 import type { DeclarationId, FunctionId, NodeId, OperationFamily, RegionId, StructuralTypeId } from '../identity/ids.js'
@@ -24,12 +24,11 @@ import type { SemanticGraph } from './model/graph.js'
 import { createStructuralTypeTable } from './model/structural-type-table.js'
 import { censusProgram } from './normalize/census.js'
 import type { FamilyProducer } from './normalize/contribution.js'
-import { createIdentityTable, rootSpecialization, type IdentityTable } from './normalize/identities.js'
+import { createIdentityTable, rootSpecialization, walkOrdinals, type IdentityTable } from './normalize/identities.js'
 import { censusDeclaredIntegers, type DeclaredIntegerWidth } from './declared-integers.js'
 import { gatingEdges } from './normalize/gating.js'
 import { normalizeProgram } from './normalize/normalize.js'
 import type { ProducerContext } from './normalize/producer-context.js'
-import { createEvaluationOrdinals, createOrdinalCounter } from './normalize/producers/mint.js'
 import { intrinsicPropertyCallOf } from './normalize/intrinsic-property-call.js'
 import { createStructuralMapper, type ClassCopyKey } from './normalize/structural.js'
 import { createSloppyAbsenceCensus, noSloppyAbsence } from './normalize/sloppy-absence.js'
@@ -88,8 +87,14 @@ import { indexValueFlow, sameValueFlowContent } from './normalize/flow/value-flo
 import type { ValueFlowIndex } from './normalize/flow/model.js'
 import { attachClosedScriptScope, attachStatedModuleSet, type ClosedScriptScope, type StatedModuleSet } from './normalize/flow/targets.js'
 import { censusRefusalCounts, type CensusRefusal } from './normalize/census-refusal.js'
-import { createCellPolicyRegistry, defaultCellEvidencePolicies, buildCellFactsTable, publishCellFacts } from './normalize/cells/index.js'
-import type { CellFactsPublication } from './normalize/cells/index.js'
+import {
+  createCellPolicyRegistry,
+  defaultCellEvidencePolicies,
+  buildCellFactsTable,
+  cellFactsSummaryOf,
+  publishCellFacts
+} from './normalize/cells/index.js'
+import type { CellFactsSummary } from './normalize/cells/index.js'
 import type { StructuralDisagreement, StructuralFormViolation } from './normalize/structural-rules.js'
 import { settleBindingCensus, type RoundCensus } from './normalize/binding-fixpoint.js'
 import { withJsDocTypeNames } from './normalize/jsdoc-type-names.js'
@@ -609,7 +614,7 @@ export interface FrontendResult {
    * `twoOwnerClaims` row as a typed `CellRefusal` (`normalize/cells/model.ts`)
    * -- still read by nothing downstream, same as the rest of this table.
    */
-  readonly cellFacts: CellFactsPublication
+  readonly cellFacts: CellFactsSummary
   /**
    * Nodes for which two of `normalize/structural.ts`'s rules both had an
    * answer -- the frontend's own finding channel.
@@ -872,6 +877,120 @@ const nativeConstructorCandidatesOf = (file: ts.SourceFile): readonly (ts.ClassD
   return found
 }
 
+/**
+ * `FrontendResult.locationOfNode` and its three twins, built from the source
+ * files and their identities alone.
+ *
+ * Module level, not written inside `runFrontend`, because V8 gives every
+ * closure a function creates one shared context: an arrow written there kept
+ * the whole frontend -- the program and its checker, every census, every
+ * value-flow index, every specialization view -- alive for the rest of the
+ * compile, through four functions that only read source text. Nothing after
+ * the frontend reads the checker.
+ *
+ * Eager and tree-free: everything the four answers read -- each node's start
+ * and end, and its declaration name -- is copied out by ordinal when the
+ * frontend returns, so the `ts.SourceFile`s die with it. Answering lazily kept
+ * every AST and its binder symbols (147 MB on a 48K-line app) alive through
+ * the whole backend for a handful of diagnostics. Keyed by
+ * `positionKeyOfNode` -- file and ordinal, kind and monomorphization suffix
+ * both dropped -- so a monomorphized copy resolves to the root it was cut
+ * from, and a DeclarationId, which never carries a kind, resolves through the
+ * same table.
+ */
+interface LocatedFile {
+  readonly fileName: string
+  readonly text: string
+  /** Filled on the first location asked of the file. */
+  lineStarts: readonly number[] | null
+  /** `node.getStart()` by ordinal, or -1 for a node with no real position. */
+  readonly starts: Int32Array
+  readonly ends: Int32Array
+  /** The ordinal of the identifier `ts.getNameOfDeclaration` answers, or -1. */
+  readonly names: Int32Array
+  /** A name whose `text` is not its source slice (a unicode escape). */
+  readonly spelledNames: ReadonlyMap<number, string>
+}
+
+const locateFile = (file: ts.SourceFile): LocatedFile => {
+  const ordinals = walkOrdinals(file)
+  const count = ordinals.size
+  const starts = new Int32Array(count).fill(-1)
+  const ends = new Int32Array(count)
+  const names = new Int32Array(count).fill(-1)
+  const spelledNames = new Map<number, string>()
+  for (const [node, ordinal] of ordinals.entries()) {
+    starts[ordinal] = node.getStart(file)
+    ends[ordinal] = node.end
+    const name = ts.getNameOfDeclaration(node as ts.Declaration)
+    if (!name || !ts.isIdentifier(name)) continue
+    const at = ordinals.get(name)
+    // An escape is always longer than what it spells, so equal length is equal text.
+    if (at !== undefined && name.end - name.getStart(file) === name.text.length) names[ordinal] = at
+    else spelledNames.set(ordinal, name.text)
+  }
+  return { fileName: file.fileName, text: file.text, lineStarts: null, starts, ends, names, spelledNames }
+}
+
+/** TypeScript's own line breaks (`computeLineStarts`): CR LF, CR, LF, LS and PS. */
+const lineStartsOf = (text: string): readonly number[] => {
+  const starts = [0]
+  for (let at = 0; at < text.length; at++) {
+    const code = text.charCodeAt(at)
+    if (code === 13 && text.charCodeAt(at + 1) === 10) continue
+    if (code === 10 || code === 13 || code === 0x2028 || code === 0x2029) starts.push(at + 1)
+  }
+  return starts
+}
+
+const lineAndCharacterOf = (file: LocatedFile, position: number): { readonly line: number; readonly character: number } => {
+  const starts = (file.lineStarts ??= lineStartsOf(file.text))
+  let low = 0
+  let high = starts.length - 1
+  while (low < high) {
+    const middle = (low + high + 1) >> 1
+    if (starts[middle]! <= position) low = middle
+    else high = middle - 1
+  }
+  return { line: low, character: position - starts[low]! }
+}
+
+const createSourceLocator = (files: readonly (readonly [identity: string, file: ts.SourceFile])[]) => {
+  const located = new Map<string, LocatedFile>()
+  for (const [identity, file] of files) if (!located.has(identity)) located.set(identity, locateFile(file))
+  const at = (key: string): { readonly file: LocatedFile; readonly ordinal: number } | null => {
+    const split = key.lastIndexOf('|')
+    const file = split < 0 ? undefined : located.get(key.slice(0, split))
+    const text = key.slice(split + 1)
+    const ordinal = Number(text)
+    if (file === undefined || !Number.isInteger(ordinal) || String(ordinal) !== text || ordinal < 0 || ordinal >= file.starts.length)
+      return null
+    return file.starts[ordinal]! < 0 ? null : { file, ordinal }
+  }
+  const locationOf = (found: ReturnType<typeof at>): DiagnosticLocation | null => {
+    if (!found) return null
+    const { line, character } = lineAndCharacterOf(found.file, found.file.starts[found.ordinal]!)
+    return { file: found.file.fileName, line: line + 1, column: character + 1 }
+  }
+  const textAt = (file: LocatedFile, ordinal: number): string => file.text.substring(file.starts[ordinal]!, file.ends[ordinal]!)
+  return {
+    locationOfNode: (node: NodeId): DiagnosticLocation | null => locationOf(at(positionKeyOfNode(node))),
+    textOfNode: (node: NodeId): string | null => {
+      const found = at(positionKeyOfNode(node))
+      return found ? textAt(found.file, found.ordinal) : null
+    },
+    locationOfDeclaration: (declaration: DeclarationId): DiagnosticLocation | null => locationOf(at(positionKeyOfDeclaration(declaration))),
+    nameOfDeclaration: (declaration: DeclarationId): string | null => {
+      const found = at(positionKeyOfDeclaration(declaration))
+      if (!found) return null
+      const spelled = found.file.spelledNames.get(found.ordinal)
+      if (spelled !== undefined) return spelled
+      const name = found.file.names[found.ordinal]!
+      return name < 0 ? null : textAt(found.file, name)
+    }
+  }
+}
+
 export const runFrontend = (input: FrontendInput): FrontendResult => {
   const timing = createFrontendTiming('phases')
   const compiled = createProgram({
@@ -929,6 +1048,9 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     verbatimModuleSyntax: compiled.program.getCompilerOptions().verbatimModuleSyntax === true,
     ...(input.hostReachedMemberKeys ? { hostReachedMemberKeys: input.hostReachedMemberKeys } : {})
   })
+  // The whole-program index exists only to answer reachability's constructor
+  // questions, all asked by now; held, it stayed live through every phase below.
+  constructionFlow = undefined
   // Instantiations are censused before anything is normalized, because the
   // answer is whole-program: which type a generic is instantiated at is decided
   // by every call site together, and a walk that learned it as it went would
@@ -1145,7 +1267,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // -- no round ever qualified, because the answers
     // move until the very round that settles, and holding the previous index
     // alive across the boundary raised the peak from 7 GB to 11 GB.
-    const valueFlow =
+    const built =
       upstream && !process.env['GEA_FLOW_CENSUS_OFF']
         ? indexValueFlow(
             compiled.checker,
@@ -1167,12 +1289,22 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // census, while a session depends on nothing but its index
     // (`shareSourceValueSession`). `GEA_SESSION_SHARE_OFF` keeps the
     // rebuild, so the claim stays checkable from one build.
-    const sharedFrom =
+    const contentEqual =
       process.env['GEA_SESSION_SHARE_OFF'] === undefined
-        ? roundFlows.find(
-            (earlier) => earlier !== valueFlow && sameValueFlowContent(earlier, valueFlow) && shareSourceValueSession(earlier, valueFlow)
-          )
+        ? roundFlows.find((earlier) => earlier !== built && sameValueFlowContent(earlier, built))
         : undefined
+    // The settling round's index is a new identity over the earlier index's
+    // tables, not the rebuilt copy of them. The carried session holds the
+    // earlier index -- its solver caches that index's write and call-site
+    // objects as query keys and facts -- so keeping the rebuild left two
+    // content-equal sets of writes, call sites and lookup tables alive to the
+    // end of normalization. A fresh object still keys every per-index cache
+    // afresh, and an index is immutable once built, so sharing its tables is
+    // sharing nothing a round can change; the session and the round's other
+    // consumers now also see one set of write and call-site objects instead
+    // of two that are equal only field by field.
+    const valueFlow: ValueFlowIndex = contentEqual ? { ...contentEqual } : built
+    const sharedFrom = contentEqual && shareSourceValueSession(contentEqual, valueFlow) ? contentEqual : undefined
     // A round's solver is asked nothing once the next round's index replaces
     // it (`retireSourceValueSession`); keeping it cost ~1 GB per round. A
     // solver handed on above is the new round's own, and stays.
@@ -1723,7 +1855,10 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   for (const [owner, sites] of argumentsObjects.usesByOwner)
     if (parameters.implicitArgumentsTupleAt?.(owner)) for (const site of sites) actualArgumentSites.add(site)
   const settledArgumentsObjects = { ...argumentsObjects, actualFrameOf: (node: ts.Node) => actualArgumentSites.has(node) }
-  const context: ProducerContext = {
+  // Everything a producer reads but the two ordinal counters, which are minted
+  // per normalization below: the counters are read only while operations are
+  // minted, and this context lives as long as the frontend does.
+  const context: Omit<ProducerContext, 'ordinals' | 'evaluationOrdinals'> = {
     nativeIterableAt: (source, consumer) => {
       if (!hostMutationFactsSealed) return null
       return sourceNativeIterableOf(context, valueFlow, input.nativeIterableProviders ?? new Map(), source, consumer)
@@ -1811,8 +1946,6 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // fact about the build, not about any one file's syntax.
     buildIsStrict,
     table,
-    ordinals: createOrdinalCounter(),
-    evaluationOrdinals: createEvaluationOrdinals(),
     // Overridden per candidate below (`path: candidate.specialization`) --
     // `rootSpecialization` here is only to satisfy the type on this shared
     // base object, which is never read from directly as a producer context.
@@ -2127,9 +2260,11 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // view they ask. Everything else -- the checker, the identity table, both
     // ordinal counters -- is the one shared context, because those answer
     // whole-program questions that a copy must not fork.
-    producers: (candidate) =>
+    producers: (candidate, { ordinals, evaluationOrdinals }) =>
       input.producers({
         ...context,
+        ordinals,
+        evaluationOrdinals,
         identities: identities.forSpecialization(candidate.specialization),
         types: types.forSpecialization(candidate.specialization),
         path: candidate.specialization
@@ -2138,6 +2273,10 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // own answer, so the producer cache, the identity views and the structural
     // mappers all agree on what "the same copy" means.
     copyKey: (candidate) => identities.copyKeyOf(candidate.specialization),
+    // The final round's solver answers the producers and nothing after them.
+    produced: () => {
+      for (const flow of roundFlows) retireSourceValueSession(flow)
+    },
     gates: (operations) =>
       gatingEdges({
         files: compiled.sourceFiles,
@@ -2153,6 +2292,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
 
   timing.mark('normalization')
   timing.report()
+  const fileIdentities = new Map([...identities.sourceFileNames].map(([identity, fileName]) => [fileName, identity]))
   // See `FrontendResult.locationOfNode`. Lazy, because a compilation that
   // reports nothing must not pay for a whole-program walk to name nodes
   // nobody asked about.
@@ -2165,47 +2305,13 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // resolve a DeclarationId -- which never carries one -- through this SAME
   // index instead of a second one built to answer the identical question in a
   // different identity currency.
-  let nodesByPosition: Map<string, ts.Node> | null = null
-  const positionIndex = (): Map<string, ts.Node> => {
-    if (nodesByPosition === null) {
-      const index = new Map<string, ts.Node>()
-      for (const file of compiled.sourceFiles) {
-        if (file.isDeclarationFile) continue
-        const walk = (current: ts.Node): void => {
-          let key: string | null = null
-          try {
-            key = positionKeyOfNode(identities.nodeIdOf(current))
-          } catch {
-            key = null
-          }
-          if (key !== null && !index.has(key)) index.set(key, current)
-          ts.forEachChild(current, walk)
-        }
-        walk(file)
-      }
-      nodesByPosition = index
-    }
-    return nodesByPosition
-  }
-  const sourceNodeOf = (node: NodeId): ts.Node | null => positionIndex().get(positionKeyOfNode(node)) ?? null
-  const sourceNodeOfDeclaration = (declaration: DeclarationId): ts.Node | null =>
-    positionIndex().get(positionKeyOfDeclaration(declaration)) ?? null
-  const locationOfFound = (found: ts.Node | null): DiagnosticLocation | null => {
-    if (!found) return null
-    const file = found.getSourceFile()
-    const { line, character } = file.getLineAndCharacterOfPosition(found.getStart())
-    return { file: file.fileName, line: line + 1, column: character + 1 }
-  }
-  const locationOfNode = (node: NodeId): DiagnosticLocation | null => locationOfFound(sourceNodeOf(node))
-  const textOfNode = (node: NodeId): string | null => sourceNodeOf(node)?.getText() ?? null
-  /** `locationOfNode`'s twin for a DeclarationId -- see `FrontendResult.locationOfDeclaration`. */
-  const locationOfDeclaration = (declaration: DeclarationId): DiagnosticLocation | null =>
-    locationOfFound(sourceNodeOfDeclaration(declaration))
-  const nameOfDeclaration = (declaration: DeclarationId): string | null => {
-    const found = sourceNodeOfDeclaration(declaration)
-    const name = found ? ts.getNameOfDeclaration(found as ts.Declaration) : undefined
-    return name && ts.isIdentifier(name) ? name.text : null
-  }
+  const { locationOfNode, textOfNode, locationOfDeclaration, nameOfDeclaration } = createSourceLocator(
+    compiled.sourceFiles.flatMap((file) => {
+      if (file.isDeclarationFile) return []
+      const identity = fileIdentities.get(file.fileName)
+      return identity === undefined ? [] : [[identity, file] as const]
+    })
+  )
 
   for (const flow of roundFlows) retireSourceValueSession(flow)
 
@@ -2295,7 +2401,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
       ['bags', { bound: bags.boundCount, refusals: censusRefusalCounts(bags.refusals) }]
     ]),
     censusRefusals: [...parameters.refusals, ...collections.refusals, ...bags.refusals],
-    cellFacts,
+    cellFacts: cellFactsSummaryOf(cellFacts),
     structuralDisagreements: types.structuralDisagreements,
     structuralFormViolations: types.structuralFormViolations,
     classCopies: types.classCopies()

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ProgramReachability } from '../../reachability.js'
 import type { CollectionTypeArguments } from '../../collection-bindings.js'
 import type { ValueFlowIndex, ValueWrite } from '../../flow/model.js'

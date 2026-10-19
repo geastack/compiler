@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { FunctionId, StructuralTypeId } from '../identity/ids.js'
 import type { IdentityTable } from './normalize/identities.js'
 import type { StructuralMapper } from './normalize/structural.js'

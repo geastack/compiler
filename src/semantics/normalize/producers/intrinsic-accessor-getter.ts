@@ -1,4 +1,4 @@
-import type ts from 'typescript'
+import type ts from '#typescript'
 import type { CensusCandidate } from '../census.js'
 import type { CandidateContribution } from '../contribution.js'
 import type { ProducerContext } from '../producer-context.js'

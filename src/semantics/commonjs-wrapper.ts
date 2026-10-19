@@ -1,12 +1,16 @@
 import { resolve } from 'node:path'
-import ts from 'typescript'
+import ts from '#typescript'
 import type { CommonJsWrapperDeclaration } from '../plugins/model.js'
+import { KeySet } from './normalize/nullable-memo.js'
 import { noHostProvidedNames, valueSymbolAt } from './normalize/unresolvable-names.js'
 
 export type CommonJsGlobal = 'require' | 'exports' | 'module'
 
 export type CommonJsIdentifierIdentity =
   { readonly kind: 'wrapper'; readonly global: CommonJsGlobal } | { readonly kind: 'provenance-failure' } | { readonly kind: 'ordinary' }
+
+const ordinaryIdentifier: CommonJsIdentifierIdentity = Object.freeze({ kind: 'ordinary' })
+const provenanceFailureIdentifier: CommonJsIdentifierIdentity = Object.freeze({ kind: 'provenance-failure' })
 
 const resolvedSymbolAt = (checker: ts.TypeChecker, node: ts.Node, hostProvided: ReadonlySet<string>): ts.Symbol | null => {
   // One rule for what a name in value position denotes (`valueSymbolAt`),
@@ -172,10 +176,47 @@ export const createCommonJsWrapperIdentity = (
   files: readonly ts.SourceFile[],
   globals: ReadonlyMap<string, CommonJsWrapperDeclaration>,
   hostProvided: ReadonlySet<string> = noHostProvidedNames
-): {
+): CommonJsWrapperIdentity => {
+  // One identity per input, not per caller: the module-record census, the
+  // require census it builds and the frontend's own require census each built
+  // one over the same checker, files and globals, and each memoized a
+  // classification for every identifier it evaluated (~13 MB across the three
+  // on a 48K-line app). Its answers are a function of exactly these inputs.
+  let byGlobals = wrapperIdentities.get(checker)
+  if (!byGlobals) wrapperIdentities.set(checker, (byGlobals = new WeakMap()))
+  let built = byGlobals.get(globals)
+  if (!built) byGlobals.set(globals, (built = []))
+  const known = built.find(
+    (entry) =>
+      entry.hostProvided === hostProvided &&
+      entry.files.length === files.length &&
+      entry.files.every((file, index) => file === files[index])
+  )
+  if (known) return known.identity
+  const identity = buildCommonJsWrapperIdentity(checker, files, globals, hostProvided)
+  built.push({ files: [...files], hostProvided, identity })
+  return identity
+}
+
+export interface CommonJsWrapperIdentity {
   readonly classify: (identifier: ts.Identifier) => CommonJsIdentifierIdentity
   readonly globalOfDeclaration: (declaration: ts.Declaration) => CommonJsGlobal | null
-} => {
+}
+
+const wrapperIdentities = new WeakMap<
+  ts.TypeChecker,
+  WeakMap<
+    ReadonlyMap<string, CommonJsWrapperDeclaration>,
+    { readonly files: readonly ts.SourceFile[]; readonly hostProvided: ReadonlySet<string>; readonly identity: CommonJsWrapperIdentity }[]
+  >
+>()
+
+const buildCommonJsWrapperIdentity = (
+  checker: ts.TypeChecker,
+  files: readonly ts.SourceFile[],
+  globals: ReadonlyMap<string, CommonJsWrapperDeclaration>,
+  hostProvided: ReadonlySet<string>
+): CommonJsWrapperIdentity => {
   const configuredByName = new Map<string, CommonJsWrapperDeclaration>()
   for (const [name, configured] of globals) {
     if (name === configured.declarationName && name === configured.global) configuredByName.set(name, configured)
@@ -242,23 +283,37 @@ export const createCommonJsWrapperIdentity = (
   // Every census pass classifies every identifier it evaluates again, and the
   // answer is a function of the identifier alone (its resolved symbol and its
   // file, against tables fixed above), so it is asked of the checker once.
+  // Nearly every answer is `ordinary` (~335K identifiers on a 48K-line app),
+  // and those are a bit each, over numbers the binding censuses' memos mostly
+  // hand out already: a map entry apiece was ~10 MB, alive at the end of
+  // production, the frontend's peak.
+  const ordinary = new KeySet<ts.Identifier>()
   const classified = new Map<ts.Identifier, CommonJsIdentifierIdentity>()
   const classify = (identifier: ts.Identifier): CommonJsIdentifierIdentity => {
+    if (ordinary.has(identifier)) return ordinaryIdentifier
     const held = classified.get(identifier)
     if (held !== undefined) return held
     const identity = classifyUncached(identifier)
-    classified.set(identifier, identity)
+    if (identity === ordinaryIdentifier) ordinary.add(identifier)
+    else classified.set(identifier, identity)
     return identity
+  }
+  // One answer object per distinct answer: readers compare answers by field.
+  const wrappers = new Map<CommonJsGlobal, CommonJsIdentifierIdentity>()
+  const wrapper = (global: CommonJsGlobal): CommonJsIdentifierIdentity => {
+    let held = wrappers.get(global)
+    if (held === undefined) wrappers.set(global, (held = { kind: 'wrapper', global }))
+    return held
   }
   const classifyUncached = (identifier: ts.Identifier): CommonJsIdentifierIdentity => {
     const symbol = resolvedSymbolAt(checker, identifier, hostProvided)
-    if (!symbol) return { kind: 'ordinary' }
+    if (!symbol) return ordinaryIdentifier
     const redeclared = redeclarations.get(symbol)?.get(identifier.getSourceFile())
-    if (redeclared !== undefined) return { kind: 'wrapper', global: redeclared }
+    if (redeclared !== undefined) return wrapper(redeclared)
     const authenticated = authenticatedSymbols.get(symbol)
-    if (authenticated !== undefined) return { kind: 'wrapper', global: authenticated }
-    if (failedSymbols.has(symbol)) return { kind: 'provenance-failure' }
-    return { kind: 'ordinary' }
+    if (authenticated !== undefined) return wrapper(authenticated)
+    if (failedSymbols.has(symbol)) return provenanceFailureIdentifier
+    return ordinaryIdentifier
   }
 
   return {

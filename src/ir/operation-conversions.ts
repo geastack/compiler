@@ -567,13 +567,18 @@ const conversionNodeOf = (
             ? conversions.callArgumentFor(input.source, input.target)
             : conversions.nodeFor(input.source, input.target)
 
+// Most operations convert nothing; one shared empty list instead of one per
+// operation, which on a large app was 900 thousand arrays held to the end.
+const noOperationConversions: readonly OperationConversion[] = Object.freeze([])
+
 export const operationConversionsOf = (
   inputs: readonly OperationConversionInput[],
   conversions: Pick<
     ConversionCensus,
     'nodeFor' | 'fieldReadFor' | 'absentIndexReadFor' | 'callArgumentFor' | 'nativeBaseViewFor' | 'nativeMethodFor'
   >
-): readonly OperationConversion[] => inputs.map((input) => ({ ...input, conversion: conversionNodeOf(input, conversions).id }))
+): readonly OperationConversion[] =>
+  inputs.length === 0 ? noOperationConversions : inputs.map((input) => ({ ...input, conversion: conversionNodeOf(input, conversions).id }))
 
 export const operationConversionsMatch = (
   expected: readonly OperationConversionInput[],

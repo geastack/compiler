@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { isAmbientDeclaration, isAmbientSymbol } from '../ambient.js'
 import { logicalResultTypeOf } from './logical-result-type.js'
 export { isOpenTypeForm } from './open-type-form.js'
@@ -23,7 +23,7 @@ import {
   type DeferredIntrinsicProtocolLedger,
   type IntrinsicProtocolRequirement
 } from './deferred-intrinsic-protocols.js'
-import { createPropertyKeyDomains, domainMayNameNumeric } from './property-key-domain.js'
+import { createPropertyKeyDomains, everyWriteReachable, domainMayNameNumeric } from './property-key-domain.js'
 import { unwrapErasedExpression } from './producers/erasure.js'
 
 /**
@@ -721,7 +721,7 @@ const numericNamesAbsentFrom = (
   let domains = numericAbsenceKeyDomains.get(flow)
   // Every write the index holds is already reachable: the flow walk prunes
   // unreachable members before it records anything.
-  if (!domains) numericAbsenceKeyDomains.set(flow, (domains = createPropertyKeyDomains(checker, flow, () => true)))
+  if (!domains) numericAbsenceKeyDomains.set(flow, (domains = createPropertyKeyDomains(checker, flow, everyWriteReachable)))
   const keys = domains
 
   // The family, each member's source ancestry, and what each declares.
@@ -1136,7 +1136,7 @@ const closedLiteralMemberAbsent = (
         return refuse('spread-source-open', property)
     }
 
-  const domains = createPropertyKeyDomains(checker, flow, () => true)
+  const domains = createPropertyKeyDomains(checker, flow, everyWriteReachable)
   // The checker's type, or -- only where the checker says nothing -- the
   // settled census's, as `numericNamesAbsentFrom`'s own `typeOf` reads it.
   // memory-pager's `grow(pager, index)` stores `pager.pages = new Array(...)`

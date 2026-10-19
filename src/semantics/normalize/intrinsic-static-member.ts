@@ -1,4 +1,4 @@
-import type ts from 'typescript'
+import type ts from '#typescript'
 import type { ProducerContext } from './producer-context.js'
 import { intrinsicObjectKeysIntact } from './host-mutation-keys.js'
 

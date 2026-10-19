@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * `T[K]` -- an indexed access the checker left DEFERRED.

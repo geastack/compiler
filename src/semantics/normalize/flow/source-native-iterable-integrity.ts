@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { NativeIterableProvider } from '../../../plugins/native-iterable-providers.js'
 import type { ValueFlowIndex } from './model.js'
 import { sourceBindingValuesOf } from './value-provenance.js'

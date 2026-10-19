@@ -843,6 +843,7 @@ test('one failed obligation remains one root and blocks certification downstream
   const preflight = {
     components: [component],
     obligations: [root, downstream],
+    failing: [root, downstream],
     componentSummaries: [],
     totals: {
       mandatory: { satisfied: 0, missing: 1, unsupported: 0, blockedByUpstream: 1 },

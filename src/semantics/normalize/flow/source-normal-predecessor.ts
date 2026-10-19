@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 import type { SourceValueSession } from './source-value-session.js'
 import { callableCompletionSummaryOf } from './callable-completions.js'

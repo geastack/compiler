@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { inlineJsxCallbackParameterType } from './normalize/callback-parameter-contracts.js'
 import type { NamespacePathCensus } from './normalize/namespace-paths.js'
 import { declaredBaseTypesOf, globalSymbolBehindModuleAmbientConst, isAmbientSymbol } from './ambient.js'

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * `Owner.prototype.m.call(this, ...args)` inside a class that is NOT `Owner`

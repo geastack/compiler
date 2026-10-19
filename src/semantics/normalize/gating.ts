@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { NamespacePathCensus } from './namespace-paths.js'
 import {
   operationFamilies,
@@ -9,7 +9,7 @@ import {
   type OperationId,
   type SemanticResultId
 } from '../../identity/ids.js'
-import type { ConditionalEdge, SemanticEdge } from '../model/edges.js'
+import type { ConditionalEdge, GatedOperations, GateLink } from '../model/edges.js'
 import { operandOf } from '../model/operands.js'
 import type { SemanticOperation } from '../model/operations.js'
 import { forEachEvaluationChild } from './evaluation-order.js'
@@ -73,11 +73,7 @@ export interface GatingInput {
  * opens and closes, and an operation's chain of them, outermost first, is what
  * decides which block it lands in.
  */
-type Gate =
-  | { readonly kind: 'guard'; readonly guard: SemanticResultId; readonly takenWhen: ConditionalEdge['takenWhen'] }
-  | { readonly kind: 'loop'; readonly loop: OperationId }
-  | { readonly kind: 'loop-latch'; readonly loop: OperationId }
-  | { readonly kind: 'region'; readonly region: OperationId; readonly part: 'try' | 'catch' | 'finally' }
+type Gate = GateLink
 
 /**
  * Every operation one node published.
@@ -146,27 +142,25 @@ interface GateWalker {
   readonly visitHere: (node: ts.Node, gates: readonly Gate[]) => void
 }
 
-export const gatingEdges = (input: GatingInput): readonly SemanticEdge[] => {
+export const gatingEdges = (input: GatingInput): GatedOperations => {
   const { files, operations, specializations } = input
-  const edges: SemanticEdge[] = []
+  const gatedOperations: OperationId[] = []
+  const gatedChains: (readonly Gate[])[] = []
   // One walker per copy, built on first use. Rebuilding a dozen closures for
   // every node of every copy would rebuild them for one answer, the same way
   // `normalize.ts` caches a producer set per copy and for the same reason.
   const walkers = new Map<string, GateWalker>()
 
-  // Emitted in chain order, outermost first: the lowering reads the chain back
+  // Recorded in chain order, outermost first: the lowering reads the chain back
   // in the order the edges arrive, so a caller's own nesting is what states
-  // which scope contains which.
+  // which scope contains which. The chain itself is recorded, not copied: one
+  // chain is every operation's under the same nesting, and the sealed graph's
+  // edge table mints its edges per operation only when a consumer reads them.
+  // That is why no chain may change once it has been handed to `visit`.
   const pushGateEdgesFor = (to: OperationId, gates: readonly Gate[]): void => {
-    for (const gate of gates) {
-      // Emitted in chain order, outermost first: the lowering reads the chain
-      // back in the order the edges arrive, so this walk's own nesting is what
-      // states which scope contains which.
-      if (gate.kind === 'loop') edges.push({ kind: 'loop', loop: gate.loop, to })
-      else if (gate.kind === 'loop-latch') edges.push({ kind: 'loop-latch', loop: gate.loop, to })
-      else if (gate.kind === 'region') edges.push({ kind: 'region', region: gate.region, part: gate.part, to })
-      else edges.push({ kind: 'conditional', guard: gate.guard, to, takenWhen: gate.takenWhen })
-    }
+    if (gates.length === 0) return
+    gatedOperations.push(to)
+    gatedChains.push(gates)
   }
 
   const walkerFor = (path: SpecializationPath): GateWalker => {
@@ -405,7 +399,9 @@ export const gatingEdges = (input: GatingInput): readonly SemanticEdge[] => {
       // on the chain held, and the guard handed forward is not on it.
       if (ts.isSwitchStatement(node)) {
         visit(node.expression, gates)
-        const chain: Gate[] = [...gates]
+        // Extended by replacement, never in place: earlier clauses' operations
+        // were recorded against the chain as it stood when they were visited.
+        let chain: readonly Gate[] = gates
         let running: SemanticResultId | null = null
         for (const clause of node.caseBlock.clauses) {
           if (!ts.isCaseClause(clause)) {
@@ -431,7 +427,7 @@ export const gatingEdges = (input: GatingInput): readonly SemanticEdge[] => {
             running = guard
             continue
           }
-          chain.push({ kind: 'guard', guard, takenWhen: 'falsy' })
+          chain = [...chain, { kind: 'guard', guard, takenWhen: 'falsy' }]
           running = null
         }
         return
@@ -587,7 +583,7 @@ export const gatingEdges = (input: GatingInput): readonly SemanticEdge[] => {
 
   const root = walkerFor(rootSpecialization)
   for (const file of files) for (const statement of input.reachable.statementsOf(file)) root.visit(statement, [])
-  return edges
+  return { operations: gatedOperations, chains: gatedChains }
 }
 
 interface HeadTestedLoop {

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * Which expressions name a source `namespace` -- a PATH -- rather than a value.

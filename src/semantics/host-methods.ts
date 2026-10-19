@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { dirname, relative, resolve } from 'node:path'
 
 /** A host owns the implementation of this checker-resolved method declaration. */

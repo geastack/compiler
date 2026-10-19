@@ -2,7 +2,7 @@ import type { SealedRepresentationPlan } from '../representation/plan.js'
 import type { Representation } from '../representation/model.js'
 import { abiKey, arrayExtensionKey, containsUnresolved, representationKey } from '../representation/model.js'
 import { optionalOf } from '../representation/optional.js'
-import type { ConversionCapability, ConversionNode, ConversionNodeId } from './algebra.js'
+import type { ClassifierContract, ConversionCapability, ConversionNode, ConversionNodeId, MaterializerContract } from './algebra.js'
 import { createConversionDerivationContext, deriveConversionCapability } from './derive.js'
 import { validateConversionGraph } from './graph-validation.js'
 import type { ClassifierMaterializerPair, ConversionRuntimeRegistry } from './registry.js'
@@ -329,10 +329,8 @@ const buildNarrowingClosure = (source: Representation): readonly Representation[
  * keeps recursive representations finite. This one predicate is shared by
  * graph proposal and backend admission so they cannot disagree.
  */
-const reachesMemo = new Map<string, boolean>()
-
 /**
- * Forgets both narrowing memos. "A pure function of the representation" holds
+ * Forgets the narrowing-closure memo. "A pure function of the representation" holds
  * only within one program: `representationKey` names a class by its
  * declaration id (`class-ref(decl|f168|20,...)`), and every single-file program
  * numbers its file the same, so the next compile in this process reads another
@@ -344,33 +342,42 @@ const reachesMemo = new Map<string, boolean>()
  */
 export const resetNarrowingMemos = (): void => {
   narrowingClosures.clear()
-  reachesMemo.clear()
 }
 
 export const narrowingReachesTarget = (source: Representation, target: Representation): boolean => {
   const targetKey = representationKey(target)
   if (narrowingClosureKeysOf(source).has(targetKey)) return true
-  // Module level for the same reason `narrowingClosureOf`'s cache above is:
-  // `reaches(from, to)` is a pure structural question about two immutable
-  // representations, so the answer is the same for every caller, and a memo
-  // minted per call throws away the whole table between questions that
-  // overwhelmingly repeat. `active` stays per call -- it is the cycle guard for
-  // THIS descent, not a fact about the graph, and sharing it would let one
-  // call's in-progress pair read as a settled `false` in another.
+  // Per call, not per compile: on a large application the questions did not
+  // repeat -- 740,400 of 786,717 pair lookups during lowering were misses, and
+  // after lowering the predicate is asked a few dozen times in all -- so a
+  // module-level table held about 40 MB of answers to the end of the compile
+  // that nothing read again. Within one descent the memo still keeps a
+  // recursive sum's repeated sub-pairs from being re-derived. `active` is the
+  // cycle guard for THIS descent, never a settled answer. Keyed by the two
+  // representation keys in turn rather than by one joined string, which
+  // would mint a fresh string per pair for a table whose two keys exist.
+  const reachesMemo = new Map<string, Map<string, boolean>>()
   const active = new Set<string>()
   const reaches = (from: Representation, to: Representation): boolean => {
     const fromKey = representationKey(from)
     const toKey = representationKey(to)
     if (fromKey === toKey) return true
     if (narrowingClosureKeysOf(from).has(toKey)) return true
-    const pair = `${fromKey}->${toKey}`
-    const known = reachesMemo.get(pair)
+    // Only an optional or a tagged union recurses; any other source answers
+    // directly, and memoizing those answers was most of the table.
+    if (from.kind !== 'optional' && from.kind !== 'tagged-union')
+      return (
+        from.kind === 'class-ref' && to.kind === 'class-ref' && from.ownership === to.ownership && to.ancestors.includes(from.declaration)
+      )
+    let fromAnswers = reachesMemo.get(fromKey)
+    if (fromAnswers === undefined) reachesMemo.set(fromKey, (fromAnswers = new Map()))
+    const known = fromAnswers.get(toKey)
     if (known !== undefined) return known
+    const pair = `${fromKey}->${toKey}`
     if (active.has(pair)) return false
     active.add(pair)
-    let result =
-      from.kind === 'class-ref' && to.kind === 'class-ref' && from.ownership === to.ownership && to.ancestors.includes(from.declaration)
-    if (!result && from.kind === 'optional') {
+    let result = false
+    if (from.kind === 'optional') {
       result = to.kind === 'optional' && from.absence === to.absence ? reaches(from.payload, to.payload) : reaches(from.payload, to)
     }
     if (!result && from.kind === 'tagged-union') {
@@ -382,7 +389,7 @@ export const narrowingReachesTarget = (source: Representation, target: Represent
           : from.arms.some((arm) => reaches(arm.value, to))
     }
     active.delete(pair)
-    reachesMemo.set(pair, result)
+    fromAnswers.set(toKey, result)
     return result
   }
   return reaches(source, target)
@@ -965,21 +972,313 @@ const referencedRepresentations = (
   return known
 }
 
+/**
+ * An `atom` whose classifier and materializer differ from pair to pair only in
+ * the domain they share, `${prefix}${source key}->${target key}`.
+ *
+ * Nearly every pair the graph mints is one: a structural recast, a class read
+ * as a record, a record stored as a union arm. A large application minted a
+ * quarter of a million of them, and each kept its own node, capability,
+ * classifier, materializer, joined id and joined domain alive to the end of
+ * the compile -- about 75 MB, for pairs almost none of which anything asks
+ * about again. The parts that are not the pair's own are kept once here, and
+ * the node is built when it is first looked up.
+ *
+ * Every other field must be a primitive, so a rebuilt half is
+ * indistinguishable from the one the registry returned; and the domain names
+ * the pair, so that object was never shared with another node.
+ */
+class PairAtomShape {
+  constructor(
+    readonly prefix: string,
+    readonly classifier: readonly (readonly [string, unknown])[],
+    readonly materializer: readonly (readonly [string, unknown])[]
+  ) {}
+
+  matches(prefix: string, classifier: readonly (readonly [string, unknown])[], materializer: readonly (readonly [string, unknown])[]) {
+    return this.prefix === prefix && sameFields(this.classifier, classifier) && sameFields(this.materializer, materializer)
+  }
+
+  capabilityFor(id: ConversionNodeId): ConversionCapability {
+    const domain = `${this.prefix}${id}`
+    return {
+      kind: 'atom',
+      classifier: withDomain(this.classifier, domain) as unknown as ClassifierContract,
+      materializer: withDomain(this.materializer, domain) as unknown as MaterializerContract
+    }
+  }
+}
+
+const sameFields = (left: readonly (readonly [string, unknown])[], right: readonly (readonly [string, unknown])[]): boolean =>
+  left.length === right.length && left.every(([key, value], index) => right[index]?.[0] === key && Object.is(right[index]?.[1], value))
+
+const withDomain = (fields: readonly (readonly [string, unknown])[], domain: string): Record<string, unknown> => {
+  const rebuilt: Record<string, unknown> = {}
+  for (const [key, value] of fields) rebuilt[key] = key === 'domain' ? domain : value
+  return rebuilt
+}
+
+/**
+ * The fields of a plain data object, in order, when each is an ordinary
+ * primitive data property and `domain` holds the domain given; else `null`.
+ * The domain's own slot keeps its position and is filled in on rebuild.
+ */
+const plainFieldsOf = (value: object, domain: string): readonly (readonly [string, unknown])[] | null => {
+  if (Object.getPrototypeOf(value) !== Object.prototype) return null
+  const fields: (readonly [string, unknown])[] = []
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== 'string') return null
+    const property = Object.getOwnPropertyDescriptor(value, key)
+    if (property === undefined || !('value' in property) || !property.writable || !property.enumerable || !property.configurable)
+      return null
+    if (key === 'domain') {
+      if (property.value !== domain) return null
+      fields.push([key, undefined])
+      continue
+    }
+    const field: unknown = property.value
+    if (field !== null && (typeof field === 'object' || typeof field === 'function')) return null
+    fields.push([key, field])
+  }
+  return fields.some(([key]) => key === 'domain') ? fields : null
+}
+
+/**
+ * The eager graph's node table: a `Map` from node id to node, stored by the
+ * two carrier keys of each pair rather than by the joined id.
+ *
+ * A string used as a `Map` key is flattened and internalized, so a table keyed
+ * by `${source}->${target}` held one flat copy of every id -- two carrier keys
+ * of a couple of hundred characters each, for every one of a quarter of a
+ * million pairs on a large application, about 60 MB alive to the end of the
+ * compile. Keyed by the parts, which are the memoized carrier keys every
+ * other table already holds, a node's `id` is the concatenation it was built
+ * as and is only flattened if something looks it up by its text. Reads and
+ * iteration answer exactly what the joined-key `Map` answered, in its
+ * insertion order.
+ *
+ * A pair whose capability is a `PairAtomShape` is stored as that shape and its
+ * two carriers, and its node is built on first lookup and then kept, so every
+ * lookup of one id answers the same object, as a stored node would.
+ */
+class ConversionNodeTable extends Map<ConversionNodeId, ConversionNode> {
+  readonly #order: (ConversionNode | PairAtomShape)[] = []
+  /** The two carriers of each entry stored as a shape; unused for a stored node. */
+  readonly #sources: (Representation | undefined)[] = []
+  readonly #targets: (Representation | undefined)[] = []
+  /** Nodes built from a shape, by position, once something has looked them up. */
+  readonly #built = new Map<number, ConversionNode>()
+  /** The shapes in use, keyed by prefix and both identities; a short list shares a key only when a field differs. */
+  readonly #shapes = new Map<string, PairAtomShape[]>()
+  readonly #pairs = new Map<string, Map<string, number>>()
+  /** The dynamic-source nodes, keyed by their target alone. */
+  readonly #sole = new Map<string, number>()
+
+  hasPair(sourceKey: string, targetKey: string): boolean {
+    return this.#pairs.get(sourceKey)?.has(targetKey) === true
+  }
+
+  hasSole(targetKey: string): boolean {
+    return this.#sole.has(targetKey)
+  }
+
+  /** Adds the pair's node, or replaces it in place, as `Map.prototype.set` does. */
+  putPair(sourceKey: string, targetKey: string, source: Representation, target: Representation, capability: ConversionCapability): void {
+    // A shape's node is rebuilt from its carriers, so their own keys must be the
+    // ones it is stored under.
+    const shape =
+      capability.kind === 'atom' && representationKey(source) === sourceKey && representationKey(target) === targetKey
+        ? this.#shapeOf(sourceKey, targetKey, capability)
+        : null
+    let targets = this.#pairs.get(sourceKey)
+    if (targets === undefined) {
+      targets = new Map()
+      this.#pairs.set(sourceKey, targets)
+    }
+    let at = targets.get(targetKey)
+    if (at === undefined) {
+      at = this.#order.length
+      targets.set(targetKey, at)
+    }
+    this.#store(at, shape ?? { id: `${sourceKey}->${targetKey}`, source, target, capability })
+    if (shape === null) return
+    this.#sources[at] = source
+    this.#targets[at] = target
+  }
+
+  /** `putPair` with the plain `atom` an installed classifier/materializer pair is. */
+  putAtom(
+    sourceKey: string,
+    targetKey: string,
+    source: Representation,
+    target: Representation,
+    installed: ClassifierMaterializerPair
+  ): void {
+    this.putPair(sourceKey, targetKey, source, target, {
+      kind: 'atom',
+      classifier: installed.classifier,
+      materializer: installed.materializer
+    })
+  }
+
+  putSole(targetKey: string, node: ConversionNode): void {
+    let at = this.#sole.get(targetKey)
+    if (at === undefined) {
+      at = this.#order.length
+      this.#sole.set(targetKey, at)
+    }
+    this.#store(at, node)
+  }
+
+  #store(at: number, entry: ConversionNode | PairAtomShape): void {
+    this.#built.delete(at)
+    this.#order[at] = entry
+    this.#sources[at] = undefined
+    this.#targets[at] = undefined
+  }
+
+  #shapeOf(sourceKey: string, targetKey: string, capability: Extract<ConversionCapability, { kind: 'atom' }>): PairAtomShape | null {
+    if (Reflect.ownKeys(capability).join() !== 'kind,classifier,materializer') return null
+    const domain = capability.classifier.domain
+    if (typeof domain !== 'string' || capability.materializer.domain !== domain) return null
+    const prefixLength = domain.length - sourceKey.length - 2 - targetKey.length
+    if (prefixLength < 0) return null
+    const prefix = domain.slice(0, prefixLength)
+    if (domain !== `${prefix}${sourceKey}->${targetKey}`) return null
+    const classifier = plainFieldsOf(capability.classifier, domain)
+    const materializer = classifier && plainFieldsOf(capability.materializer, domain)
+    if (classifier === null || materializer === null) return null
+    const key = `${prefix}\u0000${String(capability.classifier.id)}\u0000${String(capability.materializer.id)}`
+    let candidates = this.#shapes.get(key)
+    if (candidates === undefined) {
+      candidates = []
+      this.#shapes.set(key, candidates)
+    }
+    const known = candidates.find((one) => one.matches(prefix, classifier, materializer))
+    if (known !== undefined) return known
+    const shape = new PairAtomShape(prefix, classifier, materializer)
+    candidates.push(shape)
+    return shape
+  }
+
+  #nodeAt(at: number): ConversionNode {
+    const entry = this.#order[at]
+    if (entry === undefined) throw new Error(`conversion node table has no entry ${at}`)
+    if (!(entry instanceof PairAtomShape)) return entry
+    const built = this.#built.get(at)
+    if (built !== undefined) return built
+    const source = this.#sources[at]
+    const target = this.#targets[at]
+    if (source === undefined || target === undefined) throw new Error(`conversion node table entry ${at} lost its carriers`)
+    const id = `${representationKey(source)}->${representationKey(target)}`
+    const node: ConversionNode = { id, source, target, capability: entry.capabilityFor(id) }
+    this.#built.set(at, node)
+    return node
+  }
+
+  *pairKeys(): IterableIterator<readonly [string, string]> {
+    for (const [sourceKey, targets] of this.#pairs) for (const targetKey of targets.keys()) yield [sourceKey, targetKey]
+  }
+
+  /**
+   * What the whole-graph check needs, without building a node per shape: the
+   * nodes stored whole, and which ids are shapes. A shape is an `atom` whose
+   * two domains agree, so it passes `validateCapability` and reaches a
+   * materializer by itself, and nothing in it refers to another node.
+   */
+  storedNodes(): readonly ConversionNode[] {
+    return this.#order.filter((entry): entry is ConversionNode => !(entry instanceof PairAtomShape))
+  }
+
+  storedNodeOf(id: ConversionNodeId): ConversionNode | undefined {
+    const at = this.#indexOf(id)
+    const entry = at === undefined ? undefined : this.#order[at]
+    return entry instanceof PairAtomShape ? undefined : entry
+  }
+
+  isShaped(id: ConversionNodeId): boolean {
+    const at = this.#indexOf(id)
+    return at !== undefined && this.#order[at] instanceof PairAtomShape
+  }
+
+  // A joined id is split back into its parts at each `->` it contains, left to
+  // right; a carrier key spells `->` only inside its own parentheses, so at
+  // most one split names a stored pair.
+  #indexOf(id: ConversionNodeId): number | undefined {
+    for (let split = id.indexOf('->'); split !== -1; split = id.indexOf('->', split + 2)) {
+      const at = this.#pairs.get(id.slice(0, split))?.get(id.slice(split + 2))
+      if (at !== undefined) return at
+    }
+    return this.#sole.get(id)
+  }
+
+  override get size(): number {
+    return this.#order.length
+  }
+
+  override get(id: ConversionNodeId): ConversionNode | undefined {
+    const at = this.#indexOf(id)
+    return at === undefined ? undefined : this.#nodeAt(at)
+  }
+
+  override has(id: ConversionNodeId): boolean {
+    return this.#indexOf(id) !== undefined
+  }
+
+  override *entries(): MapIterator<[ConversionNodeId, ConversionNode]> {
+    for (let at = 0; at < this.#order.length; at++) {
+      const node = this.#nodeAt(at)
+      yield [node.id, node]
+    }
+  }
+
+  override *keys(): MapIterator<ConversionNodeId> {
+    for (const [id] of this.entries()) yield id
+  }
+
+  override *values(): MapIterator<ConversionNode> {
+    for (let at = 0; at < this.#order.length; at++) yield this.#nodeAt(at)
+  }
+
+  override [Symbol.iterator](): MapIterator<[ConversionNodeId, ConversionNode]> {
+    return this.entries()
+  }
+
+  override forEach(
+    visit: (node: ConversionNode, id: ConversionNodeId, map: Map<ConversionNodeId, ConversionNode>) => void,
+    thisArg?: unknown
+  ): void {
+    for (const [id, node] of this.entries()) visit.call(thisArg, node, id, this)
+  }
+
+  override set(): this {
+    throw new Error('the conversion node table is written only while the graph is built')
+  }
+
+  override delete(): boolean {
+    throw new Error('the conversion node table is read-only')
+  }
+
+  override clear(): void {
+    throw new Error('the conversion node table is read-only')
+  }
+}
+
 export const buildConversionGraph = (
   plan: SealedRepresentationPlan,
   registry: ConversionRuntimeRegistry = emptyConversionRegistry,
   constants: Iterable<Representation> = []
 ): ConversionGraph => {
   const context = createConversionDerivationContext(registry)
-  const nodes = new Map<ConversionNodeId, ConversionNode>()
+  const nodes = new ConversionNodeTable()
   const referenced = referencedRepresentations(plan, constants)
   const genericDynamicSource: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
   const genericDynamicKey = representationKey(genericDynamicSource)
 
   for (const representation of referenced.values()) {
     const id = representationKey(representation)
-    if (nodes.has(id)) continue
-    nodes.set(id, {
+    if (nodes.hasSole(id)) continue
+    nodes.putSole(id, {
       id,
       // Conversion always starts from the dynamic carrier: it is the only
       // source that needs classifying at all. A statically typed value already
@@ -1019,8 +1318,7 @@ export const buildConversionGraph = (
       // self-selection made every `X -> X` look like a checked transform (a
       // native array entry could no longer cite its identity storage).
       if (sourceKey === targetKey || !referencedKeys.has(targetKey)) continue
-      const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.narrowing(representation, target)
       // The same order `conversion/nodes.ts`'s `capabilityOf` asks in: an
       // installed narrowing, else an installed widening or recast, else the
@@ -1033,18 +1331,19 @@ export const buildConversionGraph = (
       // would mint for it, which the array rule then refuses.
       const recast = installed ? null : (registry.widening(representation, target) ?? registry.recasting(representation, target))
       const recipe = installed || recast ? null : registry.staticRecipe(representation, target)
-      nodes.set(id, {
-        id,
-        source: representation,
+      nodes.putPair(
+        sourceKey,
+        targetKey,
+        representation,
         target,
-        capability: installed
+        installed
           ? narrowingCapabilityFor(representation, target, installed)
           : recast
             ? { kind: 'atom', classifier: recast.classifier, materializer: recast.materializer }
             : recipe
               ? { kind: 'static', materializer: recipe }
               : { kind: 'never', reason: `no runtime narrowing is installed from ${sourceKey} to ${targetKey}` }
-      })
+      )
     }
   }
 
@@ -1062,16 +1361,10 @@ export const buildConversionGraph = (
       if (target.kind !== 'array-object' || target.ownership !== payload.ownership) continue
       if (representationKey(target.element) !== representationKey(payload.element)) continue
       if (arrayExtensionKey(target.extension) === arrayExtensionKey(payload.extension)) continue
-      const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.narrowing(source, target)
       if (!installed) continue
-      nodes.set(id, {
-        id,
-        source,
-        target,
-        capability: { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
-      })
+      nodes.putAtom(sourceKey, targetKey, source, target, installed)
     }
   }
 
@@ -1084,16 +1377,10 @@ export const buildConversionGraph = (
     if (source.kind !== 'optional' && source.kind !== 'tagged-union') continue
     for (const [targetKey, target] of descendantClassTargets) {
       if (!narrowingReachesTarget(source, target)) continue
-      const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.narrowing(source, target)
       if (!installed) continue
-      nodes.set(id, {
-        id,
-        source,
-        target,
-        capability: { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
-      })
+      nodes.putAtom(sourceKey, targetKey, source, target, installed)
     }
   }
 
@@ -1110,16 +1397,10 @@ export const buildConversionGraph = (
     for (const source of wideningSourcesOf(target)) {
       const sourceKey = representationKey(source)
       if (!referencedKeys.has(sourceKey)) continue
-      const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
-        id,
-        source,
-        target,
-        capability: { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
-      })
+      nodes.putAtom(sourceKey, targetKey, source, target, installed)
     }
   }
 
@@ -1134,16 +1415,10 @@ export const buildConversionGraph = (
   for (const [targetKey, target] of sumCarriers) {
     for (const [sourceKey, source] of sumCarriers) {
       if (sourceKey === targetKey) continue
-      const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
-        id,
-        source,
-        target,
-        capability: { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
-      })
+      nodes.putAtom(sourceKey, targetKey, source, target, installed)
     }
   }
 
@@ -1164,16 +1439,10 @@ export const buildConversionGraph = (
     if (target.kind !== 'function-value-dispatch') continue
     for (const [sourceKey, source] of callableSourcesByAbi.get(abiKey(target.abi)) ?? []) {
       if (sourceKey === targetKey) continue
-      const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
-        id,
-        source,
-        target,
-        capability: { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
-      })
+      nodes.putAtom(sourceKey, targetKey, source, target, installed)
     }
   }
 
@@ -1199,16 +1468,10 @@ export const buildConversionGraph = (
   for (const [targetKey, target] of dynamicTargets) {
     for (const [sourceKey, source] of referencedKeyed) {
       if (sourceKey === targetKey) continue
-      const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
-        id,
-        source,
-        target,
-        capability: { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
-      })
+      nodes.putAtom(sourceKey, targetKey, source, target, installed)
     }
   }
 
@@ -1224,16 +1487,10 @@ export const buildConversionGraph = (
   for (const [targetKey, target] of identityTargets) {
     for (const [sourceKey, source] of referencedKeyed) {
       if (sourceKey === targetKey) continue
-      const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
-        id,
-        source,
-        target,
-        capability: { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
-      })
+      nodes.putAtom(sourceKey, targetKey, source, target, installed)
     }
   }
 
@@ -1252,8 +1509,7 @@ export const buildConversionGraph = (
   for (const [targetKey, target] of classRefs) {
     for (const [sourceKey, source] of classRefs) {
       if (sourceKey === targetKey) continue
-      const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       // Both directions, from one enumeration. Upcast (a derived class stored
       // where a base is declared) is a widening; DOWNCAST -- a base-declared
       // handle read at a descendant, which is what `instanceof` narrows -- is
@@ -1264,12 +1520,7 @@ export const buildConversionGraph = (
       // `if ( part instanceof Circle )`'s own reads with no node at all.
       const installed = registry.widening(source, target) ?? registry.narrowing(source, target)
       if (!installed) continue
-      nodes.set(id, {
-        id,
-        source,
-        target,
-        capability: { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
-      })
+      nodes.putAtom(sourceKey, targetKey, source, target, installed)
     }
   }
 
@@ -1283,16 +1534,10 @@ export const buildConversionGraph = (
     for (const [sourceKey, source] of constructorFamilies) {
       if (sourceKey === targetKey || source.kind !== 'constructor-family' || source.members.length === 0) continue
       if (!source.members.every((member) => target.members.includes(member))) continue
-      const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
-        id,
-        source,
-        target,
-        capability: { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
-      })
+      nodes.putAtom(sourceKey, targetKey, source, target, installed)
     }
   }
 
@@ -1304,16 +1549,10 @@ export const buildConversionGraph = (
   const classSumTargets = keyedDistinct(referenced.values()).filter(([, one]) => one.kind === 'optional' || one.kind === 'tagged-union')
   for (const [targetKey, target] of classSumTargets) {
     for (const [sourceKey, source] of classRefs) {
-      const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
-        id,
-        source,
-        target,
-        capability: { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
-      })
+      nodes.putAtom(sourceKey, targetKey, source, target, installed)
     }
   }
 
@@ -1337,16 +1576,10 @@ export const buildConversionGraph = (
               source.kind === 'function-value-dispatch') &&
             target.members.length === 1
       if (!widens) continue
-      const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
+      if (nodes.hasPair(sourceKey, targetKey)) continue
       const installed = registry.widening(source, target)
       if (!installed) continue
-      nodes.set(id, {
-        id,
-        source,
-        target,
-        capability: { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
-      })
+      nodes.putAtom(sourceKey, targetKey, source, target, installed)
     }
   }
 
@@ -1442,10 +1675,7 @@ export const buildConversionGraph = (
   // dynamic-materialization nodes above are keyed by their target alone, and
   // the loop would have asked about those pairs before.
   const sourcesWithNodeInto = new Map<string, Set<string>>()
-  for (const node of nodes.values()) {
-    const sourceKey = representationKey(node.source)
-    const targetKey = representationKey(node.target)
-    if (node.id !== `${sourceKey}->${targetKey}`) continue
+  for (const [sourceKey, targetKey] of nodes.pairKeys()) {
     let sources = sourcesWithNodeInto.get(targetKey)
     if (!sources) {
       sources = new Set()
@@ -1459,13 +1689,7 @@ export const buildConversionGraph = (
       if (sourceKey === targetKey || existing?.has(sourceKey)) continue
       const installed = registry.recasting(source, target)
       if (!installed) continue
-      const id = `${sourceKey}->${targetKey}`
-      nodes.set(id, {
-        id,
-        source,
-        target,
-        capability: { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
-      })
+      nodes.putAtom(sourceKey, targetKey, source, target, installed)
     }
   }
 
@@ -1480,20 +1704,14 @@ export const buildConversionGraph = (
   for (const [sourceKey, source] of referenced) {
     if (sourceKey === genericDynamicKey || source.kind !== 'dynamic') continue
     for (const [targetKey, target] of referenced) {
-      const id = `${sourceKey}->${targetKey}`
-      if (nodes.has(id)) continue
-      nodes.set(id, {
-        id,
-        source,
-        target,
-        capability: deriveConversionCapability(target, context)
-      })
+      if (nodes.hasPair(sourceKey, targetKey)) continue
+      nodes.putPair(sourceKey, targetKey, source, target, deriveConversionCapability(target, context))
     }
   }
 
   // A graph whose recursive references never close is materializable in each
   // node taken alone and unrunnable taken together; the whole-graph check is
   // the only place that difference is visible.
-  validateConversionGraph([...nodes.values()])
+  validateConversionGraph(nodes.storedNodes(), (id) => nodes.storedNodeOf(id), { has: (id) => nodes.isShaped(id) })
   return { nodes }
 }

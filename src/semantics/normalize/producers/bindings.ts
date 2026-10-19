@@ -1,6 +1,6 @@
 import { enclosingArgumentsFunction, implicitArgumentsSlotOf, isBodiedSignatureDeclaration } from '../implicit-arguments.js'
 export { argumentsObjectPhantomOrdinalAt, isArgumentsObjectIdentifier } from '../implicit-arguments.js'
-import ts from 'typescript'
+import ts from '#typescript'
 import { isUnresolvableModuleAmbient } from '../../ambient.js'
 import {
   operationId,

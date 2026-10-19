@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { genericClassAliasTargetSymbol } from '../../class-alias.js'
 import { isScriptGlobalObjectPropertyDeclaration } from '../script-global-redefinition.js'
 import { enclosingCallIfCallee, flowNarrowsType, unwrapErasedExpression } from './erasure.js'

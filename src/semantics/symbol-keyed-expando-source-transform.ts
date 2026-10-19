@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * `o[Symbol.iterator] = function () { ... }` on an object-literal-declared

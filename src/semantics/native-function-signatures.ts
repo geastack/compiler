@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { DeclarationId } from '../identity/ids.js'
 import type { NativeHostFunctionDeclaration } from '../plugins/model.js'
 import { inspectNativeFunctionSignature, type InspectedNativeSignature, type NativeSignatureType } from '../native-signatures.js'

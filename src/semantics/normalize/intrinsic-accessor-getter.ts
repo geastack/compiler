@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { unwrapErased } from './producers/erasure.js'
 import { isGlobalObjectConstructor, isStandardGlobalValue } from './derived-expression-type.js'
 import { intrinsicStaticMemberIsIntact } from './intrinsic-static-member.js'

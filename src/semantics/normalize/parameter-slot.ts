@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import { impliedPatternParameterOf, isUnusableEvidence, widestOf, withoutUndefinedMember } from './derived-expression-type.js'
 import type { ParameterBindingCensus } from './parameter-bindings.js'

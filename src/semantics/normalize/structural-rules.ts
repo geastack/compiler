@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { StructuralTypeId } from '../../identity/ids.js'
 
 /**
@@ -26,7 +26,7 @@ import type { StructuralTypeId } from '../../identity/ids.js'
  * chain did. Every `forms: null` is a row this phase still owes a form, and
  * counting them is the honest measure of the port.
  */
-export interface StructuralRule {
+export interface StructuralRule<View> {
   /** What this rule is called when a disagreement names it. Stable; it is an identifier in reports, not prose. */
   readonly name: string
   /** The syntactic forms this rule answers for, or `null` for a rule that is not keyed by form yet. */
@@ -43,7 +43,7 @@ export interface StructuralRule {
    * also precisely why the audit can be a gate at all: it asks every rule for
    * every node, so a rule leaning on `forms` for correctness reports itself.
    */
-  readonly resolve: (node: ts.Node) => StructuralTypeId | null
+  readonly resolve: (this: View, node: ts.Node) => StructuralTypeId | null
 }
 
 /** Two rules that both answered for one node, and what each said. */
@@ -104,6 +104,34 @@ export interface StructuralRuleSet {
 }
 
 /**
+ * The names and forms of one declared rule list, with its per-form selection.
+ * Every structural view (907 on a 48K-line app) dispatches over the same rule
+ * list, whose resolvers take the view as `this`, so one layout serves them
+ * all -- a rule object, a resolver and a selection per form per view were
+ * ~6 MB, alive to the end of production, the frontend's peak.
+ */
+interface RuleLayout {
+  readonly names: readonly string[]
+  readonly forms: readonly (readonly ts.SyntaxKind[] | null)[]
+  readonly servingByKind: Map<ts.SyntaxKind, readonly number[]>
+  /** Every rule, for the audit, which asks all of them. */
+  readonly all: readonly number[]
+}
+const layouts = new WeakMap<readonly StructuralRule<never>[], RuleLayout>()
+const layoutOf = <View>(declared: readonly StructuralRule<View>[]): RuleLayout => {
+  const known = layouts.get(declared)
+  if (known) return known
+  const layout: RuleLayout = {
+    names: declared.map((rule) => rule.name),
+    forms: declared.map((rule) => (rule.forms === null ? null : Object.freeze([...rule.forms]))),
+    servingByKind: new Map(),
+    all: declared.map((_, index) => index)
+  }
+  layouts.set(declared, layout)
+  return layout
+}
+
+/**
  * Prepare a rule set for dispatch.
  *
  * The selection is cached per syntax kind rather than recomputed per node, and
@@ -116,18 +144,21 @@ export interface StructuralRuleSet {
  * Order within a form is the order the rules were declared in, which is the
  * order the chain asked them, so preparing changes no answer.
  */
-export const prepareStructuralRules = (rules: readonly StructuralRule[]): StructuralRuleSet => {
+export const prepareStructuralRules = <View>(declared: readonly StructuralRule<View>[], view: View): StructuralRuleSet => {
+  const layout = layoutOf(declared)
   // Decided once, when the set is prepared: an audit asks every rule for every
   // node, so the selection below is bypassed rather than rebuilt.
   const auditing = structuralFormAuditEnabled()
   const formViolations: StructuralFormViolation[] = []
-  const servingByKind = new Map<ts.SyntaxKind, readonly StructuralRule[]>()
-  const servingFor = (kind: ts.SyntaxKind): readonly StructuralRule[] => {
-    if (auditing) return rules
-    const known = servingByKind.get(kind)
+  const servingFor = (kind: ts.SyntaxKind): readonly number[] => {
+    if (auditing) return layout.all
+    const known = layout.servingByKind.get(kind)
     if (known) return known
-    const serving = rules.filter((rule) => rule.forms === null || rule.forms.includes(kind))
-    servingByKind.set(kind, serving)
+    const serving = layout.all.filter((index) => {
+      const forms = layout.forms[index]!
+      return forms === null || forms.includes(kind)
+    })
+    layout.servingByKind.set(kind, serving)
     return serving
   }
   return {
@@ -138,22 +169,23 @@ export const prepareStructuralRules = (rules: readonly StructuralRule[]): Struct
     resolve: (node, record) => {
       let answer: StructuralTypeId | null = null
       let winner = ''
-      for (const rule of servingFor(node.kind)) {
-        const resolved = rule.resolve(node)
+      for (const index of servingFor(node.kind)) {
+        const resolved = declared[index]!.resolve.call(view, node)
         if (resolved === null) continue
         // Recorded whether or not this rule WON: a rule that answers outside
         // its forms is a false claim even when an earlier rule would have
         // shadowed it today, because the next reordering makes it the answer.
-        if (auditing && rule.forms !== null && !rule.forms.includes(node.kind)) {
-          formViolations.push({ rule: rule.name, kind: node.kind })
+        const forms = layout.forms[index]!
+        if (auditing && forms !== null && !forms.includes(node.kind)) {
+          formViolations.push({ rule: layout.names[index]!, kind: node.kind })
         }
         if (answer === null) {
           answer = resolved
-          winner = rule.name
+          winner = layout.names[index]!
           if (!record && !auditing) return answer
           continue
         }
-        record?.({ kind: node.kind, winner, other: rule.name, agreed: resolved === answer })
+        record?.({ kind: node.kind, winner, other: layout.names[index]!, agreed: resolved === answer })
       }
       return answer
     },

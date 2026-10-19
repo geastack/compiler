@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { DeclarationId } from '../../../identity/ids.js'
 import { normalCompletion, pureEffects, type SemanticOperand } from '../../model/operands.js'
 import type { ControlOperation } from '../../model/operations.js'

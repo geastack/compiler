@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * A copy of a type-guard function at an `any` tested parameter, for the calls

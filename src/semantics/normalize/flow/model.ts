@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * ONE enumeration of the ways a value reaches a storage cell in JavaScript.
@@ -337,6 +337,9 @@ export const heritageClassOrInterfaceOf = (type: ts.Type): ts.InterfaceType | nu
 const constructorFunctions = new WeakMap<ts.Node, boolean>()
 
 export const isConstructorFunction = (node: ts.Node): node is ts.FunctionDeclaration | ts.FunctionExpression => {
+  // Any other node answers no at once, and remembering that answer for every
+  // node ever asked about held a table entry per node of the program.
+  if (!ts.isFunctionDeclaration(node) && !ts.isFunctionExpression(node)) return false
   const known = constructorFunctions.get(node)
   if (known !== undefined) return known
   const answer = computeIsConstructorFunction(node)

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 import type { IdentityTable } from './identities.js'
 

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { isValueReference } from './census.js'
 import type { NamespacePathCensus } from './namespace-paths.js'
 import { noHostProvidedNames, valueSymbolAt } from './unresolvable-names.js'

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import type { StructuralShape } from '../model/structural-types.js'
 import type { StructuralTypeTable } from '../model/structural-type-table.js'

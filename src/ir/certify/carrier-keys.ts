@@ -134,6 +134,35 @@ export const isUniformTupleRecord = (representation: Representation): boolean =>
   )
 }
 
+/**
+ * For a tuple whose positions do NOT share one carrier, the arm of the walk's
+ * element sum that carries each position, or `null` when any position has no
+ * single arm of its own.
+ *
+ * `[['GiB', 2 ** 30], ['MiB', 2 ** 20]] as const` is a tuple of two
+ * structurally identical records that are still two types, so no one cursor
+ * element type is every position's. The checker already says what a step
+ * yields: the union of the position types, which derives as a tagged union
+ * with an arm per distinct position carrier. Each position is then exactly
+ * one arm's value, and the cursor publishes that union, tagging each step
+ * with its position's arm -- the same value the program reads, never a
+ * conversion. A position matching no arm, or two, is refused rather than
+ * guessed.
+ */
+export const tuplePositionArmsOf = (representation: Representation, element: Representation | undefined): readonly number[] | null => {
+  if (representation.kind !== 'record' || representation.fields.length === 0 || element?.kind !== 'tagged-union') return null
+  const armKeys = element.arms.map((arm) => representationKey(arm.value))
+  const arms: number[] = []
+  for (const [position, field] of representation.fields.entries()) {
+    if (field.key !== String(position) || !field.required) return null
+    const key = representationKey(field.value)
+    const matching = armKeys.flatMap((armKey, index) => (armKey === key ? [index] : []))
+    if (matching.length !== 1) return null
+    arms.push(matching[0]!)
+  }
+  return arms
+}
+
 /** Whether a sum's arms are all shared Arrays or Sets -- the only sums `emit-iterator.ts` walks natively. */
 export const isSequenceSum = (representation: Representation): boolean =>
   representation.kind === 'tagged-union' &&
@@ -160,7 +189,8 @@ const optionalIterationSourceKeyOf = (kind: string, representation: Representati
 export const iteratorMethodCarrierKeyOf = (
   kind: string,
   representation: Representation | undefined,
-  deriver: RepresentationDeriver
+  deriver: RepresentationDeriver,
+  element?: Representation
 ): string => {
   const wrapped = optionalIterationSourceKeyOf(kind, representation)
   if (wrapped !== null) return wrapped
@@ -172,7 +202,9 @@ export const iteratorMethodCarrierKeyOf = (
   if (!representation) return `${kind}(no-iterator-method)`
   if (recordHasIteratorMethodField(deriver, representation)) return kind
   if (kind === 'native-record-ref') return 'native-record-ref(no-iterator-method)'
-  return isUniformTupleRecord(representation) ? 'record(tuple-values)' : 'record(no-iterator-method)'
+  return isUniformTupleRecord(representation) || tuplePositionArmsOf(representation, element) !== null
+    ? 'record(tuple-values)'
+    : 'record(no-iterator-method)'
 }
 
 /** Whether a `record`/`class-ref` is a shape `emitSpreadCopy` can copy without calling user code -- see `runtime-helper-key.ts`'s doc. */

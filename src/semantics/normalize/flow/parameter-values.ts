@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { outermostErasureOf } from '../producers/erasure.js'
 import { isClassSpelledSourceClass, type SourceClass, type ValueFlowIndex } from './model.js'
 import { indexCallableReach, type CallableReachIndex } from './callable-reach.js'

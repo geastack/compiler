@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { unwrapErasedExpression } from '../producers/erasure.js'
 import { literalMemberNameOf } from '../derived-expression-type.js'
 import type { FlowTarget, ValueFlowIndex } from './model.js'

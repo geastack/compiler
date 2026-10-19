@@ -1,4 +1,5 @@
-import ts from 'typescript'
+import ts from '#typescript'
+import { NullableMemo } from './normalize/nullable-memo.js'
 
 /**
  * TypeScript keeps a narrowing of a mutable property -- or of a `let` another
@@ -580,7 +581,8 @@ export const createCallInvalidatedNarrowing = (program: ts.Program, checker: ts.
   }
 
   // --- the walk ------------------------------------------------------------------------------------------------
-  const memo = new Map<ts.Node, ts.Type | null>()
+  // Asked of every node the stable checker types, and almost always `null`.
+  const memo = new NullableMemo<ts.Node, ts.Type>()
   const corrected = (node: ts.Node): ts.Type | null => {
     if (memo.has(node)) return memo.get(node)!
     memo.set(node, null)

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { SpecializationPath } from '../identities.js'
 import type { StructuralMapper } from '../structural.js'
 import { genericFunctionSetMembersOf, runtimeSymbolMemberIndexOf } from '../../model/structural-types.js'

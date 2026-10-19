@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import { containsUnstatedPosition } from './derived-expression-type.js'
 import type { ValueFlowIndex } from './flow/model.js'

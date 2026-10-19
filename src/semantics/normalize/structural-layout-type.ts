@@ -14,11 +14,13 @@ import {
   nominalConstructorChoiceTypeAt
 } from './derived-expression-type.js'
 import { isUnreducedTypeForm } from './unreduced-type-form.js'
-import ts from 'typescript'
+import ts from '#typescript'
 import { inheritedImplementationOf } from './merged-declaration.js'
 import { emptyAbsentGlobalCensus, type AbsentGlobalCensus } from './absent-globals.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import { unsharedArrayResultBodyOf } from './unshared-array-result.js'
+import { memoizedTypeAt } from '../stable-checker.js'
+import { KeySet } from './nullable-memo.js'
 
 /**
  * Which type an object or array literal is laid out as.
@@ -1667,17 +1669,24 @@ export const createLayoutTypeResolver = (
 
   // A resolver closes over one checker and one census snapshot. Reusing an
   // answer here cannot cross binding-fixpoint rounds or checker lifetimes.
+  //
+  // An answer that is the checker's own memoized type for the node -- 98% of
+  // them on a 48K-line app, 230K nodes held for the rest of the compile -- is
+  // a bit here rather than a second copy of that memo's entry.
   const answers = new WeakMap<ts.Node, ts.Type>()
+  const checkerAnswers = new KeySet<ts.Node>()
   const layoutTypeAt = (node: ts.Node): ts.Type => {
     // The frontend seals intrinsic obligations after its host census. A
     // pre-seal `any` memo cannot outrank a later authenticated native alias.
     const nativeClassAlias = nativeClassAliasTypeAt?.(node)
     if (nativeClassAlias) return nativeClassAlias
+    if (checkerAnswers.has(node)) return checker.getTypeAtLocation(node)
     const known = answers.get(node)
     if (known) return known
     const answer = layoutTypeOf(node)
     const selected = armsLiveUnderMemberNarrowing(node, answer) ?? answer
-    answers.set(node, selected)
+    if (selected === memoizedTypeAt(checker, node)) checkerAnswers.add(node)
+    else answers.set(node, selected)
     return selected
   }
 

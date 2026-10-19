@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 import { sourceBindingWritesAreComplete } from './value-provenance.js'
 import { inProgramImportReferencesOf } from './export-importers.js'

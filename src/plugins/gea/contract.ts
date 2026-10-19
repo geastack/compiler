@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { resolve } from 'node:path'
 import { geaCoreDeclarationFileName } from './host.js'
 import type { ProducerContext } from '../../semantics/normalize/producer-context.js'

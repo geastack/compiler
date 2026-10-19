@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { FlowInvocationOperands, ReceiverReference, ValueFlowIndex } from './model.js'
 import type { IntrinsicProtocolRequirement } from '../deferred-intrinsic-protocols.js'
 import { callableCompletionSummaryOf, callableCompletionValuesOf, type CallableCompletionSummary } from './callable-completions.js'

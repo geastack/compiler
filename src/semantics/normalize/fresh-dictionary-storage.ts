@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { createFreshIndexedStorageAuthority, type FreshIndexedStorageComponent } from './fresh-indexed-storage.js'
 import { closedCallableAuthorityOf } from './flow/callable-reach.js'
 import { callableCompletionSummaryOf } from './flow/callable-completions.js'

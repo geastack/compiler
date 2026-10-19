@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { exactSourceConstructionOf, sourceConstructorSelectionsOf } from './member-call-forwarding.js'
 import { isClassSpelledSourceClass, type SourceClass, type ValueFlowIndex } from './model.js'
 

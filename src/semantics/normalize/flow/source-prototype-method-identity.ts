@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 import { outermostErasureOf } from '../producers/erasure.js'
 import { isTypePositionReference, namespaceMemberDeclarationOf } from './targets.js'

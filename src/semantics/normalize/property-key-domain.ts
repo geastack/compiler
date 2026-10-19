@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './flow/model.js'
 import { unwrapErasedExpression } from './producers/erasure.js'
 import { isCanonicalNumericKey } from './host-mutation-keys.js'
@@ -15,8 +15,18 @@ const unknown: PropertyKeyDomain = { kind: 'unknown' }
 const numeric: PropertyKeyDomain = { kind: 'number' }
 const literal = (value: string): PropertyKeyDomain => ({ kind: 'literal', value })
 const concat = (left: PropertyKeyDomain, right: PropertyKeyDomain): PropertyKeyDomain => ({ kind: 'concat', left, right })
+const isNumberType = (type: ts.Type): boolean =>
+  (type.flags & ts.TypeFlags.NumberLike) !== 0 && (type.flags & ~ts.TypeFlags.NumberLike) === 0
 const isStringDomain = (domain: PropertyKeyDomain): boolean =>
   domain.kind === 'literal' || domain.kind === 'concat' || (domain.kind === 'union' && domain.members.every(isStringDomain))
+
+/**
+ * `reachable` for a caller that counts every write. A module-level function on
+ * purpose: an inline `() => true` shares its context with every other closure
+ * of the function that writes it, and key domains are remembered with the flow
+ * index -- one such arrow kept half a gigabyte of a proof's authority alive.
+ */
+export const everyWriteReachable = (): boolean => true
 
 export const createPropertyKeyDomains = (
   checker: ts.TypeChecker,
@@ -28,11 +38,38 @@ export const createPropertyKeyDomains = (
   readonly mayName: (domain: PropertyKeyDomain, name: string) => boolean
 } => {
   const domains = new Map<ts.Expression, PropertyKeyDomain>()
+  // One domain per type, not per asking expression: a parameter typed as a
+  // union of hundreds of literal keys was rebuilt literal by literal for every
+  // reference to it, and the copies were what this table held.
+  const typeDomains = new Map<ts.Type, PropertyKeyDomain>()
   const typeDomain = (type: ts.Type): PropertyKeyDomain => {
-    if (type.isUnion()) return { kind: 'union', members: type.types.map(typeDomain) }
-    if (type.isStringLiteral()) return literal(type.value)
-    if ((type.flags & ts.TypeFlags.NumberLike) !== 0 && (type.flags & ~ts.TypeFlags.NumberLike) === 0) return numeric
-    return unknown
+    const known = typeDomains.get(type)
+    if (known) return known
+    const domain: PropertyKeyDomain = type.isUnion()
+      ? { kind: 'union', members: type.types.map(typeDomain) }
+      : type.isStringLiteral()
+        ? literal(type.value)
+        : isNumberType(type)
+          ? numeric
+          : unknown
+    typeDomains.set(type, domain)
+    return domain
+  }
+  // Every reference to a variable answers the union of its writes, so it is
+  // built once per declaration. Entered as `unknown` first for the same reason
+  // `domainOf` does: a write that reads the variable itself is a cycle.
+  const variables = new Map<ts.VariableDeclaration, PropertyKeyDomain>()
+  const variableDomain = (declaration: ts.VariableDeclaration): PropertyKeyDomain => {
+    const known = variables.get(declaration)
+    if (known) return known
+    variables.set(declaration, unknown)
+    const writes = flow.writesToDeclaration(declaration).filter((write) => reachable(write.site) && write.slot === 'whole')
+    const domain: PropertyKeyDomain =
+      writes.length > 0
+        ? { kind: 'union', members: writes.map((write) => (write.value === null ? unknown : domainOf(write.value))) }
+        : unknown
+    variables.set(declaration, domain)
+    return domain
   }
   const domainOf = (expression: ts.Expression): PropertyKeyDomain => {
     const current = unwrapErasedExpression(expression)
@@ -48,7 +85,7 @@ export const createPropertyKeyDomains = (
     // it: a paging buffer's `page.buffer[o] = b`, with `o` from `i & mask` and
     // `o += this.pageOffset`, stores through a numeric key and so can never
     // name `pageOffset` -- none of the syntax below states that.
-    else if (typeDomain(checker.getTypeAtLocation(current)).kind === 'number') result = numeric
+    else if (isNumberType(checker.getTypeAtLocation(current))) result = numeric
     else if (ts.isTemplateExpression(current)) {
       result = literal(current.head.text)
       for (const span of current.templateSpans) result = concat(concat(result, domainOf(span.expression)), literal(span.literal.text))
@@ -62,57 +99,51 @@ export const createPropertyKeyDomains = (
       else if (left.kind === 'number' && right.kind === 'number') result = numeric
     } else {
       const declaration = ts.isIdentifier(current) ? flow.targetOf(current)?.declaration : null
-      if (declaration && ts.isVariableDeclaration(declaration)) {
-        const writes = flow.writesToDeclaration(declaration).filter((write) => reachable(write.site) && write.slot === 'whole')
-        result =
-          writes.length > 0
-            ? { kind: 'union', members: writes.map((write) => (write.value === null ? unknown : domainOf(write.value))) }
-            : unknown
-      } else if (ts.isIdentifier(current) && declaration && ts.isParameter(declaration)) {
+      if (declaration && ts.isVariableDeclaration(declaration)) result = variableDomain(declaration)
+      else if (ts.isIdentifier(current) && declaration && ts.isParameter(declaration)) {
         result = typeDomain(parameterTypeAt(current))
       }
     }
     domains.set(current, result)
     return result
   }
-  const matches = new Map<PropertyKeyDomain, Map<string, boolean>>()
-  const mayName = (domain: PropertyKeyDomain, name: string): boolean => {
-    let names = matches.get(domain)
-    if (!names) {
-      names = new Map()
-      matches.set(domain, names)
-    }
-    const known = names.get(name)
-    if (known !== undefined) return known
-    let result: boolean
-    switch (domain.kind) {
+  // Nothing is remembered across questions. A consumer asks every keyed write
+  // against every member name, and its own answers are memoized per name; a
+  // table here kept one entry per (write, name) -- and, for a concatenation,
+  // every prefix and suffix of every name it split -- for as long as the flow
+  // index lived, half a gigabyte on a large program. `domainMayName` remembers
+  // a concatenation's parts for one question only.
+  const mayName = domainMayName
+  return { of: domainOf, mayName }
+}
+
+/** One query's answer. The parts are remembered for this query alone: nested concatenations split the same slices repeatedly. */
+const domainMayName = (domain: PropertyKeyDomain, name: string): boolean => {
+  const parts = new Map<PropertyKeyDomain, Map<string, boolean>>()
+  const matches = (part: PropertyKeyDomain, text: string): boolean => {
+    switch (part.kind) {
       case 'unknown':
-        result = true
-        break
+        return true
       case 'literal':
-        result = domain.value === name
-        break
+        return part.value === text
       case 'number':
-        result = String(Number(name)) === name
-        break
+        return String(Number(text)) === text
       case 'union':
-        result = domain.members.some((member) => mayName(member, name))
-        break
+        return part.members.some((member) => matches(member, text))
       case 'concat': {
-        result = false
-        for (let split = 0; split <= name.length; split++) {
-          if (mayName(domain.left, name.slice(0, split)) && mayName(domain.right, name.slice(split))) {
-            result = true
-            break
-          }
-        }
-        break
+        let texts = parts.get(part)
+        if (texts === undefined) parts.set(part, (texts = new Map()))
+        const known = texts.get(text)
+        if (known !== undefined) return known
+        let result = false
+        for (let split = 0; split <= text.length && !result; split++)
+          result = matches(part.left, text.slice(0, split)) && matches(part.right, text.slice(split))
+        texts.set(text, result)
+        return result
       }
     }
-    names.set(name, result)
-    return result
   }
-  return { of: domainOf, mayName }
+  return matches(domain, name)
 }
 
 const domainEdgeLiteral = (domain: PropertyKeyDomain, side: 'left' | 'right'): string | null =>

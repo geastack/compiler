@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { PluginSourceFile } from '../model.js'
 import { geaRenderMemberName } from './contract.js'
 import { isReactiveComponentChild, openingOf, namesAComponent } from './reactive-slots.js'

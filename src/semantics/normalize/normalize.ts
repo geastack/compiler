@@ -1,14 +1,17 @@
 import type { OperationFamily, OperationId, RegionId, SemanticResultId } from '../../identity/ids.js'
 import { operationFamilies } from '../../identity/ids.js'
-import type { SemanticEdge } from '../model/edges.js'
-import { edgeSource } from '../model/edges.js'
+import { operationOfResult } from '../../identity/ids.js'
+import type { GatedOperations, GateLink, GateScope, SemanticEdge, StatedEdge } from '../model/edges.js'
+import { compactStatedEdges, edgeSource, edgesStatedBy, gateScopeSealer, SemanticEdgeTable } from '../model/edges.js'
 import type { SemanticGraph, SemanticRegion } from '../model/graph.js'
-import { validateGraph } from '../model/graph.js'
+import { PublishedResults, validateGraph } from '../model/graph.js'
+import { internedText, internSealedFacts } from '../model/sealed-facts.js'
 import type { SemanticOperation } from '../model/operations.js'
 import type { StructuralTypeTable } from '../model/structural-type-table.js'
 import type { ProgramCensus } from './census.js'
 import type { FamilyProducer } from './contribution.js'
 import { publishProgram } from './contribution.js'
+import { createEvaluationOrdinals, createOrdinalCounter, type EvaluationOrdinals, type OrdinalCounter } from './producers/mint.js'
 import type { CensusCandidate } from './census.js'
 
 /**
@@ -21,7 +24,18 @@ import type { CensusCandidate } from './census.js'
  * third state where a family quietly contributes nothing.
  */
 
+/**
+ * The one pair of ordinal counters every producer mints from. Made by the
+ * driver, which alone knows when minting is over: they hold an entry per
+ * minted operation, and nothing reads them once every candidate has produced.
+ */
+export interface ProducerMinting {
+  readonly ordinals: OrdinalCounter
+  readonly evaluationOrdinals: EvaluationOrdinals
+}
+
 export interface NormalizationInput {
+  /** Consumed: normalization takes every candidate out of it, leaving its regions. */
   readonly census: ProgramCensus
   readonly types: StructuralTypeTable
   /**
@@ -30,7 +44,7 @@ export interface NormalizationInput {
    * that instantiates a generic twice gets two, each resolving that generic's
    * type parameters as its own copy binds them.
    */
-  readonly producers: (candidate: CensusCandidate) => readonly FamilyProducer[]
+  readonly producers: (candidate: CensusCandidate, minting: ProducerMinting) => readonly FamilyProducer[]
   /**
    * What distinguishes one monomorphized copy from another, for the purpose of
    * reusing a producer set.
@@ -51,9 +65,17 @@ export interface NormalizationInput {
   /**
    * The conditional edges no single producer can state, computed once every
    * operation exists. Kept as a callback so this driver still cannot see an
-   * AST: it hands over the published operations and receives edges back.
+   * AST: it hands over the published operations and receives each gated
+   * operation's chain of scopes back -- one edge per link, stated once per chain.
    */
-  readonly gates: (operations: ReadonlyMap<OperationId, SemanticOperation>) => readonly SemanticEdge[]
+  readonly gates: (operations: ReadonlyMap<OperationId, SemanticOperation>) => GatedOperations
+  /**
+   * Called once, when every candidate has produced and before the graph's
+   * tables are built: whatever only the producers read can be let go here
+   * instead of staying alive through the rest of normalization, whose peak is
+   * otherwise the producers' working set plus the tables.
+   */
+  readonly produced: () => void
 }
 
 export interface NormalizationResult {
@@ -67,28 +89,76 @@ export const normalizeProgram = (input: NormalizationInput): NormalizationResult
   // dozen closures and rebuilding it per candidate would rebuild it thousands
   // of times for one answer.
   const byCopy = new Map<string, ReadonlyMap<OperationFamily, FamilyProducer>>()
+  let minting: ProducerMinting | null = { ordinals: createOrdinalCounter(), evaluationOrdinals: createEvaluationOrdinals() }
   const producersFor = (candidate: CensusCandidate): ReadonlyMap<OperationFamily, FamilyProducer> => {
     const key = input.copyKey(candidate)
     const cached = byCopy.get(key)
     if (cached) return cached
-    const built = new Map(input.producers(candidate).map((producer) => [producer.family, producer]))
+    if (minting === null) throw new Error('a producer set was asked for after minting ended')
+    const built = new Map(input.producers(candidate, minting).map((producer) => [producer.family, producer]))
     byCopy.set(key, built)
     return built
   }
-  const published = publishProgram(operationFamilies, producersFor, input.census.byFamily)
+  // Normalization consumes the census. Each family's candidates go once that
+  // family has produced; the census itself keeps none of them, nor does the
+  // caller's view of it -- a 48K-line app's 211k candidates were otherwise
+  // alive to the end of normalization, its peak. Only the first candidate of
+  // each family is kept, to answer which families have no producer.
+  const firstCandidates = new Map<OperationFamily, CensusCandidate>()
+  const drained = new Map<OperationFamily, readonly CensusCandidate[]>()
+  for (const [family, candidates] of input.census.byFamily) {
+    drained.set(family, candidates)
+    const first = candidates[0]
+    if (first !== undefined) firstCandidates.set(family, first)
+  }
+  ;(input.census.byFamily as Map<OperationFamily, readonly CensusCandidate[]>).clear()
+  ;(input.census.candidates as CensusCandidate[]).length = 0
+  // Sealed as each candidate contributes rather than once all have: the
+  // unsealed copies of every operation's identities and facts were otherwise
+  // all alive together at the end of publication, the frontend's peak.
+  const published = publishProgram(operationFamilies, producersFor, drained, internSealedFacts())
+  // Every producer set exists by now -- each first candidate asked for its own
+  // -- so this is answered from the cache, which then goes with the counters
+  // its producers closed over, before the graph's tables are built.
+  const uninstalledFamilies = operationFamilies.filter((family) => {
+    const first = firstCandidates.get(family)
+    return first !== undefined && !producersFor(first).has(family)
+  })
+  byCopy.clear()
+  minting = null
+  input.produced()
 
   const operations = new Map<OperationId, SemanticOperation>()
-  const results = new Map<SemanticResultId, OperationId>()
+  // Only a result whose identity does not name its own operation needs an
+  // entry of its own; every other one is answered by the operation table.
+  const foreignResults = new Map<SemanticResultId, OperationId>()
+  let resultCount = 0
   for (const operation of published.operations) {
     if (operations.has(operation.id)) {
       throw new Error(`operation ${operation.id} was published twice; one source operation must mint one identity`)
     }
     operations.set(operation.id, operation)
-    for (const result of operation.results) {
-      if (results.has(result.id)) throw new Error(`result ${result.id} was published twice`)
-      results.set(result.id, operation.id)
+  }
+  for (const operation of operations.values()) {
+    const { results } = operation
+    for (let index = 0; index < results.length; index++) {
+      const result = results[index]!
+      // Two results share an identity only within one operation, or when one
+      // of them does not name its own publisher.
+      for (let earlier = 0; earlier < index; earlier++)
+        if (results[earlier]!.id === result.id) throw new Error(`result ${result.id} was published twice`)
+      const named = operations.get(operationOfResult(result.id))
+      if (named === operation) {
+        if (foreignResults.has(result.id)) throw new Error(`result ${result.id} was published twice`)
+      } else {
+        if (foreignResults.has(result.id) || named?.results.some((other) => other.id === result.id))
+          throw new Error(`result ${result.id} was published twice`)
+        foreignResults.set(result.id, operation.id)
+      }
+      resultCount++
     }
   }
+  const results = new PublishedResults(operations, foreignResults, resultCount)
 
   const regions = new Map<RegionId, SemanticRegion>()
   for (const region of input.census.regions.values()) regions.set(region.id, region)
@@ -105,11 +175,65 @@ export const normalizeProgram = (input: NormalizationInput): NormalizationResult
     return operations.has(edgeSource(edge, (result) => results.get(result) ?? ('' as OperationId)))
   }
 
+  // The gating walk's links pass the same filter its materialized edges did,
+  // decided once per shared chain rather than once per operation inside it.
+  const linkReaches = (link: GateLink): boolean => {
+    if (link.kind === 'guard') return results.has(link.guard)
+    return operations.has(link.kind === 'region' ? link.region : link.loop)
+  }
+  const gated = input.gates(operations)
+  const sealChain = gateScopeSealer()
+  const sealedChains = new Map<readonly GateLink[], GateScope | null>()
+  const gatedOperations: OperationId[] = []
+  const innermostScopes: GateScope[] = []
+  for (let index = 0; index < gated.operations.length; index++) {
+    const chain = gated.chains[index]!
+    // An operation that was withheld would be every edge's dangling `to`.
+    const to = operations.get(gated.operations[index]!)?.id
+    if (to === undefined) continue
+    let innermost = sealedChains.get(chain)
+    if (innermost === undefined) {
+      const reaching = chain.filter(linkReaches)
+      for (const link of reaching)
+        if (link.kind === 'guard' && !Object.isFrozen(link)) (link as { guard: SemanticResultId }).guard = internedText(link.guard)
+      innermost = sealChain(reaching)
+      sealedChains.set(chain, innermost)
+    }
+    if (innermost === null) continue
+    gatedOperations.push(to)
+    innermostScopes.push(innermost)
+  }
+
+  // An operation standing for its value edges stands for them only while all
+  // of them reach; otherwise the ones that do are stated one by one, which is
+  // what filtering the uncompacted edges kept.
+  const reachingEdges: StatedEdge[] = []
+  for (const entry of published.edges) {
+    if (!('family' in entry)) {
+      if (reaches(entry)) reachingEdges.push(entry)
+      continue
+    }
+    let all = true
+    for (const edge of edgesStatedBy(entry))
+      if (!reaches(edge)) {
+        all = false
+        break
+      }
+    if (all) reachingEdges.push(entry)
+    else for (const edge of edgesStatedBy(entry)) if (reaches(edge)) reachingEdges.push(edge)
+  }
+
   const graph: SemanticGraph = {
     regions,
     structuralTypes: input.types.seal(),
     operations,
-    edges: [...published.edges, ...input.gates(operations)].filter(reaches),
+    edges: new SemanticEdgeTable(
+      compactStatedEdges(reachingEdges, (id) => operations.get(id)),
+      {
+        operations: gatedOperations,
+        innermost: innermostScopes
+      }
+    ),
     coverage: published.reports,
     results
   }
@@ -117,10 +241,6 @@ export const normalizeProgram = (input: NormalizationInput): NormalizationResult
   validateGraph(graph)
   return {
     graph,
-    uninstalledFamilies: operationFamilies.filter((family) => {
-      const candidates = input.census.byFamily.get(family) ?? []
-      const first = candidates[0]
-      return first !== undefined && !producersFor(first).has(family)
-    })
+    uninstalledFamilies
   }
 }

@@ -92,7 +92,13 @@ export interface CallableOwnDataOwner {
   readonly allocations: readonly AllocationOperation[]
   readonly writes: readonly CallableWriteTarget[]
   readonly observations: readonly CallableOwnDataObservation[]
+  /** This owner's own blockers; with `sharedBlockers`, the whole set. */
   readonly blockers: readonly CallableOwnDataBlocker[]
+  /** The blockers every owner of one census carries: each write whose target
+   * the inventory cannot isolate, and each write to a prototype. One list per
+   * census, not one per owner -- copied into every owner it was the bulk of
+   * the inventory, 22 million entries over 9,394 owners on a large app. */
+  readonly sharedBlockers: readonly CallableOwnDataBlocker[]
 }
 
 /** Additional exact origin families from a sealed native value-flow census.
@@ -119,6 +125,59 @@ export interface CallableOwnDataOriginInput {
 
 const constantKey = (operand: SemanticOperand | undefined): string | null =>
   operand?.source.kind === 'constant' ? propertyKeyTextOf(operand.source.literal, operand.source.text) : null
+
+interface BlockerPath {
+  readonly parent: BlockerPath | null
+  readonly blocker: CallableOwnDataBlocker | null
+  readonly next: Map<CallableOwnDataBlocker, BlockerPath>
+  list: readonly CallableOwnDataBlocker[] | null
+}
+
+/**
+ * One blocker per (operation, kind) and one array per distinct blocker
+ * sequence, for a whole inventory.
+ *
+ * A write through an unknown target, into a prototype or to `__proto__`
+ * blocks every owner and every one of its keys, so each owner's list repeats
+ * the same run of blockers. Allocated per owner and per key, those runs were
+ * a gigabyte of identical objects on a large program -- the largest single
+ * thing a compile held. Lists are hash-consed along a trie of the blockers
+ * appended in order, so owners whose blockers agree share one array, and a
+ * list is materialized only when it is finished.
+ */
+const blockerInterner = () => {
+  const blockers = new Map<OperationId, Map<CallableOwnDataBlocker['kind'], CallableOwnDataBlocker>>()
+  const blockerOf = (operation: SemanticOperation, kind: CallableOwnDataBlocker['kind']): CallableOwnDataBlocker => {
+    let byKind = blockers.get(operation.id)
+    if (byKind === undefined) blockers.set(operation.id, (byKind = new Map()))
+    let blocker = byKind.get(kind)
+    if (blocker === undefined) byKind.set(kind, (blocker = { operation, kind }))
+    return blocker
+  }
+  const root: BlockerPath = { parent: null, blocker: null, next: new Map(), list: [] }
+  const listOf = (path: BlockerPath): readonly CallableOwnDataBlocker[] => {
+    if (path.list !== null) return path.list
+    const reversed: CallableOwnDataBlocker[] = []
+    for (let at: BlockerPath | null = path; at !== null && at.blocker !== null; at = at.parent) reversed.push(at.blocker)
+    return (path.list = reversed.reverse())
+  }
+  /** A list built in insertion order with duplicates dropped, as a `Map` keyed by blocker identity would keep it. */
+  return () => {
+    let path = root
+    const seen = new Set<CallableOwnDataBlocker>()
+    return {
+      add: (operation: SemanticOperation, kind: CallableOwnDataBlocker['kind']): void => {
+        const blocker = blockerOf(operation, kind)
+        if (seen.has(blocker)) return
+        seen.add(blocker)
+        let next = path.next.get(blocker)
+        if (next === undefined) path.next.set(blocker, (next = { parent: path, blocker, next: new Map(), list: null }))
+        path = next
+      },
+      list: (): readonly CallableOwnDataBlocker[] => listOf(path)
+    }
+  }
+}
 
 /** Inventories only canonical graph objects. No checker spelling or parallel alias classifier is consulted. */
 export const callableOwnDataSlotSchemasOf = (graph: SemanticGraph): CallableOwnDataSlotCensus => inventoryOf(graph, null)
@@ -150,9 +209,10 @@ export const refineCallableOwnDataCensus = (
     base: readonly CallableOwnDataBlocker[],
     actual: readonly CallableOwnDataBlocker[]
   ): readonly CallableOwnDataBlocker[] => {
+    if (actual.length === 0 || actual === base) return base
     const union = new Map(base.map((blocker) => [blockerKey(blocker), blocker] as const))
     for (const blocker of actual) if (!union.has(blockerKey(blocker))) union.set(blockerKey(blocker), blocker)
-    return [...union.values()]
+    return union.size === base.length ? base : [...union.values()]
   }
   const owners = new Map(refined.owners)
   for (const [functionId, owner] of census.owners) {
@@ -164,7 +224,11 @@ export const refineCallableOwnDataCensus = (
         actual.writes.map((write) => write.operation)
       )
     )
-      owners.set(functionId, { ...owner, blockers: unionOf(owner.blockers, actual?.blockers ?? []) })
+      owners.set(functionId, {
+        ...owner,
+        blockers: unionOf(owner.blockers, actual?.blockers ?? []),
+        sharedBlockers: unionOf(owner.sharedBlockers, actual?.sharedBlockers ?? [])
+      })
   }
   const schemas = new Map(refined.schemas)
   for (const [functionId, keys] of census.schemas) {
@@ -310,109 +374,119 @@ const inventoryOf = (graph: SemanticGraph, native: CallableOwnDataOriginInput | 
     bucket.push(observation)
     observations.set(functionId, bucket)
   }
+  const observeAll = (functions: readonly FunctionId[], observation: CallableOwnDataObservation): void => {
+    for (const functionId of functions) observe(functionId, observation)
+  }
+  const exposeAll = (functions: readonly FunctionId[], operation: SemanticOperation): void => {
+    for (const functionId of functions) {
+      const bucket = exposures.get(functionId) ?? []
+      if (!bucket.includes(operation)) bucket.push(operation)
+      exposures.set(functionId, bucket)
+    }
+  }
   for (const operation of graph.operations.values()) {
     if (native?.observedOperations !== undefined && !native.observedOperations.has(operation.id)) continue
     for (const target of operation.operands) {
       if (target.source.kind !== 'result' || target.evaluation.kind === 'provenance') continue
-      for (const functionId of sourcesOf(target.source.result)) {
-        if (operation.family === 'property' && target === operandOf(operation, 'receiver')) {
-          if (
-            operation.internalMethod === 'get' ||
-            operation.internalMethod === 'has-property' ||
-            operation.internalMethod === 'own-property-keys'
-          )
-            observe(functionId, {
-              operation,
-              target,
-              key: constantKey(operandOf(operation, 'key')),
-              kind:
-                operation.internalMethod === 'own-property-keys'
-                  ? 'keys'
-                  : operation.internalMethod === 'has-property'
-                    ? 'has'
-                    : constantKey(operandOf(operation, 'key')) === 'prototype'
-                      ? 'prototype'
-                      : 'get'
-            })
-          continue
-        }
-        if (operation.family === 'invocation' && target === operandOf(operation, 'argument', 0)) {
-          if (operation.intrinsicIntegrity !== undefined) {
-            const bucket = exposures.get(functionId) ?? []
-            if (!bucket.includes(operation)) bucket.push(operation)
-            exposures.set(functionId, bucket)
-            continue
-          }
-          if (
-            operation.intrinsicReflection === 'get' ||
-            operation.intrinsicReflection === 'has' ||
-            operation.intrinsicReflection === 'getOwnPropertyDescriptor' ||
-            operation.intrinsicOwnKeys
-          ) {
-            observe(functionId, {
-              operation,
-              target,
-              key: constantKey(operandOf(operation, 'argument', 1)),
-              kind: operation.intrinsicOwnKeys
-                ? 'keys'
-                : operation.intrinsicReflection === 'getOwnPropertyDescriptor'
-                  ? 'descriptor'
-                  : operation.intrinsicReflection === 'has'
-                    ? 'has'
-                    : 'get'
-            })
-            continue
-          }
-          if (operation.intrinsicMutation !== undefined || operation.intrinsicReflection === 'deleteProperty') continue
-        }
-        if (operation.family === 'binding' && operation.external === undefined) continue
-        if (operation.family === 'reference') continue
-        if (identityOperandOf(operation) === target) continue
-        if (operation.family === 'control' && operation.form === 'return' && native?.closedReturns.has(operation.id)) continue
+      // Everything below is decided by the operation and operand alone; the
+      // functions the operand may hold only receive the answer. One shared
+      // observation per operand, not one per possible function: an operand
+      // reaching many functions allocated a copy for each, a gigabyte of
+      // identical objects on a large program.
+      const functions = sourcesOf(target.source.result)
+      if (functions.length === 0) continue
+      if (operation.family === 'property' && target === operandOf(operation, 'receiver')) {
         if (
-          operation.family === 'class-lifecycle' &&
-          operation.event === 'define-method' &&
-          target.role === 'method' &&
-          native?.closedInstallations?.has(operation.id)
+          operation.internalMethod === 'get' ||
+          operation.internalMethod === 'has-property' ||
+          operation.internalMethod === 'own-property-keys'
         )
-          continue
-        if (
-          operation.family === 'computation' &&
-          (operation.form === 'typeof' || (operation.form === 'equality' && (operation.operator === '===' || operation.operator === '!==')))
-        ) {
-          observe(functionId, { operation, target, key: null, kind: operation.form === 'typeof' ? 'typeof' : 'identity' })
-          continue
-        }
-        if (callableStoredValues.has(target)) continue
-        if (operation.family === 'invocation' && target === operandOf(operation, 'callee')) continue
-        if (operation.family === 'invocation' && native?.closedOperandTransfers?.has(operation.id)) continue
-        if (operation.family === 'invocation' && target === operandOf(operation, 'receiver')) {
-          const callee = operandOf(operation, 'callee')
-          const producerId = callee?.source.kind === 'result' ? graph.results.get(callee.source.result) : undefined
-          const member = producerId === undefined ? undefined : graph.operations.get(producerId)
-          const receiver = member?.family === 'property' && member.internalMethod === 'get' ? operandOf(member, 'receiver') : undefined
-          const key = member?.family === 'property' ? constantKey(operandOf(member, 'key')) : null
-          if (member && key !== null && receiver?.source.kind === 'result' && receiver.source.result === target.source.result) {
-            observe(functionId, { operation, target, key, kind: 'invocation-receiver', memberRead: member })
-            continue
-          }
-        }
-        const bucket = exposures.get(functionId) ?? []
-        if (!bucket.includes(operation)) bucket.push(operation)
-        exposures.set(functionId, bucket)
-        observe(functionId, { operation, target, key: null, kind: 'publication' })
+          observeAll(functions, {
+            operation,
+            target,
+            key: constantKey(operandOf(operation, 'key')),
+            kind:
+              operation.internalMethod === 'own-property-keys'
+                ? 'keys'
+                : operation.internalMethod === 'has-property'
+                  ? 'has'
+                  : constantKey(operandOf(operation, 'key')) === 'prototype'
+                    ? 'prototype'
+                    : 'get'
+          })
+        continue
       }
+      if (operation.family === 'invocation' && target === operandOf(operation, 'argument', 0)) {
+        if (operation.intrinsicIntegrity !== undefined) {
+          exposeAll(functions, operation)
+          continue
+        }
+        if (
+          operation.intrinsicReflection === 'get' ||
+          operation.intrinsicReflection === 'has' ||
+          operation.intrinsicReflection === 'getOwnPropertyDescriptor' ||
+          operation.intrinsicOwnKeys
+        ) {
+          observeAll(functions, {
+            operation,
+            target,
+            key: constantKey(operandOf(operation, 'argument', 1)),
+            kind: operation.intrinsicOwnKeys
+              ? 'keys'
+              : operation.intrinsicReflection === 'getOwnPropertyDescriptor'
+                ? 'descriptor'
+                : operation.intrinsicReflection === 'has'
+                  ? 'has'
+                  : 'get'
+          })
+          continue
+        }
+        if (operation.intrinsicMutation !== undefined || operation.intrinsicReflection === 'deleteProperty') continue
+      }
+      if (operation.family === 'binding' && operation.external === undefined) continue
+      if (operation.family === 'reference') continue
+      if (identityOperandOf(operation) === target) continue
+      if (operation.family === 'control' && operation.form === 'return' && native?.closedReturns.has(operation.id)) continue
+      if (
+        operation.family === 'class-lifecycle' &&
+        operation.event === 'define-method' &&
+        target.role === 'method' &&
+        native?.closedInstallations?.has(operation.id)
+      )
+        continue
+      if (
+        operation.family === 'computation' &&
+        (operation.form === 'typeof' || (operation.form === 'equality' && (operation.operator === '===' || operation.operator === '!==')))
+      ) {
+        observeAll(functions, { operation, target, key: null, kind: operation.form === 'typeof' ? 'typeof' : 'identity' })
+        continue
+      }
+      if (callableStoredValues.has(target)) continue
+      if (operation.family === 'invocation' && target === operandOf(operation, 'callee')) continue
+      if (operation.family === 'invocation' && native?.closedOperandTransfers?.has(operation.id)) continue
+      if (operation.family === 'invocation' && target === operandOf(operation, 'receiver')) {
+        const callee = operandOf(operation, 'callee')
+        const producerId = callee?.source.kind === 'result' ? graph.results.get(callee.source.result) : undefined
+        const member = producerId === undefined ? undefined : graph.operations.get(producerId)
+        const receiver = member?.family === 'property' && member.internalMethod === 'get' ? operandOf(member, 'receiver') : undefined
+        const key = member?.family === 'property' ? constantKey(operandOf(member, 'key')) : null
+        if (member && key !== null && receiver?.source.kind === 'result' && receiver.source.result === target.source.result) {
+          observeAll(functions, { operation, target, key, kind: 'invocation-receiver', memberRead: member })
+          continue
+        }
+      }
+      exposeAll(functions, operation)
+      observeAll(functions, { operation, target, key: null, kind: 'publication' })
     }
   }
+  const blockerList = blockerInterner()
   const schemas = new Map<FunctionId, ReadonlyMap<string, CallableOwnDataSlotSchema>>()
   for (const [functionId, keys] of owned) {
     const perKey = new Map<string, CallableOwnDataSlotSchema>()
     const blockingWrites = blockingWritesOf(functionId)
     for (const [key, writers] of keys) {
-      const blockers = new Map<string, CallableOwnDataBlocker>()
-      const add = (operation: SemanticOperation, kind: CallableOwnDataBlocker['kind']): void => {
-        blockers.set(`${operation.id}:${kind}`, { operation, kind })
-      }
+      const blockers = blockerList()
+      const add = blockers.add
       for (const writer of writers) {
         if (writer.mutation.kind === 'delete' || writer.mutation.kind === 'reflect-delete') add(writer.mutation.operation, 'delete')
         else if (writer.value === null) add(writer.mutation.operation, 'opaque-definition')
@@ -459,24 +533,31 @@ const inventoryOf = (graph: SemanticGraph, native: CallableOwnDataOriginInput | 
                 return shape?.kind === 'primitive' && (shape.primitive === 'any' || shape.primitive === 'unknown')
               }))
         ),
-        blockers: [...blockers.values()]
+        blockers: blockers.list()
       })
     }
     schemas.set(functionId, perKey)
   }
   const owners = new Map<FunctionId, CallableOwnDataOwner>()
+  // The owner-independent half of each shared write's blockers, in `writes`
+  // order; `inherited-chain` joins it only where the target is unknown, and
+  // `unknown-key` needs ownership, so both stay per owner otherwise.
+  const shared = blockerList()
+  for (const index of sharedWriteIndexes) {
+    const write = writes[index]!
+    if (unknownTargetWriteSet.has(write)) shared.add(write.operation, 'unknown-target')
+    if (prototypeWriteSet.has(write)) shared.add(write.operation, 'prototype-mutation')
+    if (write.key === '__proto__' && (write.kind === 'set' || write.kind === 'reflect-set') && unknownTargetWriteSet.has(write))
+      shared.add(write.operation, 'inherited-chain')
+  }
+  const sharedBlockers = shared.list()
   for (const functionId of new Set([...allocations.keys(), ...[...origins.values()].flat()])) {
-    const blockers = new Map<string, CallableOwnDataBlocker>()
-    const add = (operation: SemanticOperation, kind: CallableOwnDataBlocker['kind']): void => {
-      blockers.set(`${operation.id}:${kind}`, { operation, kind })
-    }
-    for (const index of blockingWritesOf(functionId)) {
+    const blockers = blockerList()
+    const add = blockers.add
+    for (const index of ownWriteIndexes.get(functionId) ?? []) {
       const write = writes[index]!
-      const own = ownsWrite(functionId, index)
-      if (own && write.key === null) add(write.operation, 'unknown-key')
-      if (unknownTargetWriteSet.has(write)) add(write.operation, 'unknown-target')
-      if (prototypeWriteSet.has(write)) add(write.operation, 'prototype-mutation')
-      if (write.key === '__proto__' && (write.kind === 'set' || write.kind === 'reflect-set') && (own || unknownTargetWriteSet.has(write)))
+      if (write.key === null) add(write.operation, 'unknown-key')
+      if (write.key === '__proto__' && (write.kind === 'set' || write.kind === 'reflect-set') && !unknownTargetWriteSet.has(write))
         add(write.operation, 'inherited-chain')
     }
     for (const operation of exposures.get(functionId) ?? [])
@@ -488,7 +569,8 @@ const inventoryOf = (graph: SemanticGraph, native: CallableOwnDataOriginInput | 
       allocations: allocations.get(functionId) ?? [],
       writes: (ownWriteIndexes.get(functionId) ?? []).map((index) => writes[index]!),
       observations: observations.get(functionId) ?? [],
-      blockers: [...blockers.values()]
+      blockers: blockers.list(),
+      sharedBlockers
     })
   }
   return { owners, schemas, unknownTargetWrites, prototypeWrites }

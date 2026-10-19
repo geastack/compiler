@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { noDeadMethodCopies, type DeadMethodCopies } from './dead-method-copies.js'
 import { isAmbientDeclaration } from '../ambient.js'
 import type { NamespacePathCensus } from './namespace-paths.js'
@@ -603,6 +603,45 @@ export const censusProgram = (
 ): ProgramCensus => {
   const candidates: CensusCandidate[] = []
   const regions = new Map<string, SemanticRegion>()
+  // One caller object per function or region, not per node: every candidate,
+  // and every operation published for it, holds its caller for the whole
+  // compile (~200K objects and their id strings on a 48K-line app). Readers
+  // compare callers by field, never by identity.
+  const callers = new Map<string, SemanticCaller>()
+  const sharedCaller = (caller: SemanticCaller): SemanticCaller => {
+    const key = callerKey(caller)
+    const known = callers.get(key)
+    if (known) return known
+    callers.set(key, caller)
+    return caller
+  }
+  /**
+   * A candidate spells its identity when asked rather than holding it: the
+   * spelling is a function of the node and the copy, both of which it holds,
+   * and every candidate is alive from the census to its family's production --
+   * all of them at once when normalization starts, where a 48K-line app's
+   * 211k identities were 24 MB of strings. Readers compare ids by value, never
+   * by identity, so a fresh copy of the same spelling answers them the same.
+   */
+  class Candidate implements CensusCandidate {
+    declare readonly classLayoutOnly?: boolean
+    declare readonly classConstructionDeferred?: boolean
+    constructor(
+      readonly node: ts.Node,
+      readonly family: OperationFamily,
+      readonly caller: SemanticCaller,
+      readonly evaluationOrdinal: number,
+      readonly specialization: SpecializationPath,
+      layoutOnly: boolean,
+      constructionDeferred: boolean
+    ) {
+      if (layoutOnly) this.classLayoutOnly = true
+      if (constructionDeferred) this.classConstructionDeferred = true
+    }
+    get id(): NodeId {
+      return identities.nodeIdOf(this.node, this.specialization)
+    }
+  }
   const ordinals = new Map<string, number>()
   const nextOrdinal = (caller: SemanticCaller): number => {
     const key = callerKey(caller)
@@ -623,19 +662,20 @@ export const censusProgram = (
     const record = (node: ts.Node, callerPath: SpecializationPath, path: SpecializationPath): void => {
       const families = familiesOf(node, namespacePaths)
       if (families.length === 0) return
-      const caller = callerOf(node, identities, regions, callerPath)
+      const caller = sharedCaller(callerOf(node, identities, regions, callerPath))
       const owner = ts.isClassDeclaration(node) ? node : ts.isClassDeclaration(node.parent) ? node.parent : null
       for (const family of families) {
-        candidates.push({
-          node,
-          id: identities.nodeIdOf(node, path),
-          family,
-          caller,
-          ...(owner && reachable.classIsLayoutOnly(owner) ? { classLayoutOnly: true } : {}),
-          ...(owner && reachable.classConstructionIsReachable?.(owner) === false ? { classConstructionDeferred: true } : {}),
-          evaluationOrdinal: nextOrdinal(caller),
-          specialization: path
-        })
+        candidates.push(
+          new Candidate(
+            node,
+            family,
+            caller,
+            nextOrdinal(caller),
+            path,
+            owner !== null && reachable.classIsLayoutOnly(owner),
+            owner !== null && reachable.classConstructionIsReachable?.(owner) === false
+          )
+        )
       }
     }
 
