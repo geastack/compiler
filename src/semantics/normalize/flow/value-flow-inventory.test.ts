@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { resolve } from 'node:path'
 import ts from 'typescript'
-import { indexValueFlow } from './value-flow.js'
+import { indexValueFlow, sameValueFlow } from './value-flow.js'
 import { censusReachability, wholeProgram } from '../reachability.js'
 import { censusParameterBindings } from '../parameter-bindings.js'
 
@@ -702,4 +702,39 @@ test('module namespace publication retains exported runtime values and excludes 
   assert.ok(flow.referencesToDeclaration(writer).includes(namespaceReference))
   assert.ok(flow.referencesToDeclaration(callable).includes(namespaceReference))
   assert.ok(!flow.referencesToDeclaration(type).includes(namespaceReference))
+})
+
+test('a round reuses an earlier index only when every write and call site it states is the same', () => {
+  const entry = resolve('test/fixtures/value-flow-round-reuse.js')
+  const source = `function fill(list, value) { list.push(value) }
+    function other(list, value) {}
+    const typed = [1];
+    fill([], 1);`
+  const options: ts.CompilerOptions = { target: ts.ScriptTarget.ES2022, allowJs: true }
+  const host = ts.createCompilerHost(options)
+  const original = host.getSourceFile.bind(host)
+  host.getSourceFile = (name, version, ...rest) =>
+    resolve(name) === resolve(entry) ? ts.createSourceFile(name, source, version, true, ts.ScriptKind.JS) : original(name, version, ...rest)
+  const program = ts.createProgram([entry], options, host)
+  const checker = program.getTypeChecker()
+  const file = program.getSourceFile(entry)!
+  const index = (
+    typeOf?: (expression: ts.Expression) => ts.Type | null,
+    targetsOf?: (call: ts.CallExpression | ts.NewExpression) => readonly ts.SignatureDeclaration[] | null
+  ) => indexValueFlow(checker, [file], wholeProgram, typeOf, undefined, targetsOf)
+  const other = file.statements.filter(ts.isFunctionDeclaration).find((declaration) => declaration.name?.text === 'other')!
+  const typed = file.statements.filter(ts.isVariableStatement).flatMap((statement) => [...statement.declarationList.declarations])[0]!
+  const arrayType = checker.getTypeAtLocation(typed.name)
+  const receiverAs = (type: ts.Type) => (expression: ts.Expression) => (expression.getText() === 'list' ? type : null)
+  const base = index()
+  assert.ok(sameValueFlow(base, index()), 'a second index of the same program is the same')
+  assert.ok(sameValueFlow(base, index(receiverAs(checker.getNumberType()))), 'an answer that states no new write leaves it the same')
+  assert.ok(!sameValueFlow(base, index(receiverAs(arrayType))), 'an answer that admits a push receiver adds a write')
+  assert.ok(
+    !sameValueFlow(
+      base,
+      index(undefined, (call) => (ts.isCallExpression(call) ? [other] : null))
+    ),
+    'a census call target differs'
+  )
 })

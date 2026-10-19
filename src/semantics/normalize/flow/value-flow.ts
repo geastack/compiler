@@ -5,6 +5,7 @@ import {
   heritageClassOrInterfaceOf,
   isConstructorFunction,
   type ExplicitThisCallFrame,
+  type FlowInvocationDispatch,
   type FlowInvocationOperands,
   type FlowCallSite,
   type FlowEdgeKind,
@@ -864,3 +865,100 @@ export const indexValueFlow = (
     writeCount: [...state.edgeCounts.values()].reduce((total, count) => total + count, 0)
   }
 }
+
+type Same<T> = (left: T, right: T) => boolean
+const identical = <T>(left: T, right: T): boolean => left === right
+const sameList =
+  <T>(sameItem: Same<T>): Same<readonly T[]> =>
+  (left, right) =>
+    left.length === right.length &&
+    left.every((item, index) => {
+      const other = right[index]
+      return other !== undefined && sameItem(item, other)
+    })
+const sameOptional =
+  <T>(sameValue: Same<T>): Same<T | null | undefined> =>
+  (left, right) =>
+    left === right || (left !== null && left !== undefined && right !== null && right !== undefined && sameValue(left, right))
+/** Keyed by the interface, so a field added to it must be compared here or the build fails. */
+const sameFields =
+  <T extends object>(fields: { readonly [K in keyof T]-?: Same<T[K]> }): Same<T> =>
+  (left, right) =>
+    (Object.keys(fields) as (keyof T)[]).every((key) => fields[key](left[key], right[key]))
+
+const sameTarget = sameFields<FlowTarget>({ symbol: identical, nameSymbol: identical, declaration: identical })
+const sameWrite = sameFields<ValueWrite>({
+  edge: identical,
+  slot: identical,
+  member: identical,
+  value: identical,
+  site: identical,
+  target: sameTarget,
+  naming: identical,
+  propertyAccess: identical,
+  iterationOrigin: sameOptional(sameFields<IterationOrigin>({ source: identical, mode: identical, asynchronous: identical }))
+})
+const sameDispatch = (left: FlowInvocationDispatch, right: FlowInvocationDispatch): boolean => {
+  // Every variant holds only nodes, keys and flags, so once the kinds agree the
+  // fields compare by identity.
+  const other: Readonly<Record<string, unknown>> = right
+  return left.kind === right.kind && Object.entries(left).every(([key, value]) => other[key] === value)
+}
+const sameNodes = sameList<ts.Node>(identical)
+const sameCallSite = sameFields<FlowCallSite>({
+  targets: sameNodes,
+  call: identical,
+  checkerDeclaration: identical,
+  inferredDeclaration: identical,
+  explicitThis: sameOptional(sameFields<ExplicitThisCallFrame>({ callee: identical, receiver: identical, args: sameNodes })),
+  operands: sameFields<FlowInvocationOperands>({
+    kind: identical,
+    dispatch: sameDispatch,
+    explicitThis: identical,
+    callee: identical,
+    receiver: identical,
+    args: sameNodes
+  })
+})
+// Built from `calls` and `allWrites` alone, so equal whenever those are.
+const derived = (): boolean => true
+// The checker's own walk: no census answer reaches them (the census arguments
+// of `indexValueFlow` are read only where writes and call sites are stated).
+const walked = (): boolean => true
+
+/**
+ * Whether two indexes of ONE program state the same writes and call sites, in
+ * the same order, and so answer every question identically.
+ *
+ * A census answer reaches an index only through the writes and call sites it
+ * states, so these two lists are the whole difference a round can make. The
+ * nodes, symbols and declarations they hold are the shared checker's own, so
+ * they compare by identity; the records around them are fresh per index and
+ * compare by content.
+ */
+export const sameValueFlow = sameFields<ValueFlowIndex>({
+  buildIsStrict: identical,
+  calls: sameList(sameCallSite),
+  allWrites: sameList(sameWrite),
+  callSiteOf: derived,
+  writesAtSite: derived,
+  writesToSymbol: derived,
+  writesToDeclaration: derived,
+  flowsFromDeclaration: derived,
+  flowsFromSymbol: derived,
+  edgeCounts: derived,
+  writeCount: derived,
+  propertyAccesses: walked,
+  bindingPatternReads: walked,
+  arrayLiterals: walked,
+  classDeclarations: walked,
+  accessorNames: walked,
+  hasComputedAccessorName: walked,
+  receiverReferencesToDeclaration: walked,
+  receiverOwnerOf: walked,
+  callableBodyIsIndexed: walked,
+  memberReferencesToSymbol: walked,
+  targetOf: walked,
+  referencesToSymbol: walked,
+  referencesToDeclaration: walked
+})

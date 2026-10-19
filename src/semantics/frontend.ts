@@ -81,7 +81,7 @@ import { withLocalBindings } from './normalize/local-bindings.js'
 import { withFieldBindings } from './normalize/field-bindings.js'
 import { censusCollectionBindings, type CollectionBindingCensus } from './normalize/collection-bindings.js'
 import { censusObjectBagBindings, emptyObjectBagCensus, type ObjectBagCensus } from './normalize/object-bag-bindings.js'
-import { indexValueFlow } from './normalize/flow/value-flow.js'
+import { indexValueFlow, sameValueFlow } from './normalize/flow/value-flow.js'
 import type { ValueFlowIndex } from './normalize/flow/model.js'
 import { attachClosedScriptScope, attachStatedModuleSet, type ClosedScriptScope, type StatedModuleSet } from './normalize/flow/targets.js'
 import { censusRefusalCounts, type CensusRefusal } from './normalize/census-refusal.js'
@@ -1127,12 +1127,21 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // Round one has no census to refine the index with, and
     // `GEA_FLOW_CENSUS_OFF` pins every round to that same base -- which is what
     // makes the flag's arm comparable with the one it measures against.
-    // Rebuilt every round on purpose: reusing the previous round's index when
-    // the census answers it consulted are unchanged was tried and measured
-    // -- no round ever qualified, because the answers
-    // move until the very round that settles, and holding the previous index
-    // alive across the boundary raised the peak from 7 GB to 11 GB.
-    const valueFlow =
+    // Indexed every round, then compared with every earlier round's index by
+    // what it STATES (`sameValueFlow`). An index identical in every write and
+    // call site is replaced by the earlier object, so the round keeps that
+    // index's solver and every cache keyed on it instead of solving the same
+    // whole-program graph again, and a later census falling through `upstream`
+    // to an earlier round's bindings finds that solver live instead of
+    // rebuilding a retired one. In practice only the round that settles
+    // matches: every earlier round adds call-argument edges the one before
+    // it lacked. Comparing the census answers the index
+    // CONSULTED was tried first and no round ever qualified: those answers
+    // move until the round that settles, though most of them change no edge.
+    // (That attempt also held the previous round's solver across the
+    // boundary, raising the peak from 7 GB to 11 GB; a reused index's solver
+    // is the one this round asks anyway.)
+    const indexed =
       upstream && !process.env['GEA_FLOW_CENSUS_OFF']
         ? indexValueFlow(
             compiled.checker,
@@ -1145,6 +1154,13 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
             upstream.explicitThisAt
           )
         : baseValueFlow
+    // `GEA_INDEX_REUSE_OFF` keeps every round on its own index, kept runnable
+    // the way `GEA_PARAM_INDEX_OFF` is: it is the arm this is measured against.
+    const valueFlow = process.env['GEA_INDEX_REUSE_OFF']
+      ? indexed
+      : (roundFlows.find((earlier) => sameValueFlow(earlier, indexed)) ?? indexed)
+    if (process.env['GEA_ROUNDS_DEBUG'] && valueFlow !== indexed)
+      process.stderr.write(`[INDEX] reusing distinct index ${roundFlows.indexOf(valueFlow) + 1} of ${roundFlows.length}\n`)
     // A round's solver is released once the next round's index replaces it
     // (`retireSourceValueSession`); keeping it cost ~1 GB per round. Every
     // earlier round's, not only the last one's: a retired solver can still be
