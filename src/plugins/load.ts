@@ -43,26 +43,44 @@ const legacyPackages = new Map([
   ['@geastack/geatsc-plugin-apple-native', { name: 'apple-native', entry: '' }],
   ['@geastack/native-webgl-angle', { name: 'native-webgl-angle-host', entry: '/geatsc-plugin' }]
 ])
-const legacyAdapter = async (file: string, name: string, plugin: unknown): Promise<CompilerPlugin | undefined> => {
-  const builtIn = installedPlugins.find((installed) => installed.name === name)
-  if (!builtIn) return undefined
+/** The nearest manifest's path and package name, when it states one. */
+const owningPackageOf = (file: string): { readonly manifest: string; readonly name: string | null } | null => {
   let directory = dirname(file)
   for (;;) {
     const manifest = join(directory, 'package.json')
     if (existsSync(manifest)) {
       const metadata: unknown = JSON.parse(readFileSync(manifest, 'utf8'))
-      if (isRecord(metadata) && typeof metadata['name'] === 'string') {
-        const known = legacyPackages.get(metadata['name'])
-        if (known?.name === name) {
-          const entry = createRequire(manifest).resolve(`${metadata['name']}${known.entry}`)
-          return realpathSync(entry) === file ? builtIn : undefined
-        }
-      }
-      break
+      return { manifest, name: isRecord(metadata) && typeof metadata['name'] === 'string' ? metadata['name'] : null }
     }
     const parent = dirname(directory)
-    if (parent === directory) break
+    if (parent === directory) return null
     directory = parent
+  }
+}
+
+/**
+ * The first shape, decided from the manifest alone, before the file is
+ * imported. Evaluating a legacy package's entry only to replace it with the
+ * built-in loaded the package's whole v1 pipeline, and with it the second copy
+ * of TypeScript that pipeline imports -- ~7 MB of heap for the rest of a
+ * compile that never calls into either.
+ */
+const legacyEntryAdapter = (file: string): CompilerPlugin | undefined => {
+  const owner = owningPackageOf(file)
+  const known = owner?.name == null ? undefined : legacyPackages.get(owner.name)
+  if (owner === null || known === undefined) return undefined
+  const entry = createRequire(owner.manifest).resolve(`${owner.name}${known.entry}`)
+  return realpathSync(entry) === file ? installedPlugins.find((installed) => installed.name === known.name) : undefined
+}
+
+const legacyAdapter = async (file: string, name: string, plugin: unknown): Promise<CompilerPlugin | undefined> => {
+  const builtIn = installedPlugins.find((installed) => installed.name === name)
+  if (!builtIn) return undefined
+  const owner = owningPackageOf(file)
+  const known = owner?.name == null ? undefined : legacyPackages.get(owner.name)
+  if (owner !== null && known?.name === name) {
+    const entry = createRequire(owner.manifest).resolve(`${owner.name}${known.entry}`)
+    return realpathSync(entry) === file ? builtIn : undefined
   }
   for (const [packageName, known] of legacyPackages) {
     if (known.name !== name) continue
@@ -158,6 +176,17 @@ const validateInstance = (value: unknown): PluginInstance => {
 }
 
 /**
+ * The adapter's tables come from the package's own statement, and the
+ * statement must be the package this path names -- not the copy the compiler's
+ * own `node_modules` happens to hold (`host-package.ts`).
+ */
+const adoptLegacyPackage = (adapter: CompilerPlugin, file: string): void => {
+  if (adapter === webglPlugin) adoptWebglPackage(file)
+  else if (adapter === geaPlugin) adoptGeaPackage(file)
+  else if (adapter === applePlugin) adoptApplePackage(file)
+}
+
+/**
  * Built-ins retain their order; explicit plugins follow in flag order. The
  * compiler API owns capability and hook precedence. Duplicate module paths
  * (including symlinks) load once; distinct definitions of one name fail.
@@ -170,6 +199,13 @@ export const loadCliPlugins = async (specifiers: readonly string[]): Promise<rea
     try {
       const file = resolvePlugin(specifier)
       if (loadedPaths.has(file)) continue
+      const entryAdapter = legacyEntryAdapter(file)
+      if (entryAdapter) {
+        adoptLegacyPackage(entryAdapter, file)
+        process.stderr.write(`compile: --plugin ${specifier}: using built-in "${entryAdapter.name}" adapter for the legacy package\n`)
+        loadedPaths.add(file)
+        continue
+      }
       const loaded: unknown = await import(pathToFileURL(file).href)
       if (!isRecord(loaded)) throw new Error('expected a plugin module')
       // Named geatscPlugin wins only when there is no default. Never guess
@@ -183,12 +219,7 @@ export const loadCliPlugins = async (specifiers: readonly string[]): Promise<rea
       if (typeof plugin['instantiate'] !== 'function') {
         const adapter = typeof plugin['configure'] === 'function' ? await legacyAdapter(file, name, exported) : undefined
         if (!adapter) throw new Error(`plugin "${name}" is incompatible: expected instantiate(options); legacy hooks are not supported`)
-        // The adapter's tables come from the package's own statement, and the
-        // statement must be the package this path names -- not the copy the
-        // compiler's own `node_modules` happens to hold (`host-package.ts`).
-        if (adapter === webglPlugin) adoptWebglPackage(file)
-        else if (adapter === geaPlugin) adoptGeaPackage(file)
-        else if (adapter === applePlugin) adoptApplePackage(file)
+        adoptLegacyPackage(adapter, file)
         process.stderr.write(`compile: --plugin ${specifier}: using built-in "${adapter.name}" adapter for the legacy package\n`)
         loadedPaths.add(file)
         continue
