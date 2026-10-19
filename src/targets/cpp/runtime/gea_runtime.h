@@ -36195,6 +36195,62 @@ inline LegacyAnchorRewrite rewriteLegacyAnchors(const RegexUnits &source) {
 }
 #endif
 
+#ifdef _LIBCPP_VERSION
+/**
+ * libc++ answers `^` at the first position of every search range, whatever the
+ * flags say: its `__search` clears `match_not_bol` whenever `match_prev_avail`
+ * is set, and its `^` accepts the range's first position outright. A search
+ * resumed at `lastIndex` would match `^` there, after any code unit at all.
+ * `Pattern::searchFrom` resumes without that: a pattern with a `^` the library
+ * could answer (`caretOutsideClass`) is searched in the form `withoutCaret`
+ * gives it -- each such `^` replaced by `[^\s\S]`, which matches nowhere --
+ * wherever a `^` cannot hold, and in its own form only from a position where
+ * one can.
+ */
+inline bool caretOutsideClass(const RegexUnits &source) {
+  bool inClass = false;
+  for (std::size_t i = 0; i < source.size(); ++i) {
+    const RegexUnit c = source[i];
+    if (c == L'\\') {
+      ++i;
+      continue;
+    }
+    if (inClass) {
+      if (c == L']') inClass = false;
+    } else if (c == L'[') {
+      inClass = true;
+    } else if (c == L'^') {
+      return true;
+    }
+  }
+  return false;
+}
+
+inline RegexUnits withoutCaret(const RegexUnits &source) {
+  RegexUnits out;
+  out.reserve(source.size() + 16);
+  bool inClass = false;
+  for (std::size_t i = 0; i < source.size(); ++i) {
+    const RegexUnit c = source[i];
+    if (c == L'\\') {
+      out.push_back(c);
+      if (i + 1 < source.size()) out.push_back(source[++i]);
+      continue;
+    }
+    if (inClass) {
+      if (c == L']') inClass = false;
+    } else if (c == L'[') {
+      inClass = true;
+    } else if (c == L'^') {
+      out += asciiRegexUnits("[^\\s\\S]");
+      continue;
+    }
+    out.push_back(c);
+  }
+  return out;
+}
+#endif
+
 [[noreturn]] inline void throwTypeError(const std::string &message);
 
 /**
@@ -37724,6 +37780,56 @@ struct Pattern {
     return *compiledCache;
   }
 
+#ifdef _LIBCPP_VERSION
+  // `withoutCaret`'s form, compiled on the first resumed search: 0 unknown,
+  // 1 compiled, -1 no `^` outside a class, so the pattern's own form serves.
+  mutable signed char caretState = 0;
+  mutable const Utf16Regex *caretFree = nullptr;
+
+  static bool lineTerminatorBefore(const RegexUnits &input, std::size_t at) {
+    const RegexUnit c = input[at - 1];
+    return c == L'\n' || c == L'\r' || c == 0x2028 || c == 0x2029;
+  }
+#endif
+
+  /**
+   * `std::regex_search` over `input` from `startUnits`, as a library whose `^`
+   * respects `match_prev_avail` answers it. Positions in `match` are absolute
+   * in `input`.
+   */
+  bool searchFrom(const RegexUnits &input, std::size_t startUnits, Utf16Match &match, const Utf16Regex &compiled) const {
+    auto flags = std::regex_constants::match_default;
+    if (startUnits > 0) flags |= std::regex_constants::match_prev_avail;
+#ifdef _LIBCPP_VERSION
+    if (startUnits > 0) {
+      if (caretState == 0) {
+        const RegexUnits &source = matcherSource();
+        if (caretOutsideClass(source)) caretFree = &cachedStdRegex(withoutCaret(source), stdFlags());
+        caretState = caretFree == nullptr ? -1 : 1;
+      }
+      if (caretState > 0) {
+        // Without `m` no `^` holds past position 0, so the caret-free form
+        // answers the whole range. With `m` one holds after a line terminator,
+        // where the pattern's own form is right from there on; every position
+        // before that is tried alone, caret-free.
+        if (!multiline)
+          return std::regex_search(input.cbegin() + static_cast<std::ptrdiff_t>(startUnits), input.cend(), match, *caretFree, flags);
+        std::size_t at = startUnits;
+        while (!lineTerminatorBefore(input, at)) {
+          if (std::regex_search(
+                  input.cbegin() + static_cast<std::ptrdiff_t>(at), input.cend(), match, *caretFree,
+                  flags | std::regex_constants::match_continuous))
+            return true;
+          if (at == input.size()) return false;
+          ++at;
+        }
+        return std::regex_search(input.cbegin() + static_cast<std::ptrdiff_t>(at), input.cend(), match, compiled, flags);
+      }
+    }
+#endif
+    return std::regex_search(input.cbegin() + static_cast<std::ptrdiff_t>(startUnits), input.cend(), match, compiled, flags);
+  }
+
 #ifdef GEA_REGEX_LEGACY_ANCHORS
   // `rewriteLegacyAnchors`' two forms, resolved on first search: 0 unknown,
   // 1 rewritten, -1 nothing to rewrite (`m`, or no anchor outside a class).
@@ -37755,11 +37861,7 @@ struct Pattern {
       }
       legacyAnchorState = rewrite.needed ? 1 : -1;
     }
-    if (legacyAnchorState < 0) {
-      auto flags = std::regex_constants::match_default;
-      if (startUnits > 0) flags |= std::regex_constants::match_prev_avail;
-      return std::regex_search(input.cbegin() + static_cast<std::ptrdiff_t>(startUnits), input.cend(), match, compiled, flags);
-    }
+    if (legacyAnchorState < 0) return searchFrom(input, startUnits, match, compiled);
     if (startUnits == 0) {
       if (std::regex_search(input.cbegin(), input.cend(), match, *legacyAtStart, std::regex_constants::match_continuous)) {
         groupOffset = legacyAtStartGroupOffset;
@@ -37836,16 +37938,12 @@ struct Pattern {
     }
     const std::size_t matchStartUnits = static_cast<std::size_t>(match[0].first - inputUnits.cbegin());
 #else
-    const Utf16Regex &compiled = compiledRegex();
     Utf16Match match;
-    auto searchBegin = inputUnits.cbegin() + static_cast<std::ptrdiff_t>(startUnits);
-    auto searchFlags = std::regex_constants::match_default;
-    if (startUnits > 0) searchFlags |= std::regex_constants::match_prev_avail;
-    if (!std::regex_search(searchBegin, inputUnits.cend(), match, compiled, searchFlags)) {
+    if (!searchFrom(inputUnits, startUnits, match, compiledRegex())) {
       if (stateful) resetLastIndex();
       return MatchSlice{};
     }
-    const std::size_t matchStartUnits = startUnits + static_cast<std::size_t>(match.position(0));
+    const std::size_t matchStartUnits = static_cast<std::size_t>(match[0].first - inputUnits.cbegin());
 #endif
     if (sticky && matchStartUnits != startUnits) {
       resetLastIndex();
@@ -38769,11 +38867,8 @@ inline gea::Ref<gea::ArrayObject<std::string>> splitByPattern(
     if (!pattern.searchMatcher(inputUnits, cursorMatcherUnits, match, groupOffset)) break;
     const std::size_t positionMatcherUnits = static_cast<std::size_t>(match[0].first - inputUnits.cbegin());
 #else
-    auto begin = inputUnits.cbegin() + static_cast<std::ptrdiff_t>(cursorMatcherUnits);
-    auto flags = std::regex_constants::match_default;
-    if (cursorMatcherUnits > 0) flags |= std::regex_constants::match_prev_avail;
-    if (!std::regex_search(begin, inputUnits.cend(), match, compiled, flags)) break;
-    const std::size_t positionMatcherUnits = cursorMatcherUnits + static_cast<std::size_t>(match.position(0));
+    if (!pattern.searchFrom(inputUnits, cursorMatcherUnits, match, compiled)) break;
+    const std::size_t positionMatcherUnits = static_cast<std::size_t>(match[0].first - inputUnits.cbegin());
 #endif
     const std::size_t endMatcherUnits = positionMatcherUnits + static_cast<std::size_t>(match.length(0));
     const std::size_t positionUnits = pattern.utf16IndexFromMatcher(inputUnits, positionMatcherUnits);
