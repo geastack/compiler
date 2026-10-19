@@ -6,6 +6,8 @@ import {
   dependencyFactSolver,
   type DependencyFactDefinition,
   type DependencyFactHoldersOf,
+  type DependencyFactStateCell,
+  type DependencyGroundingKeys,
   type DependencyRootCause
 } from './component-solver.js'
 import {
@@ -27,6 +29,7 @@ import { isModuleExportedDeclaration, isTypePositionReference, runtimeParameters
 import { outermostErasureOf, unwrapErasedExpression } from '../producers/erasure.js'
 import { literalSourcePropertyKeyOf } from './source-property-key.js'
 import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from '../deferred-intrinsic-protocols.js'
+import type { PrototypeKeyQuery } from '../host-mutation-keys.js'
 import { censusArgumentsObjects, type ArgumentsObjectCensus } from '../arguments-objects.js'
 import { exportIsUnimported } from './targets.js'
 import { inProgramImportReferencesOf } from './export-importers.js'
@@ -51,7 +54,7 @@ import { sourceCommonJsExportUsesOf, sourceCommonJsExportValueOf } from './sourc
 type Access = ts.PropertyAccessExpression | ts.ElementAccessExpression
 type Value = ts.Expression | ts.SignatureDeclaration
 type ObjectRoot = ts.CallExpression | ts.NewExpression | ts.ObjectLiteralExpression | ts.ArrayLiteralExpression | SourceCallableObject
-type Query =
+type Query = (
   | { readonly kind: 'value'; readonly node: ts.Expression }
   | { readonly kind: 'proxy-result' | 'proxy-target' | 'proxy-handler'; readonly node: ts.NewExpression }
   | { readonly kind: 'parameter'; readonly node: ts.ParameterDeclaration }
@@ -82,6 +85,21 @@ type Query =
   | { readonly kind: 'unknown-reads'; readonly node: ObjectRoot }
   | { readonly kind: 'key-reads'; readonly node: ObjectRoot; readonly key: string }
   | { readonly kind: 'callers'; readonly node: ts.SignatureDeclaration }
+) & {
+  /** The solver's record for this query, kept on the query itself (`queryStateCell`). */
+  solverState: object | undefined
+}
+/**
+ * Each query is interned once per session and keyed into the session's one
+ * solver, so the solver keeps its state on the query instead of in a table
+ * keyed by it (`DependencyFactStateCell`).
+ */
+const queryStateCell: DependencyFactStateCell<Query> = {
+  read: (query) => query.solverState,
+  write: (query, state) => {
+    query.solverState = state
+  }
+}
 
 interface Cause {
   readonly reason: string
@@ -128,7 +146,43 @@ const VALUE_ORIGIN = 'source-value-origin'
 const VALUE_ORIGIN_DOMAIN: readonly string[] = [VALUE_ORIGIN]
 const NO_DOMAINS: readonly string[] = []
 const NO_CAUSES: readonly never[] = []
+const CARRIES_VALUE = 1
+const SEEDED = 2
+/**
+ * A seal with grounding edges and no causes: everything but its edges is one
+ * of four constants, read through getters. The solver keeps every node's last
+ * seal for the session, and ~90K of a 48K-line app's seals are this one, at
+ * 72 bytes as a six-field record against 40 here.
+ */
+class GroundedSeal {
+  constructor(
+    readonly groundingKeys: DependencyGroundingKeys<Query>,
+    private readonly flags: number
+  ) {}
+  get locallyComplete(): true {
+    return true
+  }
+  get causes(): readonly never[] {
+    return NO_CAUSES
+  }
+  get groundingRequirements(): readonly string[] {
+    return (this.flags & CARRIES_VALUE) !== 0 ? VALUE_ORIGIN_DOMAIN : NO_DOMAINS
+  }
+  get groundingSeeds(): readonly string[] {
+    return (this.flags & SEEDED) !== 0 ? VALUE_ORIGIN_DOMAIN : NO_DOMAINS
+  }
+  get groundingDomain(): string {
+    return VALUE_ORIGIN
+  }
+}
 const NO_GROUNDING: readonly never[] = []
+/** A set's entries in an array of exactly its size: a spread keeps growth slack, and a seal keeps its list for the session. */
+const exactListOf = <T>(set: ReadonlySet<T>): readonly T[] => {
+  const list = new Array<T>(set.size)
+  let at = 0
+  for (const value of set) list[at++] = value
+  return list
+}
 // Read once at load, not per value transfer: `process.env` is a native interceptor.
 const noArrayKeys = process.env['GEA_NO_ARRAY_KEYS'] !== undefined
 /**
@@ -378,6 +432,34 @@ export const shareSourceValueSession = (previous: ValueFlowIndex, next: ValueFlo
   return true
 }
 
+/**
+ * One owner's interned queries: the only one, held as itself, or a table of
+ * them. A one-entry Map is ~180 bytes of hash table to hold one pointer, and
+ * most owners (a call, an object root, a value) are asked one question of a
+ * kind. A query is a plain record, never a Map, and names its own key, so the
+ * forms are told apart without a tag.
+ */
+type InternLevel<K, Q> = Q | Map<K, Q>
+const internIn = <O, K, Q extends object>(outer: Map<O, InternLevel<K, Q>>, owner: O, key: K, keyOf: (query: Q) => K, make: () => Q): Q => {
+  const held = outer.get(owner)
+  if (held === undefined) {
+    const query = make()
+    outer.set(owner, query)
+    return query
+  }
+  if (!(held instanceof Map)) {
+    if (keyOf(held) === key) return held
+    const query = make()
+    outer.set(owner, new Map([[keyOf(held), held] as const, [key, query] as const]))
+    return query
+  }
+  let query = held.get(key)
+  if (query === undefined) held.set(key, (query = make()))
+  return query
+}
+type FrameSubject = ts.Expression | ts.ParameterDeclaration | null
+const frameSubjectOf = (query: { readonly subject: FrameSubject }): FrameSubject => query.subject
+const keyedQueryKey = (query: Query): string => (query as { readonly key: string }).key
 const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceValueSession => {
   const isFreshOrdinaryObject = (node: ts.Node): boolean => sourceFreshOrdinaryObjectOf(checker, node)
   const isObjectRoot = (node: ts.Node): node is ObjectRoot => isSpelledObjectRoot(node) || isFreshOrdinaryObject(node)
@@ -390,16 +472,29 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     plan.deferred &&
     deferredIntrinsicProtocolLedgerOf(flow)?.requirePrototypeKeys(plan.intrinsic, plan.prototypeKeys, plan.location) === true
   const unary = new Map<Query['kind'], Map<ts.Node, Query>>()
-  const slots = new Map<ObjectRoot, Map<string, Query>>()
-  const storedSlots = new Map<ObjectRoot, Map<string, Query>>()
-  const keyReadQueries = new Map<ObjectRoot, Map<string, Query>>()
-  const uses = new Map<Value, Map<ts.Expression, Query>>()
+  const slots = new Map<ObjectRoot, InternLevel<string, Query>>()
+  const storedSlots = new Map<ObjectRoot, InternLevel<string, Query>>()
+  const keyReadQueries = new Map<ObjectRoot, InternLevel<string, Query>>()
+  const uses = new Map<Value, InternLevel<ts.Expression, Query>>()
   const publications = new Map<Value, Map<ObjectRoot, Map<string, Query>>>()
+  type FrameQuery = Extract<Query, { readonly body: ts.SignatureDeclaration }>
+  // Per call, the bodies and subjects it was asked about (see `frameQuery`).
   const frameQueries = new Map<
     string,
-    Map<ts.CallExpression | ts.NewExpression, Map<ts.SignatureDeclaration, Map<ts.Expression | ts.ParameterDeclaration | null, Query>>>
+    Map<ts.CallExpression | ts.NewExpression, FrameQuery | Map<ts.SignatureDeclaration, InternLevel<FrameSubject, FrameQuery>>>
   >()
-  const requirements = new Map<Query, readonly IntrinsicProtocolRequirement[]>()
+  // A lone requirement is held as itself (a requirement is a record, never an
+  // array): ~36K of a 48K-line app's ~36K lists hold one.
+  const requirements = new Map<Query, IntrinsicProtocolRequirement | readonly IntrinsicProtocolRequirement[]>()
+  // One `{ names: [key] }` per key: the requirement it goes into is kept per
+  // query (`requirements`), and ~34K of them on a 48K-line app named a few
+  // thousand keys. The ledger reads it, never writes it.
+  const singleKeyQueries = new Map<string, PrototypeKeyQuery>()
+  const singleKeyQueryOf = (key: string): PrototypeKeyQuery => {
+    let query = singleKeyQueries.get(key)
+    if (!query) singleKeyQueries.set(key, (query = { names: [key] }))
+    return query
+  }
   const argumentsByFile = new Map<ts.SourceFile, ArgumentsObjectCensus>()
   const argumentsUsesAt = (body: ts.SignatureDeclaration): readonly ts.Identifier[] | undefined => {
     const file = body.getSourceFile()
@@ -532,7 +627,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     let nodes = unary.get(kind)
     if (!nodes) unary.set(kind, (nodes = new Map()))
     let query = nodes.get(node)
-    if (!query) nodes.set(node, (query = { kind, node } as Query))
+    if (!query) nodes.set(node, (query = { kind, node, solverState: undefined } as Query))
     return query
   }
   const value = (expression: ts.Expression): Query => nodeQuery('value', unwrapErasedExpression(expression))
@@ -552,13 +647,23 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   ): Query => {
     let calls = frameQueries.get(kind)
     if (!calls) frameQueries.set(kind, (calls = new Map()))
-    let bodies = calls.get(call)
-    if (!bodies) calls.set(call, (bodies = new Map()))
-    let subjects = bodies.get(body)
-    if (!subjects) bodies.set(body, (subjects = new Map()))
-    let query = subjects.get(subject)
-    if (!query) subjects.set(subject, (query = { kind, node: call, body, subject }))
-    return query
+    const make = (): FrameQuery => ({ kind, node: call, body, subject, solverState: undefined })
+    // ~22K of a 48K-line app's ~26K per-call and per-body tables held one
+    // entry: one call asked about one body and one subject is held as that
+    // query, which names both.
+    const held = calls.get(call)
+    if (held === undefined) {
+      const query = make()
+      calls.set(call, query)
+      return query
+    }
+    let bodies: Map<ts.SignatureDeclaration, InternLevel<FrameSubject, FrameQuery>>
+    if (held instanceof Map) bodies = held
+    else {
+      if (held.body === body && held.subject === subject) return held
+      calls.set(call, (bodies = new Map([[held.body, held]])))
+    }
+    return internIn(bodies, body, subject, frameSubjectOf, make)
   }
   const closure = (root: Value): Query => nodeQuery('closure', root)
   /**
@@ -610,11 +715,12 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    * reverse lookup rather than by subscribing to every read of the key.
    */
   const keyReadsOf = (container: ObjectRoot, key: string): Query => {
-    let keys = keyReadQueries.get(container)
-    if (!keys) keyReadQueries.set(container, (keys = new Map()))
-    let query = keys.get(key)
-    if (!query) keys.set(key, (query = { kind: 'key-reads', node: container, key }))
-    return query
+    return internIn(keyReadQueries, container, key, keyedQueryKey, () => ({
+      kind: 'key-reads',
+      node: container,
+      key,
+      solverState: undefined
+    }))
   }
   const targets = (call: ts.CallExpression): Query => nodeQuery('targets', call)
   const superTargets = (call: ts.CallExpression): Query => nodeQuery('super-targets', call)
@@ -764,21 +870,24 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       if (!fact || fact.alternatives.length === 0) return false
       if (!fact.alternatives.every((owner) => absentThroughChain(owner, key, new Set()))) return false
     } else return false
-    return deferredIntrinsicProtocolLedgerOf(flow)?.requirePrototypeKeys('Object', { names: [key] }, at) === true
+    return deferredIntrinsicProtocolLedgerOf(flow)?.requirePrototypeKeys('Object', singleKeyQueryOf(key), at) === true
   }
 
-  const readsByKey = new Map<string, { readonly access: Access; readonly receiver: Query }[]>()
+  // The receivers of each key's named reads, in program order: `case
+  // 'key-reads'` seeds them and reads nothing else of a read.
+  const readsByKey = new Map<string, Query[]>()
   const unknownReads: { readonly access: Access; readonly receiver: Query }[] = []
   for (const access of flow.propertyAccesses) {
     const key = accessKey(access)
-    const entry = { access, receiver: value(access.expression) }
-    if (key === null) unknownReads.push(entry)
+    const receiver = value(access.expression)
+    if (key === null) unknownReads.push({ access, receiver })
     else {
       let reads = readsByKey.get(key)
       if (!reads) readsByKey.set(key, (reads = []))
-      reads.push(entry)
+      reads.push(receiver)
     }
   }
+  for (const [key, receivers] of readsByKey) readsByKey.set(key, receivers.slice())
   /**
    * `unknownReads`, indexed by the query that answers what its RECEIVER
    * holds -- the one hop `case 'unknown-reads'` needs from a holder key (a
@@ -808,41 +917,46 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    * was the bulk of the session's edges on a large program: one subscription
    * per (publication, read of the key) pair, millions of them, every one a
    * Map entry on the publication and a Set entry on the receiver.
+   *
+   * Each read is held as its position in `flow.propertyAccesses`: that is the
+   * access (`flow.propertyAccesses[position]`) and its program order, and its
+   * receiver and key are what it is filed under. A record per read was ~60K
+   * records on a 48K-line app. A receiver read under one key keeps that key
+   * beside its one list in place of a one-entry Map: every one of ~32K
+   * receivers was read under a single key, and each such Map was ~300 bytes
+   * of hash table.
    */
-  interface NamedRead {
-    readonly access: Access
-    readonly receiver: Query
+  interface KeyedPositions {
     readonly key: string
-    readonly order: number
+    readonly positions: readonly number[]
   }
-  // A receiver read under one key keeps that key's list in place of a
-  // one-entry Map: on a 48K-line app every one of ~32K receivers was read
-  // under a single key, and each such Map was ~300 bytes of hash table for
-  // one list whose entries already carry the key.
-  const namedReadsByReceiver = new Map<Query, Map<string, NamedRead[]> | readonly NamedRead[]>()
-  const namedReadsOf = (receiver: Query, key: string): readonly NamedRead[] | undefined => {
+  const namedReadsByReceiver = new Map<Query, Map<string, readonly number[]> | KeyedPositions>()
+  const namedReadsOf = (receiver: Query, key: string): readonly number[] | undefined => {
     const held = namedReadsByReceiver.get(receiver)
-    if (held === undefined || !Array.isArray(held)) return (held as Map<string, NamedRead[]> | undefined)?.get(key)
-    return held[0]!.key === key ? held : undefined
+    if (held === undefined) return undefined
+    if (held instanceof Map) return held.get(key)
+    return held.key === key ? held.positions : undefined
   }
   {
+    const building = new Map<Query, Map<string, number[]>>()
     let order = 0
     for (const access of flow.propertyAccesses) {
       const key = accessKey(access)
       const position = order++
       if (key === null) continue
       const receiver = value(access.expression)
-      let byKey = namedReadsByReceiver.get(receiver) as Map<string, NamedRead[]> | undefined
-      if (!byKey) namedReadsByReceiver.set(receiver, (byKey = new Map()))
-      let entries = byKey.get(key)
-      if (!entries) byKey.set(key, (entries = []))
-      entries.push({ access, receiver, key, order: position })
+      let byKey = building.get(receiver)
+      if (!byKey) building.set(receiver, (byKey = new Map()))
+      let positions = byKey.get(key)
+      if (!positions) byKey.set(key, (positions = []))
+      positions.push(position)
     }
     // Copied to their exact length, as `writesByBodyValue`'s lists are.
-    for (const [receiver, held] of namedReadsByReceiver) {
-      const byKey = held as Map<string, NamedRead[]>
-      if (byKey.size === 1) namedReadsByReceiver.set(receiver, [...byKey.values().next().value!])
-      else for (const [key, entries] of byKey) byKey.set(key, entries.slice())
+    for (const [receiver, byKey] of building) {
+      if (byKey.size === 1) {
+        const [key, positions] = byKey.entries().next().value!
+        namedReadsByReceiver.set(receiver, { key, positions: positions.slice() })
+      } else namedReadsByReceiver.set(receiver, new Map([...byKey].map(([key, positions]) => [key, positions.slice()] as const)))
     }
   }
   /**
@@ -944,34 +1058,25 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     return aliased.length === 1 ? aliased[0]! : null
   }
 
-  const slot = (root: ObjectRoot, key: string): Query => {
-    let keys = slots.get(root)
-    if (!keys) slots.set(root, (keys = new Map()))
-    let query = keys.get(key)
-    if (!query) keys.set(key, (query = { kind: 'slot', node: root, key }))
-    return query
-  }
-  const storedSlot = (root: ObjectRoot, key: string): Query => {
-    let keys = storedSlots.get(root)
-    if (!keys) storedSlots.set(root, (keys = new Map()))
-    let query = keys.get(key)
-    if (!query) keys.set(key, (query = { kind: 'stored-slot', node: root, key }))
-    return query
-  }
-  const use = (root: Value, reference: ts.Expression): Query => {
-    let refs = uses.get(root)
-    if (!refs) uses.set(root, (refs = new Map()))
-    let query = refs.get(reference)
-    if (!query) refs.set(reference, (query = { kind: 'use', root, node: reference }))
-    return query
-  }
+  const slot = (root: ObjectRoot, key: string): Query =>
+    internIn(slots, root, key, keyedQueryKey, () => ({ kind: 'slot', node: root, key, solverState: undefined }))
+  const storedSlot = (root: ObjectRoot, key: string): Query =>
+    internIn(storedSlots, root, key, keyedQueryKey, () => ({ kind: 'stored-slot', node: root, key, solverState: undefined }))
+  const use = (root: Value, reference: ts.Expression): Query =>
+    internIn(
+      uses,
+      root,
+      reference,
+      (query) => query.node as ts.Expression,
+      () => ({ kind: 'use', root, node: reference, solverState: undefined })
+    )
   const publication = (root: Value, container: ObjectRoot, key: string): Query => {
     let containers = publications.get(root)
     if (!containers) publications.set(root, (containers = new Map()))
     let keys = containers.get(container)
     if (!keys) containers.set(container, (keys = new Map()))
     let query = keys.get(key)
-    if (!query) keys.set(key, (query = { kind: 'publication', root, node: container, key }))
+    if (!query) keys.set(key, (query = { kind: 'publication', root, node: container, key, solverState: undefined }))
     return query
   }
   /** The cell holding the object a binding element takes apart, as a query. */
@@ -1431,6 +1536,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       for (const write of flow.allWrites) {
         if (write.value === undefined || write.value === null) continue
         const held = unwrapErasedExpression(write.value)
+        // Only a body is ever asked about, and only a function-like value can be one.
+        if (!ts.isFunctionLike(held)) continue
         let writes = index.get(held)
         if (!writes) index.set(held, (writes = []))
         writes.push(write)
@@ -1620,7 +1727,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    * it, the answer is the same set and the edges are none.
    */
   const NO_READS: readonly { readonly access: Access; readonly receiver: Query }[] = []
-  const NO_NAMED_READS: readonly NamedRead[] = []
+  const NO_RECEIVERS: readonly Query[] = []
+  const NO_POSITIONS: readonly number[] = []
   const NO_SITES: readonly FlowCallSite[] = []
   let constructionSitesByTarget: Map<ts.Node, FlowCallSite[]> | null = null
   const constructionSitesTargeting = (owner: ts.Node): readonly FlowCallSite[] => {
@@ -1817,7 +1925,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     /** What a seal reads back from the evaluation it ran. */
     interface SealOutcome {
       causes: readonly Cause[]
-      grounding: readonly { readonly domain: string; readonly dependency: Query }[]
+      grounding: DependencyGroundingKeys<Query>
       seeded: boolean
     }
     /**
@@ -3938,16 +4046,16 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           for (const key of reaching) {
             if (seededReadKeys.has(key)) continue
             seededReadKeys.add(key)
-            for (const entry of readsByKey.get(key) ?? NO_READS) seed(entry.receiver)
+            for (const receiver of readsByKey.get(key) ?? NO_RECEIVERS) seed(receiver)
           }
-          const found: NamedRead[] = []
+          const found: number[] = []
           for (const holder of holdersOf(container)) {
             if (!namedReadsByReceiver.has(holder)) continue
-            for (const key of reaching) for (const entry of namedReadsOf(holder, key) ?? NO_NAMED_READS) found.push(entry)
+            for (const key of reaching) for (const position of namedReadsOf(holder, key) ?? NO_POSITIONS) found.push(position)
           }
           // Program order, the order the scan this replaces discovered them in.
-          found.sort((a, b) => a.order - b.order)
-          for (const entry of found) facts.add(entry.access)
+          found.sort((a, b) => a - b)
+          for (const position of found) facts.add(flow.propertyAccesses[position]!)
           break
         }
         case 'own-keys': {
@@ -4045,7 +4153,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         // Exactly sized: the solver keeps every seal's causes for the life
         // of the session, and a list grown by `push` reserves 17 slots.
         outcome.causes = causes.length === 0 ? NO_CAUSES : causes.slice()
-        outcome.grounding = grounding.size === 0 ? NO_GROUNDING : [...grounding].map((dependency) => ({ domain: VALUE_ORIGIN, dependency }))
+        // The dependencies alone, all in `VALUE_ORIGIN` (`DependencyGroundingKeys`):
+        // a lone one as itself, ~88K of a 48K-line app's seals keeping exactly one.
+        outcome.grounding =
+          grounding.size === 0 ? NO_GROUNDING : grounding.size === 1 ? grounding.values().next().value! : exactListOf(grounding)
         outcome.seeded = seeded
       }
       return facts
@@ -4081,11 +4192,11 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       // `both(requirements.get(query), captured.requirements)`.
       // Absent reads as empty (`?? []` below); one entry per state was a map of
       // mostly empty arrays.
-      // Copied to its exact length: the ledger builds it by `filter`, which
+      // Copied to its exact length (the ledger builds it by `filter`, which
       // reserves 17 slots for a one-element answer, and this map keeps one
-      // per node for the life of the session.
+      // per node for the life of the session), or held as its lone entry.
       if (captured.requirements.length === 0) requirements.delete(query)
-      else requirements.set(query, captured.requirements.slice())
+      else requirements.set(query, captured.requirements.length === 1 ? captured.requirements[0]! : captured.requirements.slice())
       return captured.value
     }
     // The solver keeps every node's last seal for the life of the session and
@@ -4097,7 +4208,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         causes: NO_CAUSES,
         groundingRequirements: carriesValue ? VALUE_ORIGIN_DOMAIN : NO_DOMAINS,
         groundingSeeds: seeded ? VALUE_ORIGIN_DOMAIN : NO_DOMAINS,
-        groundingDependencies: NO_GROUNDING
+        groundingDomain: VALUE_ORIGIN,
+        groundingKeys: NO_GROUNDING
       })
     const plainSeals = [
       [plainSeal(false, false), plainSeal(false, true)],
@@ -4111,17 +4223,20 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         const carriesValue = VALUE_CARRYING_KINDS.has(query.kind)
         if (outcome.causes === NO_CAUSES && outcome.grounding === NO_GROUNDING)
           return plainSeals[carriesValue ? 1 : 0][outcome.seeded ? 1 : 0]
+        if (outcome.causes === NO_CAUSES)
+          return new GroundedSeal(outcome.grounding, (carriesValue ? CARRIES_VALUE : 0) | (outcome.seeded ? SEEDED : 0))
         return {
           locallyComplete: outcome.causes.length === 0,
           causes: outcome.causes,
           groundingRequirements: carriesValue ? VALUE_ORIGIN_DOMAIN : NO_DOMAINS,
           groundingSeeds: outcome.seeded ? VALUE_ORIGIN_DOMAIN : NO_DOMAINS,
-          groundingDependencies: outcome.grounding
+          groundingDomain: VALUE_ORIGIN,
+          groundingKeys: outcome.grounding
         }
       }
     }
   })()
-  const { solve, requiredDependenciesOf, seed } = dependencyFactSolver(definition, 'grounding-domains')
+  const { solve, requiredDependenciesOf, seed } = dependencyFactSolver(definition, 'grounding-domains', queryStateCell)
   // `case 'unknown-reads'` now asks `holdersOf` for the receivers that hold a
   // container, instead of `observe`-ing all 968 of them itself -- but a
   // reverse index only finds states that already EXIST and have already run.
@@ -4143,7 +4258,9 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       const query = queue[index]!
       if (visited.has(query)) continue
       visited.add(query)
-      found.push(...(requirements.get(query) ?? []))
+      const held = requirements.get(query)
+      if (Array.isArray(held)) found.push(...(held as readonly IntrinsicProtocolRequirement[]))
+      else if (held !== undefined) found.push(held as IntrinsicProtocolRequirement)
       for (const dependency of requiredDependenciesOf(query)) queue.push(dependency)
     }
     return found
