@@ -79,6 +79,7 @@ import { overrideFieldArmsOf, overrideRecordStatementOf } from './override-field
 import type { SpecializationCensus } from './specialization.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { KeySet, NullableMemo } from './nullable-memo.js'
+import { createRoundTableSharing } from './round-tables.js'
 
 /**
  * The type a parameter the program never annotated is actually called with.
@@ -1204,6 +1205,13 @@ const declaredTupleSpreadPositionAt = (checker: ts.TypeChecker, args: readonly t
   return declaredClosedTupleRestElementsOf(checker, declaration)?.[index - spreadAt] ?? null
 }
 
+/** Every round's parameter census stays alive as the next one's upstream; see `createRoundTableSharing`. */
+const shareCallTables = createRoundTableSharing<{
+  readonly callsByDeclaration: Map<ts.Declaration, (ts.CallExpression | ts.NewExpression)[]>
+  readonly callTargets: Map<ts.CallExpression | ts.NewExpression, ts.SignatureDeclaration[]>
+  readonly resolvedCallDeclarations: Map<ts.CallExpression | ts.NewExpression, ts.SignatureDeclaration | ts.JSDocSignature>
+}>()
+
 export const censusParameterBindings = (
   checker: ts.TypeChecker,
   files: readonly ts.SourceFile[],
@@ -1290,9 +1298,9 @@ export const censusParameterBindings = (
   hostProvided: ReadonlySet<string> = noHostProvidedNames
 ): ParameterBindingCensus => {
   /** Every call this program makes, grouped by the declaration its signature resolved to. */
-  const callsByDeclaration = new Map<ts.Declaration, (ts.CallExpression | ts.NewExpression)[]>()
-  const callTargets = new Map<ts.CallExpression | ts.NewExpression, ts.SignatureDeclaration[]>()
-  const resolvedCallDeclarations = new Map<ts.CallExpression | ts.NewExpression, ts.SignatureDeclaration | ts.JSDocSignature>()
+  let callsByDeclaration = new Map<ts.Declaration, (ts.CallExpression | ts.NewExpression)[]>()
+  let callTargets = new Map<ts.CallExpression | ts.NewExpression, ts.SignatureDeclaration[]>()
+  let resolvedCallDeclarations = new Map<ts.CallExpression | ts.NewExpression, ts.SignatureDeclaration | ts.JSDocSignature>()
   /**
    * A `.call`/`.apply` wrapper whose receiver's checker type gave
    * `unwrapExplicitThisCall` no call signature to unwrap statically (an
@@ -4311,6 +4319,12 @@ export const censusParameterBindings = (
     }
   }
 
+  // The sweeps above were the last to attribute calls.
+  ;({ callsByDeclaration, callTargets, resolvedCallDeclarations } = shareCallTables(checker, {
+    callsByDeclaration,
+    callTargets,
+    resolvedCallDeclarations
+  }))
   // Later composed censuses can retain earlier inferred facts. Their protocol
   // dependencies remain required while any dependent parameter facts survive.
   protocolLedger?.replace('parameter-bindings', [...upstreamProtocolRequirements, ...[...protocolRequirements.values()].flat()])

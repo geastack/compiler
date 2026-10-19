@@ -1,6 +1,18 @@
 import type ts from '#typescript'
 import { createCallInvalidatedNarrowing } from './call-invalidated-narrowing.js'
 
+/** Each stable checker's memo of `getTypeAtLocation`, readable without asking. */
+const typeMemos = new WeakMap<ts.TypeChecker, WeakMap<ts.Node, ts.Type>>()
+
+/**
+ * The type `checker.getTypeAtLocation(node)` already answered, without asking
+ * it: `undefined` for a node it was never asked about, or a checker that is not
+ * one `withStableTypeQueries` made. A memo whose answer is this one can say so
+ * instead of holding it again, since the stable checker gives the same type for
+ * the node every time it is asked.
+ */
+export const memoizedTypeAt = (checker: ts.TypeChecker, node: ts.Node): ts.Type | undefined => typeMemos.get(checker)?.get(node)
+
 /**
  * The program and checker are immutable inputs to census inference. TypeScript
  * nevertheless allocates fresh object-literal types on repeated public
@@ -129,7 +141,7 @@ export const withStableTypeQueries = (checker: ts.TypeChecker, program?: ts.Prog
   // keeps maps its optimized code embedded alive, prototypes included, for a
   // GC or two after last use, so the checker, the program and every AST
   // (0.27 GB on a 48K-line app) outlived the frontend into the backend.
-  return Object.assign(
+  const stable = Object.assign(
     { ...checker },
     {
       getTypeAtLocation,
@@ -142,4 +154,6 @@ export const withStableTypeQueries = (checker: ts.TypeChecker, program?: ts.Prog
       getSignaturesOfType
     }
   )
+  typeMemos.set(stable, types)
+  return stable
 }

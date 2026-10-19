@@ -16,6 +16,7 @@ import { definitelyReturns } from './return-paths.js'
 import { createBagAbsenceResolver, type BagAbsence } from './bag-absence.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { isObjectLiteralPrototypeSetter } from './assignment-patterns.js'
+import { createRoundTableSharing } from './round-tables.js'
 
 /**
  * The members an OPEN PROPERTY BAG carries, inferred from the properties the
@@ -328,6 +329,13 @@ const emptyEvidence = (): BagEvidence => ({
   indexRead: false,
   opaqueUse: null
 })
+
+/** Every round's bag census stays alive beside the next; see `createRoundTableSharing`. */
+const shareBagTables = createRoundTableSharing<{
+  readonly writesTo: Map<ts.Node, ts.Expression[]>
+  readonly allocationOwners: Map<ts.Expression, ts.Node | null>
+  readonly returnsOf: Map<ts.Node, (ts.Expression | null)[]>
+}>()
 
 export const censusObjectBagBindings = (
   checker: ts.TypeChecker,
@@ -697,7 +705,7 @@ export const censusObjectBagBindings = (
   const storageWrites = flow.allWrites.filter((write) => write.slot === 'whole')
   const ownerOfWrite = (write: (typeof storageWrites)[number]): ts.Node | null =>
     (write.naming && ts.isPropertyAccessExpression(write.naming) ? ownerDeclOfExpr(write.naming) : null) ?? write.target.declaration
-  const allocationOwners = new Map<ts.Expression, ts.Node | null>()
+  let allocationOwners = new Map<ts.Expression, ts.Node | null>()
   for (const write of storageWrites) {
     if (
       write.value === null ||
@@ -855,10 +863,10 @@ export const censusObjectBagBindings = (
   // The `return` expressions of every function body, and the declarations
   // initialized/assigned from an expression -- both collected once, then
   // replayed until nothing new is claimed.
-  const returnsOf = new Map<ts.Node, (ts.Expression | null)[]>()
+  let returnsOf = new Map<ts.Node, (ts.Expression | null)[]>()
   const assignments: { readonly target: ts.Node; readonly value: ts.Expression }[] = []
   /** Every write to one declaration, so a claim can be tested against ALL of them and not just the one that made it. */
-  const writesTo = new Map<ts.Node, ts.Expression[]>()
+  let writesTo = new Map<ts.Node, ts.Expression[]>()
   const unknownWrites = new Set<ts.Node>()
   const noteWrite = (target: ts.Node, value: ts.Expression): void => {
     const existing = writesTo.get(target)
@@ -1529,6 +1537,8 @@ export const censusObjectBagBindings = (
     }
   }
 
+  // Complete from here on: nothing below writes them.
+  ;({ writesTo, allocationOwners, returnsOf } = shareBagTables(checker, { writesTo, allocationOwners, returnsOf }))
   const absencesAt = createBagAbsenceResolver(checker, ownerDeclOfExpr, calleeDeclarationOf, writesTo, returnsOf)
   const valueShape = (root: ts.Node | null | undefined, node: ts.Node): ObjectBagShape | null => {
     let bag = root ? bound.get(root) : undefined

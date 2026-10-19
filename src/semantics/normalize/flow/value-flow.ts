@@ -338,33 +338,28 @@ export const sameValueFlowContent = (a: ValueFlowIndex, b: ValueFlowIndex): bool
 }
 
 /**
- * An expression's flow target, kept per checker rather than per index: it is a
- * function of the checker alone, and each round's index memoized its own copy
- * (143K targets per index on a 48K-line app, three indices alive at once). No
- * reader keys or compares targets by identity across indices.
+ * One target object per symbol that names its own cell, kept per checker
+ * rather than per index: every reference to a variable or member resolves to
+ * an equal `{ symbol, nameSymbol, declaration }`, and each round's index held
+ * a fresh copy per expression (~148K targets for ~40K symbols on a 48K-line
+ * app, three indices alive at once). Targets are immutable and no reader
+ * tells two equal ones apart by identity.
+ *
+ * Not memoized per expression: a target is two symbol lookups the stable
+ * checker already memoizes, and a memo over every expression any index or
+ * reader asked about was ~10 MB held to the end of normalization.
  */
-const flowTargetsByChecker = new WeakMap<ts.TypeChecker, FlowTargetMemo>()
-interface FlowTargetMemo {
-  readonly byExpression: Map<ts.Expression, FlowTarget | null>
-  /**
-   * One target object per symbol that names its own cell: every reference to
-   * a variable or member resolves to an equal `{ symbol, nameSymbol,
-   * declaration }`, and the memo held a fresh copy per expression (~148K
-   * targets for ~40K symbols on a 48K-line app). Targets are immutable and no
-   * reader tells two equal ones apart by identity.
-   */
-  readonly bySymbol: Map<ts.Symbol, FlowTarget>
+const flowTargetsByChecker = new WeakMap<ts.TypeChecker, Map<ts.Symbol, FlowTarget>>()
+const flowTargetsOf = (checker: ts.TypeChecker): Map<ts.Symbol, FlowTarget> => {
+  let bySymbol = flowTargetsByChecker.get(checker)
+  if (!bySymbol) flowTargetsByChecker.set(checker, (bySymbol = new Map()))
+  return bySymbol
 }
-const flowTargetMemoOf = (checker: ts.TypeChecker): FlowTargetMemo => {
-  let memo = flowTargetsByChecker.get(checker)
-  if (!memo) flowTargetsByChecker.set(checker, (memo = { byExpression: new Map(), bySymbol: new Map() }))
-  return memo
-}
-const internedTarget = (memo: FlowTargetMemo, target: FlowTarget | null): FlowTarget | null => {
+const internedTarget = (bySymbol: Map<ts.Symbol, FlowTarget>, target: FlowTarget | null): FlowTarget | null => {
   if (target === null || target.symbol === null || target.symbol !== target.nameSymbol) return target
-  const known = memo.bySymbol.get(target.symbol)
+  const known = bySymbol.get(target.symbol)
   if (known === undefined) {
-    memo.bySymbol.set(target.symbol, target)
+    bySymbol.set(target.symbol, target)
     return target
   }
   return known.declaration === target.declaration ? known : target
@@ -493,12 +488,40 @@ const lookupOver = <K, V>(table: ReadonlyMap<K, V>, earlier: ReadonlyMap<K, V> |
   return delta.size === 0 ? plainLookup(earlier) : overlayLookup(delta, earlier)
 }
 
-/** Replaces each list equal, element for element, to the prior index's list for its key with that list. */
-const shareLists = <K, L extends readonly unknown[]>(table: Map<K, L>, prior: ReadonlyMap<K, L>): void => {
+/**
+ * Replaces each list equal, element for element, to the prior index's list for
+ * its key with that list -- of the table's own element type, being those very
+ * elements.
+ */
+const shareLists = <K, L extends readonly unknown[]>(table: Map<K, L>, prior: ReadonlyMap<K, readonly unknown[]>): void => {
   for (const [key, list] of table) {
     const earlier = prior.get(key)
-    if (earlier !== undefined && earlier !== list && sameList(earlier, list)) table.set(key, earlier)
+    if (earlier !== undefined && earlier !== list && sameList(earlier, list)) table.set(key, earlier as L)
   }
+}
+
+/**
+ * Hands a declaration's list the identical list its symbol already holds,
+ * wherever the two state the same entries. Every mention and every write is
+ * filed under its cell's symbol and its declaration both (see
+ * `recordReference`), and for a cell with one declaration the two lists are
+ * the same entries in the same order: on a 48K-line app 38K of 40K
+ * declaration reference lists and 34K of 36K declaration write lists, each
+ * held twice for the life of the index. No reader mutates a list or tells two
+ * equal ones apart.
+ */
+const shareSymbolLists = <L extends readonly unknown[]>(
+  byDeclaration: Map<ts.Node, L>,
+  bySymbol: ReadonlyMap<ts.Symbol, L>,
+  symbolsOf: (list: L) => readonly (ts.Symbol | null | undefined)[]
+): void => {
+  for (const [declaration, list] of byDeclaration)
+    for (const symbol of symbolsOf(list)) {
+      const named = symbol ? bySymbol.get(symbol) : undefined
+      if (named === undefined || named === list || !sameList(named, list)) continue
+      byDeclaration.set(declaration, named)
+      break
+    }
 }
 
 /**
@@ -598,14 +621,8 @@ export const indexValueFlow = (
     return operands
   }
 
-  const targetMemo = flowTargetMemoOf(checker)
-  const targetOf = (expression: ts.Expression): FlowTarget | null => {
-    const cached = targetMemo.byExpression.get(expression)
-    if (cached !== undefined) return cached
-    const resolved = internedTarget(targetMemo, flowTargetOf(checker, expression))
-    targetMemo.byExpression.set(expression, resolved)
-    return resolved
-  }
+  const targets = flowTargetsOf(checker)
+  const targetOf = (expression: ts.Expression): FlowTarget | null => internedTarget(targets, flowTargetOf(checker, expression))
 
   const record = (
     target: FlowTarget | null,
@@ -1119,11 +1136,20 @@ export const indexValueFlow = (
     toExactLists(referencesBySymbol)
     toExactLists(referencesByDeclaration)
     toExactLists(receiverReferences)
+    shareSymbolLists(referencesByDeclaration, referencesBySymbol, (list) => {
+      const target = targetOf(list[0]!)
+      return [target?.symbol, target?.nameSymbol]
+    })
+    // A variable's every mention is one identifier naming it, which both
+    // walks file under its symbol: three in four member lists on a 48K-line
+    // app are the symbol's reference list, entry for entry.
+    shareLists(memberReferences, referencesBySymbol)
   }
   toExactLists(state.bySymbol)
   toExactLists(state.byDeclaration)
   toExactLists(state.fromSymbol)
   toExactLists(state.fromDeclaration)
+  shareSymbolLists(state.byDeclaration, state.bySymbol, (list) => [list[0]!.target.symbol])
   if (prior) {
     shareLists(state.bySymbol, prior.bySymbol)
     shareLists(state.byDeclaration, prior.byDeclaration)
@@ -1134,6 +1160,7 @@ export const indexValueFlow = (
   const NO_WRITES: readonly ValueWrite[] = []
   // Asked only by the walk above; the index's closures would otherwise keep it.
   invocationOperands.clear()
+  reusedWrites.clear()
   const NO_REFERENCES: readonly ts.Expression[] = []
   const callSites = new Map(calls.map((site) => [site.call, site]))
   const writesBySite = new Map<ts.Node, ValueWrite[]>()

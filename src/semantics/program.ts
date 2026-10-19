@@ -1061,6 +1061,17 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
       .map(({ diagnostic }) => diagnostic)
   ]
   timing.report()
+  const sourceTransformProtocols = new Map(
+    sourceFiles.flatMap((file) => {
+      const protocols = transformOutputs.get(file.fileName)?.protocols
+      return protocols?.length ? [[file, protocols] as const] : []
+    })
+  )
+  // Read above for the last time. Every file's original and transformed text
+  // was otherwise held to the end of the compile by this scope, which the
+  // program's own lookups below keep alive; a host asked for a file again
+  // runs its transforms again.
+  transformOutputs.clear()
   const exportModules = new Map<string, SourceTransformModule>()
   const exportModuleOf = (fileName: string): SourceTransformModule | null => {
     const file = program.getSourceFile(fileName)
@@ -1123,12 +1134,7 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
     sourceFiles,
     entryFiles: entryFilesOf(program, input.rootFileNames),
     sourcePreparations: preparation.audit,
-    sourceTransformProtocols: new Map(
-      sourceFiles.flatMap((file) => {
-        const protocols = transformOutputs.get(file.fileName)?.protocols
-        return protocols?.length ? [[file, protocols] as const] : []
-      })
-    ),
+    sourceTransformProtocols,
     // A program that does not typecheck has no well-defined semantics to port.
     // Collecting these here means the compiler can refuse before normalizing,
     // rather than normalizing a program the checker never validated.
