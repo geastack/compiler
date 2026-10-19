@@ -27,7 +27,7 @@ import { vcpkgInstalled, vcpkgPackages, vcpkgRoot, vcpkgTriplet } from './host-t
 import { posixShell } from './host-shell.mjs'
 import { assertLfCheckout } from './checkout-line-ends.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, readlinkSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
 const compiler = resolve(import.meta.dirname, '..')
@@ -72,6 +72,16 @@ for (const name of siblings) {
   step(workspace, ['git', 'clone', '-c', 'core.autocrlf=false', origin.replace(/compiler(\.git)?$/, `${name}$1`), name])
 }
 
+const refuseLinkedModules = (directory) => {
+  const modules = join(directory, 'node_modules')
+  let link
+  try {
+    link = lstatSync(modules).isSymbolicLink() ? readlinkSync(modules) : undefined
+  } catch {
+    return
+  }
+  if (link) throw new Error(`release setup: ${modules} is a link to ${link}; npm would install into that checkout`)
+}
 // Installed, and from the lockfile now checked out: npm records what it
 // installed in node_modules/.package-lock.json, and a pull that changes the
 // lockfile leaves that record older than it.
@@ -87,11 +97,16 @@ for (const repository of [compiler, ...siblings.map((name) => join(workspace, na
     .filter((file) => /(^|\/)package-lock\.json$/.test(file))
   for (const lock of locks) {
     const directory = join(repository, dirname(lock))
-    if (reinstall || !installed(directory)) step(directory, ['npm', 'ci', '--no-audit', '--no-fund'])
+    if (reinstall || !installed(directory)) {
+      refuseLinkedModules(directory)
+      step(directory, ['npm', 'ci', '--no-audit', '--no-fund'])
+    }
   }
   // A package that locks nothing (parallel) installs its declared ranges.
-  if (!locks.length && existsSync(join(repository, 'package.json')) && (reinstall || !installed(repository)))
+  if (!locks.length && existsSync(join(repository, 'package.json')) && (reinstall || !installed(repository))) {
+    refuseLinkedModules(repository)
     step(repository, ['npm', 'install', '--no-package-lock', '--no-audit', '--no-fund'])
+  }
 }
 
 const windowsPackage = join(workspace, 'windows/packages/geastack-windows')
