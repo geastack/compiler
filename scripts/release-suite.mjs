@@ -295,9 +295,33 @@ const unitTests = (lane, path, notHere = {}) => {
   // list it, so only a listed skip is one nobody declared.
   commands.at(-1).declaredSkips = true
 }
+// Native Linux deployment is POSIX at both ends. The client refuses a host
+// without POSIX ownership and modes, since it checks its SSH identity and
+// known_hosts by them; the transaction transport it streams to the device
+// (src/linux/transaction.py) takes fcntl locks, kills process groups and
+// checks uids and modes. On Windows the client tests could only watch it
+// refuse, and the transport tests have no transport to run.
+const posixClient = process.platform === 'win32' && 'native Linux deployment needs a POSIX client'
+const posixTransport = process.platform === 'win32' && 'runs the device-side Linux transaction transport, which needs POSIX'
 unitTests('cli', 'cli', {
   'runExternal resolves commands that exist only as a PATH shim': process.platform !== 'win32' && 'win32 only',
-  'macOS enables LLDB symbols by default and accepts an explicit source debugging option': process.platform !== 'darwin' && 'macOS only'
+  'macOS enables LLDB symbols by default and accepts an explicit source debugging option': process.platform !== 'darwin' && 'macOS only',
+  'registered SSH identity is explicit, strict and isolated from ambient configuration': posixClient,
+  'reviewed hook, quiet profile and registered destination refuse ambiguous authority': posixClient,
+  'CLI registration and flash dry-run use native alias without network or repurposing': posixClient,
+  'Node inspection and recovery dispatch use stored authority without build or local hook/artifact': posixClient,
+  'actual local transport stages exact bytes, returns pending, resumes only bound protected observation': posixTransport,
+  'tampered payload never reaches handler or modifies an existing release': posixTransport,
+  'failed activation retains inflight state and never automatically invokes rollback': posixTransport,
+  'maintenance pending does not advance mutation phases and wrong-boot observation refuses completion': posixTransport,
+  'resume refuses altered staged bytes and uncertain prior mutation': posixTransport,
+  'fresh release permissions are exact under restrictive inherited umask': posixTransport,
+  'durable root ownership refuses a second UUID while pending and releases after protected completion': posixTransport,
+  'different UUID concurrent invocation refuses before another hook side effect': posixTransport,
+  'pending candidate and transition review never advance protect; authorization bytes bind exact phase': posixTransport,
+  'read-only inspection and explicit rollback use stored hook and exact uncertain state authorization': posixTransport,
+  'hook timeout kills and reaps its process group, preserves uncertainty and refuses automatic retry': posixTransport,
+  'transport validates budget before spawn and reaps an exited-child cancellation race': posixTransport
 })
 unitTests('debugger', 'debugger', {
   // It also needs a built native app, so it is never run here.

@@ -2,10 +2,11 @@ import assert from 'node:assert/strict'
 import { mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { executableSuffix } from './executable-suffix.mjs'
 const root = resolve(import.meta.dirname, '..'),
   output = resolve(root, 'measurements/cxx-allocation-runtime')
 mkdirSync(output, { recursive: true })
-const binary = resolve(output, 'native-dom-attribute-literals-test')
+const binary = resolve(output, `native-dom-attribute-literals-test${executableSuffix}`)
 const args = [
   '-std=c++20',
   '-O1',

@@ -5,6 +5,7 @@ import { resolve } from 'node:path'
 import ts from 'typescript'
 import { compile } from '../dist/compiler.js'
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
+import { executableSuffix } from './executable-suffix.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const output = resolve(root, 'measurements/native-dictionary-accessors')
@@ -16,7 +17,7 @@ assert.deepEqual(result.loweringBlockers, [])
 assert.deepEqual(result.emissionRefusals, [])
 assert.match(result.source ?? '', /gea::detail::nativeDocumentDefine\(/)
 assert.match(result.source ?? '', /gea::detail::nativeDocumentDescriptor\(/)
-const executable = resolve(output, 'native-dictionary-accessors')
+const executable = resolve(output, `native-dictionary-accessors${executableSuffix}`)
 execFileSync(
   'clang++',
   [
@@ -35,7 +36,8 @@ execFileSync(
 )
 const native = execFileSync(executable, {
   encoding: 'utf8',
-  env: { ...process.env, ASAN_OPTIONS: process.platform === 'darwin' ? 'detect_leaks=0' : 'detect_leaks=1' }
+  // LeakSanitizer exists only on Linux; asking for it elsewhere aborts the run.
+  env: { ...process.env, ASAN_OPTIONS: process.platform === 'linux' ? 'detect_leaks=1' : 'detect_leaks=0' }
 })
 const referenceSource = ts.transpileModule(readFileSync(entry, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
 const reference = execFileSync(process.execPath, ['--input-type=module'], { input: referenceSource, encoding: 'utf8' })

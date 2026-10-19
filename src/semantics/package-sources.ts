@@ -397,7 +397,10 @@ export const createPackageSourceHost = (host: ts.ModuleResolutionHost = ts.sys, 
       const candidates = ['.ts', '.tsx', '.mts', '.cts'].map((extension) => `${base}${extension}`).filter(host.fileExists)
       if (candidates.length === 1 && candidates[0]) return candidates[0]
     }
-    return host.fileExists(absolute) ? absolute : resolve(file)
+    // A host that names files only by its own spelling (a virtual host, on
+    // Windows where `resolve` turns `/src/a.js` into `C:\src\a.js`) is asked
+    // again with the path it gave.
+    return host.fileExists(absolute) ? absolute : file
   }
   const view: ts.ModuleResolutionHost = {
     ...host,
@@ -406,7 +409,7 @@ export const createPackageSourceHost = (host: ts.ModuleResolutionHost = ts.sys, 
     directoryExists: (directory) => {
       if (aliases.some((entry) => inside(entry.prefix, resolve(directory)))) return true
       const dir = unalias(directory)
-      if (host.directoryExists?.(dir)) return true
+      if (host.directoryExists?.(dir) || (dir === resolve(directory) && host.directoryExists?.(directory))) return true
       const root = packageOf(`${dir}/__module__.ts`)
       const record = root ? readRecord(root) : undefined
       if ([...(record?.mappings.keys() ?? [])].some((file) => inside(file, dir))) return true
