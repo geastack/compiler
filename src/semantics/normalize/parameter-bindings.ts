@@ -78,7 +78,7 @@ import { classInstanceArmsPassed, plainRecordStatementOf } from './class-instanc
 import { overrideFieldArmsOf, overrideRecordStatementOf } from './override-field-arms.js'
 import type { SpecializationCensus } from './specialization.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
-import { NullableMemo } from './nullable-memo.js'
+import { KeySet, NullableMemo } from './nullable-memo.js'
 
 /**
  * The type a parameter the program never annotated is actually called with.
@@ -4075,7 +4075,13 @@ export const censusParameterBindings = (
   /** Refused frames, for `debugReport` to print the open use behind each. */
   const implicitRefusals = new Map<ts.SignatureDeclaration, string>()
   // A `spread` edge names the spread's SOURCE, which it reads in bulk and never stores into.
-  const writeNames = new Set(valueFlow.allWrites.flatMap((write) => (write.naming && write.edge !== 'spread' ? [write.naming] : [])))
+  // Only membership is asked, and the census -- every round of it, each the
+  // next one's upstream -- stays alive through production: a `Set` of every
+  // write's naming expression was ~1.25 MB per round on a 48K-line app, where
+  // a bit each over the numbers `callsOf`'s write receivers already gave them
+  // is a few KB.
+  const writeNames = new KeySet<ts.Expression>()
+  for (const write of valueFlow.allWrites) if (write.naming && write.edge !== 'spread') writeNames.add(write.naming)
   if (process.env['GEA_IMPLICIT_FRAME_DEBUG']) console.error(`[IMPLICIT-FRAME] owners in index: ${index.implicitArgumentsUses.size}`)
   for (const [owner, uses] of index.implicitArgumentsUses) {
     const infer = (): ImplicitArgumentsInference => {
