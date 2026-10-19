@@ -211,7 +211,7 @@ interface JsDocCarrier {
  * moves. Determinism is unaffected -- the second pass repeats the first pass's
  * order and visits each node's tags in source order.
  */
-export const walkOrdinals = (file: ts.SourceFile): Map<ts.Node, number> => {
+export const walkOrdinals = (file: ts.SourceFile): NodeOrdinals => {
   const known = ordinalWalks.get(file)
   if (known !== undefined) return known
   const walked = computeOrdinals(file)
@@ -223,17 +223,73 @@ export const walkOrdinals = (file: ts.SourceFile): Map<ts.Node, number> => {
  * The walk is a pure function of the tree, and a declaration file's tree is
  * shared across compiles (`shared-declaration-files.ts`), so its walk is kept
  * with it -- weakly, so a source file's walk dies with the file. The returned
- * map is only ever read.
+ * index is only ever read.
  */
-const ordinalWalks = new WeakMap<ts.SourceFile, Map<ts.Node, number>>()
+const ordinalWalks = new WeakMap<ts.SourceFile, NodeOrdinals>()
 
-const computeOrdinals = (file: ts.SourceFile): Map<ts.Node, number> => {
-  const ordinals = new Map<ts.Node, number>()
-  let next = 0
+/**
+ * Every node of one file and its ordinal, as two flat lists rather than a map.
+ *
+ * A map entry per node of every file the program reaches was ~21 MB on a
+ * 48K-line app, alive for the whole frontend. Here a node is one slot of the
+ * ordinal-ordered list plus one 4-byte entry of a list ordered by source
+ * position. Finding a node searches that second list for its position and
+ * then compares identities among the few nodes that start there, so a node the
+ * walk never reached still has no ordinal.
+ */
+export class NodeOrdinals {
+  readonly #nodes: readonly ts.Node[]
+  readonly #byPosition: Int32Array
+
+  constructor(nodes: readonly ts.Node[]) {
+    this.#nodes = nodes
+    const byPosition = new Int32Array(nodes.length)
+    for (let ordinal = 0; ordinal < nodes.length; ordinal++) byPosition[ordinal] = ordinal
+    byPosition.sort((left, right) => nodes[left]!.pos - nodes[right]!.pos || left - right)
+    this.#byPosition = byPosition
+  }
+
+  /** How many nodes the walk reached: every ordinal is below this. */
+  get size(): number {
+    return this.#nodes.length
+  }
+
+  get(node: ts.Node): number | undefined {
+    const nodes = this.#nodes
+    const byPosition = this.#byPosition
+    const position = node.pos
+    let low = 0
+    let high = byPosition.length
+    while (low < high) {
+      const middle = (low + high) >>> 1
+      if (nodes[byPosition[middle]!]!.pos < position) low = middle + 1
+      else high = middle
+    }
+    for (let at = low; at < byPosition.length; at++) {
+      const ordinal = byPosition[at]!
+      const candidate = nodes[ordinal]!
+      if (candidate.pos !== position) break
+      if (candidate === node) return ordinal
+    }
+    return undefined
+  }
+
+  /** Each node with its ordinal, in ordinal order. */
+  *entries(): IterableIterator<readonly [ts.Node, number]> {
+    const nodes = this.#nodes
+    for (let ordinal = 0; ordinal < nodes.length; ordinal++) yield [nodes[ordinal]!, ordinal]
+  }
+}
+
+const computeOrdinals = (file: ts.SourceFile): NodeOrdinals => {
+  // Membership only while walking: the walk can meet a node twice (a JSDoc
+  // comment two hosts share), and the first meeting is its ordinal.
+  const seen = new Set<ts.Node>()
+  const nodes: ts.Node[] = []
   const assign = (node: ts.Node): void => {
-    if (ordinals.has(node)) return
-    ordinals.set(node, next)
-    next += 1
+    if (seen.has(node)) return
+    seen.add(node)
+    nodes.push(node)
   }
   const visit = (node: ts.Node): void => {
     assign(node)
@@ -256,7 +312,7 @@ const computeOrdinals = (file: ts.SourceFile): Map<ts.Node, number> => {
     ts.forEachChild(node, visitJsDoc)
   }
   visitJsDoc(file)
-  return ordinals
+  return new NodeOrdinals(nodes.slice())
 }
 
 export const createIdentityTable = (
@@ -298,7 +354,7 @@ export const createIdentityTable = (
   const fileIndex = new Map<ts.SourceFile, string>()
   files.forEach((file, index) => fileIndex.set(file, `f${index}`))
 
-  const ordinalsByFile = new Map<ts.SourceFile, Map<ts.Node, number>>()
+  const ordinalsByFile = new Map<ts.SourceFile, NodeOrdinals>()
   const ordinalOf = (node: ts.Node): { file: string; ordinal: number } => {
     const file = node.getSourceFile()
     const identity = fileIndex.get(file)

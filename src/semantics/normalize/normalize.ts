@@ -11,6 +11,7 @@ import type { StructuralTypeTable } from '../model/structural-type-table.js'
 import type { ProgramCensus } from './census.js'
 import type { FamilyProducer } from './contribution.js'
 import { publishProgram } from './contribution.js'
+import { createEvaluationOrdinals, createOrdinalCounter, type EvaluationOrdinals, type OrdinalCounter } from './producers/mint.js'
 import type { CensusCandidate } from './census.js'
 
 /**
@@ -23,7 +24,18 @@ import type { CensusCandidate } from './census.js'
  * third state where a family quietly contributes nothing.
  */
 
+/**
+ * The one pair of ordinal counters every producer mints from. Made by the
+ * driver, which alone knows when minting is over: they hold an entry per
+ * minted operation, and nothing reads them once every candidate has produced.
+ */
+export interface ProducerMinting {
+  readonly ordinals: OrdinalCounter
+  readonly evaluationOrdinals: EvaluationOrdinals
+}
+
 export interface NormalizationInput {
+  /** Consumed: normalization takes every candidate out of it, leaving its regions. */
   readonly census: ProgramCensus
   readonly types: StructuralTypeTable
   /**
@@ -32,7 +44,7 @@ export interface NormalizationInput {
    * that instantiates a generic twice gets two, each resolving that generic's
    * type parameters as its own copy binds them.
    */
-  readonly producers: (candidate: CensusCandidate) => readonly FamilyProducer[]
+  readonly producers: (candidate: CensusCandidate, minting: ProducerMinting) => readonly FamilyProducer[]
   /**
    * What distinguishes one monomorphized copy from another, for the purpose of
    * reusing a producer set.
@@ -70,18 +82,43 @@ export const normalizeProgram = (input: NormalizationInput): NormalizationResult
   // dozen closures and rebuilding it per candidate would rebuild it thousands
   // of times for one answer.
   const byCopy = new Map<string, ReadonlyMap<OperationFamily, FamilyProducer>>()
+  let minting: ProducerMinting | null = { ordinals: createOrdinalCounter(), evaluationOrdinals: createEvaluationOrdinals() }
   const producersFor = (candidate: CensusCandidate): ReadonlyMap<OperationFamily, FamilyProducer> => {
     const key = input.copyKey(candidate)
     const cached = byCopy.get(key)
     if (cached) return cached
-    const built = new Map(input.producers(candidate).map((producer) => [producer.family, producer]))
+    if (minting === null) throw new Error('a producer set was asked for after minting ended')
+    const built = new Map(input.producers(candidate, minting).map((producer) => [producer.family, producer]))
     byCopy.set(key, built)
     return built
   }
+  // Normalization consumes the census. Each family's candidates go once that
+  // family has produced; the census itself keeps none of them, nor does the
+  // caller's view of it -- a 48K-line app's 211k candidates were otherwise
+  // alive to the end of normalization, its peak. Only the first candidate of
+  // each family is kept, to answer which families have no producer.
+  const firstCandidates = new Map<OperationFamily, CensusCandidate>()
+  const drained = new Map<OperationFamily, readonly CensusCandidate[]>()
+  for (const [family, candidates] of input.census.byFamily) {
+    drained.set(family, candidates)
+    const first = candidates[0]
+    if (first !== undefined) firstCandidates.set(family, first)
+  }
+  ;(input.census.byFamily as Map<OperationFamily, readonly CensusCandidate[]>).clear()
+  ;(input.census.candidates as CensusCandidate[]).length = 0
   // Sealed as each candidate contributes rather than once all have: the
   // unsealed copies of every operation's identities and facts were otherwise
   // all alive together at the end of publication, the frontend's peak.
-  const published = publishProgram(operationFamilies, producersFor, input.census.byFamily, internSealedFacts())
+  const published = publishProgram(operationFamilies, producersFor, drained, internSealedFacts())
+  // Every producer set exists by now -- each first candidate asked for its own
+  // -- so this is answered from the cache, which then goes with the counters
+  // its producers closed over, before the graph's tables are built.
+  const uninstalledFamilies = operationFamilies.filter((family) => {
+    const first = firstCandidates.get(family)
+    return first !== undefined && !producersFor(first).has(family)
+  })
+  byCopy.clear()
+  minting = null
 
   const operations = new Map<OperationId, SemanticOperation>()
   // Only a result whose identity does not name its own operation needs an
@@ -196,10 +233,6 @@ export const normalizeProgram = (input: NormalizationInput): NormalizationResult
   validateGraph(graph)
   return {
     graph,
-    uninstalledFamilies: operationFamilies.filter((family) => {
-      const candidates = input.census.byFamily.get(family) ?? []
-      const first = candidates[0]
-      return first !== undefined && !producersFor(first).has(family)
-    })
+    uninstalledFamilies
   }
 }

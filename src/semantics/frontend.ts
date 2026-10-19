@@ -27,9 +27,8 @@ import type { FamilyProducer } from './normalize/contribution.js'
 import { createIdentityTable, rootSpecialization, walkOrdinals, type IdentityTable } from './normalize/identities.js'
 import { censusDeclaredIntegers, type DeclaredIntegerWidth } from './declared-integers.js'
 import { gatingEdges } from './normalize/gating.js'
-import { normalizeProgram, type NormalizationInput, type NormalizationResult } from './normalize/normalize.js'
+import { normalizeProgram } from './normalize/normalize.js'
 import type { ProducerContext } from './normalize/producer-context.js'
-import { createEvaluationOrdinals, createOrdinalCounter, type EvaluationOrdinals, type OrdinalCounter } from './normalize/producers/mint.js'
 import { intrinsicPropertyCallOf } from './normalize/intrinsic-property-call.js'
 import { createStructuralMapper, type ClassCopyKey } from './normalize/structural.js'
 import { createSloppyAbsenceCensus, noSloppyAbsence } from './normalize/sloppy-absence.js'
@@ -913,26 +912,14 @@ interface LocatedFile {
   readonly spelledNames: ReadonlyMap<number, string>
 }
 
-/**
- * Normalization with the one pair of ordinal counters every producer mints
- * from, made here rather than in the frontend's scope: the counters hold an
- * entry per minted operation and nothing reads them once the graph is sealed,
- * yet anything the frontend's own frame holds -- a local, or the input object
- * it builds for a call -- lives as long as the frontend does.
- */
-const normalizeMinting = (
-  inputOf: (ordinals: OrdinalCounter, evaluationOrdinals: EvaluationOrdinals) => NormalizationInput
-): NormalizationResult => normalizeProgram(inputOf(createOrdinalCounter(), createEvaluationOrdinals()))
-
 const locateFile = (file: ts.SourceFile): LocatedFile => {
   const ordinals = walkOrdinals(file)
-  let count = 0
-  for (const ordinal of ordinals.values()) count = Math.max(count, ordinal + 1)
+  const count = ordinals.size
   const starts = new Int32Array(count).fill(-1)
   const ends = new Int32Array(count)
   const names = new Int32Array(count).fill(-1)
   const spelledNames = new Map<number, string>()
-  for (const [node, ordinal] of ordinals) {
+  for (const [node, ordinal] of ordinals.entries()) {
     starts[ordinal] = node.getStart(file)
     ends[ordinal] = node.end
     const name = ts.getNameOfDeclaration(node as ts.Declaration)
@@ -2266,14 +2253,14 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // Resolved the same way and for the same reason as `keyedCollections` above.
   const regexpDeclarations = regexpDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
   timing.mark('structural-and-host-censuses')
-  const normalized = normalizeMinting((ordinals, evaluationOrdinals) => ({
+  const normalized = normalizeProgram({
     census,
     types: table,
     // One producer set per monomorphized copy, differing only in which mapper
     // view they ask. Everything else -- the checker, the identity table, both
     // ordinal counters -- is the one shared context, because those answer
     // whole-program questions that a copy must not fork.
-    producers: (candidate) =>
+    producers: (candidate, { ordinals, evaluationOrdinals }) =>
       input.producers({
         ...context,
         ordinals,
@@ -2297,7 +2284,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
         unresolvableNames,
         namespacePaths
       })
-  }))
+  })
 
   timing.mark('normalization')
   timing.report()

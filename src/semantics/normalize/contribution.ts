@@ -1,4 +1,4 @@
-import type { OperationFamily, OperationId, SemanticResultId } from '../../identity/ids.js'
+import type { NodeId, OperationFamily, OperationId, SemanticResultId } from '../../identity/ids.js'
 import type { CensusBlocker, FamilyCoverage, FamilyReport } from '../model/coverage.js'
 import { compactStatedEdges, type SemanticEdge, type StatedEdge } from '../model/edges.js'
 import type { SemanticOperation } from '../model/operations.js'
@@ -48,11 +48,15 @@ export interface ProgramPublication {
  * frontend's peak.
  */
 interface PreparedCandidates {
-  readonly families: OperationFamily[]
-  readonly candidates: CensusCandidate[]
-  readonly live: boolean[]
-  readonly operationEnds: number[]
-  readonly edgeEnds: number[]
+  /** How many candidates have been prepared; every column below is filled up to here. */
+  count: number
+  /** Each candidate's family, as its index in the families being published. */
+  readonly families: Uint16Array
+  /** Each candidate's identity: all a withheld one's blocker needs of it, without holding the candidate. */
+  readonly sources: NodeId[]
+  readonly live: Uint8Array
+  readonly operationEnds: Int32Array
+  readonly edgeEnds: Int32Array
   readonly operations: SemanticOperation[]
   readonly edges: StatedEdge[]
 }
@@ -61,7 +65,7 @@ const operationStart = (prepared: PreparedCandidates, index: number): number => 
 
 const resultsOf = (prepared: PreparedCandidates): ReadonlySet<SemanticResultId> => {
   const published = new Set<SemanticResultId>()
-  for (let index = 0; index < prepared.candidates.length; index++) {
+  for (let index = 0; index < prepared.count; index++) {
     if (!prepared.live[index]) continue
     for (let at = operationStart(prepared, index); at < prepared.operationEnds[index]!; at++) {
       for (const result of prepared.operations[at]!.results) published.add(result.id)
@@ -109,23 +113,26 @@ const danglingCitation = (
  * the guard fail-closed -- a missing conversion stays a compile-time answer
  * instead of becoming a silently wrong picture.
  */
-const withholdDanglingCitations = (prepared: PreparedCandidates, blockers: Map<CensusCandidate, CensusBlocker>): void => {
+const withholdDanglingCitations = (
+  prepared: PreparedCandidates,
+  families: readonly OperationFamily[],
+  blockers: Map<number, CensusBlocker>
+): void => {
   let changed = true
   while (changed) {
     changed = false
     const published = resultsOf(prepared)
-    for (let index = 0; index < prepared.candidates.length; index++) {
+    for (let index = 0; index < prepared.count; index++) {
       if (!prepared.live[index]) continue
       const dangling = danglingCitation(prepared, index, published)
       if (dangling === null) continue
-      prepared.live[index] = false
+      prepared.live[index] = 0
       let dropsInvocation = false
       for (let at = operationStart(prepared, index); at < prepared.operationEnds[index]!; at++)
         if (prepared.operations[at]!.family === 'invocation') dropsInvocation = true
-      const candidate = prepared.candidates[index]!
-      blockers.set(candidate, {
-        source: candidate.id,
-        family: prepared.families[index]!,
+      blockers.set(index, {
+        source: prepared.sources[index]!,
+        family: families[prepared.families[index]!]!,
         reason: dropsInvocation
           ? `dropped invocation: cites result ${dangling}, which no installed producer publishes`
           : `withheld: cites result ${dangling}, which no installed producer publishes`,
@@ -194,48 +201,60 @@ export type ProducersFor = (candidate: CensusCandidate) => ReadonlyMap<Operation
 export const publishProgram = (
   families: readonly OperationFamily[],
   producersFor: ProducersFor,
-  census: ReadonlyMap<OperationFamily, readonly CensusCandidate[]>,
+  // Drained: each family's candidates are taken out once it has produced, so
+  // they need not all stay alive to the end of production, the frontend's peak.
+  census: Map<OperationFamily, readonly CensusCandidate[]>,
   // Runs on each operation as its candidate contributes.
   seal: (operation: SemanticOperation) => void
 ): ProgramPublication => {
+  // Sized once: the census says how many candidates there are, and a column
+  // per candidate grown by pushing reserved half as much again, all of it
+  // alive at the end of production.
+  let total = 0
+  for (const family of families) total += census.get(family)?.length ?? 0
   const prepared: PreparedCandidates = {
-    families: [],
-    candidates: [],
-    live: [],
-    operationEnds: [],
-    edgeEnds: [],
+    count: 0,
+    families: new Uint16Array(total),
+    sources: new Array<NodeId>(total),
+    live: new Uint8Array(total),
+    operationEnds: new Int32Array(total),
+    edgeEnds: new Int32Array(total),
     operations: [],
     edges: []
   }
-  const blockers = new Map<CensusCandidate, CensusBlocker>()
+  // Keyed by the candidate's place in `prepared`, in the order blockers arise.
+  const blockers = new Map<number, CensusBlocker>()
   const candidateCount = new Map<OperationFamily, number>()
-  const prepare = (family: OperationFamily, candidate: CensusCandidate, live: boolean): void => {
-    prepared.families.push(family)
-    prepared.candidates.push(candidate)
-    prepared.live.push(live)
-    prepared.operationEnds.push(prepared.operations.length)
-    prepared.edgeEnds.push(prepared.edges.length)
+  const prepare = (familyIndex: number, candidate: CensusCandidate, live: boolean): void => {
+    const index = prepared.count++
+    prepared.families[index] = familyIndex
+    prepared.sources[index] = candidate.id
+    prepared.live[index] = live ? 1 : 0
+    prepared.operationEnds[index] = prepared.operations.length
+    prepared.edgeEnds[index] = prepared.edges.length
   }
 
-  for (const family of families) {
+  for (let familyIndex = 0; familyIndex < families.length; familyIndex++) {
+    const family = families[familyIndex]!
     const candidates = census.get(family) ?? []
+    census.delete(family)
     candidateCount.set(family, candidates.length)
     for (const candidate of candidates) {
       const producer = producersFor(candidate).get(family)
       if (!producer) {
-        blockers.set(candidate, {
+        blockers.set(prepared.count, {
           source: candidate.id,
           family,
           reason: `family ${family} has no installed producer`,
           missingPrimitive: null
         })
-        prepare(family, candidate, false)
+        prepare(familyIndex, candidate, false)
         continue
       }
       const contribution = contributionOf(producer, candidate)
       if (contribution.kind === 'blocked') {
-        blockers.set(candidate, contribution.blocker)
-        prepare(family, candidate, false)
+        blockers.set(prepared.count, contribution.blocker)
+        prepare(familyIndex, candidate, false)
         continue
       }
       const { operations } = contribution
@@ -247,11 +266,11 @@ export const publishProgram = (
       // program's value edges were otherwise all alive as objects at the end
       // of production.
       compactStatedEdges(contribution.edges, (id) => operations.find((operation) => operation.id === id), prepared.edges)
-      prepare(family, candidate, true)
+      prepare(familyIndex, candidate, true)
     }
   }
 
-  withholdDanglingCitations(prepared, blockers)
+  withholdDanglingCitations(prepared, families, blockers)
 
   // The published lists are the prepared ones with every withheld candidate's
   // share taken out, closed up in place.
@@ -260,11 +279,11 @@ export const publishProgram = (
   const operationsByFamily = new Map<OperationFamily, OperationId[]>()
   let operationAt = 0
   let edgeAt = 0
-  for (let index = 0, operationFrom = 0, edgeFrom = 0; index < prepared.candidates.length; index++) {
+  for (let index = 0, operationFrom = 0, edgeFrom = 0; index < prepared.count; index++) {
     const operationTo = prepared.operationEnds[index]!
     const edgeTo = prepared.edgeEnds[index]!
     if (prepared.live[index]) {
-      const family = prepared.families[index]!
+      const family = families[prepared.families[index]!]!
       publishedByFamily.set(family, (publishedByFamily.get(family) ?? 0) + 1)
       for (let at = operationFrom; at < operationTo; at++) {
         const operation = operations[at]!
