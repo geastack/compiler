@@ -1,4 +1,4 @@
-import type ts from 'typescript'
+import type ts from '#typescript'
 import type { ParameterBindingCensus } from './parameter-bindings.js'
 import { sameImplicitArgumentsTuple, type ImplicitArgumentsTuple } from './implicit-arguments-tuple.js'
 

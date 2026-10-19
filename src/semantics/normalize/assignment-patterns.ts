@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /** Only the colon form with a noncomputed __proto__ key sets an object's prototype. */
 export const isObjectLiteralPrototypeSetter = (node: ts.Node): boolean =>

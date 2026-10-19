@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 import { unwrapErasedExpression } from './normalize/producers/erasure.js'
 

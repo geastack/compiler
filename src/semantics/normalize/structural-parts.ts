@@ -1,7 +1,7 @@
 import { implicitArgumentsSlotOf } from './implicit-arguments.js'
 import type { ImplicitArgumentsTuple } from './implicit-arguments-tuple.js'
 import { neverOverrideResultOf } from './never-override-result.js'
-import ts from 'typescript'
+import ts from '#typescript'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
 import { bagReturnTypeOf, bagShapeTypeAt, emptyObjectBagCensus, type ObjectBagCensus } from './object-bag-bindings.js'

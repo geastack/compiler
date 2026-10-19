@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { operationId, semanticResultId, type StructuralTypeId } from '../../../identity/ids.js'
 import type { NativeOwnAssignment, NativeOwnAssignmentValue, NativeOwnSlot } from '../../native-own-assignment.js'
 import type { SemanticOperand } from '../../model/operands.js'

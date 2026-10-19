@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * How a declaration binds, as the language defines it.

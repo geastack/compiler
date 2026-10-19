@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import type ts from 'typescript'
+import type ts from '#typescript'
 import type { HostOwnedDeclaration } from '../plugins/model.js'
 
 const matchesDeclaration = (symbol: ts.Symbol, declaration: ts.Declaration, configured: HostOwnedDeclaration): boolean =>

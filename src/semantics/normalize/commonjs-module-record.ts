@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { CommonJsWrapperDeclaration } from '../../plugins/model.js'
 import { createCommonJsWrapperIdentity } from '../commonjs-wrapper.js'
 import { createCommonJsRequireCensus } from './commonjs-require.js'

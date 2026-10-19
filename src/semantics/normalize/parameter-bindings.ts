@@ -1,6 +1,6 @@
 import { isRealCallableDeclaration, isModuleExportedDeclaration, isTypePositionReference, runtimeParametersOf } from './flow/targets.js'
 import { inProgramImportReferencesOf } from './flow/export-importers.js'
-import ts from 'typescript'
+import ts from '#typescript'
 import { implicitArgumentsSlotOf } from './implicit-arguments.js'
 import {
   implicitArgumentsReadTypeAt,

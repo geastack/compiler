@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './flow/model.js'
 import { unwrapErasedExpression } from './producers/erasure.js'
 import { isCanonicalNumericKey } from './host-mutation-keys.js'

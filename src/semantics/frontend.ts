@@ -12,7 +12,7 @@ import type {
 } from '../plugins/model.js'
 import { censusNativeFunctionSignatures, type NativeFunctionSignatureCensus } from './native-function-signatures.js'
 import { anyKeyedWriteTypes, prototypeMutatedConstructorTypes, proxyFallbackTypes } from './dynamic-fallback.js'
-import ts from 'typescript'
+import ts from '#typescript'
 import { structuralShapeKey } from './model/structural-types.js'
 import { createPackageDeclarationNames, resolveHostMethod, type HostMethodBindingTable } from './host-methods.js'
 import type { DeclarationId, FunctionId, NodeId, OperationFamily, RegionId, StructuralTypeId } from '../identity/ids.js'

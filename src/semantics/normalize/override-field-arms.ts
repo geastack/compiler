@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { interfaceFamilyGroupsOf } from '../interface-families.js'
 import type { SuppressedWriteArmCensus } from './suppressed-write-arms.js'
 

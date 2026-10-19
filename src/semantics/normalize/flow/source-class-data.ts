@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { isClassSpelledSourceClass, isConstructorFunction, type SourceClass, type ValueFlowIndex } from './model.js'
 import { ownedClassReceiverInventoryOf } from './owned-class-receivers.js'
 import { isSourceInstanceMethod } from './source-prototype-method-identity.js'

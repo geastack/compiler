@@ -1,4 +1,4 @@
-import type ts from 'typescript'
+import type ts from '#typescript'
 import type { FlowEdgeKind, ValueFlowIndex, ValueWrite } from '../flow/model.js'
 import type { CellDomain, CellValue } from './model.js'
 

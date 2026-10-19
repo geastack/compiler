@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ProducerContext } from '../producer-context.js'
 import { isStandardGlobalValue } from '../derived-expression-type.js'
 import { intactIntrinsicPrototypeKeysType } from '../intrinsic-prototype.js'

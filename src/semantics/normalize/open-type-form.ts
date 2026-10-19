@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * An unreduced generic expression cannot supply a physical carrier. A

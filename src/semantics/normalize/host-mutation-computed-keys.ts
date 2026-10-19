@@ -1,4 +1,4 @@
-import type ts from 'typescript'
+import type ts from '#typescript'
 import type { ValueFlowIndex } from './flow/model.js'
 import { arrayIterationKeys, computedKeySetOf, type ComputedKeySetAuthority } from './flow/computed-key-set.js'
 import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'

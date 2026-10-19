@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { SourceTransformOutput, SourceTransformProtocol } from './source-transform-protocol.js'
 
 const isJavaScriptSource = (file: ts.SourceFile): boolean => /\.[cm]?jsx?$/i.test(file.fileName)

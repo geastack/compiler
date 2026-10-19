@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ProgramReachability } from '../../reachability.js'
 import { cellCandidatesOf } from '../candidates.js'
 import { cellType, type CellValue } from '../model.js'

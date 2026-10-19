@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { declaredIntegerWidthOf } from '../declared-integers.js'
 import { isAmbientDeclaration } from '../ambient.js'
 import { transparentClassAliasDeclarationTarget, transparentConstClassAliasTarget } from '../class-alias.js'

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * A class instance handed to a parameter the program states as a plain data

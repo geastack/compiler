@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 // Whether a function-like body reads `this` anywhere in its OWN scope -- an
 // arrow function is walked through (lexical `this`, so an arrow nested

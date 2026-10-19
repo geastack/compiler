@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 import { isTypePositionReference, resolveFlowSymbolAlias, statedModuleSetOf, type StatedModuleSet } from './targets.js'
 import { nodeIsReachable } from '../reachability.js'

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 
 /** A value no call or construction can invoke. `object` is refused with

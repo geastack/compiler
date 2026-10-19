@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { typeOnlyModuleUse } from '../module-resolution.js'
 import { uncachedJsDocTags } from '../uncached-jsdoc-tags.js'
 import { namespaceMembersUnderClosedKeyOf } from './flow/targets.js'

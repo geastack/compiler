@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { DeclarationId } from '../../identity/ids.js'
 import type { ClassCopyAncestor } from '../class-heritage.js'
 import type { IdentityTable, SpecializationPath } from './identities.js'

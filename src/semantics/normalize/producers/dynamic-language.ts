@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { DynamicLanguageOperation } from '../../model/operations.js'
 import type { SemanticEdge } from '../../model/edges.js'
 import type { SemanticOperand } from '../../model/operands.js'

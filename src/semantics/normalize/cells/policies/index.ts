@@ -1,4 +1,4 @@
-import type ts from 'typescript'
+import type ts from '#typescript'
 import type { ProgramReachability } from '../../reachability.js'
 import type { ObjectBagIdentity } from '../../object-bag-bindings.js'
 import { createBagCellPolicy } from './bag.js'

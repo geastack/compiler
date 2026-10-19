@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ObjectBagIdentity, ObjectBagShape } from '../../object-bag-bindings.js'
 import type { ValueFlowIndex, ValueWrite } from '../../flow/model.js'
 import { cellType, type CellValue } from '../model.js'

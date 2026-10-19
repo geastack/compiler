@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { inheritedImplementationOf } from './merged-declaration.js'
 import { isFreshOrLastUseOfFreshLocal, type FreshValueKind } from './fresh-table-last-use.js'
 

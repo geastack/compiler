@@ -14,7 +14,7 @@ import {
   nominalConstructorChoiceTypeAt
 } from './derived-expression-type.js'
 import { isUnreducedTypeForm } from './unreduced-type-form.js'
-import ts from 'typescript'
+import ts from '#typescript'
 import { inheritedImplementationOf } from './merged-declaration.js'
 import { emptyAbsentGlobalCensus, type AbsentGlobalCensus } from './absent-globals.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'

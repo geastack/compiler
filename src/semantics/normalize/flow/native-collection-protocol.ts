@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { outermostErasureOf, unwrapErasedExpression } from '../producers/erasure.js'
 import type { ValueFlowIndex } from './model.js'
 import { deferredIntrinsicProtocolLedgerOf } from '../deferred-intrinsic-protocols.js'

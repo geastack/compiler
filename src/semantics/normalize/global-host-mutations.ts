@@ -1,6 +1,6 @@
 import { callableCompletionSummaryOf } from './flow/callable-completions.js'
 import { relative } from 'node:path'
-import ts from 'typescript'
+import ts from '#typescript'
 import type { DeclarationId } from '../../identity/ids.js'
 import { globalSymbolBehindModuleAmbientConst, isAmbientDeclaration, moduleAmbientGlobalSatisfiesDeclaration } from '../ambient.js'
 import type { IdentityTable } from './identities.js'

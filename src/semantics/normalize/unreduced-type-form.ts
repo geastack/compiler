@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * Whether a type is an UNREDUCED FORM: a conditional, an indexed access, a

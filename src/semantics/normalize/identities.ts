@@ -1,5 +1,5 @@
 import { sep } from 'node:path'
-import ts from 'typescript'
+import ts from '#typescript'
 import { declarationId, functionId, nodeId, type DeclarationId, type FunctionId, type NodeId } from '../../identity/ids.js'
 import { isAmbientDeclaration } from '../ambient.js'
 import { inheritedImplementationOf, mergedDeclarationOf } from './merged-declaration.js'

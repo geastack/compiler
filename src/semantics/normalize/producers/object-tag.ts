@@ -1,5 +1,5 @@
 import { outermostErasureOf } from './erasure.js'
-import ts from 'typescript'
+import ts from '#typescript'
 import type { CensusCandidate } from '../census.js'
 import type { CandidateContribution } from '../contribution.js'
 import type { ProducerContext } from '../producer-context.js'

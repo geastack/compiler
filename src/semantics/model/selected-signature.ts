@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { DeclarationId, StructuralTypeId } from '../../identity/ids.js'
 import type { SignatureParameter } from './structural-types.js'
 

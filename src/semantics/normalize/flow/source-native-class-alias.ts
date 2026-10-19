@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { carriesUnsubstitutedGeneric } from '../parameter-bindings.js'
 import { outermostErasureOf } from '../producers/erasure.js'
 import { exactSourceConstructionOf } from './member-call-forwarding.js'

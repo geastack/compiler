@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { isAmbientDeclaration, isAmbientSymbol } from '../ambient.js'
 import { logicalResultTypeOf } from './logical-result-type.js'
 export { isOpenTypeForm } from './open-type-form.js'

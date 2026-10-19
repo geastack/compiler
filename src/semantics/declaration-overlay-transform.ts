@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { uncachedJsDocTags } from './uncached-jsdoc-tags.js'
 import { existsSync, readFileSync } from 'fs'
 import { basename, dirname, join, relative, resolve, sep } from 'path'

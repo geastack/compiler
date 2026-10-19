@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * Whether a callable declaration states `@gea-exact-arms` -- see

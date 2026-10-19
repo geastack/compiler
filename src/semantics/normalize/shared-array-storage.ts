@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ParameterBindingCensus } from './parameter-bindings.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import type { SourceClass, ValueFlowIndex } from './flow/model.js'

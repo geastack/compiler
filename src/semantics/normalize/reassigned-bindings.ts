@@ -1,4 +1,4 @@
-import type ts from 'typescript'
+import type ts from '#typescript'
 import type { FlowEdgeKind, ValueFlowIndex } from './flow/model.js'
 
 /** Reassignment consumes the same settled writes as type inference and call attribution. */

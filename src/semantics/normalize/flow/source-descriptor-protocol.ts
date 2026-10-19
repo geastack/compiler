@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 import { deferredIntrinsicProtocolLedgerOf } from '../deferred-intrinsic-protocols.js'
 import { intrinsicPrototypeKeyIsAbsent } from '../intrinsic-prototype.js'

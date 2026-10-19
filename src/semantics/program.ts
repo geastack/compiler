@@ -1,5 +1,5 @@
 import type { PackageSource } from './package-sources.js'
-import ts from 'typescript'
+import ts from '#typescript'
 import { withStableTypeQueries } from './stable-checker.js'
 import { sharedDeclarationReader } from './shared-declaration-files.js'
 import { basename, dirname, join, resolve } from 'node:path'

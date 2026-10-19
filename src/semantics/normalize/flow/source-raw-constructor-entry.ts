@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 import { classConstructorBindingUsesAreClosed, sourceConstructorSelectionsOf } from './member-call-forwarding.js'
 import { sourceClassFamilyOf } from './owned-class-receivers.js'

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import { objectPrototypeMemberNames } from '../../representation/record-fields.js'
 import type { ProducerContext } from './producer-context.js'

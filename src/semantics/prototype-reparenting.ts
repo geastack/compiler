@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { DeclarationId } from '../identity/ids.js'
 import type { IdentityTable } from './normalize/identities.js'
 import { isGlobalObjectConstructor, isStandardInterfaceType } from './normalize/derived-expression-type.js'

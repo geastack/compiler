@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { heritageClassOrInterfaceOf } from './normalize/flow/model.js'
 
 /**

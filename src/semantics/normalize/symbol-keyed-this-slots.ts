@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 
 /**

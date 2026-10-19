@@ -19,7 +19,7 @@
  * that fills it.
  */
 
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 import { dependencyComponentSolver } from './component-solver.js'
 

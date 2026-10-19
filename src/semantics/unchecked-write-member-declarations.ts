@@ -1,5 +1,5 @@
 import { dirname, relative, resolve } from 'node:path'
-import ts from 'typescript'
+import ts from '#typescript'
 import { interfaceFlowImplementorsOf } from './interface-implementors.js'
 
 /**

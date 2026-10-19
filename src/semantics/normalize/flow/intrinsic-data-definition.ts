@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { unwrapErasedExpression } from '../producers/erasure.js'
 
 export interface IntrinsicDataDefinitionPlan {

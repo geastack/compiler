@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { operationId, semanticResultId, type OperationId, type SemanticResultId, type StructuralTypeId } from '../../../identity/ids.js'
 import type { CensusCandidate } from '../census.js'
 import type { CandidateContribution, FamilyProducer } from '../contribution.js'

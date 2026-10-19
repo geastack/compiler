@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * A symbol's first declaration -- except where a CLASS merges with an

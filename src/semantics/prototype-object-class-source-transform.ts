@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * An object literal a script uses only as a prototype, rewritten into the class

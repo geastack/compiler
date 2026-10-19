@@ -1,4 +1,4 @@
-import type ts from 'typescript'
+import type ts from '#typescript'
 import type { ValueFlowIndex } from './model.js'
 
 /** Exact fixed-export identities authenticated by the CommonJS wrapper census.

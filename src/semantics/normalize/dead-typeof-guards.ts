@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { OperationId } from '../../identity/ids.js'
 import type { AbsentGlobalCensus } from './absent-globals.js'
 import type { IdentityTable } from './identities.js'

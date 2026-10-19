@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { disjointUnionTypeOf, joinOfWrites } from './derived-expression-type.js'
 import {
   enclosingArgumentsFunction,

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { DeclarationId } from '../../identity/ids.js'
 import { normalCompletion } from '../../semantics/model/operands.js'
 import type { SemanticOperation } from '../../semantics/model/operations.js'

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * Every `/** ... *\/` range in a file, in source order and without repeats.

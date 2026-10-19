@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { DeclarationId, OperationId } from '../../../identity/ids.js'
 import { operationId, operationOfResult, semanticResultId } from '../../../identity/ids.js'
 import type { PrimitiveFamily } from '../../model/coverage.js'

@@ -1,5 +1,5 @@
 import { dirname, resolve } from 'node:path'
-import ts from 'typescript'
+import ts from '#typescript'
 import type { CommonJsWrapperDeclaration } from '../../plugins/model.js'
 import { createCommonJsWrapperIdentity, type CommonJsIdentifierIdentity } from '../commonjs-wrapper.js'
 import { isAssignmentOperatorKind } from './producers/shared.js'

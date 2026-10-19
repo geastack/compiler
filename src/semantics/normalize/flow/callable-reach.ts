@@ -15,7 +15,7 @@ import {
   pushHypothesisTrail
 } from './proof-hypotheses.js'
 import { unwrapErasedExpression } from '../producers/erasure.js'
-import ts from 'typescript'
+import ts from '#typescript'
 import { isGlobalObjectAssign } from '../derived-expression-type.js'
 import {
   heritageClassOrInterfaceOf,

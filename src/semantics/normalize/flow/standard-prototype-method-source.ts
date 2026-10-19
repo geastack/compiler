@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { unwrapErasedExpression } from '../producers/erasure.js'
 import { isStandardGlobalValue } from '../derived-expression-type.js'
 import type { IntrinsicProtocolRequirement } from '../deferred-intrinsic-protocols.js'

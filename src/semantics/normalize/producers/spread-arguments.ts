@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { operationId, semanticResultId, type StructuralTypeId } from '../../../identity/ids.js'
 import type { SemanticEdge } from '../../model/edges.js'
 import type { OperandEvaluation, SemanticOperand } from '../../model/operands.js'

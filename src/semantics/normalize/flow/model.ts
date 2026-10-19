@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * ONE enumeration of the ways a value reaches a storage cell in JavaScript.

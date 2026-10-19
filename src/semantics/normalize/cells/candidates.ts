@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { isAmbientDeclaration } from '../../ambient.js'
 import { forEachReachableStatement, type ProgramReachability } from '../reachability.js'
 

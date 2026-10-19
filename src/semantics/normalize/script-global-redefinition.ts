@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { UnresolvableNameCensus } from './unresolvable-names.js'
 import { unwrapErasedExpression } from './producers/erasure.js'
 

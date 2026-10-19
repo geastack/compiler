@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * TypeScript keeps a narrowing of a mutable property -- or of a `let` another

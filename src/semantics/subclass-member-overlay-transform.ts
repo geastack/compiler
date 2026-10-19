@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { createHash } from 'crypto'
 import { existsSync, readdirSync, type Dirent } from 'fs'
 import { dirname, join, relative, resolve, sep } from 'path'

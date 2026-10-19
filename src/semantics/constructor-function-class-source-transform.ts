@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * A pre-class constructor function and the methods its script assigns onto

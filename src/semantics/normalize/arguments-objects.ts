@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { enclosingArgumentsFunction, implicitArgumentsSlotOf, isArgumentsObjectIdentifier } from './implicit-arguments.js'
 
 /**

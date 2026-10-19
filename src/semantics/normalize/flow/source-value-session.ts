@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { isGlobalObjectAssign } from '../derived-expression-type.js'
 import type { FlowCallSite, FlowEdgeKind, FlowInvocationOperands, SourceClass, ValueFlowIndex, ValueWrite } from './model.js'
 import { isClassSpelledSourceClass } from './model.js'

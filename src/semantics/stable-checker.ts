@@ -1,4 +1,4 @@
-import type ts from 'typescript'
+import type ts from '#typescript'
 import { createCallInvalidatedNarrowing } from './call-invalidated-narrowing.js'
 
 /**

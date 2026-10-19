@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { isGlobalObjectAssign, isStandardInterfaceType, invocationOperandsOf, literalMemberNameOf } from '../derived-expression-type.js'
 import { typedArrayInstanceInterfaceNames } from '../../host-protocols.js'
 import {

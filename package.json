@@ -31,6 +31,12 @@
     "./dist/*": "./dist/*",
     "./src/*": "./src/*"
   },
+  "imports": {
+    "#typescript": {
+      "types": "typescript",
+      "default": "./dist/semantics/typescript.js"
+    }
+  },
   "files": [
     "dist/**/*.js",
     "dist/**/*.d.ts",

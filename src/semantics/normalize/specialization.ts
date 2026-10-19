@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { genericFunctionChoiceMembersOf } from './generic-function-choice.js'
 import type { ProgramReachability } from './reachability.js'
 import type { NamespacePathCensus } from './namespace-paths.js'

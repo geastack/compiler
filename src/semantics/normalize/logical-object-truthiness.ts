@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex } from './flow/model.js'
 import { sourceValueSessionOf } from './flow/source-value-session.js'
 

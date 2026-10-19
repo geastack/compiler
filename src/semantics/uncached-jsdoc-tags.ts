@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * `ts.getJSDocTags`, without leaving the answer behind on a node that has no

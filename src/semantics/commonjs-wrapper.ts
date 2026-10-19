@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import ts from 'typescript'
+import ts from '#typescript'
 import type { CommonJsWrapperDeclaration } from '../plugins/model.js'
 import { noHostProvidedNames, valueSymbolAt } from './normalize/unresolvable-names.js'
 

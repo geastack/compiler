@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { DeclarationId } from '../../identity/ids.js'
 import type { StructuralAccessor } from '../model/structural-types.js'
 import { censusedTypeAt, isStandardInterfaceType } from './derived-expression-type.js'

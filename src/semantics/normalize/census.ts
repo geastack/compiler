@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { noDeadMethodCopies, type DeadMethodCopies } from './dead-method-copies.js'
 import { isAmbientDeclaration } from '../ambient.js'
 import type { NamespacePathCensus } from './namespace-paths.js'

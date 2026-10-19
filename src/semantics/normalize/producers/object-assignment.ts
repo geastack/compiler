@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { operationId, regionId, semanticResultId } from '../../../identity/ids.js'
 import type { StructuralTypeId } from '../../../identity/ids.js'
 import type { BindingOperation, DestructuringOperation, PropertyOperation } from '../../model/operations.js'

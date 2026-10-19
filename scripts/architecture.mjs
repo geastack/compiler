@@ -427,7 +427,7 @@ for (const file of collectTypeScriptFiles(sourceRoot).sort()) {
     }
 
     const specifier = moduleSpecifierText(node)
-    if (specifier === 'typescript' && !inSemantics && !inPlugins) {
+    if ((specifier === 'typescript' || specifier === '#typescript') && !inSemantics && !inPlugins) {
       typescriptImportOutsideSemanticsCount += 1
       violations.push(`${lineOf(node)}: imports 'typescript' outside src/semantics/ and src/plugins/`)
     }

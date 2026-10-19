@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * Whether a function body treats `null` in parameter `parameter` exactly as it

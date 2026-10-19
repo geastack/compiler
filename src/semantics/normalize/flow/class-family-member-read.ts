@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { heritageClassOrInterfaceOf, type SourceClass, type ValueFlowIndex, type ValueWrite } from './model.js'
 import { sourceClassKeyReadPlanOf } from './source-class-data.js'
 import { classConstructorKeepsInstanceOf } from './member-call-forwarding.js'

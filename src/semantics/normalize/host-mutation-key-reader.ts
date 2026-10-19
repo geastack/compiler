@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { isAmbientDeclaration } from '../ambient.js'
 import { unwrapErasedExpression } from './producers/erasure.js'
 import { declarationStatesHostInert } from './host-effect-contracts.js'

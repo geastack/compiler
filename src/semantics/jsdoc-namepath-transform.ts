@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { documentationRangesIn } from './documentation-ranges.js'
 
 /**

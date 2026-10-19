@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * Whether a value expression hands over an object NO OTHER REFERENCE can ever

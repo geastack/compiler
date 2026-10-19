@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { censusedTypeAt } from './derived-expression-type.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 

@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * A plain JavaScript function the program constructs with `new`, tagged

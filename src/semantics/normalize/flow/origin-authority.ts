@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { NativeCollectionProtocolPlan } from './native-collection-protocol.js'
 import type { ClosedCallableAuthority } from './callable-array-origins.js'
 import type { SourceInvocationFact } from './invocation-facts.js'

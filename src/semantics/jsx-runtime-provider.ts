@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { CompiledProgram } from './program.js'
 
 /** Project-selected automatic JSX runtime, using the Program's existing module

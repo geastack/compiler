@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
-import type ts from 'typescript'
+import type ts from '#typescript'
 import type { PackageSource } from './package-sources.js'
 
 export interface DiagnosticSourcePreparationAudit {

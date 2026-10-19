@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { inheritedAccessorOfAssignment } from '../inherited-accessor.js'
 import {
   annotationStatesNothing,

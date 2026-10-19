@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { ValueFlowIndex, ValueWrite } from './flow/model.js'
 import { classifyCallableMention } from './flow/callable-reach.js'
 import { isModuleExportedDeclaration } from './flow/targets.js'

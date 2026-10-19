@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 
 /**
  * `this.field = expr`, written through a captured lexical alias rather than

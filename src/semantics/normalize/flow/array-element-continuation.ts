@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { outermostErasureOf, unwrapErasedExpression } from '../producers/erasure.js'
 import { isGlobalObjectConstructor, isStandardGlobalValue, literalMemberNameOf } from '../derived-expression-type.js'
 import { isAssignmentPattern } from '../assignment-patterns.js'

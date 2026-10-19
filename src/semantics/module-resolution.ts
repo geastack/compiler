@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { dirname, resolve } from 'node:path'
 import { createPackageSourceHost, type PackageSource } from './package-sources.js'
 

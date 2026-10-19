@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import type { PropertyKeyShape, StructuralShape } from '../model/structural-types.js'
 import { privateNameKeyText } from '../model/structural-types.js'
 import type { IdentityTable } from './identities.js'

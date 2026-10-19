@@ -1,4 +1,4 @@
-import ts from 'typescript'
+import ts from '#typescript'
 import { implementationSignatureOf } from './structural-declarations.js'
 import { inheritedImplementationOf } from './merged-declaration.js'
 
