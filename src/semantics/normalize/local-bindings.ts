@@ -38,6 +38,7 @@ import { emptyCommonJsModuleRecordCensus, type CommonJsModuleRecordCensus } from
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
 import { assertedReceiverArmMayLackMember } from './asserted-arm-absence.js'
 import { contextTypedLiteralThisOf } from './structural-receiver.js'
+import { NullableMemo } from './nullable-memo.js'
 
 /**
  * The type an unannotated `let`/`var` cell holds, when the program never
@@ -794,7 +795,7 @@ export const censusLocalBindings = (
   }
 
   /** Node-level memo/cycle-guard for the general resolver below -- a property-access chain can revisit the same sub-expression more than once. */
-  const nodeMemo = new Map<ts.Node, ts.Type | null>()
+  const nodeMemo = new NullableMemo<ts.Node, ts.Type>()
   const nodeResolving = new Set<ts.Node>()
   /**
    * A silent write's own answer, once its cell resolved via

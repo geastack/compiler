@@ -78,6 +78,7 @@ import { classInstanceArmsPassed, plainRecordStatementOf } from './class-instanc
 import { overrideFieldArmsOf, overrideRecordStatementOf } from './override-field-arms.js'
 import type { SpecializationCensus } from './specialization.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
+import { NullableMemo } from './nullable-memo.js'
 
 /**
  * The type a parameter the program never annotated is actually called with.
@@ -1857,7 +1858,7 @@ export const censusParameterBindings = (
     // Memoized per round: a binding learned this round changes what a later
     // question answers, so a memo that outlived the round would answer with the
     // previous round's smaller view.
-    let memo = new Map<ts.Node, ts.Type | null>()
+    let memo = new NullableMemo<ts.Node, ts.Type>()
     const resolving = new Set<ts.Node>()
 
     /**
@@ -2452,7 +2453,7 @@ export const censusParameterBindings = (
       resolve,
       known,
       reset: (): void => {
-        memo = new Map<ts.Node, ts.Type | null>()
+        memo = new NullableMemo<ts.Node, ts.Type>()
       }
     }
   }
@@ -3970,7 +3971,7 @@ export const censusParameterBindings = (
   publishing.reset()
 
   /** Answers for `statedTypeAt`, settled once the fixpoint above has stopped. */
-  const statedTypes = new Map<ts.Node, ts.Type | null>()
+  const statedTypes = new NullableMemo<ts.Node, ts.Type>()
 
   const computeStatedTypeAt = (node: ts.Node): ts.Type | null => {
     // A PRIOR ROUND's stated narrowings are forwarded, the same way `known`
@@ -4349,6 +4350,11 @@ export const censusParameterBindings = (
       // identifier in the program reaches it, and the body below asks the
       // checker for a symbol -- the single most expensive thing this compiler
       // can ask -- once per call.
+      //
+      // Only an identifier or a parameter costs that ask. Any other node's
+      // answer is the upstream round's, forwarded with no checker question,
+      // and remembering it kept a miss per node of the program here (~160K).
+      if (!ts.isIdentifier(node) && !ts.isParameter(node)) return computeStatedTypeAt(node)
       const remembered = statedTypes.get(node)
       if (remembered !== undefined) return remembered
       const answer = computeStatedTypeAt(node)

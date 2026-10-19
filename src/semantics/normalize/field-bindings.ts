@@ -27,6 +27,7 @@ import { argumentsObjectUsesAt } from './arguments-objects.js'
 import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
+import { NullableMemo } from './nullable-memo.js'
 
 /**
  * The type an unannotated class FIELD holds, when the program never declares
@@ -969,7 +970,7 @@ export const censusFieldBindings = (
     (checker.getTypeAtLocation(node).flags & (ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0
 
   /** Node-level memo/cycle-guard for the general resolver below. */
-  const nodeMemo = new Map<ts.Node, ts.Type | null>()
+  const nodeMemo = new NullableMemo<ts.Node, ts.Type>()
   const nodeResolving = new Set<ts.Node>()
 
   // The closed-family fallback is the parameter census's own rule, asked the
@@ -1655,7 +1656,7 @@ export const withFieldBindings = (
     if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.Const) === 0) return null
     return callResultAt(declaration.initializer)
   }
-  const held = new Map<ts.Node, ts.Type | null>()
+  const held = new NullableMemo<ts.Node, ts.Type>()
   const statedTypeAt = (node: ts.Node): ts.Type | null => {
     const answer = own(node)
     if (answer) return answer

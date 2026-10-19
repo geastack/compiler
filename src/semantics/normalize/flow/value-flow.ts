@@ -343,12 +343,35 @@ export const sameValueFlowContent = (a: ValueFlowIndex, b: ValueFlowIndex): bool
  * (143K targets per index on a 48K-line app, three indices alive at once). No
  * reader keys or compares targets by identity across indices.
  */
-const flowTargetsByChecker = new WeakMap<ts.TypeChecker, Map<ts.Expression, FlowTarget | null>>()
-const flowTargetMemoOf = (checker: ts.TypeChecker): Map<ts.Expression, FlowTarget | null> => {
+const flowTargetsByChecker = new WeakMap<ts.TypeChecker, FlowTargetMemo>()
+interface FlowTargetMemo {
+  readonly byExpression: Map<ts.Expression, FlowTarget | null>
+  /**
+   * One target object per symbol that names its own cell: every reference to
+   * a variable or member resolves to an equal `{ symbol, nameSymbol,
+   * declaration }`, and the memo held a fresh copy per expression (~148K
+   * targets for ~40K symbols on a 48K-line app). Targets are immutable and no
+   * reader tells two equal ones apart by identity.
+   */
+  readonly bySymbol: Map<ts.Symbol, FlowTarget>
+}
+const flowTargetMemoOf = (checker: ts.TypeChecker): FlowTargetMemo => {
   let memo = flowTargetsByChecker.get(checker)
-  if (!memo) flowTargetsByChecker.set(checker, (memo = new Map()))
+  if (!memo) flowTargetsByChecker.set(checker, (memo = { byExpression: new Map(), bySymbol: new Map() }))
   return memo
 }
+const internedTarget = (memo: FlowTargetMemo, target: FlowTarget | null): FlowTarget | null => {
+  if (target === null || target.symbol === null || target.symbol !== target.nameSymbol) return target
+  const known = memo.bySymbol.get(target.symbol)
+  if (known === undefined) {
+    memo.bySymbol.set(target.symbol, target)
+    return target
+  }
+  return known.declaration === target.declaration ? known : target
+}
+
+/** The cell of a write whose target names no symbol; immutable, so one serves every such write. */
+const NO_CELL: FlowTarget = { symbol: null, nameSymbol: null, declaration: null }
 
 /**
  * What one index's walk records from syntax and the checker alone: every
@@ -382,22 +405,49 @@ interface SyntaxFacts {
  * index is built over the one reachability the rounds share, so holding only
  * the newest record keeps every hit and drops the orphan.
  */
-const recordedSyntaxFacts = new WeakMap<
-  ts.TypeChecker,
-  { readonly reachable: ProgramReachability; readonly files: readonly ts.SourceFile[]; readonly facts: SyntaxFacts }
->()
+interface SyntaxRecord {
+  readonly reachable: ProgramReachability
+  readonly files: readonly ts.SourceFile[]
+  readonly facts: SyntaxFacts
+  readonly prior: PriorTables
+}
+
+/**
+ * The tables of the index that recorded the syntax facts, which later rounds
+ * over the same walk share wherever they state the same thing.
+ *
+ * A later round differs from the first only where the census moved a write or
+ * a call site (see `sameValueFlowContent`), so almost every write and call it
+ * records is field-for-field one the first index already holds, and almost
+ * every per-cell list it builds lists exactly the same writes. The first
+ * index stays alive beside the settled one through normalization, so each kept
+ * its own equal copy: ~58K writes, ~21K call sites and ~85K lists per index on
+ * a 48K-line app. A round now hands back the first index's object wherever it
+ * is equal; nothing reads these by identity across indices, and an index never
+ * changes once built.
+ */
+interface PriorTables {
+  readonly writesBySite: ReadonlyMap<ts.Node, ValueWrite[]>
+  readonly callSites: ReadonlyMap<ts.Node, FlowCallSite>
+  readonly bySymbol: ReadonlyMap<ts.Symbol, ValueWrite[]>
+  readonly byDeclaration: ReadonlyMap<ts.Node, ValueWrite[]>
+  readonly fromSymbol: ReadonlyMap<ts.Symbol, ValueWrite[]>
+  readonly fromDeclaration: ReadonlyMap<ts.Node, ValueWrite[]>
+}
+
+const recordedSyntaxFacts = new WeakMap<ts.TypeChecker, SyntaxRecord>()
 
 const recordedSyntaxFactsOf = (
   checker: ts.TypeChecker,
   reachable: ProgramReachability,
   files: readonly ts.SourceFile[]
-): SyntaxFacts | null => {
+): SyntaxRecord | null => {
   const known = recordedSyntaxFacts.get(checker)
   return known &&
     known.reachable === reachable &&
     known.files.length === files.length &&
     known.files.every((file, index) => file === files[index])
-    ? known.facts
+    ? known
     : null
 }
 
@@ -405,9 +455,50 @@ const rememberSyntaxFacts = (
   checker: ts.TypeChecker,
   reachable: ProgramReachability,
   files: readonly ts.SourceFile[],
-  facts: SyntaxFacts
+  facts: SyntaxFacts,
+  prior: PriorTables
 ): void => {
-  recordedSyntaxFacts.set(checker, { reachable, files: [...files], facts })
+  recordedSyntaxFacts.set(checker, { reachable, files: [...files], facts, prior })
+}
+
+const sameList = (a: readonly unknown[], b: readonly unknown[]): boolean => {
+  if (a.length !== b.length) return false
+  for (let index = 0; index < a.length; index++) if (a[index] !== b[index]) return false
+  return true
+}
+
+/**
+ * A later round's view of one table: only the keys whose entry differs from
+ * the prior index's, over the prior index's table.
+ *
+ * Sharing the lists left each round its own copy of every table that holds
+ * them, and the tables are most of an index (~14 MB of the settled index on a
+ * 48K-line app, against a few hundred entries that differ). The functions
+ * below are separate so a closure over the delta never shares a scope, and
+ * with it a reference, with the full table the delta was cut from.
+ */
+const plainLookup =
+  <K, V>(table: ReadonlyMap<K, V>) =>
+  (key: K): V | undefined =>
+    table.get(key)
+const overlayLookup =
+  <K, V>(delta: ReadonlyMap<K, V | undefined>, earlier: ReadonlyMap<K, V>) =>
+  (key: K): V | undefined =>
+    delta.has(key) ? delta.get(key) : earlier.get(key)
+const lookupOver = <K, V>(table: ReadonlyMap<K, V>, earlier: ReadonlyMap<K, V> | undefined): ((key: K) => V | undefined) => {
+  if (earlier === undefined) return plainLookup(table)
+  const delta = new Map<K, V | undefined>()
+  for (const [key, value] of table) if (earlier.get(key) !== value) delta.set(key, value)
+  for (const key of earlier.keys()) if (!table.has(key)) delta.set(key, undefined)
+  return delta.size === 0 ? plainLookup(earlier) : overlayLookup(delta, earlier)
+}
+
+/** Replaces each list equal, element for element, to the prior index's list for its key with that list. */
+const shareLists = <K, L extends readonly unknown[]>(table: Map<K, L>, prior: ReadonlyMap<K, L>): void => {
+  for (const [key, list] of table) {
+    const earlier = prior.get(key)
+    if (earlier !== undefined && earlier !== list && sameList(earlier, list)) table.set(key, earlier)
+  }
 }
 
 /**
@@ -450,7 +541,19 @@ export const indexValueFlow = (
   const bindingPatternReads: ts.BindingElement[] = []
   const recorded = recordedSyntaxFactsOf(checker, reachable, files)
   const recordSyntax = recorded === null
-  const syntax: SyntaxFacts = recorded ?? {
+  const prior = recorded?.prior ?? null
+  // Each prior write is handed out at most once, so two equal writes at one
+  // site stay two objects, as they were.
+  const reusedWrites = new Set<ValueWrite>()
+  const priorWriteEqualTo = (write: ValueWrite): ValueWrite => {
+    for (const candidate of prior?.writesBySite.get(write.site) ?? []) {
+      if (reusedWrites.has(candidate) || !sameWrite(candidate, write)) continue
+      reusedWrites.add(candidate)
+      return candidate
+    }
+    return write
+  }
+  const syntax: SyntaxFacts = recorded?.facts ?? {
     propertyAccesses: [],
     arrayLiterals: [],
     accessorNames: new Set(),
@@ -497,10 +600,10 @@ export const indexValueFlow = (
 
   const targetMemo = flowTargetMemoOf(checker)
   const targetOf = (expression: ts.Expression): FlowTarget | null => {
-    const cached = targetMemo.get(expression)
+    const cached = targetMemo.byExpression.get(expression)
     if (cached !== undefined) return cached
-    const resolved = flowTargetOf(checker, expression)
-    targetMemo.set(expression, resolved)
+    const resolved = internedTarget(targetMemo, flowTargetOf(checker, expression))
+    targetMemo.byExpression.set(expression, resolved)
     return resolved
   }
 
@@ -519,8 +622,8 @@ export const indexValueFlow = (
     // and still name real heap storage. Keep its write in the shared inventory;
     // symbol-keyed consumers have no entry, while provenance follows `naming`.
     if (!target && !naming) return
-    const cell = target ?? { symbol: null, nameSymbol: null, declaration: null }
-    const write: ValueWrite = {
+    const cell = target ?? NO_CELL
+    const stated: ValueWrite = {
       edge,
       slot,
       member,
@@ -531,6 +634,7 @@ export const indexValueFlow = (
       propertyAccess,
       ...(iterationOrigin ? { iterationOrigin } : {})
     }
+    const write = priorWriteEqualTo(stated)
     state.allWrites.push(write)
     if (cell.symbol) push(state.bySymbol, cell.symbol, write)
     if (cell.declaration) push(state.byDeclaration, cell.declaration, write)
@@ -869,7 +973,7 @@ export const indexValueFlow = (
       const explicitTarget = explicitThis ? callableDeclarationOfExpression(checker, explicitThis.callee) : null
       const resolved = explicitThis ? null : (checker.getResolvedSignature(node)?.declaration ?? null)
       const implementation = resolved ? implementationOfOverload(checker, resolved) : null
-      calls.push({
+      const site: FlowCallSite = {
         call: node,
         targets: [
           ...new Set([
@@ -882,7 +986,9 @@ export const indexValueFlow = (
         operands,
         ...(inferredDeclaration ? { inferredDeclaration } : {}),
         checkerDeclaration: resolved
-      })
+      }
+      const earlier = prior?.callSites.get(node)
+      calls.push(earlier !== undefined && sameCall(earlier, site) ? earlier : site)
     }
     if (recordSyntax && (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && !isTypePositionReference(node))
       propertyAccesses.push(node)
@@ -1013,14 +1119,21 @@ export const indexValueFlow = (
     toExactLists(referencesBySymbol)
     toExactLists(referencesByDeclaration)
     toExactLists(receiverReferences)
-    rememberSyntaxFacts(checker, reachable, files, syntax)
   }
   toExactLists(state.bySymbol)
   toExactLists(state.byDeclaration)
   toExactLists(state.fromSymbol)
   toExactLists(state.fromDeclaration)
+  if (prior) {
+    shareLists(state.bySymbol, prior.bySymbol)
+    shareLists(state.byDeclaration, prior.byDeclaration)
+    shareLists(state.fromSymbol, prior.fromSymbol)
+    shareLists(state.fromDeclaration, prior.fromDeclaration)
+  }
 
   const NO_WRITES: readonly ValueWrite[] = []
+  // Asked only by the walk above; the index's closures would otherwise keep it.
+  invocationOperands.clear()
   const NO_REFERENCES: readonly ts.Expression[] = []
   const callSites = new Map(calls.map((site) => [site.call, site]))
   const writesBySite = new Map<ts.Node, ValueWrite[]>()
@@ -1032,11 +1145,33 @@ export const indexValueFlow = (
     else writesBySite.set(write.site, [write])
   }
   toExactLists(writesBySite)
+  if (prior) shareLists(writesBySite, prior.writesBySite)
+  if (recordSyntax)
+    rememberSyntaxFacts(checker, reachable, files, syntax, {
+      writesBySite,
+      callSites,
+      bySymbol: state.bySymbol,
+      byDeclaration: state.byDeclaration,
+      fromSymbol: state.fromSymbol,
+      fromDeclaration: state.fromDeclaration
+    })
+  const callSiteAt = lookupOver(callSites, prior?.callSites)
+  const writesAt = lookupOver(writesBySite, prior?.writesBySite)
+  const writesToSymbol = lookupOver(state.bySymbol, prior?.bySymbol)
+  const writesToDeclaration = lookupOver(state.byDeclaration, prior?.byDeclaration)
+  const flowsFromSymbol = lookupOver(state.fromSymbol, prior?.fromSymbol)
+  const flowsFromDeclaration = lookupOver(state.fromDeclaration, prior?.fromDeclaration)
+  // A later round reads its tables through the lookups above alone; emptying
+  // the full ones releases them from this function's scope, which the
+  // index's closures keep alive.
+  if (prior)
+    for (const table of [callSites, writesBySite, state.bySymbol, state.byDeclaration, state.fromSymbol, state.fromDeclaration])
+      table.clear()
   return {
     buildIsStrict,
     calls,
-    callSiteOf: (call) => callSites.get(call),
-    writesAtSite: (site) => writesBySite.get(site) ?? NO_WRITES,
+    callSiteOf: callSiteAt,
+    writesAtSite: (site) => writesAt(site) ?? NO_WRITES,
     propertyAccesses,
     bindingPatternReads,
     classDeclarations,
@@ -1048,10 +1183,10 @@ export const indexValueFlow = (
     callableBodyIsIndexed: (declaration) => indexedCallableBodies.has(declaration),
     memberReferencesToSymbol: (symbol) => memberReferences.get(symbol) ?? [],
     targetOf,
-    writesToSymbol: (symbol) => state.bySymbol.get(symbol) ?? NO_WRITES,
-    writesToDeclaration: (declaration) => state.byDeclaration.get(declaration) ?? NO_WRITES,
-    flowsFromSymbol: (symbol) => state.fromSymbol.get(symbol) ?? NO_WRITES,
-    flowsFromDeclaration: (declaration) => state.fromDeclaration.get(declaration) ?? NO_WRITES,
+    writesToSymbol: (symbol) => writesToSymbol(symbol) ?? NO_WRITES,
+    writesToDeclaration: (declaration) => writesToDeclaration(declaration) ?? NO_WRITES,
+    flowsFromSymbol: (symbol) => flowsFromSymbol(symbol) ?? NO_WRITES,
+    flowsFromDeclaration: (declaration) => flowsFromDeclaration(declaration) ?? NO_WRITES,
     referencesToSymbol: (symbol) => referencesBySymbol.get(symbol) ?? NO_REFERENCES,
     referencesToDeclaration: (declaration) => referencesByDeclaration.get(declaration) ?? NO_REFERENCES,
     allWrites: state.allWrites,
