@@ -83,7 +83,7 @@ jsx-framework.tsx.cpp 7a8118ad5732
 keyed-collection-member-argument.js.cpp ce9e2a88a0af
 keyed-collection-member-argument.ts.cpp 7dfa9dd579ff
 language.ts.cpp 7f13764b63eb
-literal-receiver-properties.ts.cpp 6e3eedab5e8b
+literal-receiver-properties.ts.cpp ab19b5f72d5b
 logical-guard-optional-instance.ts.cpp 89a513dfff49
 logical-merge-boolean-left.ts.cpp 1b706cab96b0
 logical-merge-nullable-reference.ts.cpp a807f569a103
@@ -97,7 +97,7 @@ namespace-qualified-lib.ts.cpp 83f3a493a285
 namespace-qualified-paths.ts.cpp 94329ee91cb1
 narrowed-read.ts.cpp 4861ae5f9f8d
 narrowed-union-read.ts.cpp 3cc2e44d518a
-native-instanceof.ts.cpp 35f9c7719b00
+native-instanceof.ts.cpp ba5632099594
 native-optional-field-read-closed.ts.cpp ecb23f437da1
 nullable-union-guard.ts.cpp c3ab7ab9cbd7
 nullish-coalescing.ts.cpp 8dbed3ccfda9
