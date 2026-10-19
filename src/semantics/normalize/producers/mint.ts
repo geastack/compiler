@@ -22,13 +22,24 @@ export const createOrdinalCounter = (): OrdinalCounter => {
   // while a joined `${source}|${family}` key was a fresh string per operation
   // (~30 MB on a 48K-line app). A family name holds no `|`, so the joined key
   // was injective and this counts exactly the same pairs.
-  const used = new Map<OperationFamily, Map<NodeId, number>>()
+  //
+  // Nearly every pair mints once, so a pair is first only remembered as used
+  // -- a set entry is two slots where a map entry is three -- and given a count
+  // when it mints a second time.
+  const once = new Map<OperationFamily, Set<NodeId>>()
+  const more = new Map<OperationFamily, Map<NodeId, number>>()
   return {
     next: (source, family) => {
-      let bySource = used.get(family)
-      if (!bySource) used.set(family, (bySource = new Map()))
-      const ordinal = bySource.get(source) ?? 0
-      bySource.set(source, ordinal + 1)
+      let used = once.get(family)
+      if (!used) once.set(family, (used = new Set()))
+      if (!used.has(source)) {
+        used.add(source)
+        return 0
+      }
+      let counts = more.get(family)
+      if (!counts) more.set(family, (counts = new Map()))
+      const ordinal = counts.get(source) ?? 1
+      counts.set(source, ordinal + 1)
       return ordinal
     }
   }

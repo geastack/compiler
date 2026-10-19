@@ -118,6 +118,24 @@ import { namespaceMembersUnderClosedKeyOf } from './flow/targets.js'
  *   the alias chain to the same declaration and marks it here.
  */
 
+/**
+ * `ts.getJSDocTags`, without leaving the answer behind when there is none.
+ *
+ * The checker caches every answer on the node, creating a list for it when the
+ * node has no comment of its own; asked of every node this walk reaches, that
+ * was 274k lists on a 48K-line app, alive from reachability to the end of
+ * normalization -- the frontend's peak -- for nodes nothing will ask again.
+ * Putting back the empty field the parser initialized is the state the node
+ * was in, so a later reader computes the same answer.
+ */
+const uncachedJsDocTags = (node: ts.Node): readonly ts.JSDocTag[] => {
+  const carrier = node as ts.Node & { jsDoc?: unknown }
+  const before = carrier.jsDoc
+  const tags = ts.getJSDocTags(node)
+  if (before === undefined && tags.length === 0) carrier.jsDoc = undefined
+  return tags
+}
+
 export interface ProgramReachability {
   /** The top-level statements of `file` this program reaches, in source order. */
   readonly statementsOf: (file: ts.SourceFile) => readonly ts.Statement[]
@@ -1243,7 +1261,7 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
    * comment.
    */
   const markJsDocNamedClasses = (node: ts.Node): void => {
-    for (const tag of ts.getJSDocTags(node)) {
+    for (const tag of uncachedJsDocTags(node)) {
       if (ts.isJSDocAugmentsTag(tag) || ts.isJSDocImplementsTag(tag)) {
         markTypeNamedClasses(tag.class)
         continue
