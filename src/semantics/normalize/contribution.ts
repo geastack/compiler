@@ -2,6 +2,7 @@ import type { NodeId, OperationFamily, OperationId, SemanticResultId } from '../
 import type { CensusBlocker, FamilyCoverage, FamilyReport } from '../model/coverage.js'
 import { compactStatedEdges, type SemanticEdge, type StatedEdge } from '../model/edges.js'
 import type { SemanticOperation } from '../model/operations.js'
+import { internedText } from '../model/sealed-facts.js'
 import type { CensusCandidate } from './census.js'
 
 /**
@@ -53,12 +54,71 @@ interface PreparedCandidates {
   /** Each candidate's family, as its index in the families being published. */
   readonly families: Uint16Array
   /** Each candidate's identity: all a withheld one's blocker needs of it, without holding the candidate. */
-  readonly sources: NodeId[]
+  readonly sources: NodeIdColumn
   readonly live: Uint8Array
   readonly operationEnds: Int32Array
   readonly edgeEnds: Int32Array
   readonly operations: SemanticOperation[]
   readonly edges: StatedEdge[]
+}
+
+/**
+ * A NodeId per candidate, held as its ordinal plus the spelling around it.
+ *
+ * Only a withheld candidate's blocker ever reads one back, yet every
+ * candidate's was held to the end of production, the frontend's peak: on a
+ * 48K-line app 450k identities, most of them still the concatenation trees
+ * they were built as, 17 MB. The spelling either side of the ordinal -- the
+ * file and syntax kind before it, a copy's suffix after it -- repeats across
+ * thousands of candidates, so each is kept once and a candidate holds two
+ * numbers. An identity that does not split that way is kept whole.
+ */
+interface NodeIdColumn {
+  readonly set: (index: number, id: NodeId) => void
+  readonly get: (index: number) => NodeId
+}
+
+const nodeIdColumn = (size: number): NodeIdColumn => {
+  const ordinals = new Int32Array(size)
+  // Index into `heads`/`tails`, or -1 for an identity kept whole in `unsplit`.
+  const frames = new Int32Array(size)
+  const heads: string[] = []
+  const tails: string[] = []
+  const frameOf = new Map<string, Map<string, number>>()
+  const unsplit = new Map<number, NodeId>()
+  return {
+    set: (index, id) => {
+      // The ordinal follows the last separator: a copy's suffix escapes its own.
+      const from = id.lastIndexOf('|') + 1
+      let to = from
+      while (to < id.length && id.charCodeAt(to) >= 48 && id.charCodeAt(to) <= 57) to++
+      const digits = id.slice(from, to)
+      const ordinal = Number(digits)
+      if (from === 0 || to === from || to - from > 9 || String(ordinal) !== digits) {
+        frames[index] = -1
+        unsplit.set(index, id)
+        return
+      }
+      const head = id.slice(0, from)
+      const tail = id.slice(to)
+      let byTail = frameOf.get(head)
+      if (byTail === undefined) frameOf.set(internedText(head), (byTail = new Map()))
+      let frame = byTail.get(tail)
+      if (frame === undefined) {
+        frame = heads.length
+        // Interned, so a frame does not hold the first identity it was cut from.
+        heads.push(internedText(head))
+        tails.push(internedText(tail))
+        byTail.set(tails[frame]!, frame)
+      }
+      ordinals[index] = ordinal
+      frames[index] = frame
+    },
+    get: (index) => {
+      const frame = frames[index]!
+      return frame < 0 ? unsplit.get(index)! : (`${heads[frame]!}${ordinals[index]!}${tails[frame]!}` as NodeId)
+    }
+  }
 }
 
 const operationStart = (prepared: PreparedCandidates, index: number): number => (index === 0 ? 0 : prepared.operationEnds[index - 1]!)
@@ -131,7 +191,7 @@ const withholdDanglingCitations = (
       for (let at = operationStart(prepared, index); at < prepared.operationEnds[index]!; at++)
         if (prepared.operations[at]!.family === 'invocation') dropsInvocation = true
       blockers.set(index, {
-        source: prepared.sources[index]!,
+        source: prepared.sources.get(index),
         family: families[prepared.families[index]!]!,
         reason: dropsInvocation
           ? `dropped invocation: cites result ${dangling}, which no installed producer publishes`
@@ -215,7 +275,7 @@ export const publishProgram = (
   const prepared: PreparedCandidates = {
     count: 0,
     families: new Uint16Array(total),
-    sources: new Array<NodeId>(total),
+    sources: nodeIdColumn(total),
     live: new Uint8Array(total),
     operationEnds: new Int32Array(total),
     edgeEnds: new Int32Array(total),
@@ -228,7 +288,7 @@ export const publishProgram = (
   const prepare = (familyIndex: number, candidate: CensusCandidate, live: boolean): void => {
     const index = prepared.count++
     prepared.families[index] = familyIndex
-    prepared.sources[index] = candidate.id
+    prepared.sources.set(index, candidate.id)
     prepared.live[index] = live ? 1 : 0
     prepared.operationEnds[index] = prepared.operations.length
     prepared.edgeEnds[index] = prepared.edges.length
