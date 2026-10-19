@@ -69,6 +69,13 @@ export interface NormalizationInput {
    * operation's chain of scopes back -- one edge per link, stated once per chain.
    */
   readonly gates: (operations: ReadonlyMap<OperationId, SemanticOperation>) => GatedOperations
+  /**
+   * Called once, when every candidate has produced and before the graph's
+   * tables are built: whatever only the producers read can be let go here
+   * instead of staying alive through the rest of normalization, whose peak is
+   * otherwise the producers' working set plus the tables.
+   */
+  readonly produced: () => void
 }
 
 export interface NormalizationResult {
@@ -119,6 +126,7 @@ export const normalizeProgram = (input: NormalizationInput): NormalizationResult
   })
   byCopy.clear()
   minting = null
+  input.produced()
 
   const operations = new Map<OperationId, SemanticOperation>()
   // Only a result whose identity does not name its own operation needs an

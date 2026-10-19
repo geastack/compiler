@@ -103,15 +103,35 @@ export interface StructuralRuleSet {
   readonly formViolations: readonly StructuralFormViolation[]
 }
 
-const formLists = new Map<string, readonly ts.SyntaxKind[]>()
-const sharedForms = (forms: readonly ts.SyntaxKind[] | null): readonly ts.SyntaxKind[] | null => {
-  if (forms === null) return null
-  const key = forms.join(',')
-  const known = formLists.get(key)
+/**
+ * The names and forms of one declared rule list, with its per-form selection,
+ * shared by every view that declares the same list. Every structural view
+ * (909 on a 48K-line app) declares the same rules in the same order, each
+ * with its own resolver: a view keeps only those resolvers, in declaration
+ * order, and asks this layout which of them serve a form -- a rule object per
+ * rule and a selection per form per view were ~3.5 MB, alive to the end of
+ * production, the frontend's peak.
+ */
+interface RuleLayout {
+  readonly names: readonly string[]
+  readonly forms: readonly (readonly ts.SyntaxKind[] | null)[]
+  readonly servingByKind: Map<ts.SyntaxKind, readonly number[]>
+  /** Every rule, for the audit, which asks all of them. */
+  readonly all: readonly number[]
+}
+const layouts = new Map<string, RuleLayout>()
+const layoutOf = (declared: readonly StructuralRule[]): RuleLayout => {
+  const key = declared.map((rule) => `${rule.name}:${rule.forms === null ? '*' : rule.forms.join(',')}`).join(';')
+  const known = layouts.get(key)
   if (known) return known
-  const held = Object.freeze([...forms])
-  formLists.set(key, held)
-  return held
+  const layout: RuleLayout = {
+    names: declared.map((rule) => rule.name),
+    forms: declared.map((rule) => (rule.forms === null ? null : Object.freeze([...rule.forms]))),
+    servingByKind: new Map(),
+    all: declared.map((_, index) => index)
+  }
+  layouts.set(key, layout)
+  return layout
 }
 
 /**
@@ -128,23 +148,21 @@ const sharedForms = (forms: readonly ts.SyntaxKind[] | null): readonly ts.Syntax
  * order the chain asked them, so preparing changes no answer.
  */
 export const prepareStructuralRules = (declared: readonly StructuralRule[]): StructuralRuleSet => {
-  // Every structural view (909 on a 48K-line app) declares the same rule list
-  // with its own `forms` literals, and the list stays reachable through
-  // `resolve` for the life of the view: ~72 small arrays per view, about 4 MB
-  // in all, holding the same few dozen kind lists. The prepared set keeps one
-  // shared list per spelling; the declared objects are released.
-  const rules = declared.map((rule): StructuralRule => ({ name: rule.name, forms: sharedForms(rule.forms), resolve: rule.resolve }))
+  const layout = layoutOf(declared)
+  const resolvers = declared.map((rule) => rule.resolve)
   // Decided once, when the set is prepared: an audit asks every rule for every
   // node, so the selection below is bypassed rather than rebuilt.
   const auditing = structuralFormAuditEnabled()
   const formViolations: StructuralFormViolation[] = []
-  const servingByKind = new Map<ts.SyntaxKind, readonly StructuralRule[]>()
-  const servingFor = (kind: ts.SyntaxKind): readonly StructuralRule[] => {
-    if (auditing) return rules
-    const known = servingByKind.get(kind)
+  const servingFor = (kind: ts.SyntaxKind): readonly number[] => {
+    if (auditing) return layout.all
+    const known = layout.servingByKind.get(kind)
     if (known) return known
-    const serving = rules.filter((rule) => rule.forms === null || rule.forms.includes(kind))
-    servingByKind.set(kind, serving)
+    const serving = layout.all.filter((index) => {
+      const forms = layout.forms[index]!
+      return forms === null || forms.includes(kind)
+    })
+    layout.servingByKind.set(kind, serving)
     return serving
   }
   return {
@@ -155,22 +173,23 @@ export const prepareStructuralRules = (declared: readonly StructuralRule[]): Str
     resolve: (node, record) => {
       let answer: StructuralTypeId | null = null
       let winner = ''
-      for (const rule of servingFor(node.kind)) {
-        const resolved = rule.resolve(node)
+      for (const index of servingFor(node.kind)) {
+        const resolved = resolvers[index]!(node)
         if (resolved === null) continue
         // Recorded whether or not this rule WON: a rule that answers outside
         // its forms is a false claim even when an earlier rule would have
         // shadowed it today, because the next reordering makes it the answer.
-        if (auditing && rule.forms !== null && !rule.forms.includes(node.kind)) {
-          formViolations.push({ rule: rule.name, kind: node.kind })
+        const forms = layout.forms[index]!
+        if (auditing && forms !== null && !forms.includes(node.kind)) {
+          formViolations.push({ rule: layout.names[index]!, kind: node.kind })
         }
         if (answer === null) {
           answer = resolved
-          winner = rule.name
+          winner = layout.names[index]!
           if (!record && !auditing) return answer
           continue
         }
-        record?.({ kind: node.kind, winner, other: rule.name, agreed: resolved === answer })
+        record?.({ kind: node.kind, winner, other: layout.names[index]!, agreed: resolved === answer })
       }
       return answer
     },

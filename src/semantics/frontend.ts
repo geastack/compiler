@@ -2273,6 +2273,10 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // own answer, so the producer cache, the identity views and the structural
     // mappers all agree on what "the same copy" means.
     copyKey: (candidate) => identities.copyKeyOf(candidate.specialization),
+    // The final round's solver answers the producers and nothing after them.
+    produced: () => {
+      for (const flow of roundFlows) retireSourceValueSession(flow)
+    },
     gates: (operations) =>
       gatingEdges({
         files: compiled.sourceFiles,

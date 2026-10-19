@@ -83,6 +83,7 @@ import { callableCompletionValuesOf, constructionYieldsCompletionOf } from './ca
 import { sourceValueSessionOf } from './source-value-session.js'
 import type { SharedProvenanceAnswer } from './origin-authority.js'
 import { settleProofMemoClaims, type ProvisionalProofMemo } from './proof-memo-settlement.js'
+import { KeySet } from '../nullable-memo.js'
 
 interface JointSourceInvocationReceipt {
   readonly call: ts.CallExpression
@@ -267,7 +268,7 @@ const callLookups = new WeakMap<
   {
     readonly declarations: ReadonlyMap<ts.SignatureDeclaration | ts.JSDocSignature, readonly FlowCallSite[]>
     readonly callees: ReadonlyMap<ts.Expression, readonly FlowCallSite[]>
-    readonly writeReceivers: ReadonlySet<ts.Expression>
+    readonly writeReceivers: KeySet<ts.Expression>
   }
 >()
 /** Calls whose callee is a named member access, by key: record method calls
@@ -313,7 +314,10 @@ const callsOf = (flow: ValueFlowIndex) => {
   if (cached) return cached
   const declarations = new Map<ts.SignatureDeclaration | ts.JSDocSignature, FlowCallSite[]>()
   const callees = new Map<ts.Expression, FlowCallSite[]>()
-  const writeReceivers = new Set<ts.Expression>()
+  // A bit per receiver over numbers the binding censuses' memos already gave
+  // almost all of them: only membership is asked, of every index alive through
+  // normalization (~1.25 MB of set entries each on a 48K-line app).
+  const writeReceivers = new KeySet<ts.Expression>()
   for (const write of flow.allWrites) if (write.naming) writeReceivers.add(write.naming)
   for (const site of flow.calls) {
     const uses = callees.get(site.operands.callee)

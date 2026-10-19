@@ -1,6 +1,7 @@
 import { resolve } from 'node:path'
 import ts from '#typescript'
 import type { CommonJsWrapperDeclaration } from '../plugins/model.js'
+import { KeySet } from './normalize/nullable-memo.js'
 import { noHostProvidedNames, valueSymbolAt } from './normalize/unresolvable-names.js'
 
 export type CommonJsGlobal = 'require' | 'exports' | 'module'
@@ -282,17 +283,22 @@ const buildCommonJsWrapperIdentity = (
   // Every census pass classifies every identifier it evaluates again, and the
   // answer is a function of the identifier alone (its resolved symbol and its
   // file, against tables fixed above), so it is asked of the checker once.
+  // Nearly every answer is `ordinary` (~335K identifiers on a 48K-line app),
+  // and those are a bit each, over numbers the binding censuses' memos mostly
+  // hand out already: a map entry apiece was ~10 MB, alive at the end of
+  // production, the frontend's peak.
+  const ordinary = new KeySet<ts.Identifier>()
   const classified = new Map<ts.Identifier, CommonJsIdentifierIdentity>()
   const classify = (identifier: ts.Identifier): CommonJsIdentifierIdentity => {
+    if (ordinary.has(identifier)) return ordinaryIdentifier
     const held = classified.get(identifier)
     if (held !== undefined) return held
     const identity = classifyUncached(identifier)
-    classified.set(identifier, identity)
+    if (identity === ordinaryIdentifier) ordinary.add(identifier)
+    else classified.set(identifier, identity)
     return identity
   }
-  // One answer object per distinct answer: the memo above holds an answer per
-  // identifier the census evaluates (~335K on a 48K-line app), nearly all
-  // `ordinary`, and readers compare answers by field.
+  // One answer object per distinct answer: readers compare answers by field.
   const wrappers = new Map<CommonJsGlobal, CommonJsIdentifierIdentity>()
   const wrapper = (global: CommonJsGlobal): CommonJsIdentifierIdentity => {
     let held = wrappers.get(global)
