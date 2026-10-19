@@ -2721,6 +2721,33 @@ export const isDistinctClassConstructorPair = (a: ts.Type, b: ts.Type): boolean 
   return first !== null && second !== null && first !== second
 }
 
+/** The class an instance type belongs to, or `null` for any other type -- a class's constructor object included. */
+const classOfInstanceType = (type: ts.Type): ts.Symbol | null => {
+  const symbol = type.getSymbol()
+  return symbol !== undefined && (symbol.flags & ts.SymbolFlags.Class) !== 0 && type.getConstructSignatures().length === 0 ? symbol : null
+}
+
+/** Whether `candidate` is an instance of a class that inherits from `other`'s class -- a descendant, never the class itself. */
+const isDescendantInstanceOf = (checker: ts.TypeChecker, candidate: ts.Type, other: ts.Type): boolean => {
+  const ancestor = classOfInstanceType(other)
+  const own = classOfInstanceType(candidate)
+  if (ancestor === null || own === null || ancestor === own) return false
+  const seen = new Set<ts.Symbol>()
+  const visit = (instance: ts.Type): boolean => {
+    const target =
+      ((instance as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) !== 0 ? (instance as ts.TypeReference).target : instance
+    if (!target.isClassOrInterface()) return false
+    for (const base of checker.getBaseTypes(target)) {
+      const symbol = base.getSymbol()
+      if (symbol === undefined || seen.has(symbol)) continue
+      seen.add(symbol)
+      if (symbol === ancestor || visit(base)) return true
+    }
+    return false
+  }
+  return visit(candidate)
+}
+
 /**
  * A constructor type with no class anchor -- `{ new (bytes: Uint8Array):
  * Reply; make(bytes: Uint8Array): Reply }`, `new () => Component`.
@@ -2881,6 +2908,13 @@ export const widestOf = (checker: ts.TypeChecker, types: readonly ts.Type[]): ts
     // as "the" type made the other's default convert into it --
     // `[cls = class {}, xCls = class X {}]` read `xCls.name` as `"cls"`.
     if (isDistinctClassConstructorPair(other, candidate)) return false
+    // The same nominal carrier for INSTANCES: a subclass never covers its
+    // own ancestor's instance. One that adds no fields is structurally
+    // assignable from its base both ways, so `show(new Sub())` beside
+    // `show(new Base())` joined the parameter to `Sub`, and the base instance
+    // entered through a downcast to a class it is not. The ancestor stays a
+    // candidate, and covers the subclass as an ordinary upcast.
+    if (isDescendantInstanceOf(checker, candidate, other)) return false
     // An empty object literal the program EVALUATED covers nothing but another
     // empty literal. It is a fresh object with zero members -- the most precise
     // statement there is (see `exactEmptyObjectLiteralType`) -- and a table
