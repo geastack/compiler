@@ -1104,6 +1104,7 @@ regexp-sticky-lastindex-non-writable.runtime.js.cpp 1a521e050fe5
 regexp-sticky-zero-length.ts.cpp e2d5397c0bc4
 regexp-test-coerces-its-argument.ts.cpp d3fa27e6e776
 regexp-utf16-coordinate.ts.cpp 85f8e50e0ddf
+regexp-word-boundary-range-start.ts.cpp 5cb20421bfdb
 repeated-construction.ts.cpp 9c5e769524ad
 repeated-union-selection-reuses-the-dominating-one.runtime.ts.cpp 52c936d86bec
 rest-array-of-any-spread-into-a-null-absent-parameter.runtime.ts.cpp 07d128ceb8e0

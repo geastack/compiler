@@ -37674,6 +37674,69 @@ struct Pattern {
   using Utf16Regex = RegexMatcher;
   using Utf16Match = std::match_results<RegexUnits::const_iterator>;
 
+  /**
+   * The flags for a search that starts `startUnits` into `input`.
+   *
+   * `match_prev_avail` says the code unit before the range is part of the
+   * input, so `^` must not match at the range start unless that code unit ends
+   * a line under `m`. libstdc++ and the MSVC STL read it that way. libc++
+   * matches `^` at the start of every range, multiline or not, and ignores
+   * `match_not_bol` while `match_prev_avail` is set (as the standard says), so
+   * `/^a/y` at lastIndex 2 matched "x\na" and `split(/^/)` cut at every
+   * position. On libc++ the range start is instead told whether it begins a
+   * line: never without `m`, and with `m` exactly when a line terminator
+   * (ES 22.2.2.6) precedes it. That drops `match_prev_avail`, which libc++ also
+   * reads for `\b`/`\B` at the range start, so it is kept for patterns with no
+   * `^` to misread; with a `^`, `match_not_bow` stands in for a word character
+   * before the range, which is exact except at a word-to-non-word resume point.
+   */
+  std::regex_constants::match_flag_type searchFlagsFrom(const RegexUnits &input, std::size_t startUnits) const {
+    auto flags = std::regex_constants::match_default;
+    if (startUnits == 0) return flags;
+#if defined(_LIBCPP_VERSION)
+    if (!hasStartAnchor()) return flags | std::regex_constants::match_prev_avail;
+    const RegexUnit previous = input[startUnits - 1];
+    const bool lineStart = multiline && (previous == L'\n' || previous == L'\r' || previous == 0x2028 || previous == 0x2029);
+    if (!lineStart) flags |= std::regex_constants::match_not_bol;
+    const bool wordBefore = previous == L'_' || (previous >= L'0' && previous <= L'9') || (previous >= L'a' && previous <= L'z') ||
+                            (previous >= L'A' && previous <= L'Z');
+    if (wordBefore) flags |= std::regex_constants::match_not_bow;
+#else
+    (void)input;
+    flags |= std::regex_constants::match_prev_avail;
+#endif
+    return flags;
+  }
+
+#if defined(_LIBCPP_VERSION)
+  // Whether the source holds a `^` outside a class: 0 unknown, 1 yes, -1 no.
+  mutable signed char startAnchorState = 0;
+
+  bool hasStartAnchor() const {
+    if (startAnchorState == 0) {
+      const RegexUnits &source = matcherSource();
+      bool escaped = false;
+      bool inClass = false;
+      startAnchorState = -1;
+      for (const RegexUnit unit : source) {
+        if (escaped) {
+          escaped = false;
+        } else if (unit == L'\\') {
+          escaped = true;
+        } else if (inClass) {
+          if (unit == L']') inClass = false;
+        } else if (unit == L'[') {
+          inClass = true;
+        } else if (unit == L'^') {
+          startAnchorState = 1;
+          break;
+        }
+      }
+    }
+    return startAnchorState > 0;
+  }
+#endif
+
   static const Utf16Regex &cachedStdRegex(const RegexUnits &source, std::regex::flag_type flags) {
     using Cache = std::map<std::pair<RegexUnits, unsigned>, Utf16Regex>;
     GEA_REALM_LOCAL(Cache, cache, {});
@@ -37756,9 +37819,8 @@ struct Pattern {
       legacyAnchorState = rewrite.needed ? 1 : -1;
     }
     if (legacyAnchorState < 0) {
-      auto flags = std::regex_constants::match_default;
-      if (startUnits > 0) flags |= std::regex_constants::match_prev_avail;
-      return std::regex_search(input.cbegin() + static_cast<std::ptrdiff_t>(startUnits), input.cend(), match, compiled, flags);
+      return std::regex_search(
+          input.cbegin() + static_cast<std::ptrdiff_t>(startUnits), input.cend(), match, compiled, searchFlagsFrom(input, startUnits));
     }
     if (startUnits == 0) {
       if (std::regex_search(input.cbegin(), input.cend(), match, *legacyAtStart, std::regex_constants::match_continuous)) {
@@ -37839,9 +37901,7 @@ struct Pattern {
     const Utf16Regex &compiled = compiledRegex();
     Utf16Match match;
     auto searchBegin = inputUnits.cbegin() + static_cast<std::ptrdiff_t>(startUnits);
-    auto searchFlags = std::regex_constants::match_default;
-    if (startUnits > 0) searchFlags |= std::regex_constants::match_prev_avail;
-    if (!std::regex_search(searchBegin, inputUnits.cend(), match, compiled, searchFlags)) {
+    if (!std::regex_search(searchBegin, inputUnits.cend(), match, compiled, searchFlagsFrom(inputUnits, startUnits))) {
       if (stateful) resetLastIndex();
       return MatchSlice{};
     }
@@ -38770,9 +38830,8 @@ inline gea::Ref<gea::ArrayObject<std::string>> splitByPattern(
     const std::size_t positionMatcherUnits = static_cast<std::size_t>(match[0].first - inputUnits.cbegin());
 #else
     auto begin = inputUnits.cbegin() + static_cast<std::ptrdiff_t>(cursorMatcherUnits);
-    auto flags = std::regex_constants::match_default;
-    if (cursorMatcherUnits > 0) flags |= std::regex_constants::match_prev_avail;
-    if (!std::regex_search(begin, inputUnits.cend(), match, compiled, flags)) break;
+    if (!std::regex_search(begin, inputUnits.cend(), match, compiled, pattern.searchFlagsFrom(inputUnits, cursorMatcherUnits)))
+      break;
     const std::size_t positionMatcherUnits = cursorMatcherUnits + static_cast<std::size_t>(match.position(0));
 #endif
     const std::size_t endMatcherUnits = positionMatcherUnits + static_cast<std::size_t>(match.length(0));
