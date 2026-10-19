@@ -756,7 +756,6 @@ const computeNativeCallableFlow = (
       viewMethodFields.set(fields.target.shapeId, methods)
     }
   }
-  const valueCarriers = new Map(bodies.flatMap((body) => [...body.values]))
   const producers = new Map<IrValueId, IrOperation>()
   const bodyById = new Map<FunctionId, IrBody | null>()
   const physicalBodiesBySource = new Map<FunctionId, IrBody[]>()
@@ -2672,6 +2671,11 @@ const computeNativeCallableFlow = (
     )
       break
   }
+  // The solve is settled and nothing below replays a heap effect. The answers
+  // built from here on are the backend's peak, so the solve-only effect list
+  // goes first and the program-wide carrier table is built only now.
+  heapEffects.length = 0
+  const valueCarriers = new Map(bodies.flatMap((body) => [...body.values]))
   const result = new Map<IrValueId, CallCalleeIdentity>()
   // Presence is checked by the later optional conversion. This fact names
   // possible implementations, never a physical call ABI or a non-null value.
@@ -3001,6 +3005,8 @@ const computeNativeCallableFlow = (
     }
     nativeFieldOperationStorageValues.set(operation, domains)
   }
+  // `keyOf` above was the last reader of the producer table.
+  producers.clear()
   const callableIdentityOrigins = new Map<IrValueId, readonly FunctionId[]>()
   const callablePublications = new Map<FunctionId, Set<IrOperation | null>>()
   for (const cell of cells)
