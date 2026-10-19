@@ -580,7 +580,8 @@ if (holdersShape !== undefined) {
     groups.set(key, (groups.get(key) ?? 0) + 1)
   }
   console.log(`--- ${total} objects of ${holdersShape} by holder chain`)
-  for (const [key, count] of [...groups].sort((left, right) => right[1] - left[1]).slice(0, top)) console.log(`  ${String(count).padStart(9)}  ${key}`)
+  for (const [key, count] of [...groups].sort((left, right) => right[1] - left[1]).slice(0, top))
+    console.log(`  ${String(count).padStart(9)}  ${key}`)
 }
 
 // `--strings`: string memory by node type, the longest distinct strings, and
