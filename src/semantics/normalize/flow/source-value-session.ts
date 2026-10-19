@@ -4,9 +4,9 @@ import type { FlowCallSite, FlowEdgeKind, FlowInvocationOperands, SourceClass, V
 import { isClassSpelledSourceClass } from './model.js'
 import {
   dependencyFactSolver,
+  FactState,
   type DependencyFactDefinition,
   type DependencyFactHoldersOf,
-  type DependencyFactStateCell,
   type DependencyGroundingKeys,
   type DependencyRootCause
 } from './component-solver.js'
@@ -54,7 +54,7 @@ import { sourceCommonJsExportUsesOf, sourceCommonJsExportValueOf } from './sourc
 type Access = ts.PropertyAccessExpression | ts.ElementAccessExpression
 type Value = ts.Expression | ts.SignatureDeclaration
 type ObjectRoot = ts.CallExpression | ts.NewExpression | ts.ObjectLiteralExpression | ts.ArrayLiteralExpression | SourceCallableObject
-type Query = (
+type QueryShape =
   | { readonly kind: 'value'; readonly node: ts.Expression }
   | { readonly kind: 'proxy-result' | 'proxy-target' | 'proxy-handler'; readonly node: ts.NewExpression }
   | { readonly kind: 'parameter'; readonly node: ts.ParameterDeclaration }
@@ -85,19 +85,43 @@ type Query = (
   | { readonly kind: 'unknown-reads'; readonly node: ObjectRoot }
   | { readonly kind: 'key-reads'; readonly node: ObjectRoot; readonly key: string }
   | { readonly kind: 'callers'; readonly node: ts.SignatureDeclaration }
-) & {
-  /** The solver's record for this query, kept on the query itself (`queryStateCell`). */
-  solverState: object | undefined
-}
+type Query = QueryShape & QueryState
+type FrameSubject = ts.Expression | ts.ParameterDeclaration | null
 /**
- * Each query is interned once per session and keyed into the session's one
- * solver, so the solver keeps its state on the query instead of in a table
- * keyed by it (`DependencyFactStateCell`).
+ * A query, which is also the session solver's node for it: each query is
+ * interned once per session and keyed into the session's one solver
+ * (`keysAreStates`), so a query record and a solver state per question --
+ * ~220K on a 48K-line app, two headers and a pointer each way -- are one
+ * object. The fields beyond `kind` and `node` share two slots, since no query
+ * has both a body and a key or both a subject and a root; the accessors tell
+ * them apart by the first slot's type and answer `undefined` for a field the
+ * query's kind does not have, as the plain record did.
  */
-const queryStateCell: DependencyFactStateCell<Query> = {
-  read: (query) => query.solverState,
-  write: (query, state) => {
-    query.solverState = state
+class QueryState extends FactState<Query, Value, Cause> {
+  constructor(
+    readonly kind: QueryShape['kind'],
+    readonly node: QueryShape['node'],
+    /** A frame's body or a keyed query's key. */
+    private readonly first: ts.SignatureDeclaration | string | undefined,
+    /** A frame's subject, or a use's or publication's root. */
+    private readonly second: FrameSubject | Value | undefined
+  ) {
+    super()
+  }
+  get solverKey(): Query {
+    return this as Query
+  }
+  get body(): ts.SignatureDeclaration | undefined {
+    return typeof this.first === 'object' ? this.first : undefined
+  }
+  get subject(): FrameSubject | Value | undefined {
+    return typeof this.first === 'object' ? this.second : undefined
+  }
+  get key(): string | undefined {
+    return typeof this.first === 'string' ? this.first : undefined
+  }
+  get root(): FrameSubject | Value | undefined {
+    return typeof this.first === 'object' ? undefined : this.second
   }
 }
 
@@ -436,7 +460,7 @@ export const shareSourceValueSession = (previous: ValueFlowIndex, next: ValueFlo
  * One owner's interned queries: the only one, held as itself, or a table of
  * them. A one-entry Map is ~180 bytes of hash table to hold one pointer, and
  * most owners (a call, an object root, a value) are asked one question of a
- * kind. A query is a plain record, never a Map, and names its own key, so the
+ * kind. A query is never a Map, and names its own key, so the
  * forms are told apart without a tag.
  */
 type InternLevel<K, Q> = Q | Map<K, Q>
@@ -457,7 +481,6 @@ const internIn = <O, K, Q extends object>(outer: Map<O, InternLevel<K, Q>>, owne
   if (query === undefined) held.set(key, (query = make()))
   return query
 }
-type FrameSubject = ts.Expression | ts.ParameterDeclaration | null
 const frameSubjectOf = (query: { readonly subject: FrameSubject }): FrameSubject => query.subject
 const keyedQueryKey = (query: Query): string => (query as { readonly key: string }).key
 const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceValueSession => {
@@ -627,7 +650,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     let nodes = unary.get(kind)
     if (!nodes) unary.set(kind, (nodes = new Map()))
     let query = nodes.get(node)
-    if (!query) nodes.set(node, (query = { kind, node, solverState: undefined } as Query))
+    if (!query) nodes.set(node, (query = new QueryState(kind, node, undefined, undefined) as Query))
     return query
   }
   const value = (expression: ts.Expression): Query => nodeQuery('value', unwrapErasedExpression(expression))
@@ -647,7 +670,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   ): Query => {
     let calls = frameQueries.get(kind)
     if (!calls) frameQueries.set(kind, (calls = new Map()))
-    const make = (): FrameQuery => ({ kind, node: call, body, subject, solverState: undefined })
+    const make = (): FrameQuery => new QueryState(kind, call, body, subject) as FrameQuery
     // ~22K of a 48K-line app's ~26K per-call and per-body tables held one
     // entry: one call asked about one body and one subject is held as that
     // query, which names both.
@@ -715,12 +738,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    * reverse lookup rather than by subscribing to every read of the key.
    */
   const keyReadsOf = (container: ObjectRoot, key: string): Query => {
-    return internIn(keyReadQueries, container, key, keyedQueryKey, () => ({
-      kind: 'key-reads',
-      node: container,
-      key,
-      solverState: undefined
-    }))
+    return internIn(keyReadQueries, container, key, keyedQueryKey, () => new QueryState('key-reads', container, key, undefined) as Query)
   }
   const targets = (call: ts.CallExpression): Query => nodeQuery('targets', call)
   const superTargets = (call: ts.CallExpression): Query => nodeQuery('super-targets', call)
@@ -1059,16 +1077,16 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   }
 
   const slot = (root: ObjectRoot, key: string): Query =>
-    internIn(slots, root, key, keyedQueryKey, () => ({ kind: 'slot', node: root, key, solverState: undefined }))
+    internIn(slots, root, key, keyedQueryKey, () => new QueryState('slot', root, key, undefined) as Query)
   const storedSlot = (root: ObjectRoot, key: string): Query =>
-    internIn(storedSlots, root, key, keyedQueryKey, () => ({ kind: 'stored-slot', node: root, key, solverState: undefined }))
+    internIn(storedSlots, root, key, keyedQueryKey, () => new QueryState('stored-slot', root, key, undefined) as Query)
   const use = (root: Value, reference: ts.Expression): Query =>
     internIn(
       uses,
       root,
       reference,
       (query) => query.node as ts.Expression,
-      () => ({ kind: 'use', root, node: reference, solverState: undefined })
+      () => new QueryState('use', reference, undefined, root) as Query
     )
   const publication = (root: Value, container: ObjectRoot, key: string): Query => {
     let containers = publications.get(root)
@@ -1076,7 +1094,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     let keys = containers.get(container)
     if (!keys) containers.set(container, (keys = new Map()))
     let query = keys.get(key)
-    if (!query) keys.set(key, (query = { kind: 'publication', root, node: container, key, solverState: undefined }))
+    if (!query) keys.set(key, (query = new QueryState('publication', container, key, root) as Query))
     return query
   }
   /** The cell holding the object a binding element takes apart, as a query. */
@@ -4236,7 +4254,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       }
     }
   })()
-  const { solve, requiredDependenciesOf, seed } = dependencyFactSolver(definition, 'grounding-domains', queryStateCell)
+  const { solve, requiredDependenciesOf, seed } = dependencyFactSolver(definition, 'grounding-domains', true)
   // `case 'unknown-reads'` now asks `holdersOf` for the receivers that hold a
   // container, instead of `observe`-ing all 968 of them itself -- but a
   // reverse index only finds states that already EXIST and have already run.

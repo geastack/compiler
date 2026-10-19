@@ -843,6 +843,8 @@ const GROUNDED_SHIFT = 8
 const GROUNDED_MASK = 3 << GROUNDED_SHIFT
 /** `groundedInNoDomain`. */
 const NO_GROUNDING_DOMAIN = 1 << 10
+/** A key that is its own state (`keysAreStates`) has been made a node of the solver: `stateOf` has run for it. */
+const MINTED = 1 << 11
 /** One of the facts a state holds when it holds exactly one, told apart from the collection forms (see `FactState.facts`). */
 const isLoneFact = (value: unknown): boolean =>
   typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Set)
@@ -861,9 +863,12 @@ const isLoneFact = (value: unknown): boolean =>
  * insertion order and `has` is SameValueZero, as for a `Set`.
  *
  * A class, so ~224K instances share one shape and one copy of the methods,
- * and so its two booleans can share one field.
+ * and so its two booleans can share one field. Abstract over where the key
+ * lives: a caller that interns one record per key can make that record the
+ * state itself (`keysAreStates`), and a key record and a state per node were
+ * two headers and a pointer each way -- ~9 MB on a 48K-line app.
  */
-class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlot {
+export abstract class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlot {
   /**
    * Every scheduled edge, holding the dependency's STATE and not just its
    * key. A transfer re-reads the same edges on every re-evaluation, so
@@ -916,7 +921,7 @@ class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlot {
    * (`factsFrom`'s `dependencyState`) and the point it fires (`propagate`'s
    * queue).
    */
-  constructor(readonly key: K) {}
+  abstract readonly solverKey: K
   /** Seeded: this state's facts are visible to `holdersOf`. */
   get indexed(): boolean {
     return (this.flags & INDEXED) !== 0
@@ -941,6 +946,12 @@ class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlot {
   }
   set groundedInNoDomain(value: boolean) {
     this.flags = value ? this.flags | NO_GROUNDING_DOMAIN : this.flags & ~NO_GROUNDING_DOMAIN
+  }
+  get minted(): boolean {
+    return (this.flags & MINTED) !== 0
+  }
+  set minted(value: boolean) {
+    this.flags = value ? this.flags | MINTED : this.flags & ~MINTED
   }
   get explicitRequired(): boolean {
     return (this.flags & EXPLICIT_REQUIRED) !== 0
@@ -1044,6 +1055,13 @@ class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlot {
   }
 }
 
+/** A state for a key that cannot hold one, kept in the solver's own table. */
+class KeyedFactState<K, V, R> extends FactState<K, V, R> {
+  constructor(readonly solverKey: K) {
+    super()
+  }
+}
+
 /** `GEA_SOLVER_COUNTS` exit reports of the solvers still alive at exit. */
 const exitReports = new Set<WeakRef<() => void>>()
 if (process.env['GEA_SOLVER_COUNTS'] !== undefined)
@@ -1052,46 +1070,44 @@ if (process.env['GEA_SOLVER_COUNTS'] !== undefined)
   })
 
 /**
- * Where a key's state is kept when the key can hold it itself: a field on a
- * key record the caller already interns once per question. A table keyed by
- * key costs a hash entry per node -- ~7 MB of table for a 48K-line app's ~224K
- * nodes -- where a field costs one slot. The solver stores only states it
- * minted and reads back exactly what it stored, so a cell must be private to
- * one solver.
- */
-export interface DependencyFactStateCell<K> {
-  readonly read: (key: K) => object | undefined
-  readonly write: (key: K, state: object) => void
-}
-
-/**
  * `expand` is either one definition for every node (its callbacks are handed
  * the node's key) or a function minting one per node, called once as the node
- * is created. Without a `cell`, states are kept in a table keyed by key.
+ * is created.
+ *
+ * With `keysAreStates`, every key is a `FactState` subclass instance the
+ * caller interned once per question, and the key is the node's state: a table
+ * keyed by key costs a hash entry per node -- ~7 MB of table for a 48K-line
+ * app's ~224K nodes -- and a separate state per key a header and two pointers.
+ * Such keys must be private to one solver. Otherwise states are kept in a
+ * table keyed by key.
  */
 export const dependencyFactSolver = <K, V, R>(
   expand: DependencyFactDefinition<K, V, R> | ((key: K) => DependencyFactDefinition<K, V, R>),
   mode: DependencyComponentMode,
-  cell?: DependencyFactStateCell<K>
+  keysAreStates = false
 ): DependencyFactSolver<K, V, R> => {
   type Seal = FactSeal<K, R>
   type State = FactState<K, V, R>
-  const table = cell === undefined ? new Map<K, State>() : null
-  const existingStateOf = (key: K): State | undefined => (table !== null ? table.get(key) : (cell!.read(key) as State | undefined))
+  const table = keysAreStates ? null : new Map<K, State>()
+  const existingStateOf = (key: K): State | undefined => {
+    if (table !== null) return table.get(key)
+    const state = key as unknown as State
+    return state.minted ? state : undefined
+  }
   let stateCount = 0
-  // Every state, for the `GEA_SOLVER_SIZES` report alone: a cell has no iteration.
+  // Every state, for the `GEA_SOLVER_SIZES` report alone: keys that are states have no iteration.
   const everyState: State[] | null = process.env['GEA_SOLVER_SIZES'] === undefined ? null : []
   // A definition per key is kept beside the states only for a caller that
   // supplies one; a shared definition is not stored per state at all.
   const definitions = typeof expand === 'function' ? new Map<K, DependencyFactDefinition<K, V, R>>() : null
   const definitionOf = (state: State): DependencyFactDefinition<K, V, R> =>
-    definitions === null ? (expand as DependencyFactDefinition<K, V, R>) : definitions.get(state.key)!
+    definitions === null ? (expand as DependencyFactDefinition<K, V, R>) : definitions.get(state.solverKey)!
   const observedState = (owner: State, dependency: K): State | undefined => {
     const observed = owner.observedDependencies
     if (observed === null) return undefined
-    if (!Array.isArray(observed)) return (observed as State).key === dependency ? (observed as State) : undefined
+    if (!Array.isArray(observed)) return (observed as State).solverKey === dependency ? (observed as State) : undefined
     if (observed.length <= SMALL_EDGES) {
-      for (const candidate of observed as readonly State[]) if (candidate.key === dependency) return candidate
+      for (const candidate of observed as readonly State[]) if (candidate.solverKey === dependency) return candidate
       return undefined
     }
     // An owner is among a dependency's dependents exactly when it observes
@@ -1149,8 +1165,8 @@ export const dependencyFactSolver = <K, V, R>(
     observed === null
       ? NO_DEPENDENCIES
       : Array.isArray(observed)
-        ? (observed as readonly State[]).map((state) => state.key)
-        : [(observed as State).key]
+        ? (observed as readonly State[]).map((state) => state.solverKey)
+        : [(observed as State).solverKey]
   const requiredOf = (state: State | undefined): Iterable<K> => {
     if (state === undefined) return NO_DEPENDENCIES
     if (state.requiresObserved) return observedKeys(state.observedDependencies)
@@ -1178,7 +1194,7 @@ export const dependencyFactSolver = <K, V, R>(
   // after the drain and needs to know what the drain touched.
   const sealDirty = new Set<K>()
   const enqueue = (state: State): void => {
-    sealDirty.add(state.key)
+    sealDirty.add(state.solverKey)
     if (queued.has(state)) return
     queued.add(state)
     queue.push(state)
@@ -1190,11 +1206,11 @@ export const dependencyFactSolver = <K, V, R>(
       // No edge readers kept on the state: three closures and their context
       // for the life of every state, when only a running transfer or seal ever
       // calls them. `transferOf`/`sealOf` mint them for that call.
-      const built: State = new FactState<K, V, R>(key)
+      const built: State = table !== null ? new KeyedFactState<K, V, R>(key) : (key as unknown as State)
       if (definitions !== null) definitions.set(key, (expand as (key: K) => DependencyFactDefinition<K, V, R>)(key))
       state = built
       if (table !== null) table.set(key, built)
-      else cell!.write(key, built)
+      else built.minted = true
       stateCount++
       everyState?.push(built)
       enqueue(built)
@@ -1253,7 +1269,7 @@ export const dependencyFactSolver = <K, V, R>(
     const holding = holders.get(fact)
     if (holding === undefined) return NO_HOLDERS
     const found: K[] = []
-    for (const holder of edgeStates(holding)) found.push(holder.key)
+    for (const holder of edgeStates(holding)) found.push(holder.solverKey)
     return found
   }
 
@@ -1289,11 +1305,11 @@ export const dependencyFactSolver = <K, V, R>(
     }
     if (joinsObserved) {
       ownerState.requiresObserved = true
-      componentDirty.add(ownerState.key)
+      componentDirty.add(ownerState.solverKey)
       dependencyRevision++
     } else if (required && !ownerState.requiresObserved && !isRequired(ownerState, dependency)) {
       setExplicitRequired(ownerState, withRequired(explicitRequiredOf(ownerState), dependency))
-      componentDirty.add(ownerState.key)
+      componentDirty.add(ownerState.solverKey)
       dependencyRevision++
       changed = true
     }
@@ -1319,14 +1335,14 @@ export const dependencyFactSolver = <K, V, R>(
       (dependency) => readFrom(state, dependency),
       (dependency) => observeFrom(state, dependency),
       (fact) => holdersOfFrom(state, fact),
-      state.key
+      state.solverKey
     )
   const sealOf = (state: State): Seal =>
     definitionOf(state).seal(
       (dependency) => readFrom(state, dependency),
       (dependency) => observeFrom(state, dependency),
       (fact) => holdersOfFrom(state, fact),
-      state.key
+      state.solverKey
     )
 
   const propagate = (): void => {
@@ -1379,7 +1395,8 @@ export const dependencyFactSolver = <K, V, R>(
   const requiredDependentsOf = function* (key: K): Iterable<K> {
     const state = existingStateOf(key)
     if (state === undefined) return
-    for (const dependent of edgeStates(state.dependents)) if (dependent.requiresObserved || isRequired(dependent, key)) yield dependent.key
+    for (const dependent of edgeStates(state.dependents))
+      if (dependent.requiresObserved || isRequired(dependent, key)) yield dependent.solverKey
   }
   // A changed seal evicts every cached component answer that reaches it, so
   // reporting a change for a re-seal that reproduces the same answer evicts
@@ -1436,7 +1453,7 @@ export const dependencyFactSolver = <K, V, R>(
       required += [...requiredOf(state)].length
       dependents += edgeCount(state.dependents)
       facts += state.size
-      const kind = (state.key as { readonly kind?: unknown }).kind
+      const kind = (state.solverKey as { readonly kind?: unknown }).kind
       const bucketKey = typeof kind === 'string' ? kind : 'unknown'
       let bucket = perKind.get(bucketKey)
       if (bucket === undefined) perKind.set(bucketKey, (bucket = { states: 0, observed: 0, required: 0, facts: 0 }))

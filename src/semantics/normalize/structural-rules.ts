@@ -26,7 +26,7 @@ import type { StructuralTypeId } from '../../identity/ids.js'
  * chain did. Every `forms: null` is a row this phase still owes a form, and
  * counting them is the honest measure of the port.
  */
-export interface StructuralRule {
+export interface StructuralRule<View> {
   /** What this rule is called when a disagreement names it. Stable; it is an identifier in reports, not prose. */
   readonly name: string
   /** The syntactic forms this rule answers for, or `null` for a rule that is not keyed by form yet. */
@@ -43,7 +43,7 @@ export interface StructuralRule {
    * also precisely why the audit can be a gate at all: it asks every rule for
    * every node, so a rule leaning on `forms` for correctness reports itself.
    */
-  readonly resolve: (node: ts.Node) => StructuralTypeId | null
+  readonly resolve: (this: View, node: ts.Node) => StructuralTypeId | null
 }
 
 /** Two rules that both answered for one node, and what each said. */
@@ -104,13 +104,11 @@ export interface StructuralRuleSet {
 }
 
 /**
- * The names and forms of one declared rule list, with its per-form selection,
- * shared by every view that declares the same list. Every structural view
- * (909 on a 48K-line app) declares the same rules in the same order, each
- * with its own resolver: a view keeps only those resolvers, in declaration
- * order, and asks this layout which of them serve a form -- a rule object per
- * rule and a selection per form per view were ~3.5 MB, alive to the end of
- * production, the frontend's peak.
+ * The names and forms of one declared rule list, with its per-form selection.
+ * Every structural view (907 on a 48K-line app) dispatches over the same rule
+ * list, whose resolvers take the view as `this`, so one layout serves them
+ * all -- a rule object, a resolver and a selection per form per view were
+ * ~6 MB, alive to the end of production, the frontend's peak.
  */
 interface RuleLayout {
   readonly names: readonly string[]
@@ -119,10 +117,9 @@ interface RuleLayout {
   /** Every rule, for the audit, which asks all of them. */
   readonly all: readonly number[]
 }
-const layouts = new Map<string, RuleLayout>()
-const layoutOf = (declared: readonly StructuralRule[]): RuleLayout => {
-  const key = declared.map((rule) => `${rule.name}:${rule.forms === null ? '*' : rule.forms.join(',')}`).join(';')
-  const known = layouts.get(key)
+const layouts = new WeakMap<readonly StructuralRule<never>[], RuleLayout>()
+const layoutOf = <View>(declared: readonly StructuralRule<View>[]): RuleLayout => {
+  const known = layouts.get(declared)
   if (known) return known
   const layout: RuleLayout = {
     names: declared.map((rule) => rule.name),
@@ -130,7 +127,7 @@ const layoutOf = (declared: readonly StructuralRule[]): RuleLayout => {
     servingByKind: new Map(),
     all: declared.map((_, index) => index)
   }
-  layouts.set(key, layout)
+  layouts.set(declared, layout)
   return layout
 }
 
@@ -147,9 +144,8 @@ const layoutOf = (declared: readonly StructuralRule[]): RuleLayout => {
  * Order within a form is the order the rules were declared in, which is the
  * order the chain asked them, so preparing changes no answer.
  */
-export const prepareStructuralRules = (declared: readonly StructuralRule[]): StructuralRuleSet => {
+export const prepareStructuralRules = <View>(declared: readonly StructuralRule<View>[], view: View): StructuralRuleSet => {
   const layout = layoutOf(declared)
-  const resolvers = declared.map((rule) => rule.resolve)
   // Decided once, when the set is prepared: an audit asks every rule for every
   // node, so the selection below is bypassed rather than rebuilt.
   const auditing = structuralFormAuditEnabled()
@@ -174,7 +170,7 @@ export const prepareStructuralRules = (declared: readonly StructuralRule[]): Str
       let answer: StructuralTypeId | null = null
       let winner = ''
       for (const index of servingFor(node.kind)) {
-        const resolved = resolvers[index]!(node)
+        const resolved = declared[index]!.resolve.call(view, node)
         if (resolved === null) continue
         // Recorded whether or not this rule WON: a rule that answers outside
         // its forms is a false claim even when an earlier rule would have
