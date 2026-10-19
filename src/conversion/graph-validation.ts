@@ -54,17 +54,19 @@ const capabilityReachesMaterializer = (capability: ConversionCapability, resolve
  */
 const resolveMaterializability = (
   nodes: readonly ConversionNode[],
-  nodeOf: ((id: ConversionNodeId) => ConversionNode | undefined) | undefined
+  nodeOf: ((id: ConversionNodeId) => ConversionNode | undefined) | undefined,
+  atoms: Pick<ReadonlySet<ConversionNodeId>, 'has'> | undefined
 ): Resolution => {
   const resolvedNodes = new Set<ConversionNode>()
   const resolvedIds = new Set<ConversionNodeId>()
   const isResolved = (node: ConversionNode): boolean => (nodeOf ? resolvedNodes.has(node) : resolvedIds.has(node.id))
   const resolved: Resolution = nodeOf
     ? (id) => {
+        if (atoms?.has(id)) return true
         const node = nodeOf(id)
         return node !== undefined && resolvedNodes.has(node)
       }
-    : (id) => resolvedIds.has(id)
+    : (id) => atoms?.has(id) === true || resolvedIds.has(id)
   let changed = true
   while (changed) {
     changed = false
@@ -107,17 +109,24 @@ const collectRecursiveRefs = (capability: ConversionCapability): readonly Conver
  * `validateCapability`, plus the one defect a single node can never see on its
  * own -- a `recursive-ref` chain that loops through other nodes forever
  * without ever reaching a materializer.
+ *
+ * `atoms` names further members of the graph, outside `nodes`, that the
+ * caller knows to be plain `atom`s with agreeing domains: each passes
+ * `validateCapability` and reaches a materializer by itself, and refers to no
+ * other node, so they are members and resolved without being built.
  */
 export const validateConversionGraph = (
   nodes: readonly ConversionNode[],
-  nodeOf?: (id: ConversionNodeId) => ConversionNode | undefined
+  nodeOf?: (id: ConversionNodeId) => ConversionNode | undefined,
+  atoms?: Pick<ReadonlySet<ConversionNodeId>, 'has'>
 ): void => {
-  const nodeIds: Pick<ReadonlySet<ConversionNodeId>, 'has'> = nodeOf
+  const known: Pick<ReadonlySet<ConversionNodeId>, 'has'> = nodeOf
     ? { has: (id) => nodeOf(id) !== undefined }
     : new Set(nodes.map((node) => node.id))
+  const nodeIds: Pick<ReadonlySet<ConversionNodeId>, 'has'> = atoms ? { has: (id) => known.has(id) || atoms.has(id) } : known
   for (const node of nodes) validateCapability(node.capability, nodeIds, node.id)
 
-  const resolved = resolveMaterializability(nodes, nodeOf)
+  const resolved = resolveMaterializability(nodes, nodeOf, atoms)
   for (const node of nodes) {
     for (const ref of collectRecursiveRefs(node.capability)) {
       if (!resolved(ref)) {
