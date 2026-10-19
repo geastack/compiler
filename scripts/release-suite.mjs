@@ -384,7 +384,6 @@ if (wanted('perf')) {
   // @geastack/parallel workloads (against Rayon and a C++ pool), compared with
   // the baseline benchmarks/ records for this machine. A machine without one
   // fails: an unmeasured release has not passed this lane.
-  const benchmarks = checkout('benchmarks', 'node/release-gate/perf-gate.mjs')
   // GEA_PERF_HOST names the benchmark machine (an ssh host) the gate runs on
   // instead of this one: a desktop, and a WSL VM above all, drifts too much for
   // the gate's controls. remote.sh copies the checkouts there and runs it.
@@ -403,7 +402,7 @@ if (wanted('perf')) {
     last(
       'perf',
       `HTTP and parallel performance gate on ${perfHost}`,
-      benchmarks,
+      checkout('benchmarks', 'node/release-gate/perf-gate.mjs'),
       ['bash', 'node/release-gate/remote.sh', '--fix-loopback'],
       {
         GEA_PERF_HOST: perfHost,
@@ -411,11 +410,17 @@ if (wanted('perf')) {
       }
     )
   else if (process.platform === 'linux' && process.arch === 'x64')
-    last('perf', 'HTTP and parallel performance gate', benchmarks, ['node', 'node/release-gate/perf-gate.mjs', '--fix-loopback'], {
-      GEA_COMPILER_DIR: compiler,
-      GEA_NODE_COMPAT_DIR: join(workspace, 'node-compat'),
-      PARALLEL_ROOT: join(workspace, 'parallel')
-    })
+    last(
+      'perf',
+      'HTTP and parallel performance gate',
+      checkout('benchmarks', 'node/release-gate/perf-gate.mjs'),
+      ['node', 'node/release-gate/perf-gate.mjs', '--fix-loopback'],
+      {
+        GEA_COMPILER_DIR: compiler,
+        GEA_NODE_COMPAT_DIR: join(workspace, 'node-compat'),
+        PARALLEL_ROOT: join(workspace, 'parallel')
+      }
+    )
   else hostOnly.push('perf: the HTTP and parallel performance gate (needs Linux on x86-64)')
 }
 
