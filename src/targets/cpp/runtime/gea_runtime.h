@@ -46908,7 +46908,12 @@ void styleProperty(Node& node, const std::string& prop, const std::string& prope
     // The embedded stylesheet already consumes numeric lengths and opacity.
     // Avoid formatting a fractional double only to parse it back on every
     // animation tick. Unsupported properties retain their string semantics.
-    if constexpr (requires { node.style().setNumberProperty(property, static_cast<double>(value)); }) {
+    // A handle that writes the number itself skips the Style a `style()` call
+    // returns, and with it a second owner of the node's identity per write.
+    if constexpr (requires { node.setStyleNumberProperty(property, static_cast<double>(value)); }) {
+      if (std::isfinite(static_cast<double>(value)) &&
+          node.setStyleNumberProperty(property, static_cast<double>(value))) return;
+    } else if constexpr (requires { node.style().setNumberProperty(property, static_cast<double>(value)); }) {
       if (std::isfinite(static_cast<double>(value)) &&
           node.style().setNumberProperty(property, static_cast<double>(value))) return;
     }
