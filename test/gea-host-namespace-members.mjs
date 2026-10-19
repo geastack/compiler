@@ -6,7 +6,7 @@ import { adoptGeaPackage } from '../dist/plugins/gea/host.js'
 
 const root = resolve(import.meta.dirname, '..')
 const fixture = resolve(root, 'test/fixtures/gea-host-namespace-members')
-adoptGeaPackage(resolve(root, '../core/packages/geatsc-plugin-gea/dist/index.js'))
+adoptGeaPackage(resolve(process.env.GEA_CORE_ROOT ?? resolve(root, '../core'), 'packages/geatsc-plugin-gea/dist/index.js'))
 
 // A namespace path's member call renders the host's free function; the path
 // itself is never a value, and no logical receiver crosses the call.
