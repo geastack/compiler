@@ -171,6 +171,13 @@ std::string printable(const std::string &text) {
 }  // namespace
 
 int main() {
+#if defined(_LIBCPP_VERSION)
+  // The rewrite exists for the MSVC STL and resumes through `(?=\1)`, a
+  // back-reference inside a lookahead that libc++'s parser rejects. libc++ has
+  // LWG 2503, so it never takes this path; libstdc++ and the MSVC STL run it.
+  std::printf("legacy-anchor rewrite not applicable on libc++\n");
+  return 0;
+#endif
   int failures = 0;
   for (const Case &c : cases) {
     const std::string actual = run(c);
