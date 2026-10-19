@@ -55,6 +55,17 @@ const onlyAt = process.argv.findIndex((argument) => argument === '--only' || arg
 const only = onlyAt < 0 ? undefined : (process.argv[onlyAt].slice(7) || process.argv[onlyAt + 1] || '').split(',')
 const wanted = (lane) => !only || only.includes(lane)
 
+const buildHostReachable = (host) => {
+  if (process.env.GEA_PARALLEL_HOST) return true
+  try {
+    execFileSync('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', host, 'true'], { stdio: 'ignore' })
+    return true
+  } catch {
+    console.log(`parallel: ${host} is unreachable, the native fixtures build on this host`)
+    return false
+  }
+}
+
 const checkout = (name, marker) => {
   const directory = join(workspace, name)
   if (!workspace || !existsSync(join(directory, marker)))
@@ -211,8 +222,11 @@ if (wanted('parallel')) {
   add('parallel', 'test', parallel, ['npm', 'test'])
   add('parallel', 'refusals', parallel, ['npm', 'run', 'test:refusals'])
   // Linux and Windows build and run the fixtures on this host; elsewhere the
-  // runner ships them to its Linux build machine.
-  add('parallel', 'native', parallel, ['node', 'test/run-native.mjs', ...(process.platform !== 'darwin' ? ['--host=local'] : [])])
+  // runner ships them to its Linux build machine, GEA_PARALLEL_HOST or its
+  // default -- unless that machine cannot be reached, when this host, which
+  // has the sanitizers the fixtures build with, builds and runs them itself.
+  const local = process.platform !== 'darwin' || !buildHostReachable(process.env.GEA_PARALLEL_HOST ?? 'dashwin-geastack')
+  add('parallel', 'native', parallel, ['node', 'test/run-native.mjs', ...(local ? ['--host=local'] : [])])
   if (process.platform === 'win32')
     hostOnly.push('parallel: the ThreadSanitizer builds of test/run-native.mjs (clang has no ThreadSanitizer on Windows)')
 }
