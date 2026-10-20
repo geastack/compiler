@@ -26,6 +26,7 @@ const units = [
   'promise-union-no-throwaway-state',
   'cycle-collector-generations',
   'cycle-full-collection-pacing',
+  'map-direct-index',
   'cycle-collector-task-handoff',
   'cycle-collector-untraced-owner-cascade',
   'callable-identity-lazy',

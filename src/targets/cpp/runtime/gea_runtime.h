@@ -15415,6 +15415,10 @@ class Map {
     entries_.clear();
     serials_.clear();
     if constexpr (indexable) index_.clear();
+    if constexpr (directable) {
+      direct_.clear();
+      directOk_ = true;
+    }
   }
 
   /**
@@ -15471,12 +15475,49 @@ class Map {
    * of an unchanging Map (parallel regions) stay read-only.
    */
   static constexpr bool indexable = detail::MapKeyIndexable<K>::value;
+  /**
+   * Key -> position + 1 for a Map whose every key is a small non-negative
+   * integer Number -- object ids, slot numbers -- held in a plain array the
+   * key indexes. Such a Map is typically read per frame per object (a
+   * renderer's per-geometry and per-program state tables): below `indexFrom`
+   * a read compared the key against every entry, and above it hashed into a
+   * node-based table, where one array load answers either.
+   *
+   * It is kept while every key so far qualifies and the array stays within
+   * a constant factor of the entry count; the first key that does not
+   * (fractional, negative, NaN, or far past the others) drops it for good and
+   * the Map falls back to `index_` and the scan. Like `index_`, it is only a
+   * position cache: storage order, serials and iteration are untouched.
+   */
+  static constexpr bool directable = std::is_same_v<K, double>;
+  static constexpr std::uint32_t directSlotLimit = std::uint32_t{1} << 20;
+  /** Whether `key` is an integer in [0, directSlotLimit), and which slot it names. -0 is 0, as SameValueZero says. */
+  static bool directSlotOf(const K& key, std::uint32_t& slot) {
+    if constexpr (directable) {
+      if (!(key >= 0.0 && key < static_cast<double>(directSlotLimit))) return false;
+      slot = static_cast<std::uint32_t>(key);
+      return static_cast<double>(slot) == key;
+    } else {
+      (void)key;
+      (void)slot;
+      return false;
+    }
+  }
   static constexpr std::size_t indexFrom = 8;
   static constexpr std::size_t notFound = static_cast<std::size_t>(-1);
   using Index = std::conditional_t<indexable, std::unordered_map<K, std::size_t, detail::MapKeyHash, detail::MapKeyEqual>,
                                    detail::NoMapIndex>;
 
   std::size_t positionOf(const K& key) const {
+    if constexpr (directable) {
+      // Every key is a small non-negative integer (`direct_`), so a key that
+      // is not one is absent, and one that is names its slot.
+      if (directOk_) {
+        std::uint32_t slot = 0;
+        if (!directSlotOf(key, slot) || slot >= direct_.size()) return notFound;
+        return static_cast<std::size_t>(direct_[slot]) - 1;
+      }
+    }
     if constexpr (indexable) {
       if (!index_.empty()) {
         const auto found = index_.find(key);
@@ -15497,6 +15538,26 @@ class Map {
     }
   }
   void indexAppended() {
+    if constexpr (directable) {
+      if (directOk_) {
+        std::uint32_t slot = 0;
+        const std::size_t count = entries_.size();
+        if (directSlotOf(entries_.back().first, slot) && slot < directSlotLimit && slot < 64 + 16 * count) {
+          if (slot >= direct_.size()) direct_.resize(static_cast<std::size_t>(slot) + 1, 0);
+          direct_[slot] = static_cast<std::uint32_t>(count);
+          return;
+        }
+        // A key outside the direct table's domain: the Map answers through
+        // the scan and the hashed index from here on, as it always did.
+        directOk_ = false;
+        direct_.clear();
+        direct_.shrink_to_fit();
+        if constexpr (indexable) {
+          if (entries_.size() >= indexFrom) rebuildIndex();
+        }
+        return;
+      }
+    }
     if constexpr (indexable) {
       if (!index_.empty()) index_.emplace(entries_.back().first, entries_.size() - 1);
       else if (entries_.size() >= indexFrom) rebuildIndex();
@@ -15505,6 +15566,18 @@ class Map {
   // Erasing shifted every later entry down one position (an O(n) move already),
   // so the index is renumbered by rebuilding it, or dropped below `indexFrom`.
   void indexRemoved() {
+    if constexpr (directable) {
+      if (directOk_) {
+        // Erasing shifted every later entry down one position: renumber.
+        std::fill(direct_.begin(), direct_.end(), 0u);
+        for (std::size_t index = 0; index < entries_.size(); ++index) {
+          std::uint32_t slot = 0;
+          directSlotOf(entries_[index].first, slot);
+          direct_[slot] = static_cast<std::uint32_t>(index + 1);
+        }
+        return;
+      }
+    }
     if constexpr (indexable) {
       if (!index_.empty()) rebuildIndex();
     }
@@ -15515,6 +15588,8 @@ class Map {
   std::uint64_t nextSerial_ = 1;
   std::shared_ptr<const detail::MapViewSource<K, V>> view_;
   Index index_;
+  std::vector<std::uint32_t> direct_;
+  bool directOk_ = true;
 };
 
 namespace detail {
