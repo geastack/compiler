@@ -27,7 +27,7 @@ export {
   type VirtualMethodImplementor
 }
 import { cppFormalName } from './emit-context.js'
-import { nativeFieldPolicyType, wellKnownSymbolEnumNameOf } from './records.js'
+import { nativeFieldPolicyType, switchedByKeyLength, wellKnownSymbolEnumNameOf } from './records.js'
 import {
   cppAbiParameterType,
   cppBodyName,
@@ -752,7 +752,7 @@ export const prototypeReadHooks = (
         : [
             `(!gea_key.isSymbol() && (${keys!
               .filter((key) => !cppRecordFieldKeyIsSymbol(key))
-              .map((key) => `gea_key.text() == ${cppStringLiteral(key)}`)
+              .map((key) => `std::string_view{gea_key.text()} == ${cppStringLiteral(key)}`)
               .join(' || ')}))`
           ]),
       ...(keys?.some(cppRecordFieldKeyIsSymbol)
@@ -769,9 +769,14 @@ export const prototypeReadHooks = (
                 ? []
                 : [
                     '  if (!gea_key.isSymbol()) {',
-                    '    const std::string& gea_name = gea_key.text();',
-                    ...texts.map(
-                      (getter) => `    if (gea_name == ${cppStringLiteral(getter.key)}) { gea_out = ${getter.text}; return true; }`
+                    // A `string_view` under a switch on the length, as the
+                    // record field dispatchers do (`switchedByKeyLength`): a
+                    // class with seventy methods answered a read of a name it
+                    // does not have -- an optional member probed on an object
+                    // of a sibling class -- with seventy `strlen`+`memcmp`s.
+                    '    const std::string_view gea_name = gea_key.text();',
+                    ...switchedByKeyLength(
+                      texts.map((getter) => `    if (gea_name == ${cppStringLiteral(getter.key)}) { gea_out = ${getter.text}; return true; }`)
                     ),
                     '  }'
                   ]),

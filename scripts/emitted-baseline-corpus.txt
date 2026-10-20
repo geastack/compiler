@@ -65,7 +65,7 @@ host-throw.ts.cpp 49e9601f4496
 host-tonumber.ts.cpp b63e886b715a
 host-tostring.ts.cpp f118bea1c466
 ifelse.ts.cpp 7c9e0828976b
-in-operator-class-through-interface.ts.cpp a9cc1db5d0d0
+in-operator-class-through-interface.ts.cpp 9a08e2952de9
 in-operator-record-keys.ts.cpp de58f4c8ed8e
 index-signature-only.ts.cpp 6d2ff867a266
 initializer-write-attribution-repro.js.cpp 67851e40f6d8

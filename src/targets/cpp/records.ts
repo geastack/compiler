@@ -1675,7 +1675,7 @@ const keyByteLengthOfBranch = (line: string): number | null => {
  * it skips.
  */
 const switchedKeyBranches = 6
-const switchedByKeyLength = (body: readonly string[]): readonly string[] => {
+export const switchedByKeyLength = (body: readonly string[]): readonly string[] => {
   const out: string[] = []
   let run: { readonly line: string; readonly bytes: number }[] = []
   const flush = (): void => {
