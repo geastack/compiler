@@ -13928,6 +13928,7 @@ class Dictionary {
     if (first_ && first_->first == key) return first_->second;
     if (!first_ && entries_.empty()) {
       enumerableKeys_.reset();
+      noteKey(key);
       first_.emplace(detail::duplicateString(key), V{});
       if constexpr (aliasable) detail::noteDocumentDataKeyCreated(this, key);
       return first_->second;
@@ -13935,6 +13936,7 @@ class Dictionary {
     const std::size_t found = findPosition(key);
     if (found != npos) return entries_[found].second;
     enumerableKeys_.reset();
+    noteKey(key);
     Entry& entry = entries_.emplace_back(detail::duplicateString(key), V{});
     GEA_EH_TRY_ANY(gea_eh_failed) {
       indexInsert(entries_.size() - 1);
@@ -13993,6 +13995,7 @@ class Dictionary {
   V readHinted(std::string_view key, std::atomic<std::uint32_t>& hint) const {
     if constexpr (!aliasable) {
       if (!view_) [[likely]] {
+        if (!mayHoldKey(key)) return V{};
         if (first_ && first_->first == key) return first_->second;
         const std::size_t found = hintedPosition(key, hint);
         return found == npos ? V{} : entries_[found].second;
@@ -14005,6 +14008,7 @@ class Dictionary {
   Carrier readIfPresentHinted(std::string_view key, std::atomic<std::uint32_t>& hint) const {
     if constexpr (!aliasable) {
       if (!view_) [[likely]] {
+        if (!mayHoldKey(key)) return Carrier();
         if (first_ && first_->first == key) return Carrier(first_->second);
         const std::size_t found = hintedPosition(key, hint);
         return found == npos ? Carrier() : Carrier(entries_[found].second);
@@ -14518,6 +14522,7 @@ class Dictionary {
   void appendAbsent(const std::string& key, V value) {
     if (view_) [[unlikely]] detail::refuseAliasedDictionaryStore();
     enumerableKeys_.reset();
+    noteKey(key);
     if (!first_ && entries_.empty()) {
       first_.emplace(detail::duplicateString(key), std::move(value));
       return;
@@ -14633,6 +14638,28 @@ class Dictionary {
   // `std::map` that cost one node allocation per key.
   static constexpr std::size_t kScanLimit = 8;
   static constexpr std::size_t npos = static_cast<std::size_t>(-1);
+  /**
+   * One bit per key this table has ever stored, chosen from the key's length
+   * and its first and last bytes (`keyBit`), so a read of a key whose bit is
+   * clear is answered "absent" without touching an entry.
+   *
+   * A renderer probes every geometry for entries it rarely has -- a color or
+   * tangent attribute, morph targets -- once per draw, each a different table,
+   * so a miss walked every entry's key and no per-site hint could remember it.
+   * The bit is set by every insertion and never cleared: a deleted key leaves
+   * it set, and two keys may share one, which only sends the read on to the
+   * lookup it always made. A clear bit is proof, because nothing stores a key
+   * without setting it. Only the plain own-entry reads consult it; a view or
+   * an alias holds no entries of its own here.
+   */
+  std::uint64_t keyMask_ = 0;
+  static constexpr unsigned keyBit(std::string_view key) {
+    const std::size_t size = key.size();
+    const unsigned edges = size == 0 ? 0u : static_cast<unsigned>(static_cast<unsigned char>(key[0])) * 3u + static_cast<unsigned char>(key[size - 1]);
+    return static_cast<unsigned>(size * 7u + edges) & 63u;
+  }
+  void noteKey(std::string_view key) { keyMask_ |= std::uint64_t{1} << keyBit(key); }
+  bool mayHoldKey(std::string_view key) const { return (keyMask_ & (std::uint64_t{1} << keyBit(key))) != 0; }
   static constexpr std::uint32_t kEmptySlot = static_cast<std::uint32_t>(-1);
   std::vector<std::uint32_t> index_;
   std::size_t findPosition(std::string_view key) const {
