@@ -2,10 +2,11 @@ import assert from 'node:assert/strict'
 import { mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { executableSuffix } from './executable-suffix.mjs'
 const root = resolve(import.meta.dirname, '..')
 const output = resolve(root, 'measurements/cxx-allocation-runtime')
 mkdirSync(output, { recursive: true })
-const binary = resolve(output, 'dynamic-array-some-test')
+const binary = resolve(output, `dynamic-array-some-test${executableSuffix}`)
 const env = { ...process.env, GEA_AUDIO_DISABLED: '1' }
 let calls = 0
 const sparse = [, 7]

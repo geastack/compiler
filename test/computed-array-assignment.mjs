@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { compile } from '../dist/compiler.js'
+import { executableSuffix } from './executable-suffix.mjs'
 
 test('computed array assignment evaluates RHS before target keys and preserves swaps', () => {
   const root = resolve(import.meta.dirname, '..')
@@ -26,7 +27,7 @@ test('computed array assignment evaluates RHS before target keys and preserves s
   assert.ok(result.certificate, JSON.stringify(result.diagnostics.diagnostics))
   assert.deepEqual(result.loweringBlockers, [])
   assert.deepEqual(result.emissionRefusals, [])
-  const binary = resolve(dir, 'test')
+  const binary = resolve(dir, `test${executableSuffix}`)
   execFileSync(
     'clang++',
     ['-std=c++20', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],

@@ -8,6 +8,10 @@ import { createJsxRuntimeModuleResolver } from '../../semantics/jsx-runtime-prov
 import { createGeaProviderAuthority, derivesFromGeaComponent, derivesFromGeaReactiveBase } from './contract.js'
 import { geaCoreDeclarationFileName } from './host.js'
 
+// TypeScript spells paths with forward slashes on every platform; node:path
+// joins with a backslash on Windows. Compare files on one separator.
+const spelled = (file: string | null | undefined) => file?.replaceAll('\\', '/')
+
 const inspect = (entry: string, project: string | null) => {
   const compiled = createProgram({
     rootFileNames: [resolve(entry)],
@@ -32,15 +36,15 @@ test('explicit frontend-selected source SDK exports retain their class and react
   assert.equal(derivesFromGeaComponent(runtime.compiled.checker, runtime.types.get('App')!, runtime.authority), true)
   assert.equal(derivesFromGeaReactiveBase(runtime.compiled.checker, runtime.types.get('State')!, runtime.authority), true)
   assert.equal(
-    runtime.compiled.runtimeModuleTargetOf('@geastack/core', runtime.source.fileName, 'import'),
-    resolve('test/runtime/_component-framework.tsx')
+    spelled(runtime.compiled.runtimeModuleTargetOf('@geastack/core', runtime.source.fileName, 'import')),
+    spelled(resolve('test/runtime/_component-framework.tsx'))
   )
 })
 
 test('the configured automatic JSX provider exports are selected by the same frontend resolver', () => {
   const factory = inspect('test/fixtures/jsx-factory/app.tsx', 'test/fixtures/jsx-factory/tsconfig.json')
   const provider = createJsxRuntimeModuleResolver(factory.compiled)(factory.source.fileName)
-  assert.equal(provider?.fileName, resolve('test/fixtures/jsx-factory/jsx-runtime.ts'))
+  assert.equal(spelled(provider?.fileName), spelled(resolve('test/fixtures/jsx-factory/jsx-runtime.ts')))
   assert.equal(derivesFromGeaComponent(factory.compiled.checker, factory.types.get('Header')!, factory.authority), true)
 })
 
