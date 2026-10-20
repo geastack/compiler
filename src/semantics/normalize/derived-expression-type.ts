@@ -2721,6 +2721,47 @@ export const isDistinctClassConstructorPair = (a: ts.Type, b: ts.Type): boolean 
   return first !== null && second !== null && first !== second
 }
 
+/** The class a class INSTANCE type belongs to (a generic one's own class for any instantiation), or `null` for any other type. */
+const classOfInstanceType = (type: ts.Type): ts.Symbol | null =>
+  (type.flags & ts.TypeFlags.Object) !== 0 &&
+  type.symbol !== undefined &&
+  (type.symbol.flags & ts.SymbolFlags.Class) !== 0 &&
+  type.getConstructSignatures().length === 0
+    ? type.symbol
+    : null
+
+/** `type`'s class and every ancestor class the checker resolves for it, nearest first. */
+const classChainOf = (checker: ts.TypeChecker, type: ts.Type): ts.Symbol[] => {
+  const chain: ts.Symbol[] = []
+  let current: ts.Type | undefined = type
+  while (current !== undefined) {
+    const own = classOfInstanceType(current)
+    if (own === null || chain.includes(own)) break
+    chain.push(own)
+    const target: ts.Type = (current as ts.TypeReference).target ?? current
+    current = target.isClassOrInterface() ? checker.getBaseTypes(target).find((base) => classOfInstanceType(base) !== null) : undefined
+  }
+  return chain
+}
+
+/**
+ * Whether `other` is a class instance that every class arm of `candidate` it is
+ * assignable to fails to hold nominally: none of those arms is its own class or
+ * one of its ancestors, and `candidate` offers no other arm it is assignable to.
+ * The checker's assignability is structural, so a base object is "assignable"
+ * to a subclass that adds no member; this compiler's class carrier is not.
+ */
+const isClassInstanceOutsideClassArms = (checker: ts.TypeChecker, other: ts.Type, candidate: ts.Type): boolean => {
+  if (classOfInstanceType(other) === null) return false
+  const receiving = (candidate.isUnion() ? candidate.types : [candidate]).filter((arm) => checker.isTypeAssignableTo(other, arm))
+  if (receiving.length === 0) return false
+  const chain = classChainOf(checker, other)
+  return receiving.every((arm) => {
+    const armClass = classOfInstanceType(arm)
+    return armClass !== null && !chain.includes(armClass)
+  })
+}
+
 /**
  * A constructor type with no class anchor -- `{ new (bytes: Uint8Array):
  * Reply; make(bytes: Uint8Array): Reply }`, `new () => Component`.
@@ -2881,6 +2922,14 @@ export const widestOf = (checker: ts.TypeChecker, types: readonly ts.Type[]): ts
     // as "the" type made the other's default convert into it --
     // `[cls = class {}, xCls = class X {}]` read `xCls.name` as `"cls"`.
     if (isDistinctClassConstructorPair(other, candidate)) return false
+    // The same holds for the INSTANCES: a class instance carrier is nominal
+    // too (`class-ref`), and a base-class object is not a subclass object
+    // however alike their shapes. `show(cube)` then `show(new Base())` made
+    // the parameter the subclass, the first observation the base was
+    // structurally assignable to, and the base object then entered it through
+    // an unchecked downcast. Only an ancestor class (or the same one) covers
+    // a class instance.
+    if (isClassInstanceOutsideClassArms(checker, other, candidate)) return false
     // An empty object literal the program EVALUATED covers nothing but another
     // empty literal. It is a fresh object with zero members -- the most precise
     // statement there is (see `exactEmptyObjectLiteralType`) -- and a table

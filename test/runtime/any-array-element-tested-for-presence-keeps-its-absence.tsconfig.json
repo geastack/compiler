@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "strict": false, "strictNullChecks": true, "noUncheckedIndexedAccess": false, "types": [] },
+  "files": ["any-array-element-tested-for-presence-keeps-its-absence.runtime.js"]
+}

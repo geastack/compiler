@@ -2397,20 +2397,31 @@ const emitTypedArrayConstruct = (
     return
   }
   // A BOXED argument. The overload this dispatch reads off a carrier is read
-  // off the BOX'S TAG instead, and the tag can pick exactly one: `Tag::Number`
-  // is the `length` overload. `unboxedLoadText` renders that as the
-  // tag-and-payload-checked read, so a box holding anything else aborts by
-  // name at the construction rather than being reinterpreted as a length --
-  // the same discipline every other boxed read in this backend keeps, and the
-  // reason `preflight/invocation-arguments.ts` can state `scalar(number)` as
-  // this argument's target without over-claiming.
+  // off the BOX'S TAG instead, at run time, as ECMA-262 23.2.5.1 itself reads
+  // it off the value: `Tag::Number` is the `length` overload, and anything
+  // else is the numeric-Array copy `isNumericArrayCarrier` takes below.
+  // The checker cannot pick for us: an `any` argument resolves to the first
+  // declared overload, `length: number`, so `new Float32Array(out[k])` with
+  // `k` from a `string[]` reached here as a length while the box held an
+  // `ArrayObject<double>`, and the length read aborted.
+  // `unboxedLoadText` renders both reads checked, so a box holding anything
+  // else (a string, `undefined`, a boxed typed array or buffer, a non-number
+  // element) aborts by name rather than being reinterpreted.
   //
   // `new Int32Array( n )` and `new Float32Array( flatSize )` in untyped
   // JavaScript are both a length through a parameter the source never typed.
   if (carrier.kind === 'dynamic') {
-    const length = unboxedLoadText({ kind: 'scalar', domain: 'number' }, operandText(ctx, argument))
-    if (length !== null) {
-      lines.push(`${name} = gea::makeRef<${target}>(gea::detail::typedArrayLengthIndex(gea::detail::toIntegerOrInfinity(${length})));`)
+    const box = 'gea_typed_source'
+    const number: Representation = { kind: 'scalar', domain: 'number' }
+    const length = unboxedLoadText(number, box)
+    const values = unboxedLoadText({ kind: 'array-object', element: number, ownership: 'shared-refcount', extension: null }, box)
+    if (length !== null && values !== null) {
+      lines.push(
+        `${name} = ([&]() -> ${cppTypeOf(result)} { const gea::Value& ${box} = ${operandText(ctx, argument)}; ` +
+          `if (${box}.tag() == gea::Value::Tag::Number) ` +
+          `return gea::makeRef<${target}>(gea::detail::typedArrayLengthIndex(gea::detail::toIntegerOrInfinity(${length}))); ` +
+          `return gea::makeRef<${target}>(${target}::fromValues(${values})); }());`
+      )
       return
     }
   }

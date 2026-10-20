@@ -1,5 +1,5 @@
 import type { DeclarationId, FunctionId } from '../identity/ids.js'
-import type { ClassField, ClassLayout, ClassMethod } from './classes.js'
+import type { ClassAccessor, ClassField, ClassLayout, ClassMethod } from './classes.js'
 import type { ConversionCensus } from '../conversion/nodes.js'
 import type { CallableAbi, Representation } from '../representation/model.js'
 import { abiKey, representationKey } from '../representation/model.js'
@@ -35,6 +35,44 @@ export const classPrototypeMethodValueArmsOf = (
     else return null
   }
   return arms.length === 0 ? null : arms
+}
+
+/** The exact allocations below `receiver` whose lookup of `key` reaches a
+ * descendant's accessor although `receiver` itself finds a data field: three's
+ * `Material.clearcoat`, a field its `fromJSON` assigns, which
+ * `MeshPhysicalMaterial` redeclares as a getter/setter pair. An instance of
+ * such an allocation has no own data property under the key -- every base
+ * write reaches the setter -- so a base-typed read must call the getter.
+ * Empty when `receiver` does not find a field or nothing below redeclares it.
+ */
+export const classFieldAccessorArmsOf = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  receiver: DeclarationId,
+  key: string
+): readonly { readonly allocation: DeclarationId; readonly owner: DeclarationId; readonly accessor: ClassAccessor }[] => {
+  if (classMemberOf(classes, receiver, key)?.kind !== 'field') return []
+  const arms: { allocation: DeclarationId; owner: DeclarationId; accessor: ClassAccessor }[] = []
+  for (const [allocation, layout] of classes) {
+    if (!extendsClass(classes, allocation, receiver)) continue
+    if (layout.uninstantiable === true || layout.allocationAbsent === true) continue
+    const site = classMemberOf(classes, allocation, key)
+    if (site?.kind === 'accessor') arms.push({ allocation, owner: site.owner, accessor: site.accessor })
+  }
+  return arms
+}
+
+/** The keys `declaration`'s own accessors redeclare over a data field its
+ * bases find -- the reflected half of `classFieldAccessorArmsOf`, asked by
+ * the class whose own-property hooks must stop answering from the base slot.
+ */
+export const classAccessorShadowedFieldKeysOf = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  declaration: DeclarationId
+): readonly string[] => {
+  const layout = classes.get(declaration)
+  const base = layout?.base ?? null
+  if (!layout || base === null) return []
+  return layout.accessors.filter((accessor) => classMemberOf(classes, base, accessor.key)?.kind === 'field').map((accessor) => accessor.key)
 }
 
 /** All prototype keys reachable through this native family, including keys

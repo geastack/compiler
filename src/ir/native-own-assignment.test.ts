@@ -5,10 +5,10 @@ import { resolve } from 'node:path'
 import { compile, type CompilationResult } from '../compiler.js'
 import { nativeObjectDataSlotSchemasOf } from '../semantics/native-object-data-slots.js'
 import { nativeObjectDataStorageOf } from '../projection/native-object-data.js'
-import { allOperationsOf, type CallOperation, type ConvertOperation, type GetOperation, type IrOperation } from './model.js'
+import { allOperationsOf, type CallOperation, type ConvertOperation, type GetOperation } from './model.js'
 import { nativeObjectDataSlotAuthorityOf } from './native-object-data-slots.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
-import { nativeObjectSampleEntryOf, nativeObjectSampleMatches } from './native-object-sample.js'
+import { nativeObjectSampleMatches } from './native-object-sample.js'
 import {
   nativeOwnAssignmentEffectFreeInterval,
   nativeOwnAssignmentRecipeOf,
@@ -96,7 +96,7 @@ for (const fixture of [
     }
   })
 
-test('optional bulk options install native source storage before a required owned sample', () => {
+test('optional bulk options install native source storage before a required options view reads them', () => {
   const result = compileSource()
   assert.equal(result.diagnostics.clean, true, details(result))
   assert.notEqual(result.source, null, details(result))
@@ -104,11 +104,16 @@ test('optional bulk options install native source storage before a required owne
   const assignment = operations.find(
     (operation): operation is CallOperation => operation.kind === 'call' && operation.nativeOwnAssignment !== undefined
   )
-  const sample = operations.find(
-    (operation): operation is ConvertOperation => operation.kind === 'convert' && operation.nativeObjectSample !== undefined
-  )
   assert.ok(assignment?.nativeOwnAssignment)
-  assert.ok(sample?.nativeObjectSample)
+  // The merged target enters `serialize`'s differently typed `options` as a
+  // view of the same allocation, not as an owned copy sampled from it: a record
+  // seen as another type shares its identity with it (value-records.ts,
+  // `entersView`), and the target is the allocation `Object.assign` writes.
+  assert.equal(
+    operations.some((operation) => operation.kind === 'convert' && operation.nativeObjectSample !== undefined),
+    false,
+    'the options record is viewed, never sampled'
+  )
   const depth = assignment.nativeOwnAssignment.sources.flatMap((source) => source.fields).find((field) => field.key === 'depth')
   assert.equal(depth?.destination, 'extension')
   assert.equal(depth?.storage.kind, 'scalar')
@@ -125,9 +130,6 @@ test('optional bulk options install native source storage before a required owne
     legacy?.storageFits.some((fit) => fit.source.kind === 'scalar' && fit.storage.kind === 'optional'),
     true
   )
-  assert.equal(sample.nativeObjectSample.owner.value, sample.source.value, 'held reads use the recovered original allocation')
-  assert.equal(sample.nativeObjectSample.fields.find((field) => field.key === 'depth')?.presence, 'proven')
-  assert.equal(sample.nativeObjectSample.fields.find((field) => field.key === 'depth')?.sourceOrdinal, 2)
   assert.equal(
     operandsOfIrOperation(assignment).some((operand) => operand.value === assignment.nativeOwnAssignment!.owner.value),
     true
@@ -135,6 +137,7 @@ test('optional bulk options install native source storage before a required owne
   assert.equal(result.slotDrift.length, 0)
   assert.equal(result.printerDrift.length, 0)
   assert.match(result.source!, /nativeObjectDataSet/)
+  assert.match(result.source!, /makeLiveViewWithOrigin/, 'serialize reads the assigned allocation through a live view')
   assert.doesNotMatch(result.source!, /gea::Value::box|gea::nativeDynamicSet/)
 })
 
@@ -279,56 +282,28 @@ test('native bulk receipts reject substituted source SSA, store node and origina
   )
 })
 
-test('owned sampling requires the installing normal edge and exact owner/key/presence citations', () => {
+test('owned sampling is not minted where the sampled record is viewed instead', () => {
+  // This program's `serialize( value, serializeOptions )` was the owned
+  // sample's one producer here. The options record now shares the assigned
+  // allocation's identity (a record seen as another type is a view of it), so
+  // no convert carries a sample receipt, and none needs one: the receipt
+  // checker accepts every convert as it stands, so no sampling conversion was
+  // planned and then left without the receipt that authenticates it.
   const result = compileSource()
-  const block = blocksOf(result).find((block) =>
-    block.operations.some((one) => one.kind === 'convert' && one.nativeObjectSample !== undefined)
+  assert.equal(result.diagnostics.clean, true, details(result))
+  const operations = blocksOf(result).flatMap(allOperationsOf)
+  assert.equal(
+    operations.some((one) => one.kind === 'convert' && one.nativeObjectSample !== undefined),
+    false
   )
-  assert.ok(block)
-  const operation = block.operations.find((one): one is ConvertOperation => one.kind === 'convert' && one.nativeObjectSample !== undefined)
-  assert.ok(operation?.nativeObjectSample)
-  const before: readonly IrOperation[] = block.operations.slice(0, block.operations.indexOf(operation))
   const input = inputOf(result)
-  assert.equal(nativeObjectSampleMatches(operation, before, input), true)
-  const { nativeObjectSample: omitted, ...withoutReceipt } = operation
-  assert.equal(nativeObjectSampleMatches(withoutReceipt, before, input), false)
-  assert.equal(
-    nativeObjectSampleMatches(
-      {
-        ...operation,
-        nativeObjectSample: {
-          ...operation.nativeObjectSample,
-          owner: { ...operation.nativeObjectSample.owner, value: 'different-owner' as never }
-        }
-      },
-      before,
-      input
-    ),
-    false
-  )
-  assert.equal(
-    nativeObjectSampleMatches(
-      {
-        ...operation,
-        nativeObjectSample: {
-          ...operation.nativeObjectSample,
-          fields: operation.nativeObjectSample.fields.map((field) => ({ ...field, sourceOrdinal: 1 }))
-        }
-      },
-      before,
-      input
-    ),
-    false
-  )
-  assert.equal(
-    nativeObjectSampleEntryOf(
-      operation.nativeObjectSample.observed,
-      operation.result.representation,
-      before.filter((one) => one.kind !== 'call' || one.lineage !== operation.nativeObjectSample!.assignment),
-      input
-    ),
-    null
-  )
+  for (const block of blocksOf(result)) {
+    const blockOperations = allOperationsOf(block)
+    blockOperations.forEach((operation, index) => {
+      if (operation.kind !== 'convert') return
+      assert.equal(nativeObjectSampleMatches(operation, blockOperations.slice(0, index), input), true)
+    })
+  }
 })
 
 test('complete bulk storage includes a later native parameter-alias writer instead of hiding it behind closure', () => {

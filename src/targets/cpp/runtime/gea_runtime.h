@@ -166,6 +166,17 @@ namespace gea {
   return value;
 }
 
+/** `float32Product`'s pin for a double product: `Math.hypot` squares and sums
+ * in one expression, and Clang's default fuses that pair into one rounding. */
+[[gnu::always_inline]] inline double float64Product(double value) {
+#if defined(__aarch64__)
+  __asm__("" : "+w"(value));
+#elif (defined(__x86_64__) || defined(__i386__)) && defined(__SSE2__)
+  __asm__("" : "+x"(value));
+#endif
+  return value;
+}
+
 namespace detail {
 
 inline void collectReferenceCycles(bool full);
@@ -15971,6 +15982,15 @@ struct ArrayObjectElementOf<ArrayObject<Element>> {
 };
 
 namespace detail {
+template <typename Element>
+ArrayObject<Element> arrayObjectBaseProbe(const ArrayObject<Element>&);
+template <typename T>
+using ArrayObjectBaseOf = decltype(arrayObjectBaseProbe(std::declval<const T&>()));
+template <typename T>
+concept DerivedArrayObject = !IsArrayObjectStruct<T>::value && requires { typename ArrayObjectBaseOf<T>; };
+}
+
+namespace detail {
 template <typename T>
 struct DynamicCarrier;
 }  // namespace detail
@@ -20236,6 +20256,8 @@ struct Error;
 namespace host {
 inline gea::Ref<gea::runtime::Error> createRuntimeError(const char* kind, const gea::Optional<std::string>& message);
 inline bool isRuntimeError(const gea::Value& value);
+inline gea::Ref<gea::runtime::Error> runtimeErrorOf(const gea::Value& value);
+inline bool isErrorValue(const gea::Value& value);
 inline bool instanceOfRuntimeError(const gea::Value& value, const char* kind);
 inline std::string runtimeErrorString(const gea::Value& value);
 [[noreturn]] inline void throwRuntimeError(const char* kind, const std::string& message);
@@ -24448,6 +24470,20 @@ struct DynamicCallableCarrier<Optional<T>> {
   }
 };
 
+/**
+ * The compiler's certified live view of a dynamic object as record `T`, for a
+ * record a boxed callable's frame names (`program-conversions.ts`'s
+ * `dynamic-call-argument`). The generated program specializes it for exactly
+ * the records it published that recipe for; every other `T` has none.
+ */
+template <typename T>
+struct DynamicArgumentView {
+  static constexpr bool installed = false;
+};
+
+template <typename Element>
+gea::Ref<ArrayObject<Element>> dynamicArgumentArrayView(const Value& value);
+
 template <typename T>
 struct DynamicCarrier<gea::Ref<T>> {
   static constexpr bool supported = true;
@@ -24459,6 +24495,19 @@ struct DynamicCarrier<gea::Ref<T>> {
   }
   static gea::Ref<T> in(const Value& value, std::size_t position) {
     if (value.tag() == Value::Tag::Undefined) refuseMissingCallArgument(position);
+    // A caller hands the callee its own object, whatever layout the caller
+    // gave it: `pts.map(([r, y]) => ...)` over `number[]` rows, an options
+    // literal into an `o = {}` parameter. Another layout is read through a
+    // live view of that same object, so the callee's writes reach the caller.
+    if (value.tag() == Value::Tag::Object && !accepts(value)) {
+      if constexpr (IsArrayObjectStruct<T>::value) {
+        using Element = typename ArrayObjectElementOf<T>::type;
+        if constexpr (DynamicCarrier<Element>::supported)
+          if (value.isArrayPayload()) return dynamicArgumentArrayView<Element>(value);
+      } else if constexpr (DynamicArgumentView<T>::installed) {
+        return DynamicArgumentView<T>::in(value);
+      }
+    }
     return unboxClassRef<T>(value, "a dynamic call argument");
   }
 };
@@ -29421,6 +29470,14 @@ using ::gea::checkedNativeArrayView;
 using ::gea::nativeArrayViewAccepts;
 using ::gea::nativeArrayViewAcceptsExact;
 using ::gea::nativeArrayViewElementsAccept;
+
+/** Each element crosses by the frame's own rule for its carrier, in both directions. */
+template <typename Element>
+gea::Ref<ArrayObject<Element>> dynamicArgumentArrayView(const Value& value) {
+  return checkedNativeArrayView<Element, NativeFieldLeafPolicy>(
+      value, "a dynamic call argument", [](const Value& entry) -> Element { return DynamicCarrier<Element>::in(entry, 0); },
+      [](const Element& entry) -> Value { return DynamicCarrier<Element>::out(entry); });
+}
 }
 
 /** A descriptor query creates a new ordinary object. Its copied native
@@ -29831,20 +29888,30 @@ bool nativeDynamicRead(const gea::Ref<T>& object, const PropertyKey& key, Value&
   }
   if (const auto read = record::readDocumentView(Ref<void>(object), key, answer)) return *read;
   if (const auto read = record::readNativeViewValue(Ref<void>(object), key, answer)) return *read;
+  // OrdinaryGet continues from every own miss to the prototype, exactly as the
+  // boxed twin `Value::getProperty` does: a class's accessors and methods are
+  // answered by its generated prototype hook, never by instance storage.
+  const auto inherited = [&]() -> bool {
+    if constexpr (requires(const T& reader) { reader.gea_readPrototypeProperty(key, answer); })
+      return object->gea_readPrototypeProperty(key, answer);
+    else
+      return false;
+  };
   if constexpr (requires(const T& reader) { reader.gea_readOwnField(key, answer); }) {
     if (object->gea_readOwnField(key, answer)) return true;
     if constexpr (detail::NativeOwnFieldPredicate<T>) {
       // A deleted fixed slot is still the layout's slot. Do not let an index
       // sidecar or expando shadow it merely because its presence bit is false.
-      if (object->gea_matchesOwnField(key)) return false;
+      if (object->gea_matchesOwnField(key)) return inherited();
     }
   }
   if constexpr (requires(const T& reader) { reader.gea_readOwnIndex(key, answer); reader.gea_matchesOwnIndex(key); }) {
     if (object->gea_readOwnIndex(key, answer)) return true;
-    if (object->gea_matchesOwnIndex(key)) return false;
+    if (object->gea_matchesOwnIndex(key)) return inherited();
   }
   const gea::Ref<DynamicObject> expando = detail::expandoFor(nativePropertyAnchor(object), false);
-  return expando && expando->readWithReceiver(key, [&] { return Value::box(Value::Tag::Object, object); }, answer);
+  if (expando && expando->readWithReceiver(key, [&] { return Value::box(Value::Tag::Object, object); }, answer)) return true;
+  return inherited();
 }
 
 // A certified missing property still evaluates its receiver/key and throws on
@@ -32584,6 +32651,26 @@ bool assignOwnPropertiesUnorderedWith(const gea::Ref<T>& source, const gea::Ref<
 
 /** Array exotic own enumerable string keys, followed by enumerable expandos. */
 template <typename Element>
+std::vector<std::string> arrayOwnEnumerableKeys(const gea::Ref<ArrayObject<Element>>& array);
+template <typename Element>
+bool arrayHasOwnEnumerableKey(const gea::Ref<ArrayObject<Element>>& array, const std::string& key);
+template <typename Element>
+std::vector<std::string> arrayOwnPropertyNames(const gea::Ref<ArrayObject<Element>>& array);
+
+template <detail::DerivedArrayObject Array>
+std::vector<std::string> arrayOwnEnumerableKeys(const gea::Ref<Array>& array) {
+  return arrayOwnEnumerableKeys(gea::Ref<detail::ArrayObjectBaseOf<Array>>(array));
+}
+template <detail::DerivedArrayObject Array>
+bool arrayHasOwnEnumerableKey(const gea::Ref<Array>& array, const std::string& key) {
+  return arrayHasOwnEnumerableKey(gea::Ref<detail::ArrayObjectBaseOf<Array>>(array), key);
+}
+template <detail::DerivedArrayObject Array>
+std::vector<std::string> arrayOwnPropertyNames(const gea::Ref<Array>& array) {
+  return arrayOwnPropertyNames(gea::Ref<detail::ArrayObjectBaseOf<Array>>(array));
+}
+
+template <typename Element>
 std::vector<std::string> arrayOwnEnumerableKeys(const gea::Ref<ArrayObject<Element>>& array) {
   std::vector<std::string> keys;
   if (!array) return keys;
@@ -33965,6 +34052,26 @@ inline bool isShortBasicLatin(const std::string &s) {
   return size == 0 || (static_cast<unsigned char>(s[0]) & 0x80u) == 0;
 }
 
+// The UTF-8 walks below take eight ASCII bytes (eight code units) per step
+// with this. A per-byte walk past a string's first non-ASCII byte made every
+// `length`/`charAt`/`slice` on a long, mostly-ASCII string -- a shader chunk
+// with one accented comment -- a full byte loop, and three.js's include
+// resolver calls them once per character.
+inline bool isAsciiWord(const unsigned char *bytes) {
+  std::uint64_t word;
+  std::memcpy(&word, bytes, 8);
+  return (word & 0x8080808080808080ull) == 0;
+}
+
+/** How many of the first `limit` bytes (at most `s.size()`) lead `s` as ASCII. */
+inline std::size_t asciiPrefixLength(const std::string &s, std::size_t limit) {
+  const unsigned char *d = reinterpret_cast<const unsigned char *>(s.data());
+  std::size_t i = 0;
+  while (i + 8 <= limit && isAsciiWord(d + i)) i += 8;
+  while (i < limit && !(d[i] & 0x80)) ++i;
+  return i;
+}
+
 inline Utf16Metadata utf16Metadata(const std::string &s) {
   // A short name answers from two loads; `OnDemandDocument.isElementName`
   // takes the metadata of the name it compares once per element.
@@ -33989,12 +34096,17 @@ inline Utf16Metadata utf16Metadata(const std::string &s) {
   std::size_t n = len;
   if (!basicLatin) {
     n = i;  // ASCII prefix: one unit per byte so far
-    for (; i < len; ++i) {
-      unsigned char byte = d[i];
-      if ((byte & 0xC0) == 0x80) continue;
+    const auto count = [&](unsigned char byte) {
+      if ((byte & 0xC0) == 0x80) return;
       if ((byte & 0xF8) == 0xF0) n += 2;
       else n += 1;
+    };
+    // Each byte counts on its own, so whole words can be classified at once.
+    for (; i + 8 <= len; i += 8) {
+      if (isAsciiWord(d + i)) n += 8;
+      else for (std::size_t k = 0; k < 8; ++k) count(d[i + k]);
     }
+    for (; i < len; ++i) count(d[i]);
   }
   return {n, basicLatin, {}};
 }
@@ -34038,9 +34150,15 @@ inline std::uint32_t decodeCodePointAt(const std::string &s, std::size_t i, std:
 /** Map a JavaScript UTF-16 code-unit offset onto this runtime's UTF-8 storage. */
 inline std::size_t byteOffsetFromUtf16(const std::string &s, std::size_t target) {
   if (isShortBasicLatin(s)) return std::min(target, s.size());
+  const unsigned char *d = reinterpret_cast<const unsigned char *>(s.data());
   std::size_t byte = 0;
   std::size_t units = 0;
   while (byte < s.size() && units < target) {
+    if (units + 8 <= target && byte + 8 <= s.size() && isAsciiWord(d + byte)) {
+      byte += 8;
+      units += 8;
+      continue;
+    }
     std::size_t width = 1;
     const std::uint32_t codePoint = decodeCodePointAt(s, byte, width);
     byte += width;
@@ -34052,10 +34170,16 @@ inline std::size_t byteOffsetFromUtf16(const std::string &s, std::size_t target)
 /** Map a matcher byte boundary back to the UTF-16 index ECMAScript exposes. */
 inline std::size_t utf16OffsetFromByte(const std::string &s, std::size_t target) {
   if (isShortBasicLatin(s)) return std::min(target, s.size());
+  const unsigned char *d = reinterpret_cast<const unsigned char *>(s.data());
   std::size_t byte = 0;
   std::size_t units = 0;
   const std::size_t stop = std::min(target, s.size());
   while (byte < stop) {
+    if (byte + 8 <= stop && isAsciiWord(d + byte)) {
+      byte += 8;
+      units += 8;
+      continue;
+    }
     std::size_t width = 1;
     const std::uint32_t codePoint = decodeCodePointAt(s, byte, width);
     byte += width;
@@ -34163,24 +34287,28 @@ inline std::string substringUtf16(const std::string &s, std::size_t startUnit, s
   // ASCII fast path: if every byte up to `endUnit` is ASCII, UTF-16 indices
   // equal byte indices, so the slice is a plain byte substr -- no
   // per-code-point surrogate accounting and no quadratic walk.
-  {
-    const unsigned char *d = reinterpret_cast<const unsigned char *>(s.data());
-    const std::size_t size = s.size();
-    const std::size_t scanLimit = endUnit < size ? endUnit : size;
-    std::size_t i = 0;
-    while (i < scanLimit && !(d[i] & 0x80)) ++i;
-    if (i == scanLimit) {
-      const std::size_t b0 = startUnit < size ? startUnit : size;
-      const std::size_t b1 = endUnit < size ? endUnit : size;
-      if (b0 >= b1) return std::string();
-      return s.substr(b0, b1 - b0);
-    }
+  const std::size_t scanLimit = endUnit < s.size() ? endUnit : s.size();
+  const std::size_t asciiPrefix = asciiPrefixLength(s, scanLimit);
+  if (asciiPrefix == scanLimit) {
+    const std::size_t b0 = startUnit < s.size() ? startUnit : s.size();
+    if (b0 >= scanLimit) return std::string();
+    return s.substr(b0, scanLimit - b0);
   }
+  const unsigned char *d = reinterpret_cast<const unsigned char *>(s.data());
   std::string out;
   out.reserve((endUnit - startUnit) * 2);
-  std::size_t unitPosition = 0;
-  std::size_t i = 0;
+  // The prefix just scanned is one unit per byte: resume the walk there.
+  std::size_t unitPosition = asciiPrefix < startUnit ? asciiPrefix : startUnit;
+  std::size_t i = unitPosition;
   while (i < s.size() && unitPosition < endUnit) {
+    // An ASCII word is eight units: counted wholly before the range, copied wholly inside it.
+    if (i + 8 <= s.size() && (unitPosition + 8 <= startUnit || (unitPosition >= startUnit && unitPosition + 8 <= endUnit)) &&
+        isAsciiWord(d + i)) {
+      if (unitPosition >= startUnit) out.append(s, i, 8);
+      i += 8;
+      unitPosition += 8;
+      continue;
+    }
     unsigned char b = static_cast<unsigned char>(s[i]);
     std::size_t length;
     bool astral = false;
@@ -34388,6 +34516,11 @@ inline std::string charAt(const std::string &s, double position) {
   position = integerPosition(position);
   // The first unit of a string whose first byte is ASCII is that byte, without scanning for its UTF-16 length.
   if (position == 0.0 && !s.empty() && static_cast<unsigned char>(s[0]) < 0x80) return std::string(1, s[0]);
+  // So is any unit inside the ASCII prefix: a scan to it, not the whole string's length.
+  if (position > 0.0 && position < static_cast<double>(s.size())) {
+    const std::size_t index = static_cast<std::size_t>(position);
+    if (asciiPrefixLength(s, index + 1) > index) return std::string(1, s[index]);
+  }
   const std::size_t length = utf16Length(s);
   if (!std::isfinite(position) || position < 0.0 || position >= static_cast<double>(length)) return std::string();
   const std::size_t index = static_cast<std::size_t>(position);
@@ -37337,6 +37470,44 @@ struct Pattern {
   // `test`: 0 unknown, 1 compiled, -1 outside the subset.
   mutable signed char simpleState = 0;
   mutable std::shared_ptr<const simple::Program> simpleProgram;
+  // The unit every match must open with, for `matchAt`'s search: -1 unknown,
+  // 0 none.
+  mutable int leadingUnitState = -1;
+
+  /**
+   * The ASCII character a match of `compiledSource` must begin with: its
+   * first atom, when that is a plain character no quantifier can skip and no
+   * top-level `|` routes around -- `/#pragma unroll_loop_start\s+…/`. 0 when
+   * the pattern does not pin one.
+   */
+  int leadingUnit() const {
+    if (leadingUnitState >= 0) return leadingUnitState;
+    leadingUnitState = 0;
+    const std::string &text = compiledSource;
+    if (ignoreCase || unicode || text.empty()) return 0;
+    const unsigned char first = static_cast<unsigned char>(text[0]);
+    if (first == 0 || first >= 0x80 || std::string_view("\\^$.|?*+()[]{}").find(static_cast<char>(first)) != std::string_view::npos) return 0;
+    if (text.size() > 1 && std::string_view("*?{").find(text[1]) != std::string_view::npos) return 0;
+    int depth = 0;
+    bool inClass = false;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+      const char c = text[i];
+      if (c == '\\') {
+        ++i;
+      } else if (inClass) {
+        if (c == ']') inClass = false;
+      } else if (c == '[') {
+        inClass = true;
+      } else if (c == '(') {
+        ++depth;
+      } else if (c == ')') {
+        --depth;
+      } else if (c == '|' && depth == 0) {
+        return 0;
+      }
+    }
+    return leadingUnitState = first;
+  }
 
   const simple::Program *simplePattern() const {
     if (simpleState == 0) {
@@ -37897,6 +38068,28 @@ struct Pattern {
       if (stateful) resetLastIndex();
       return MatchSlice{};
     }
+    // An ASCII literal (`/NUM_DIR_LIGHTS/g`) is a byte search, as in `test`:
+    // no byte of a multi-byte sequence is ASCII, so the bytes match exactly
+    // where the code units do, and a start inside a surrogate pair cannot
+    // begin a match. Transcoding the whole input for `std::regex` on every
+    // match made each `replace` of three.js's shader constants O(n) per match
+    // on top of libc++'s matcher. Sticky stays below: it must not slide off a
+    // half pair.
+    if (!sticky && !unicode && literalPattern() && !literalUtf8.empty() && gea::runtime::string::asciiOnly(literalUtf8)) {
+      const std::size_t from = gea::runtime::string::byteOffsetFromUtf16(input, startPublicUnits);
+      const std::size_t at = input.find(literalUtf8, from);
+      if (at == std::string::npos) {
+        if (stateful) resetLastIndex();
+        return MatchSlice{};
+      }
+      MatchSlice out;
+      out.matched = true;
+      out.position = gea::runtime::string::utf16OffsetFromByte(input, at);
+      out.length = literalUtf8.size();
+      if (stateful) setLastIndexUnits(out.position + out.length);
+      out.captures.push_back(gea::Optional<std::string>(literalUtf8));
+      return out;
+    }
     // A caller may write lastIndex into the middle of a surrogate pair. In
     // Unicode mode CodePointAt sees the trailing surrogate there as a lone
     // code point; preserving this exact boundary keeps sticky/global matching
@@ -37915,11 +38108,30 @@ struct Pattern {
     const Utf16Regex &compiled = compiledRegex();
     Utf16Match match;
     auto searchBegin = inputUnits.cbegin() + static_cast<std::ptrdiff_t>(startUnits);
-    if (!std::regex_search(searchBegin, inputUnits.cend(), match, compiled, searchFlagsFrom(inputUnits, startUnits))) {
+    bool found = false;
+    if (const int lead = sticky ? 0 : leadingUnit()) {
+      // libc++ allocates and frees its matcher state at every start it tries,
+      // which made one walk over a shader source (`#pragma unroll_loop_start`)
+      // cost milliseconds. A match can only start at `lead`: try only there,
+      // in order, so the first success is still the leftmost match.
+      for (auto at = searchBegin; (at = std::find(at, inputUnits.cend(), static_cast<RegexUnit>(lead))) != inputUnits.cend(); ++at) {
+        const auto flags =
+            searchFlagsFrom(inputUnits, static_cast<std::size_t>(at - inputUnits.cbegin())) | std::regex_constants::match_continuous;
+        if (std::regex_search(at, inputUnits.cend(), match, compiled, flags)) {
+          searchBegin = at;
+          found = true;
+          break;
+        }
+      }
+    } else {
+      found = std::regex_search(searchBegin, inputUnits.cend(), match, compiled, searchFlagsFrom(inputUnits, startUnits));
+    }
+    if (!found) {
       if (stateful) resetLastIndex();
       return MatchSlice{};
     }
-    const std::size_t matchStartUnits = startUnits + static_cast<std::size_t>(match.position(0));
+    const std::size_t matchStartUnits =
+        static_cast<std::size_t>(searchBegin - inputUnits.cbegin()) + static_cast<std::size_t>(match.position(0));
 #endif
     if (sticky && matchStartUnits != startUnits) {
       resetLastIndex();
@@ -43065,7 +43277,7 @@ inline std::string typeOf(const gea::Value &value) {
 // without that dynamic boundary still refuses by name inside `dynamicToString`:
 // manufacturing "[object Object]" would bypass a possible native `toString`.
 inline std::string toString(const gea::Value &value) {
-  if (gea::host::isRuntimeError(value)) return gea::host::runtimeErrorString(value);
+  if (gea::host::isErrorValue(value)) return gea::host::runtimeErrorString(value);
   switch (value.tag()) {
     case gea::Value::Tag::Undefined:
       return toStringUndefined();
@@ -43324,9 +43536,15 @@ inline double min_invoke(void*, gea::Ref<gea::ArrayObject<double>> values) {
  * another argument is NaN*; any NaN with no infinity makes it NaN; no
  * arguments at all is +0. And squaring before summing overflows to +Infinity
  * for magnitudes above ~1.34e154 whose true hypotenuse is finite, and flushes
- * to +0 below ~1.5e-162. Scaling every term by the largest magnitude first --
- * the standard formulation, and the one V8 uses -- removes both, and is exact
- * on the cases that should be exact (hypot(3, 4) is 5).
+ * to +0 below ~1.5e-162. Scaling every term by the largest magnitude first
+ * removes both, and is exact on the cases that should be exact (hypot(3, 4)
+ * is 5).
+ *
+ * The sum is V8's: Kahan-compensated, in argument order, then
+ * `sqrt(sum) * largest`, each square rounded on its own. ECMA-262 lets the
+ * result be approximated, so this is for parity with the browser: a plain sum
+ * differs from V8 on about 6% of three-operand calls, and a fused
+ * square-and-add on about 1% of two-operand calls.
  */
 inline double hypot_invoke(void*, gea::Ref<gea::ArrayObject<double>> values) {
   bool sawNaN = false;
@@ -43343,13 +43561,17 @@ inline double hypot_invoke(void*, gea::Ref<gea::ArrayObject<double>> values) {
   }
   if (sawNaN) return std::numeric_limits<double>::quiet_NaN();
   if (largest == 0.0) return 0.0;
-  double sumOfSquares = 0.0;
+  double sum = 0.0;
+  double compensation = 0.0;
   for (const auto& slot : values->slots()) {
     if (!slot.present) continue;
-    const double scaled = slot.value / largest;
-    sumOfSquares += scaled * scaled;
+    const double scaled = std::fabs(slot.value) / largest;
+    const double summand = gea::float64Product(scaled * scaled) - compensation;
+    const double preliminary = sum + summand;
+    compensation = (preliminary - sum) - summand;
+    sum = preliminary;
   }
-  return largest * std::sqrt(sumOfSquares);
+  return std::sqrt(sum) * largest;
 }
 
 // ---------------------------------------------------------------------------
@@ -44009,7 +44231,7 @@ inline void registerErrorRecordType(const char* name) {
  */
 inline bool instanceOfError(const gea::Value& value, const char* name) {
   if (value.tag() != gea::Value::Tag::Object) return false;
-  if (gea::host::isRuntimeError(value)) return gea::host::instanceOfRuntimeError(value, name);
+  if (gea::host::isErrorValue(value)) return gea::host::instanceOfRuntimeError(value, name);
   const auto found = detail::errorPayloadTypes().find(name);
   if (found == detail::errorPayloadTypes().end()) return false;
   const void* payload = value.payloadType();
@@ -44829,7 +45051,7 @@ inline void log(const std::string& text) {
   std::fputc('\n', stdout);
 }
 
-/** Node routes both `console.warn` and `console.error` to stderr; only `error` has a real call site in the corpus, so only it is implemented. */
+/** Node routes both `console.warn` and `console.error` to stderr; `warn` below delegates here. */
 inline void error(const std::string& text) {
   std::fputs(text.c_str(), stderr);
   std::fputc('\n', stderr);
@@ -44954,6 +45176,23 @@ inline void info(const gea::Value& first, const std::vector<gea::Value>& rest) {
 inline void info(const std::vector<gea::Value>& values) { log(values); }
 
 inline void info(const gea::Ref<gea::ArrayObject<gea::Value>>& values) { log(values); }
+
+/**
+ * `console.warn` -- stderr, byte for byte what `console.error` writes.
+ *
+ * Node's `warn` and `error` (`lib/internal/console/constructor.js`) both write
+ * `kFormatForStderr(args)` to `kUseStderr`; they differ only in which
+ * diagnostics channel they publish to, which this runtime does not have. So
+ * `warn` delegates to `error`, as `info` delegates to `log` above, and restates
+ * the same four overloads for the same reason: the arity shape picks the one.
+ */
+inline void warn(const std::string& text) { error(text); }
+
+inline void warn(const gea::Value& first, const std::vector<gea::Value>& rest) { error(first, rest); }
+
+inline void warn(const std::vector<gea::Value>& values) { error(values); }
+
+inline void warn(const gea::Ref<gea::ArrayObject<gea::Value>>& values) { error(values); }
 
 }  // namespace console
 
@@ -50529,17 +50768,13 @@ inline void gea_json_read(gea::json::Reader& reader, gea::embedded::ui::Signal<T
 // and `new TextDecoder(label)` for a label this implementation does not
 // support (`RangeError`).
 //
-// v1 raises those through `gea_cpp_reject(gea_cpp_value::error(...))`, which
-// needs its boxed error carrier. This runtime has no such carrier: a thrown
-// value here is a program-generated error struct (`ErrorConstructor::create`
-// is a template over one, declared *after* this header), so a library
-// function in this header cannot construct one. So each of the four aborts BY
-// NAME with the specification's own message and clause, exactly as
-// `detail::typedArrayLengthIndex`, `gea::runtime::array::reduce`'s empty-array
-// TypeError and `detail::refuseOmittedArgument` already do for the same
-// reason. That is a real difference from ECMAScript -- a `try { atob(x) }
-// catch {}` cannot recover -- and it is stated here rather than papered over
-// with a plausible empty string.
+// `decodeURI`/`decodeURIComponent` throw a catchable `URIError` through
+// `gea::host::throwRuntimeError`, the runtime-owned Error carrier. `btoa`,
+// `atob` and the TextDecoder label check still abort BY NAME with the
+// specification's message: they predate that carrier and have not been moved
+// onto it, so a `try { atob(x) } catch {}` cannot recover yet. That is a real
+// difference from ECMAScript, stated here rather than papered over with a
+// plausible empty string.
 // ===========================================================================
 
 namespace gea::runtime::text {
@@ -50855,11 +51090,7 @@ inline void appendPercentU(std::string& out, std::uint32_t codeUnit) {
   out.push_back(hexDigit(codeUnit & 0x0F));
 }
 
-/** v1: `gea::uri::uri_error` (uri.cpp), re-typed to this runtime's named abort -- see this family's header comment for why. */
-[[noreturn]] inline void refuseMalformedUri() {
-  std::fprintf(stderr, "gea: URIError: URI malformed (ECMA-262 19.2.6.5 Decode, step 4.b / 19.2.6.4 Encode, step 4.b)\n");
-  gea::detail::abortAfterFlush();
-}
+[[noreturn]] inline void refuseMalformedUri() { gea::host::throwRuntimeError("URIError", "URI malformed"); }
 
 /** v1: `gea::uri::is_unescaped` (uri.cpp). ECMA-262 19.2.6.1.1's `uriUnescaped` = `uriAlpha` + DecimalDigit + `uriMark`. */
 inline bool isUnescaped(std::uint32_t codePoint) {
@@ -51096,15 +51327,19 @@ inline std::string unescapeImpl(const std::string& input) {
  * than through a second copy.
  */
 inline std::string encodeUri(const std::string& value) { return encodeImpl(value, false); }
+inline std::string encodeUri(const char* value) { return encodeUri(std::string(value)); }
 inline std::string encodeUri(double value) { return encodeImpl(gea::host::detail::toString(value), false); }
 inline std::string encodeUri(bool value) { return encodeImpl(gea::host::detail::toString(value), false); }
 inline std::string encodeUriComponent(const std::string& value) { return encodeImpl(value, true); }
+inline std::string encodeUriComponent(const char* value) { return encodeUriComponent(std::string(value)); }
 inline std::string encodeUriComponent(double value) { return encodeImpl(gea::host::detail::toString(value), true); }
 inline std::string encodeUriComponent(bool value) { return encodeImpl(gea::host::detail::toString(value), true); }
 inline std::string decodeUri(const std::string& value) { return decodeImpl(value, false); }
+inline std::string decodeUri(const char* value) { return decodeUri(std::string(value)); }
 inline std::string decodeUri(double value) { return decodeImpl(gea::host::detail::toString(value), false); }
 inline std::string decodeUri(bool value) { return decodeImpl(gea::host::detail::toString(value), false); }
 inline std::string decodeUriComponent(const std::string& value) { return decodeImpl(value, true); }
+inline std::string decodeUriComponent(const char* value) { return decodeUriComponent(std::string(value)); }
 inline std::string decodeUriComponent(double value) { return decodeImpl(gea::host::detail::toString(value), true); }
 inline std::string decodeUriComponent(bool value) { return decodeImpl(gea::host::detail::toString(value), true); }
 
@@ -51707,11 +51942,23 @@ inline bool isRuntimeError(const gea::Value& value) {
   return value.tag() == gea::Value::Tag::Object &&
       value.payloadType() == gea::detail::payloadTypeTagFor<gea::Ref<gea::runtime::Error>>();
 }
+inline gea::Ref<gea::runtime::Error> runtimeErrorOf(const gea::Value& value) {
+  if (value.tag() != gea::Value::Tag::Object) return {};
+  if (value.payloadType() == gea::detail::payloadTypeTagFor<gea::Ref<gea::runtime::Error>>()) return value.as<gea::Ref<gea::runtime::Error>>();
+  if (value.classObject() && gea::detail::classIdentityExtends(value.classIdentity(), &gea::detail::RefOperationsFor<gea::runtime::Error>::table))
+    return value.classObject().template staticCast<gea::runtime::Error>();
+  return {};
+}
+inline bool isErrorValue(const gea::Value& value) { return static_cast<bool>(runtimeErrorOf(value)); }
 inline bool instanceOfRuntimeError(const gea::Value& value, const char* kind) {
-  return isRuntimeError(value) && value.as<gea::Ref<gea::runtime::Error>>()->instanceOf(kind);
+  const auto error = runtimeErrorOf(value);
+  return error && error->instanceOf(kind);
 }
 inline std::string runtimeErrorString(const gea::Value& value) {
-  return gea::detail::unboxAs<gea::Ref<gea::runtime::Error>>(value, gea::Value::Tag::Object, "Error ToString")->toString();
+  const auto error = runtimeErrorOf(value);
+  if (!error) return gea::detail::unboxAs<gea::Ref<gea::runtime::Error>>(value, gea::Value::Tag::Object, "Error ToString")->toString();
+  if (value.classObject() && value.getProperty(gea::PropertyKey::string("toString")).tag() == gea::Value::Tag::Function) return gea::dynamicToString(value);
+  return error->toString();
 }
 [[noreturn]] inline void throwRuntimeError(const char* kind, const std::string& message) {
 #if defined(GEA_RUNTIME_THROW_ENDS_PROGRAM) && GEA_RUNTIME_THROW_ENDS_PROGRAM
@@ -51736,7 +51983,7 @@ inline const bool uncaughtDescriberInstalled = [] {
       std::rethrow_exception(current);
     } catch (const gea::Value& value) {
       try {
-        text = gea::host::isRuntimeError(value) ? gea::host::runtimeErrorString(value) : gea::dynamicToString(value);
+        text = gea::host::isErrorValue(value) ? gea::host::runtimeErrorString(value) : gea::dynamicToString(value);
       } catch (...) {
         text = "<a value whose ToString threw>";
       }

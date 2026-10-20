@@ -315,12 +315,27 @@ const callableChildrenOf = (abi: {
  * the call operation accounts for their exposure. Decoding an argument into
  * a native frame does not publish that frame's fields back to dynamic code.
  * Keep the full type inventory in directChildrenOf for candidate discovery.
+ *
+ * A callable parameter is the exception: a dynamic caller passes its own
+ * function there, and decoding it installs the adapter that boxes that
+ * parameter's inputs out to it (`DynamicCarrier<CallableObject>`), so those
+ * inputs are published exactly as a `convert` to the parameter's convention
+ * publishes them. Sakura's untyped `dom.addEventListener('pointerdown', (e) =>
+ * e.button)` reaches a typed `HostListener` slot that way, and its event
+ * class had no field protocol for the listener's read.
  */
 const publishedChildrenOf = (
   representation: Representation,
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   deriver: RepresentationDeriver | null
 ): readonly Representation[] => {
+  const withCallbackInputs = (abi: CallableAbi): readonly Representation[] => [
+    abi.result,
+    ...abi.parameters.flatMap((parameter) => {
+      const callback = unwrappedCallableAbi(parameter.value)
+      return callback === null ? [] : callableAdapterInputsOf(null, callback)
+    })
+  ]
   switch (representation.kind) {
     case 'function':
     case 'function-family':
@@ -328,11 +343,11 @@ const publishedChildrenOf = (
     case 'constructor-value-dispatch':
     case 'function-value-dispatch':
     case 'function-value-family':
-      return [representation.abi.result]
+      return withCallbackInputs(representation.abi)
     case 'function-and-constructor':
-      return [representation.call.result, representation.construct.result]
+      return [...withCallbackInputs(representation.call), ...withCallbackInputs(representation.construct)]
     case 'native-handle':
-      return [representation.call, representation.construct].flatMap((abi) => (abi ? [abi.result] : []))
+      return [representation.call, representation.construct].flatMap((abi) => (abi ? withCallbackInputs(abi) : []))
     case 'class-ref': {
       // A `#private` element is reachable only from the class's own body,
       // never by dynamic code holding the instance: the reflected protocol
@@ -2034,6 +2049,13 @@ export const reflectionExposureOf = (
   }
   for (const operation of operations) {
     currentOperation = operation
+    // A callback the operation hands a value of its own (`map`'s element,
+    // `sort`'s pair) takes it boxed when its parameter is `any`. The box is
+    // made in the printed adapter or in the runtime helper, never by a
+    // `convert`, so the published recipe is the only boundary there is to see.
+    for (const recipe of operation.conversionRecipes ?? [])
+      if (recipe.role === 'prototype-callback' && recipe.target.kind === 'dynamic')
+        promoteLogicalReceiver(recipe.source, 'prototype-callback-to-dynamic')
     if (operation.kind === 'get-iterator' && operation.nativeNextMethodRead)
       promoteIteratorRead(operation.result.representation, operation.nativeNextMethodRead, operation)
     if ((operation.kind === 'iterator-next' || operation.kind === 'iterator-close') && operation.nativeMethodRead)
@@ -2557,6 +2579,10 @@ export const reflectionExposureOf = (
             promoteFull(operation.receiver.representation, 'spread-expando-key')
           } else if (representationKey(into.value) !== representationKey(field.value)) promoteFull(field.value, 'spread-converted-field')
         }
+        // A live view's slots are inert: the runtime copies a view source by
+        // walking its original's own keys (`copiesThroughNativeView`), never
+        // through the static copy, so that original must list them.
+        demandEnumeratedViewOrigins(operation.source.representation, operation)
         continue
       }
       promoteFull(operation.source.representation, 'dynamic-spread-source')

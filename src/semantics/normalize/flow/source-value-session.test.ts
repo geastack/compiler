@@ -274,6 +274,31 @@ test('native literal iteration retains element escapes in the source closure', (
   assert.ok(checked.ledger.capture(() => checked.session.ownSlotOf(owner, 'extra')).value === null)
 })
 
+test('an iteration binding refused by one source root keeps the literal entries whatever was solved first', () => {
+  // `values` holds the literal at once and `other()`'s object only after the
+  // call resolves. Solving `values` first used to refuse `value` before it held
+  // anything, so `readers` never saw `value.inner`, and `inner` looked closed
+  // although `escape` receives it.
+  const source = `
+    declare function escape(value: unknown): void;
+    declare const flag: boolean;
+    const inner = { count: 1 };
+    const outer = { inner: /* target */ inner };
+    function other() { return { inner: 0 } }
+    const values = flag ? [outer] : other();
+    for (const value of /* source */ values) escape(value.inner);
+  `
+  for (const sourceFirst of [false, true]) {
+    const checked = inspect(source)
+    if (sourceFirst)
+      assert.ok(checked.ledger.capture(() => checked.session.valuesOf(targetExpression(checked.file, '/* source */', 'values'))).value)
+    const inner = targetExpression(checked.file, '/* target */', 'inner')
+    // Compared as text: a failing assertion would otherwise print the nodes, and with them the whole program.
+    const closed = checked.ledger.capture(() => checked.session.closedValuesOf(inner)).value
+    assert.deepEqual(closed?.map((value) => value.getText(checked.file)) ?? null, null, `\`values\` solved first: ${sourceFirst}`)
+  }
+})
+
 /** The parameter of the first `set <key>(...)` accessor in the file. */
 const setterParameterOf = (file: ts.SourceFile, key: string): ts.ParameterDeclaration => {
   let found: ts.ParameterDeclaration | undefined
@@ -1642,4 +1667,216 @@ test('open intrinsic own installations cannot borrow the original library callee
     const call = checked.targetCall('/* target */', 'Object.freeze')
     assert.ok(checked.ledger.capture(() => checked.session.invocationTargetsOf(call)).value === null, preparation)
   }
+})
+
+test('a body read into another cell finds the calls made through that cell', () => {
+  // `candidateCallersOf` lists calls by the body's own names. A call through
+  // `const g = f`, a parameter, an element or a destructured binding spells
+  // another one, and `callers(f)` was a complete `[]`; the body's closure
+  // walks each alias to its call.
+  const { file, ledger, session } = inspect(`
+    function f(x) { return x; }
+    function idle(y) { return y; }
+    const g = f;
+    g(1);
+    function apply(h) { return h(2); }
+    apply(f);
+    const list = [f];
+    list[0](3);
+    const { run } = { run: f };
+    run(4);
+    f(5);
+    idle;
+  `)
+  const declared = (name: string): ts.FunctionDeclaration => {
+    const found = file.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === name)
+    assert.ok(found, name)
+    return found
+  }
+  const f = declared('f')
+  const texts = (values: readonly ts.Node[] | null): string[] | null => values?.map((value) => value.getText(file)).sort() ?? null
+  assert.deepEqual(texts(ledger.capture(() => session.callerSitesOf(f)).value), ['f(5)', 'g(1)', 'h(2)', 'list[0](3)', 'run(4)'])
+  assert.deepEqual(texts(ledger.capture(() => session.parameterValuesOf(f.parameters[0]!)).value), ['1', '2', '3', '4', '5'])
+  assert.deepEqual(ledger.capture(() => session.callerSitesOf(declared('idle'))).value, [])
+})
+
+test('a for-in head shared by many construction sites answers every key its options literals spell', () => {
+  // One `setValues( values )` applies every options literal any construction
+  // site passes; each `values[ key ]` and `this[ key ]` in its body asks the
+  // head's key set once per root that reaches it, so the key set must be the
+  // head's own answer rather than a walk of every literal per asking root.
+  const sites = 120
+  const program = (extra: string): string => `
+    declare const externalOptions: unknown;
+    class Base {
+      opacity = 1;
+      side = 0;
+      setValues(values) {
+        if (values === undefined) return;
+        for (const key in values) {
+          const current = this[key];
+          if (current === undefined) continue;
+          this[key] = values[key];
+        }
+      }
+    }
+    class Left extends Base { constructor(parameters?) { super(); this.setValues(parameters); } }
+    class Right extends Base { constructor(parameters?) { super(); this.setValues(parameters); } }
+    ${Array.from({ length: sites }, (_, site) => `new ${site % 2 ? 'Left' : 'Right'}({ opacity: ${site + 2} });`).join('\n')}
+    new Right({ side: 7 });
+    new Left();
+    ${extra}
+    const owner = new Left({ opacity: 1 });
+    /* owner */ owner;
+  `
+  const members = (source: string, key: string): readonly string[] | null => {
+    const checked = inspect(source)
+    return (
+      withLedger(checked, () => checked.session.memberValuesOf(targetExpression(checked.file, '/* owner */', 'owner'), key))
+        // The session's own `undefined` is a synthesized `void 0` with no text.
+        ?.map((value) => (ts.isVoidExpression(value) ? 'undefined' : value.getText(checked.file)))
+        .sort() ?? null
+    )
+  }
+  // `values[ key ]` reads every key of every literal the parameter holds, and
+  // `undefined` for a key a literal lacks: each enumerated slot gets that
+  // union -- the owner's own `opacity: 1` and the one-off `side: 7` included --
+  // beside the field's own initializer.
+  const applied = ['1', ...Array.from({ length: sites }, (_, site) => String(site + 2)), '7', 'undefined']
+  assert.deepEqual(members(program(''), 'opacity'), ['1', ...applied].sort())
+  assert.deepEqual(members(program(''), 'side'), ['0', ...applied].sort())
+  assert.equal(members(program('new Left(externalOptions);'), 'opacity'), null)
+})
+
+test('a read joining many growing slots publishes every value they come to hold', () => {
+  // `clone` reads `this.x` across every instance, and each instance's slot
+  // grows as more setter calls are discovered: a re-evaluation adds only what
+  // each slot gained since the last one, so nothing may be dropped on the way.
+  const sites = 60
+  const checked = inspect(`
+    class Vec {
+      x = 0;
+      set(x) { this.x = x; return this; }
+      clone() { return new Vec().set(this.x); }
+    }
+    ${Array.from({ length: sites }, (_, site) => `const made${site} = new Vec().set(${site + 1}).clone();`).join('\n')}
+    const owner = made0.clone();
+    /* owner */ owner;
+  `)
+  const members = withLedger(checked, () => checked.session.memberValuesOf(targetExpression(checked.file, '/* owner */', 'owner'), 'x'))
+  assert.ok(members !== null)
+  const texts = new Set(members.map((value) => value.getText(checked.file)))
+  for (let site = 0; site <= sites; site++) assert.ok(texts.has(String(site)), `missing ${site}`)
+})
+
+const valueTexts = (checked: ReturnType<typeof inspect>, values: readonly ts.Node[] | null): readonly string[] | null =>
+  values?.map((value) => (ts.isVoidExpression(value) && value.parent === undefined ? 'undefined' : value.getText(checked.file))).sort() ??
+  null
+
+test('constructions of one class share a walk but each answers its own parameter rebinding', () => {
+  // `reset` rebinds its parameter before storing through it: the store reaches
+  // the vector the rebinding made, never the one passed in, although both are
+  // constructions of the same class and share the walk through `reset`.
+  const checked = inspect(`
+    class Vec { x = 0; }
+    function reset(v) {
+      v = new Vec();
+      v.x = 5;
+      return v;
+    }
+    const passed = new Vec();
+    const other = new Vec();
+    const made = reset(passed);
+    /* passed */ passed;
+    /* other */ other;
+    /* made */ made;
+  `)
+  const members = (marker: string, text: string) =>
+    valueTexts(
+      checked,
+      withLedger(checked, () => checked.session.memberValuesOf(targetExpression(checked.file, marker, text), 'x'))
+    )
+  assert.deepEqual(members('/* passed */', 'passed'), ['0'])
+  assert.deepEqual(members('/* other */', 'other'), ['0'])
+  assert.deepEqual(members('/* made */', 'made'), ['0', '5'])
+})
+
+test('constructions of one class share a walk but each answers its own defined keys', () => {
+  // Only `marked` has `id` defined, so only its destructuring in `take` reads
+  // a described slot; the same pattern over `plain` names no descriptor.
+  const checked = inspect(`
+    class Tag { name = 'tag'; }
+    function take(t) { const { id } = t; return id; }
+    const plain = new Tag();
+    const marked = new Tag();
+    Object.defineProperty(marked, 'id', { value: 7 });
+    take(plain);
+    take(marked);
+    /* plain */ plain;
+    /* marked */ marked;
+  `)
+  const closed = (marker: string, text: string) =>
+    withLedger(checked, () => checked.session.closedValuesOf(targetExpression(checked.file, marker, text)))
+  assert.equal(closed('/* plain */', 'plain'), null)
+  assert.notEqual(closed('/* marked */', 'marked'), null)
+})
+
+test('every value stored under one container key continues at each read of it', () => {
+  const checked = inspect(`
+    class Walker { go() { return 1; } }
+    class Runner { go() { return 2; } }
+    const holder = { item: null };
+    const first = new Walker();
+    const second = new Runner();
+    holder.item = first;
+    holder.item = second;
+    const result = holder.item.go();
+    /* first */ first;
+    /* second */ second;
+    /* result */ result;
+  `)
+  const at = (marker: string, text: string) => targetExpression(checked.file, marker, text)
+  assert.notEqual(
+    withLedger(checked, () => checked.session.closedValuesOf(at('/* first */', 'first'))),
+    null
+  )
+  assert.notEqual(
+    withLedger(checked, () => checked.session.closedValuesOf(at('/* second */', 'second'))),
+    null
+  )
+  assert.deepEqual(
+    valueTexts(
+      checked,
+      withLedger(checked, () => checked.session.valuesOf(at('/* result */', 'result')))
+    ),
+    ['1', '2']
+  )
+})
+
+test('a read through some constructions of a class reads only their slots', () => {
+  // `this.x` in `get` holds every construction and reads them as one family;
+  // `v.x` holds only `b`, and must not see the store made through `a` alone.
+  const checked = inspect(`
+    class P {
+      x = 0;
+      get() { return this.x; }
+    }
+    const a = new P();
+    const b = new P();
+    const c = new P();
+    a.x = 5;
+    function readX(v) { return v.x; }
+    const partial = readX(b);
+    const whole = a.get() + b.get() + c.get();
+    /* partial */ partial;
+  `)
+  const read = (text: string) => {
+    const access = targetExpression(checked.file, 'class P', text)
+    return valueTexts(
+      checked,
+      withLedger(checked, () => checked.session.valuesOf(access))
+    )
+  }
+  assert.deepEqual(read('v.x'), ['0'])
+  assert.deepEqual(read('this.x'), ['0', '5'])
 })

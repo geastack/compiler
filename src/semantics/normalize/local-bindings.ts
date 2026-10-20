@@ -881,6 +881,15 @@ export const censusLocalBindings = (
    * element type, as do indexed reads whose absence is not observed.
    */
   const observedIndexedAbsence = new Map<ts.Node, ts.Type>()
+  /**
+   * The same observation over a read the checker types `any` (`const lit = []`
+   * in a JavaScript file). `any` names no element, but this census may still
+   * type the cell from its write, and the read itself already admits absence
+   * (`structural-array-read.ts`'s `admitsUndefined`). The cell's type is known
+   * only once resolution settles, so its declaration and observing references
+   * wait for it.
+   */
+  const untypedObservedAbsence: { readonly declaration: ts.VariableDeclaration; readonly nodes: readonly ts.Node[] }[] = []
 
   const directUndefinedComparison = (expression: ts.Expression): boolean => {
     let inner: ts.Node = expression
@@ -951,13 +960,18 @@ export const censusLocalBindings = (
       assertedReceiverArmMayLackMember(checker, initializer, (receiver) => checker.getTypeAtLocation(receiver))
     if (!arrayRead && !dictionaryRead && !assertedRead) return
     const value = checker.getTypeAtLocation(initializer)
-    if (isUnusableEvidence(value) || (value.flags & ts.TypeFlags.Unknown) !== 0) return
+    const untyped = isAnyType(value)
+    if (!untyped && (isUnusableEvidence(value) || (value.flags & ts.TypeFlags.Unknown) !== 0)) return
     const symbol = checker.getSymbolAtLocation(declaration.name)
     if (!symbol) return
     const observing = flow
       .referencesToSymbol(symbol)
       .filter((reference) => directUndefinedComparison(reference) || directTruthinessTest(reference))
     if (observing.length === 0) return
+    if (untyped) {
+      untypedObservedAbsence.push({ declaration, nodes: [declaration, declaration.name, ...observing] })
+      return
+    }
     const optional = checker.getNullableType(value, ts.TypeFlags.Undefined)
     observedIndexedAbsence.set(declaration, optional)
     observedIndexedAbsence.set(declaration.name, optional)
@@ -1895,6 +1909,12 @@ export const censusLocalBindings = (
     const before = bound.size
     for (const candidate of retry) resolveDeclaration(candidate)
     if (bound.size === before) break
+  }
+  for (const { declaration, nodes } of untypedObservedAbsence) {
+    const cell = bound.get(declaration)
+    if (!cell) continue
+    const optional = checker.getNullableType(cell, ts.TypeFlags.Undefined)
+    for (const node of nodes) observedIndexedAbsence.set(node, optional)
   }
 
   // `root` is the same stable, hand-written reason string this census always

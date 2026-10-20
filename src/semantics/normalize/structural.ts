@@ -101,6 +101,7 @@ import {
   inferredArrayElementAt,
   statedCollectionTypeAt,
   inferredCollectionTypeArgumentsAt,
+  readsUnjoinedArrayMember,
   unstatedNeverArray
 } from './structural-array-element.js'
 import { createDeclaredBodyResolver } from './structural-declared-body.js'
@@ -1521,6 +1522,29 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
         })
       }
       return null
+    }
+  },
+  {
+    // The same box, read back through a computed key: each `never[]` arm the
+    // checker answers is a member stored as the box.
+    name: 'computed-read-of-unjoined-array-member',
+    forms: [ts.SyntaxKind.ElementAccessExpression],
+    resolve(node) {
+      if (!ts.isElementAccessExpression(node)) return null
+      const read = this.layoutTypeAt(node)
+      const arms = read.isUnion() ? read.types : [read]
+      const isNeverArray = (arm: ts.Type): boolean =>
+        this.checker.isArrayType(arm) &&
+        ((this.checker.getTypeArguments(arm as ts.TypeReference)[0]?.flags ?? 0) & ts.TypeFlags.Never) !== 0
+      if (!arms.some(isNeverArray) || !readsUnjoinedArrayMember(this.checker, this.collections, this.layoutTypeAt, node)) return null
+      const box = this.table.intern({
+        kind: 'array',
+        element: this.table.intern({ kind: 'primitive', primitive: 'any' }),
+        readonly: false,
+        extension: []
+      })
+      const members = [...new Set(arms.map((arm) => (isNeverArray(arm) ? box : this.typeOf(arm))))]
+      return members.length === 1 ? members[0]! : this.table.intern({ kind: 'union', members })
     }
   },
   {
