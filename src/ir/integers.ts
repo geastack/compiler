@@ -108,6 +108,12 @@ export interface IntegerNarrowing {
    */
   readonly integerDivisions: ReadonlySet<IrValueId>
   /**
+   * The `%` among `integerDivisions` whose divisor the body proves odd
+   * (`oddValuesOf`), and so never zero: their helper keeps only the
+   * `MIN % -1` test, which -1, being odd, still needs.
+   */
+  readonly nonZeroDivisors: ReadonlySet<IrValueId>
+  /**
    * The narrowed values an `int`/`i32` annotation put there, each with its
    * machine width. Their `+ - *`, negation and updates WRAP at that width --
    * the annotation's contract -- rather than overflowing; an `int32` one is
@@ -129,6 +135,7 @@ export const emptyIntegerNarrowing: IntegerNarrowing = {
   dynamicRemainders: new Set(),
   roundingArithmetic: new Set(),
   integerDivisions: new Set(),
+  nonZeroDivisors: new Set(),
   declaredWidths: new Map(),
   exactNumericConversions: new Set(),
   declaredBindings: new Map()
@@ -927,6 +934,14 @@ export const narrowableIntegersOf = (body: IrBody, storage: IntegerStorageFacts 
     isNumberScalarValue
   )
 
+  const odd = oddValuesOf(body, graph, readsCell, computes, phis, numericConversions, constants)
+  const nonZeroDivisors = new Set<IrValueId>()
+  for (const value of declared.divisions) {
+    const compute = computes.get(value)
+    const divisor = compute?.form === 'binary' && compute.operator === '%' ? compute.operands[1] : undefined
+    if (divisor !== undefined && odd.has(divisor.value)) nonZeroDivisors.add(value)
+  }
+
   const values = new Set<IrValueId>(declared.values)
   const bindings = new Set<DeclarationId>()
   const declaredBindings = new Map<DeclarationId, DeclaredIntegerWidth>()
@@ -1000,6 +1015,7 @@ export const narrowableIntegersOf = (body: IrBody, storage: IntegerStorageFacts 
     dynamicRemainders,
     roundingArithmetic,
     integerDivisions: declared.divisions,
+    nonZeroDivisors,
     declaredWidths: declared.widths,
     exactNumericConversions,
     declaredBindings
@@ -1415,4 +1431,117 @@ const cellReadRefinementsOf = (
     if (entry !== null) transfer(blockId, entry, true)
   }
   return refinements
+}
+
+/**
+ * The values a body proves odd, and so never zero.
+ *
+ * A trial-division loop's divisor (`for (let d: int = 3; d * d <= n; d += 2)
+ * if (n % d === 0) ...`) starts odd and steps by an even constant, so it is
+ * odd at every read. Without that proof its `%` keeps the guarded helper's
+ * zero test, and clang lays the loop out around that branch: primes ran 8%
+ * behind the same loop written in C++ and Rust on the Haswell benchmark
+ * machine. Parity survives wrapping, so `int` and `i32` arithmetic keeps it.
+ *
+ * A value is odd when it is an odd constant, a numeric conversion of an odd
+ * value, odd plus or minus an even constant, a product of two odd values, a
+ * phi of odd values, or a read of a cell that holds an odd value on every path
+ * to it. The cells take the forward dataflow `cellReadRefinementsOf` uses, met
+ * by intersection: only a cell this body alone writes takes part, and the
+ * entry, which a parameter's or an unwritten cell's value reaches, holds none.
+ */
+const oddValuesOf = (
+  body: IrBody,
+  graph: ReturnType<typeof controlFlowGraphOf>,
+  readsCell: ReadonlyMap<IrValueId, DeclarationId>,
+  computes: ReadonlyMap<IrValueId, ComputeOperation>,
+  phis: ReadonlyMap<IrValueId, readonly IrOperand[]>,
+  numericConversions: ReadonlyMap<IrValueId, IrOperand>,
+  constants: ReadonlyMap<IrValueId, number>
+): ReadonlySet<IrValueId> => {
+  const facts = body.facts
+  const oddReads = new Set<IrValueId>()
+  if (facts === undefined) return oddReads
+  const captured = new Set<DeclarationId>(facts.capturedDeclarations)
+  const eligible = (cell: DeclarationId): boolean => !facts.boxed.has(cell) && !captured.has(cell)
+  const evenConstant = (value: IrValueId): boolean => {
+    const constant = constants.get(value)
+    return constant !== undefined && constant % 2 === 0
+  }
+  const odd = (value: IrValueId, seen: Set<IrValueId> = new Set()): boolean => {
+    if (seen.has(value)) return false
+    seen.add(value)
+    const constant = constants.get(value)
+    if (constant !== undefined) return Math.abs(constant % 2) === 1
+    if (readsCell.has(value)) return oddReads.has(value)
+    const converted = numericConversions.get(value)
+    if (converted !== undefined) return odd(converted.value, seen)
+    const incoming = phis.get(value)
+    if (incoming !== undefined) return incoming.length > 0 && incoming.every((operand) => odd(operand.value, new Set(seen)))
+    const compute = computes.get(value)
+    if (compute?.form !== 'binary') return false
+    const [left, right] = compute.operands
+    if (!left || !right) return false
+    if (compute.operator === '+' || compute.operator === '-')
+      return (odd(left.value, new Set(seen)) && evenConstant(right.value)) || (evenConstant(left.value) && odd(right.value, new Set(seen)))
+    if (compute.operator === '*') return odd(left.value, new Set(seen)) && odd(right.value, new Set(seen))
+    return false
+  }
+
+  type State = Set<DeclarationId>
+  const transfer = (blockId: IrBlockId, entry: State): State => {
+    const state: State = new Set(entry)
+    for (const operation of body.blocks.get(blockId)?.operations ?? []) {
+      if (operation.kind === 'binding-read') {
+        if (state.has(operation.declaration)) oddReads.add(operation.result.id)
+        else oddReads.delete(operation.result.id)
+        continue
+      }
+      if (operation.kind === 'binding-write') {
+        if (eligible(operation.declaration) && odd(operation.value.value)) state.add(operation.declaration)
+        else state.delete(operation.declaration)
+        continue
+      }
+      if ('declaration' in operation && typeof operation.declaration === 'string') state.delete(operation.declaration as DeclarationId)
+    }
+    return state
+  }
+  const meet = (states: readonly State[]): State => {
+    const [first, ...rest] = states
+    if (first === undefined) return new Set()
+    return new Set([...first].filter((cell) => rest.every((other) => other.has(cell))))
+  }
+  // Optimistic, as in `cellReadRefinementsOf`: an unvisited predecessor adds
+  // nothing to the meet, facts only shrink, and the entry starts empty.
+  const exits = new Map<IrBlockId, State>()
+  const entryOf = (blockId: IrBlockId): State | null => {
+    const predecessors = graph.predecessors.get(blockId) ?? []
+    if (blockId === body.entry || predecessors.length === 0) return new Set()
+    const visited = predecessors.map((predecessor) => exits.get(predecessor)).filter((state): state is State => state !== undefined)
+    return visited.length === 0 ? null : meet(visited)
+  }
+  const sameState = (left: State | undefined, right: State): boolean =>
+    left !== undefined && left.size === right.size && [...right].every((cell) => left.has(cell))
+  for (let changed = true, rounds = 0; changed; rounds++) {
+    // An unsettled optimistic state is not a sound one.
+    if (rounds === 64) return new Set()
+    changed = false
+    for (const blockId of body.blockOrder) {
+      const entry = entryOf(blockId)
+      if (entry === null) continue
+      const exit = transfer(blockId, entry)
+      if (sameState(exits.get(blockId), exit)) continue
+      exits.set(blockId, exit)
+      changed = true
+    }
+  }
+  // The settled states, applied once more, leave exactly the reads they prove.
+  oddReads.clear()
+  for (const blockId of body.blockOrder) {
+    const entry = entryOf(blockId)
+    if (entry !== null) transfer(blockId, entry)
+  }
+  const proved = new Set<IrValueId>(oddReads)
+  for (const value of [...computes.keys(), ...phis.keys(), ...numericConversions.keys()]) if (odd(value)) proved.add(value)
+  return proved
 }

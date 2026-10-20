@@ -515,7 +515,9 @@ const isCallableNode = (node: AllocationNode): node is CallableAllocationNode =>
 
 /** A declaration instantiated with the enclosing function body, before that body's statements execute. */
 const isBodyLevelFunctionDeclaration = (node: AllocationNode): node is ts.FunctionDeclaration => {
-  if (!ts.isFunctionDeclaration(node) || !ts.isBlock(node.parent)) return false
+  if (!ts.isFunctionDeclaration(node)) return false
+  if (ts.isSourceFile(node.parent)) return true
+  if (!ts.isBlock(node.parent)) return false
   const owner = node.parent.parent
   return (
     (ts.isFunctionDeclaration(owner) ||

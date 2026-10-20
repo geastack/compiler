@@ -379,7 +379,32 @@ if (wanted('perf')) {
   // the baseline benchmarks/ records for this machine. A machine without one
   // fails: an unmeasured release has not passed this lane.
   const benchmarks = checkout('benchmarks', 'node/release-gate/perf-gate.mjs')
-  if (process.platform === 'linux' && process.arch === 'x64')
+  // GEA_PERF_HOST names the benchmark machine (an ssh host) the gate runs on
+  // instead of this one: a desktop, and a WSL VM above all, drifts too much for
+  // the gate's controls. remote.sh copies the checkouts there and runs it.
+  // Without it, an ssh alias `geastack-bench` in this user's ssh config is that
+  // machine (`ssh -G` resolves an alias to its configured HostName).
+  const benchAlias = (() => {
+    try {
+      const config = execFileSync('ssh', ['-G', 'geastack-bench'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      return /^hostname (?!geastack-bench$)/m.test(config) ? 'geastack-bench' : undefined
+    } catch {
+      return undefined
+    }
+  })()
+  const perfHost = process.env.GEA_PERF_HOST || benchAlias
+  if (perfHost && process.platform !== 'win32')
+    last(
+      'perf',
+      `HTTP and parallel performance gate on ${perfHost}`,
+      benchmarks,
+      ['bash', 'node/release-gate/remote.sh', '--fix-loopback'],
+      {
+        GEA_PERF_HOST: perfHost,
+        GEASTACK_ROOT: workspace
+      }
+    )
+  else if (process.platform === 'linux' && process.arch === 'x64')
     last('perf', 'HTTP and parallel performance gate', benchmarks, ['node', 'node/release-gate/perf-gate.mjs', '--fix-loopback'], {
       GEA_COMPILER_DIR: compiler,
       GEA_NODE_COMPAT_DIR: join(workspace, 'node-compat'),

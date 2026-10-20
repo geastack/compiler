@@ -97,6 +97,8 @@ export interface IrBodyCensus {
   readonly roundingArithmetic: ReadonlySet<IrValueId>
   /** See `IntegerNarrowing.integerDivisions`. */
   readonly integerDivisions: ReadonlySet<IrValueId>
+  /** See `IntegerNarrowing.nonZeroDivisors`. */
+  readonly nonZeroDivisors: ReadonlySet<IrValueId>
   /** See `IntegerNarrowing.declaredWidths`. */
   readonly declaredWidths: ReadonlyMap<IrValueId, DeclaredIntegerWidth>
   readonly exactNumericConversions: ReadonlySet<IrValueId>
@@ -179,6 +181,7 @@ export type IrBodyCensusBeforeHoists = Pick<
   | 'remainderForms'
   | 'roundingArithmetic'
   | 'integerDivisions'
+  | 'nonZeroDivisors'
   | 'declaredWidths'
   | 'exactNumericConversions'
   | 'declaredIntegerCells'
@@ -240,6 +243,7 @@ export const irBodyCensusOf = (body: IrBody, policy: IrBodyCensusPolicy): IrBody
     remainderForms,
     roundingArithmetic: narrowed.roundingArithmetic,
     integerDivisions: narrowed.integerDivisions,
+    nonZeroDivisors: narrowed.nonZeroDivisors,
     declaredWidths: narrowed.declaredWidths,
     exactNumericConversions: narrowed.exactNumericConversions,
     declaredIntegerCells: narrowed.declaredBindings,

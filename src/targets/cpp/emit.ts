@@ -1147,7 +1147,12 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
   // it anyway (`IntegerNarrowing.integerDivisions`): there the integer division
   // IS the answer, without a round trip through a double.
   if (ctx.integerDivisions.has(operation.result.id) && (operation.operator === '/' || operation.operator === '%')) {
-    const helper = operation.operator === '/' ? 'gea::integerQuotient' : 'gea::integerModulo'
+    const helper =
+      operation.operator === '/'
+        ? 'gea::integerQuotient'
+        : ctx.nonZeroDivisors.has(operation.result.id)
+          ? 'gea::integerModuloNonZero'
+          : 'gea::integerModulo'
     lines.push(`${name} = ${helper}(${operandText(ctx, first)}, ${operandText(ctx, second)});`)
     return
   }
@@ -3399,6 +3404,7 @@ export const emitBody = (
       for (const [value, form] of settled.remainderForms) prepass.remainderForms.set(value, form)
       for (const value of settled.roundingArithmetic) prepass.roundingArithmetic.add(value)
       for (const value of settled.integerDivisions) prepass.integerDivisions.add(value)
+      for (const value of settled.nonZeroDivisors) prepass.nonZeroDivisors.add(value)
       for (const [value, width] of settled.declaredWidths) prepass.declaredWidths.set(value, width)
       for (const value of settled.exactNumericConversions) prepass.exactNumericConversions.add(value)
       for (const [cell, width] of settled.declaredIntegerCells) prepass.declaredIntegerCells.set(cell, width)
