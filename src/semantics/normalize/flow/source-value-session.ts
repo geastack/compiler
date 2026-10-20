@@ -81,10 +81,11 @@ type QueryShape =
   | { readonly kind: 'slot' | 'stored-slot'; readonly node: ObjectRoot; readonly key: string }
   | { readonly kind: 'own-keys'; readonly node: ObjectRoot }
   | { readonly kind: 'enumerated-keys'; readonly node: ts.Expression }
-  | { readonly kind: 'use'; readonly node: ts.Expression; readonly root: Value }
+  | { readonly kind: 'use' | 'root-use'; readonly node: ts.Expression; readonly root: Value }
+  | { readonly kind: 'enumerated-slots'; readonly node: ts.Expression; readonly root: Value }
   | { readonly kind: 'publication'; readonly node: ObjectRoot; readonly key: string; readonly root: Value }
   | { readonly kind: 'unknown-reads'; readonly node: ObjectRoot }
-  | { readonly kind: 'key-reads'; readonly node: ObjectRoot; readonly key: string }
+  | { readonly kind: 'key-reads' | 'key-uses' | 'family-slot'; readonly node: ObjectRoot; readonly key: string }
   | { readonly kind: 'callers'; readonly node: ts.SignatureDeclaration }
 type Query = QueryShape & QueryState
 type FrameSubject = ts.Expression | ts.ParameterDeclaration | null
@@ -501,7 +502,11 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   const slots = new Map<ObjectRoot, InternLevel<string, Query>>()
   const storedSlots = new Map<ObjectRoot, InternLevel<string, Query>>()
   const keyReadQueries = new Map<ObjectRoot, InternLevel<string, Query>>()
+  const keyUseQueries = new Map<ObjectRoot, InternLevel<string, Query>>()
   const uses = new Map<Value, InternLevel<ts.Expression, Query>>()
+  const rootUses = new Map<Value, InternLevel<ts.Expression, Query>>()
+  const enumeratedSlotQueries = new Map<Value, InternLevel<ts.Expression, Query>>()
+  const familySlotQueries = new Map<ObjectRoot, InternLevel<string, Query>>()
   const publications = new Map<Value, Map<ObjectRoot, Map<string, Query>>>()
   type FrameQuery = Extract<Query, { readonly body: ts.SignatureDeclaration }>
   // Per call, the bodies and subjects it was asked about (see `frameQuery`).
@@ -768,6 +773,24 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   const keyReadsOf = (container: ObjectRoot, key: string): Query => {
     return internIn(keyReadQueries, container, key, keyedQueryKey, () => new QueryState('key-reads', container, key, undefined) as Query)
   }
+  /**
+   * Every reference a value stored under `key` of THIS container is used at
+   * next, whatever the value: the reads of the key (named and unspelled), the
+   * cells a destructuring of the container binds it to, the loop bindings
+   * iterating an array container, and the same for each container the key's
+   * value is copied into (`Object.assign`, a spread, a `defineProperty`
+   * descriptor's `value`).
+   *
+   * None of that depends on which value was stored, and a container's key
+   * receives many: every `publication` of a (value, container, key) used to
+   * re-derive it, scanning the container's whole closure twice per
+   * evaluation, so a class instance whose closure lists every store of its
+   * methods paid that scan once per value its slots were handed. Here it is
+   * one node per (container, key), and a publication only continues its own
+   * value at each reference this node names.
+   */
+  const keyUsesOf = (container: ObjectRoot, key: string): Query =>
+    internIn(keyUseQueries, container, key, keyedQueryKey, () => new QueryState('key-uses', container, key, undefined) as Query)
   const targets = (call: ts.CallExpression): Query => nodeQuery('targets', call)
   const superTargets = (call: ts.CallExpression): Query => nodeQuery('super-targets', call)
   /**
@@ -1108,15 +1131,152 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     internIn(slots, root, key, keyedQueryKey, () => new QueryState('slot', root, key, undefined) as Query)
   const storedSlot = (root: ObjectRoot, key: string): Query =>
     internIn(storedSlots, root, key, keyedQueryKey, () => new QueryState('stored-slot', root, key, undefined) as Query)
-  const use = (root: Value, reference: ts.Expression): Query =>
-    internIn(
+  /**
+   * The value a use walk is keyed by: a class instance's family token, or the
+   * root itself.
+   *
+   * A walk of a `new` root through the program asks the root's identity in
+   * exactly two places -- whether a parameter rebinding stores it (`refs`)
+   * and whether a `defineProperty` gave it a key its classes do not declare
+   * (`descriptorOf`); everything else it asks is a fact of its construction,
+   * which names the same classes for every construction of them. So the
+   * walks of every `new Vector3( ... )` in a program were one walk repeated
+   * per construction site -- a node per (site, reference) through every
+   * method the vector reaches, and on a large program most of the solve.
+   *
+   * Constructions whose construction fact names the same classes share one
+   * token (the first of them met) and one walk. The two identity questions
+   * are not answered on the shared walk: it hands each back as a gate
+   * (`gateOf`), and each root's own `closure` answers it for that root
+   * (`resolveGates`), continuing the shared walk where the root continues.
+   * Every other root is its own token, walked exactly as before.
+   */
+  const familyTokens = new Map<string, ts.NewExpression>()
+  const familyReps = new Set<Value>()
+  const tokens = new Map<Value, Value>()
+  const classIds = new Map<SourceClass, number>()
+  const classIdOf = (owner: SourceClass): number => {
+    let id = classIds.get(owner)
+    if (id === undefined) classIds.set(owner, (id = classIds.size))
+    return id
+  }
+  const tokenOf = (root: Value): Value => {
+    let token = tokens.get(root)
+    if (token !== undefined) return token
+    token = root
+    if (ts.isNewExpression(root) && !isFreshOrdinaryObject(root)) {
+      const alternatives = construction(root)?.alternatives
+      if (alternatives !== undefined && alternatives.length > 0) {
+        const signature = alternatives.map(classIdOf).join(',')
+        let representative = familyTokens.get(signature)
+        if (representative === undefined) {
+          familyTokens.set(signature, (representative = root))
+          familyReps.add(root)
+        }
+        token = representative
+      }
+    }
+    tokens.set(root, token)
+    return token
+  }
+  const isFamilyMember = (root: Value): boolean => familyReps.has(tokenOf(root))
+  /**
+   * Every construction in the program a family token stands for, from the
+   * call index: what `family-slot` joins. Built once, and only when a slot
+   * summary is first asked for.
+   */
+  let familyMembers: Map<Value, Set<ts.NewExpression>> | null = null
+  const NO_MEMBERS: ReadonlySet<ts.NewExpression> = new Set()
+  const familyMembersOf = (token: Value): ReadonlySet<ts.NewExpression> => {
+    if (familyMembers === null) {
+      familyMembers = new Map()
+      for (const site of flow.calls) {
+        if (!ts.isNewExpression(site.call) || !isFamilyMember(site.call)) continue
+        const token = tokenOf(site.call)
+        let members = familyMembers.get(token)
+        if (!members) familyMembers.set(token, (members = new Set()))
+        members.add(site.call)
+      }
+    }
+    return familyMembers.get(token) ?? NO_MEMBERS
+  }
+  /**
+   * One key's slots across every construction of a family: a read through a
+   * receiver that holds all of them -- `this.x` in a vector method, `v.x` of a
+   * parameter every vector reaches -- joins this one node instead of every
+   * construction's own slot. A large program's vectors and colors each hold
+   * every value their setters were ever passed, so each such read was N slots
+   * of hundreds of values, re-read as any of them grew. Like a row
+   * (`enumeratedSlots`) it carries its slots' grounding and owes none.
+   */
+  const familySlot = (token: ObjectRoot, key: string): Query =>
+    internIn(familySlotQueries, token, key, keyedQueryKey, () => new QueryState('family-slot', token, key, undefined) as Query)
+  /**
+   * A gate: an identity question a family walk reached and left to the root.
+   * A rebinding gate (`declaration` set) continues at `reference` for a root
+   * one of the parameter's rebindings stores; a root gate re-walks
+   * `reference` with the root itself (`root-use`). Each is a fact of the
+   * walk's nodes -- an `OmittedExpression` no use fact ever is -- and no
+   * `closure` or `slot` answer ever holds one.
+   */
+  interface Gate {
+    readonly reference: ts.Expression
+    readonly declaration: ts.ParameterDeclaration | null
+  }
+  const gates = new Map<Value, Gate>()
+  const rebindingGates = new Map<ts.Expression, Value>()
+  const rootGates = new Map<ts.Expression, Value>()
+  const gateOf = (reference: ts.Expression, declaration: ts.ParameterDeclaration | null): Value => {
+    const held = declaration === null ? rootGates : rebindingGates
+    let marker = held.get(reference)
+    if (marker === undefined) {
+      held.set(reference, (marker = ts.factory.createOmittedExpression()))
+      gates.set(marker, { reference, declaration })
+    }
+    return marker
+  }
+  const use = (root: Value, reference: ts.Expression): Query => {
+    const token = tokenOf(root)
+    return internIn(
       uses,
+      token,
+      reference,
+      (query) => query.node as ts.Expression,
+      () => new QueryState('use', reference, undefined, token) as Query
+    )
+  }
+  /**
+   * Every slot of `root` a for-in head over `enumerated` binds a key of: one
+   * row of a read like `src[ u ]`, which reads each root it can reach under
+   * every key the head enumerates.
+   *
+   * Read inline, such an access joined roots x keys slots and re-read all of
+   * them whenever any one grew -- three's `cloneUniforms` reading every
+   * uniform group under every uniform name, thousands of slots per
+   * evaluation. As a row per root, a slot that grows re-reads its row, and
+   * the access re-reads only its rows. The row is not value-carrying: it
+   * carries its slots' grounding through to the access and owes none of its
+   * own, so a row of a root with no key yet is no unwitnessed cycle member.
+   */
+  const enumeratedSlots = (enumerated: ts.Expression, root: Value): Query =>
+    internIn(
+      enumeratedSlotQueries,
+      root,
+      enumerated,
+      (query) => query.node as ts.Expression,
+      () => new QueryState('enumerated-slots', enumerated, undefined, root) as Query
+    )
+  /** `reference` walked with the root itself: a family walk's root gate. */
+  const rootUse = (root: Value, reference: ts.Expression): Query =>
+    internIn(
+      rootUses,
       root,
       reference,
       (query) => query.node as ts.Expression,
-      () => new QueryState('use', reference, undefined, root) as Query
+      () => new QueryState('root-use', reference, undefined, root) as Query
     )
-  const publication = (root: Value, container: ObjectRoot, key: string): Query => {
+  const publication = (stored: Value, container: ObjectRoot, key: string): Query => {
+    const root = tokenOf(stored)
     let containers = publications.get(root)
     if (!containers) publications.set(root, (containers = new Map()))
     let keys = containers.get(container)
@@ -2007,6 +2167,22 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
      * small one costs less to re-add than to look up.
      */
     const addedThrough = new Map<Query, Map<ReadonlySet<Value>, number>>()
+    interface GateLog {
+      readonly list: Value[]
+      readonly seen: Set<Value>
+    }
+    const gateLogs = new Map<Query, GateLog>()
+    /**
+     * Per reader, each family it has found every construction of among its
+     * receivers (`true`), or how many receivers it held when it last did not
+     * (a receiver set only grows, so a family once covered stays covered).
+     */
+    const familyCoverage = new Map<Query, Map<Value, number | true>>()
+    const gateLogOf = (query: Query): GateLog => {
+      let log = gateLogs.get(query)
+      if (log === undefined) gateLogs.set(query, (log = { list: [], seen: new Set() }))
+      return log
+    }
     const evaluate = (
       query: Query,
       required: Read,
@@ -2043,6 +2219,16 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       /** `read(use(root, reference))`, without minting the node for a use that does nothing (`inertUse`). */
       const readUse = (root: Value, reference: ts.Expression): ReadonlySet<Value> =>
         inertUse(reference) ? NO_VALUES : read(use(root, reference))
+      /**
+       * The gates this node answers for its own root (`resolveGates`), when it
+       * is the closure of a family member or reads a family walk for one: a
+       * gate it adds is kept here instead of becoming a fact.
+       */
+      let gating: GateLog | null = null
+      /** This node walks a family token: identity questions become gates. */
+      let familyWalk = false
+      /** The reference a `use` node walks: a root gate re-walks it. */
+      let walkedReference: ts.Expression | null = null
       const add = (values: Iterable<Value>): void => {
         // A transfer only has to hand back what this node has not published
         // yet: the solver adds every fact a transfer returns to the node and
@@ -2053,18 +2239,53 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         // class, each slot holding every value its setters were passed) copy
         // and re-test every fact again -- ~95% of all facts added on a large
         // program. A seal still builds its full answer: it reads `facts`.
-        if (outcome !== null || !(values instanceof FactState) || values.size <= DELTA_MINIMUM) {
+        const whole = outcome !== null || !(values instanceof FactState) || values.size <= DELTA_MINIMUM
+        if (whole && gating === null) {
           for (const held of values) facts.add(held)
           return
         }
-        let through = addedThrough.get(query)
-        if (through === undefined) addedThrough.set(query, (through = new Map()))
-        const before = through.get(values) ?? 0
-        const size = values.size
-        if (before === size) return
+        let before = 0
+        if (!whole) {
+          let through = addedThrough.get(query)
+          if (through === undefined) addedThrough.set(query, (through = new Map()))
+          before = through.get(values) ?? 0
+          const size = values.size
+          if (before === size) return
+          through.set(values, size)
+        }
         let at = 0
-        for (const held of values) if (at++ >= before) facts.add(held)
-        through.set(values, size)
+        if (gating === null) {
+          for (const held of values) if (at++ >= before) facts.add(held)
+          return
+        }
+        for (const held of values) {
+          if (at++ < before) continue
+          if (held.kind === ts.SyntaxKind.OmittedExpression && gates.has(held)) {
+            if (!gating.seen.has(held)) {
+              gating.seen.add(held)
+              gating.list.push(held)
+            }
+          } else facts.add(held)
+        }
+      }
+      /**
+       * Answers every gate the family walks read by this node have handed back,
+       * for `root`: a rebinding gate continues the walk past the rebinding when
+       * one of the parameter's rebindings stores `root` (the test `refs` makes
+       * on a root's own walk), and a root gate re-walks its reference with
+       * `root` itself. What either reads can hand back further gates, answered
+       * in the same pass. The log outlives the evaluation, because `add` hands
+       * back only what a dependency gained, while every gate is asked again:
+       * its answer can change as the rebindings' values grow.
+       */
+      const resolveGates = (root: Value): void => {
+        const log = gating!
+        for (let at = 0; at < log.list.length; at++) {
+          const gate = gates.get(log.list[at]!)!
+          if (gate.declaration === null) add(read(rootUse(root, gate.reference)))
+          else if (!parameterRebindingsOf(gate.declaration).every((write) => write.value !== null && !read(value(write.value)).has(root)))
+            add(readUse(root, gate.reference))
+        }
       }
       /**
        * A member call whose receiver holds nothing but `null`/`undefined`
@@ -2229,6 +2450,14 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             (computedWriteEdgesByReceiver.get(holder) ?? []).some((edge) => keysOf(edge.access).includes(key))
           )) ||
         writesTo(root, definitionReceivers.get(key) ?? [])
+      /**
+       * Whether `descriptorOf` of a construction would ask which roots a
+       * `defineProperty` targets -- the one part of it that is not a fact of
+       * the construction's classes, and so the one a family walk cannot answer
+       * for every member at once.
+       */
+      const definitionDecides = (root: Value, key: string): boolean =>
+        isObjectRoot(root) && !descriptor(root, key) && (definitionReceivers.get(key)?.length ?? 0) > 0
 
       /**
        * Every element key of the arrays an access could be reaching.
@@ -2345,6 +2574,56 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         if (sealing && candidates.size === 0) fail('unresolved-property-key', access)
         return [...keys]
       }
+      /** The families whose slots this evaluation has read whole (`readSlotsOf`). */
+      const familiesRead = new Set<Value>()
+      /** The family whose every construction `receivers` holds, when `root` is one of them: its slots can be read whole. */
+      const coveringFamilyOf = (root: Value, receivers: ReadonlySet<Value>): Value | null => {
+        if (!isFamilyMember(root)) return null
+        const token = tokenOf(root)
+        const members = familyMembersOf(token)
+        if (!members.has(root as ts.NewExpression)) return null
+        let known = familyCoverage.get(query)
+        const held = known?.get(token)
+        if (held === true) return token
+        if (held === receivers.size) return null
+        let covered = members.size > 1
+        if (covered) for (const member of members) if (!receivers.has(member)) covered = false
+        if (known === undefined) familyCoverage.set(query, (known = new Map()))
+        known.set(token, covered ? true : receivers.size)
+        return covered ? token : null
+      }
+      /**
+       * What `access` reads off `root`, one of `receivers`, under `keys` (its
+       * `keysOf`): each slot; or, for a key bound by a for-in head, the
+       * root's row of the head's keys (`enumeratedSlots`); or, when
+       * `receivers` holds every construction of the root's family, the
+       * family's slot (`familySlot`), once for all of them. A callable
+       * object's own data is proven per read, so it is read key by key.
+       */
+      const readSlotsOf = (root: ObjectRoot, receivers: ReadonlySet<Value>, keys: readonly string[], access: Access): void => {
+        if (isSourceCallableObject(root)) {
+          for (const key of keys) {
+            if (key !== 'name' && key !== 'length' && sourceCallableOwnDataWriteOf(checker, flow, root, key, access) === null)
+              fail('unproven-callable-data-read', access)
+            else add(carry(slot(root, key)))
+          }
+          return
+        }
+        const enumerated =
+          keys.length > 0 && ts.isElementAccessExpression(access) && accessKey(access) === null
+            ? enumerationHeadOf(access.argumentExpression)
+            : null
+        if (enumerated !== null) {
+          add(carry(enumeratedSlots(enumerated, root)))
+          return
+        }
+        const family = coveringFamilyOf(root, receivers)
+        if (family === null) for (const key of keys) add(carry(slot(root, key)))
+        else if (!familiesRead.has(family)) {
+          familiesRead.add(family)
+          for (const key of keys) add(carry(familySlot(family as ObjectRoot, key)))
+        }
+      }
       // A root this lane cannot read refuses the binding, and the literal
       // roots' entries are still returned. The solver keeps every fact a
       // transfer ever published, so answering null once such a root arrived
@@ -2398,18 +2677,28 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         if (exportIsUnimported(checker, flow, declaration)) return null
         return importerMentions(declaration) !== null ? null : 'export-importers-unenumerable'
       }
+      /** The references `refs` walks for a declaration no rebinding applies to: every read of the cell, and its importers' mentions. */
+      const referencesOf = (declaration: ts.Declaration): readonly ts.Expression[] => {
+        const found: ts.Expression[] = []
+        for (const reference of flow.referencesToDeclaration(declaration))
+          if (reference !== ts.getNameOfDeclaration(declaration) && !isTypePositionReference(reference)) found.push(reference)
+        for (const reference of importerMentions(declaration) ?? []) found.push(reference)
+        return found
+      }
       const refs = (root: Value, declaration: ts.Declaration): void => {
         for (const reference of flow.referencesToDeclaration(declaration)) {
           if (reference === ts.getNameOfDeclaration(declaration) || isTypePositionReference(reference)) continue
           // Past an unconditional rebinding the cell holds only what a write
           // after entry stored; a root none of those writes stores is no
-          // longer reachable through it.
-          if (
-            ts.isParameter(declaration) &&
-            readsAfterRebinding(declaration, reference) &&
-            parameterRebindingsOf(declaration).every((write) => write.value !== null && !read(value(write.value)).has(root))
-          )
-            continue
+          // longer reachable through it. Whether one stores it is a question
+          // about the root, so a family walk leaves it to each root.
+          if (ts.isParameter(declaration) && readsAfterRebinding(declaration, reference)) {
+            if (familyWalk) {
+              facts.add(gateOf(reference, declaration))
+              continue
+            }
+            if (parameterRebindingsOf(declaration).every((write) => write.value !== null && !read(value(write.value)).has(root))) continue
+          }
           add(readUse(root, reference))
         }
         for (const reference of importerMentions(declaration) ?? []) add(readUse(root, reference))
@@ -2429,6 +2718,17 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       const patternReadsSlots = (root: Value, pattern: ts.BindingPattern): void => {
         if (!isObjectRoot(root)) {
           fail('non-object-destructured-container', pattern)
+          return
+        }
+        if (
+          familyWalk &&
+          pattern.elements.some((element) => {
+            if (ts.isOmittedExpression(element) || element.dotDotDotToken) return false
+            const key = bindingElementKey(element)
+            return key !== null && definitionDecides(root, key)
+          })
+        ) {
+          facts.add(gateOf(walkedReference!, null))
           return
         }
         for (const element of pattern.elements) {
@@ -2921,6 +3221,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             }
             return absentOwnKey(held, key, parent, descriptorOf, hasUnnamedWrite)
           }
+          if (familyWalk && keys.some((key) => definitionDecides(root, key))) {
+            facts.add(gateOf(reference, null))
+            return
+          }
           // `instance.constructor` READS the class object off the prototype
           // -- a value this graph does not carry, and one whose escape opens
           // the family: `unknown( value.constructor )` can construct and
@@ -3300,17 +3604,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                 fail('undeferrable-array-protocol', expression)
                 continue
               }
-              if (isObjectRoot(root))
-                for (const key of keys) {
-                  if (
-                    isSourceCallableObject(root) &&
-                    key !== 'name' &&
-                    key !== 'length' &&
-                    sourceCallableOwnDataWriteOf(checker, flow, root, key, expression) === null
-                  )
-                    fail('unproven-callable-data-read', expression)
-                  else add(carry(slot(root, key)))
-                }
+              if (isObjectRoot(root)) readSlotsOf(root, roots, keys, expression)
               else if (!isNullish(root)) fail('non-object-receiver')
             }
             // Every receiver nullish: the read throws, so the cell provably
@@ -3473,6 +3767,9 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             if (getterRead !== null) {
               // The getter runs with this construction as its receiver, and
               // the read yields what the getter's completions yield.
+              // The receiver's walk through the getter is a family walk for a
+              // family member, whose gates are this root's to answer.
+              if (getterRead.getters.length > 0 && isFamilyMember(root)) gating = gateLogOf(query)
               for (const getter of getterRead.getters) {
                 for (const reference of flow.receiverReferencesToDeclaration(getter)) add(readUse(root, reference))
                 const summary = callableCompletionSummaryOf(flow, getter)
@@ -3484,6 +3781,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                     seeded = true
                   }
                 }
+              }
+              if (gating !== null) {
+                resolveGates(root)
+                gating = null
               }
               if (getterRead.absent) {
                 facts.add(undefinedValue)
@@ -3917,18 +4218,9 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               add(carry(contextual(expression.whenFalse)))
             } else if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
               const keys = keysOf(expression)
-              for (const root of read(contextual(expression.expression))) {
-                if (isObjectRoot(root))
-                  for (const key of keys) {
-                    if (
-                      isSourceCallableObject(root) &&
-                      key !== 'name' &&
-                      key !== 'length' &&
-                      sourceCallableOwnDataWriteOf(checker, flow, root, key, expression) === null
-                    )
-                      fail('unproven-callable-data-read', expression)
-                    else add(carry(slot(root, key)))
-                  }
+              const receivers = read(contextual(expression.expression))
+              for (const root of receivers) {
+                if (isObjectRoot(root)) readSlotsOf(root, receivers, keys, expression)
                 else if (root.kind !== ts.SyntaxKind.NullKeyword && !ts.isVoidExpression(root)) fail('non-object-receiver')
               }
             } else if (
@@ -4108,6 +4400,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         }
         case 'closure': {
           const root = query.node
+          if (isFamilyMember(root)) gating = gateLogOf(query)
           if (ts.isFunctionDeclaration(root)) {
             // `refs` follows the same import inventory as stored cells. A
             // factory imported by a source module is not an external escape.
@@ -4124,27 +4417,31 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           else fail('unmodelled-root')
           if (ts.isNewExpression(root) && !isFreshOrdinaryObject(root)) {
             const owners = constructionFrames.receiverOwnersOf(root)
-            if (!owners) {
-              fail('opaque-construction')
-              break
-            }
-            for (const owner of owners) {
-              if (!isClassSpelledSourceClass(owner)) {
-                for (const reference of flow.receiverReferencesToDeclaration(owner)) add(readUse(root, reference))
-                continue
+            if (!owners) fail('opaque-construction')
+            else
+              for (const owner of owners) {
+                if (!isClassSpelledSourceClass(owner)) {
+                  for (const reference of flow.receiverReferencesToDeclaration(owner)) add(readUse(root, reference))
+                  continue
+                }
+                for (const member of owner.members) {
+                  if (
+                    ts.isConstructorDeclaration(member) ||
+                    (ts.isPropertyDeclaration(member) && (ts.getCombinedModifierFlags(member) & ts.ModifierFlags.Static) === 0)
+                  )
+                    for (const reference of flow.receiverReferencesToDeclaration(member)) add(readUse(root, reference))
+                }
               }
-              for (const member of owner.members) {
-                if (
-                  ts.isConstructorDeclaration(member) ||
-                  (ts.isPropertyDeclaration(member) && (ts.getCombinedModifierFlags(member) & ts.ModifierFlags.Static) === 0)
-                )
-                  for (const reference of flow.receiverReferencesToDeclaration(member)) add(readUse(root, reference))
-              }
-            }
           }
+          if (gating !== null) resolveGates(root)
           break
         }
         case 'use':
+          familyWalk = familyReps.has(query.root)
+          walkedReference = query.node
+          visitUse(query.root, query.node)
+          break
+        case 'root-use':
           visitUse(query.root, query.node)
           break
         case 'unknown-reads': {
@@ -4183,6 +4480,16 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           for (const position of found) facts.add(flow.propertyAccesses[position]!)
           break
         }
+        case 'family-slot': {
+          for (const member of familyMembersOf(query.node)) add(carry(slot(member, query.key)))
+          break
+        }
+        case 'enumerated-slots': {
+          const root = query.root as ObjectRoot
+          const head = nodeQuery('enumerated-keys', query.node)
+          for (const key of enumeratedKeyListOf(head, read(head))) add(carry(slot(root, key)))
+          break
+        }
         case 'enumerated-keys': {
           for (const key of enumeratedKeysOf(query.node, read, fail, sealing, ownKeysOf)) facts.add(enumeratedKeyValue(key))
           seeded = true
@@ -4219,57 +4526,66 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           break
         }
         case 'publication': {
-          read(closure(query.node))
+          // The value continues at every reference the container's key is used
+          // at (`keyUsesOf`), which is the same for every value it holds.
+          for (const reference of read(keyUsesOf(query.node, query.key))) add(readUse(query.root, reference as ts.Expression))
+          break
+        }
+        case 'key-uses': {
+          const container = query.node
+          const key = query.key
+          read(closure(container))
           // A container merged into another by `Object.assign` hands this
           // key's value to the target as well.
-          for (const stored of read(closure(query.node))) {
+          for (const stored of read(closure(container))) {
             if (!ts.isCallExpression(stored)) continue
             const bulk = bulkAssignOf(stored)
-            if (bulk === null || !bulk.sources.some((source) => read(value(source)).has(query.node))) continue
-            for (const held of read(value(bulk.target))) if (isObjectRoot(held)) add(read(publication(query.root, held, query.key)))
+            if (bulk === null || !bulk.sources.some((source) => read(value(source)).has(container))) continue
+            for (const held of read(value(bulk.target))) if (isObjectRoot(held)) add(read(keyUsesOf(held, key)))
           }
-          for (const stored of read(closure(query.node))) {
+          for (const stored of read(closure(container))) {
             const copied = ts.isExpression(stored) ? outermostErasureOf(stored).parent : undefined
-            if (copied && ts.isSpreadAssignment(copied) && read(value(copied.expression)).has(query.node))
-              add(read(publication(query.root, copied.parent, query.key)))
-            if (!ts.isCallExpression(stored) || !definitionPlans.has(stored) || query.key !== 'value') continue
+            if (copied && ts.isSpreadAssignment(copied) && read(value(copied.expression)).has(container))
+              add(read(keyUsesOf(copied.parent, key)))
+            if (!ts.isCallExpression(stored) || !definitionPlans.has(stored) || key !== 'value') continue
             const plan = definitionOf(stored)
-            if (plan === null || !read(value(stored.arguments[2]!)).has(query.node)) continue
+            if (plan === null || !read(value(stored.arguments[2]!)).has(container)) continue
             for (const held of read(value(stored.arguments[0]!)))
-              if (isObjectRoot(held)) for (const key of plan.keys) add(read(publication(query.root, held, key)))
+              if (isObjectRoot(held)) for (const defined of plan.keys) add(read(keyUsesOf(held, defined)))
           }
           // Discovery-only, as the per-read receiver test it replaces was.
-          for (const access of observe(keyReadsOf(query.node, query.key))) {
+          for (const access of observe(keyReadsOf(container, key))) {
             if (!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access)) continue
-            add(readUse(query.root, access))
+            facts.add(access)
           }
           // Discovery-only, exactly as the receiver test it replaces was: a
           // publication never required the unknown reads to have settled, it
           // only had to see the ones that had.
-          for (const access of observe(unknownReadsOf(query.node))) {
+          for (const access of observe(unknownReadsOf(container))) {
             if (!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access)) continue
-            if (keyReaches(query.node, keysOf(access), query.key)) add(readUse(query.root, access))
+            if (keyReaches(container, keysOf(access), key)) facts.add(access)
           }
           // The value this key holds also reaches every cell a binding element
           // of this container declares. Enumerating only `propertyAccesses`
           // left `const { app } = p; sink(app)` out of the inventory, which is
           // a hole in a closure proof, not a missing capability.
-          for (const element of both(patternReadsByKey.get(query.key), unknownPatternReads)) {
-            const container = bindingContainer(element)
-            if (container === null || !observe(container).has(query.node)) continue
+          for (const element of both(patternReadsByKey.get(key), unknownPatternReads)) {
+            const holder = bindingContainer(element)
+            if (holder === null || !observe(holder).has(container)) continue
             if (element.dotDotDotToken || bindingElementKey(element) === null) fail('unmodelled-container-read', element)
-            else refs(query.root, element)
+            else for (const reference of referencesOf(element)) facts.add(reference)
           }
-          if (ts.isArrayLiteralExpression(query.node) && (query.key === ELEMENT_KEY || isCanonicalIndex(query.key)))
+          if (ts.isArrayLiteralExpression(container) && (key === ELEMENT_KEY || isCanonicalIndex(key)))
             for (const write of (valueIterationWrites ??= flow.allWrites.filter((write) => write.iterationOrigin?.mode === 'values'))) {
               const origin = write.iterationOrigin!
-              if (!observe(value(origin.source)).has(query.node)) continue
+              if (!observe(value(origin.source)).has(container)) continue
               if (origin.asynchronous || deferredIntrinsicProtocolLedgerOf(flow)?.require('Array', origin.source) !== true) {
                 fail('unproven-array-iteration', write.site)
                 continue
               }
               const declaration = write.target.declaration
-              if (declaration && ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name)) refs(query.root, declaration)
+              if (declaration && ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name))
+                for (const reference of referencesOf(declaration)) facts.add(reference)
               else fail('unmodelled-iteration-binding', write.site)
             }
           break

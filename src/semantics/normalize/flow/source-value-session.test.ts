@@ -1768,3 +1768,115 @@ test('a read joining many growing slots publishes every value they come to hold'
   const texts = new Set(members.map((value) => value.getText(checked.file)))
   for (let site = 0; site <= sites; site++) assert.ok(texts.has(String(site)), `missing ${site}`)
 })
+
+const valueTexts = (checked: ReturnType<typeof inspect>, values: readonly ts.Node[] | null): readonly string[] | null =>
+  values?.map((value) => (ts.isVoidExpression(value) && value.parent === undefined ? 'undefined' : value.getText(checked.file))).sort() ??
+  null
+
+test('constructions of one class share a walk but each answers its own parameter rebinding', () => {
+  // `reset` rebinds its parameter before storing through it: the store reaches
+  // the vector the rebinding made, never the one passed in, although both are
+  // constructions of the same class and share the walk through `reset`.
+  const checked = inspect(`
+    class Vec { x = 0; }
+    function reset(v) {
+      v = new Vec();
+      v.x = 5;
+      return v;
+    }
+    const passed = new Vec();
+    const other = new Vec();
+    const made = reset(passed);
+    /* passed */ passed;
+    /* other */ other;
+    /* made */ made;
+  `)
+  const members = (marker: string, text: string) =>
+    valueTexts(
+      checked,
+      withLedger(checked, () => checked.session.memberValuesOf(targetExpression(checked.file, marker, text), 'x'))
+    )
+  assert.deepEqual(members('/* passed */', 'passed'), ['0'])
+  assert.deepEqual(members('/* other */', 'other'), ['0'])
+  assert.deepEqual(members('/* made */', 'made'), ['0', '5'])
+})
+
+test('constructions of one class share a walk but each answers its own defined keys', () => {
+  // Only `marked` has `id` defined, so only its destructuring in `take` reads
+  // a described slot; the same pattern over `plain` names no descriptor.
+  const checked = inspect(`
+    class Tag { name = 'tag'; }
+    function take(t) { const { id } = t; return id; }
+    const plain = new Tag();
+    const marked = new Tag();
+    Object.defineProperty(marked, 'id', { value: 7 });
+    take(plain);
+    take(marked);
+    /* plain */ plain;
+    /* marked */ marked;
+  `)
+  const closed = (marker: string, text: string) =>
+    withLedger(checked, () => checked.session.closedValuesOf(targetExpression(checked.file, marker, text)))
+  assert.equal(closed('/* plain */', 'plain'), null)
+  assert.notEqual(closed('/* marked */', 'marked'), null)
+})
+
+test('every value stored under one container key continues at each read of it', () => {
+  const checked = inspect(`
+    class Walker { go() { return 1; } }
+    class Runner { go() { return 2; } }
+    const holder = { item: null };
+    const first = new Walker();
+    const second = new Runner();
+    holder.item = first;
+    holder.item = second;
+    const result = holder.item.go();
+    /* first */ first;
+    /* second */ second;
+    /* result */ result;
+  `)
+  const at = (marker: string, text: string) => targetExpression(checked.file, marker, text)
+  assert.notEqual(
+    withLedger(checked, () => checked.session.closedValuesOf(at('/* first */', 'first'))),
+    null
+  )
+  assert.notEqual(
+    withLedger(checked, () => checked.session.closedValuesOf(at('/* second */', 'second'))),
+    null
+  )
+  assert.deepEqual(
+    valueTexts(
+      checked,
+      withLedger(checked, () => checked.session.valuesOf(at('/* result */', 'result')))
+    ),
+    ['1', '2']
+  )
+})
+
+test('a read through some constructions of a class reads only their slots', () => {
+  // `this.x` in `get` holds every construction and reads them as one family;
+  // `v.x` holds only `b`, and must not see the store made through `a` alone.
+  const checked = inspect(`
+    class P {
+      x = 0;
+      get() { return this.x; }
+    }
+    const a = new P();
+    const b = new P();
+    const c = new P();
+    a.x = 5;
+    function readX(v) { return v.x; }
+    const partial = readX(b);
+    const whole = a.get() + b.get() + c.get();
+    /* partial */ partial;
+  `)
+  const read = (text: string) => {
+    const access = targetExpression(checked.file, 'class P', text)
+    return valueTexts(
+      checked,
+      withLedger(checked, () => checked.session.valuesOf(access))
+    )
+  }
+  assert.deepEqual(read('v.x'), ['0'])
+  assert.deepEqual(read('this.x'), ['0', '5'])
+})
