@@ -11,7 +11,7 @@ const root = resolve(import.meta.dirname, '..')
 const output = resolve(root, 'measurements/cxx-native-rtc')
 mkdirSync(output, { recursive: true })
 process.env.TMPDIR = output
-const core = resolve(root, '../core')
+const core = process.env.GEA_CORE_ROOT ?? resolve(root, '../core')
 adoptGeaPackage(resolve(core, 'packages/geatsc-plugin-gea/dist/index.js'))
 const flags = [
   '-std=c++20',

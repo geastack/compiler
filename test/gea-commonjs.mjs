@@ -7,7 +7,7 @@ import { compile } from '../dist/compiler.js'
 import { adoptGeaPackage, geaCommonJsGlobals } from '../dist/plugins/gea/host.js'
 
 const root = resolve(import.meta.dirname, '..')
-const plugin = resolve(root, '../core/packages/geatsc-plugin-gea')
+const plugin = resolve(process.env.GEA_CORE_ROOT ?? resolve(root, '../core'), 'packages/geatsc-plugin-gea')
 adoptGeaPackage(resolve(plugin, 'dist/index.js'))
 assert.equal(geaCommonJsGlobals().size, 3)
 const result = compile({

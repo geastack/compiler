@@ -55,6 +55,17 @@ const onlyAt = process.argv.findIndex((argument) => argument === '--only' || arg
 const only = onlyAt < 0 ? undefined : (process.argv[onlyAt].slice(7) || process.argv[onlyAt + 1] || '').split(',')
 const wanted = (lane) => !only || only.includes(lane)
 
+const buildHostReachable = (host) => {
+  if (process.env.GEA_PARALLEL_HOST) return true
+  try {
+    execFileSync('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', host, 'true'], { stdio: 'ignore' })
+    return true
+  } catch {
+    console.log(`parallel: ${host} is unreachable, the native fixtures build on this host`)
+    return false
+  }
+}
+
 const checkout = (name, marker) => {
   const directory = join(workspace, name)
   if (!workspace || !existsSync(join(directory, marker)))
@@ -185,6 +196,11 @@ if (wanted('core')) {
       // not skipped quietly: the summary names every one this host left unrun.
       if (process.platform !== 'darwin' && readFileSync(join(tests, file), 'utf8').includes('-framework'))
         hostOnly.push(`core: ${file} (links a macOS framework)`)
+      // The companion tests compile the generated C++ of a gea-companion macOS
+      // build, which they expect under apple's targets/macos/generated and no
+      // lane produces; the summary names them until one does.
+      else if (file.startsWith('run-gea-companion-'))
+        hostOnly.push(`core: ${file} (needs a gea-companion macOS build's generated C++, which no lane produces)`)
       else add('core', file, examples, ['bash', join(tests, file)], env)
     }
   }
@@ -211,8 +227,11 @@ if (wanted('parallel')) {
   add('parallel', 'test', parallel, ['npm', 'test'])
   add('parallel', 'refusals', parallel, ['npm', 'run', 'test:refusals'])
   // Linux and Windows build and run the fixtures on this host; elsewhere the
-  // runner ships them to its Linux build machine.
-  add('parallel', 'native', parallel, ['node', 'test/run-native.mjs', ...(process.platform !== 'darwin' ? ['--host=local'] : [])])
+  // runner ships them to its Linux build machine, GEA_PARALLEL_HOST or its
+  // default -- unless that machine cannot be reached, when this host, which
+  // has the sanitizers the fixtures build with, builds and runs them itself.
+  const local = process.platform !== 'darwin' || !buildHostReachable(process.env.GEA_PARALLEL_HOST ?? 'dashwin-geastack')
+  add('parallel', 'native', parallel, ['node', 'test/run-native.mjs', ...(local ? ['--host=local'] : [])])
   if (process.platform === 'win32')
     hostOnly.push('parallel: the ThreadSanitizer builds of test/run-native.mjs (clang has no ThreadSanitizer on Windows)')
 }
@@ -378,13 +397,18 @@ if (wanted('perf')) {
   // @geastack/parallel workloads (against Rayon and a C++ pool), compared with
   // the baseline benchmarks/ records for this machine. A machine without one
   // fails: an unmeasured release has not passed this lane.
-  const benchmarks = checkout('benchmarks', 'node/release-gate/perf-gate.mjs')
   if (process.platform === 'linux' && process.arch === 'x64')
-    last('perf', 'HTTP and parallel performance gate', benchmarks, ['node', 'node/release-gate/perf-gate.mjs', '--fix-loopback'], {
-      GEA_COMPILER_DIR: compiler,
-      GEA_NODE_COMPAT_DIR: join(workspace, 'node-compat'),
-      PARALLEL_ROOT: join(workspace, 'parallel')
-    })
+    last(
+      'perf',
+      'HTTP and parallel performance gate',
+      checkout('benchmarks', 'node/release-gate/perf-gate.mjs'),
+      ['node', 'node/release-gate/perf-gate.mjs', '--fix-loopback'],
+      {
+        GEA_COMPILER_DIR: compiler,
+        GEA_NODE_COMPAT_DIR: join(workspace, 'node-compat'),
+        PARALLEL_ROOT: join(workspace, 'parallel')
+      }
+    )
   else hostOnly.push('perf: the HTTP and parallel performance gate (needs Linux on x86-64)')
 }
 
