@@ -12,7 +12,7 @@ annotated-generic-function-alias.ts.cpp 8e846c912275
 any-argument-guard-copy-beside-typed-callers.runtime.ts.cpp c0ca1c846a71
 any-argument-outside-a-guard-parameter-domain.runtime.ts.cpp f450de861e24
 any-array-callbacks-read-fields-of-the-native-records-they-are-handed.runtime.js.cpp a488ef49c014
-any-array-element-tested-for-presence-keeps-its-absence.runtime.js.cpp b4c7411fd172
+any-array-element-tested-for-presence-keeps-its-absence.runtime.js.cpp ea36ae10edae
 any-asserted-to-promise-then-dispatches-on-the-box.runtime.ts.cpp 538e2b321713
 any-cast-this-member-call-dispatches-over-the-receiver-classes.runtime.ts.cpp b28d099d7c05
 any-dictionary-into-named-interface.runtime.ts.cpp 83c5a5f1e126
@@ -333,7 +333,7 @@ dictionary-entry-chunks-grow-copy-and-die.runtime.ts.cpp 5884072e3036
 dictionary-index-optional-destination.ts.cpp 19e542a2d7d6
 dictionary-index-truthiness.ts.cpp a41c82ae75dc
 dictionary-logical-receiver-with-dynamic-this.runtime.ts.cpp dbc01cd857fb
-dictionary-named-absence.ts.cpp c92d83437b22
+dictionary-named-absence.ts.cpp e059b2b6d4a9
 dictionary-or-any-union-computed-read.runtime.ts.cpp c8469b4c4ee6
 direct-interface-method-receiver.ts.cpp 14b713845f5f
 dispatch-event-target-created-on-viewed-literal.runtime.ts.cpp 234c86694eab
@@ -622,7 +622,7 @@ instanceof-class-union-through-nested-record-views.runtime.ts.cpp 540bfb9a5f2f
 instanceof-date-over-a-union-of-native-carriers.runtime.ts.cpp 6543d6b77454
 instanceof-derived-class.ts.cpp 526f685a24d1
 instanceof-else-arm-narrowed-to-never-is-not-converted.runtime.ts.cpp 439d10677a1d
-instanceof-error-over-boxed-error-subclass.runtime.ts.cpp 0a6f5f7e88c3
+instanceof-error-over-boxed-error-subclass.runtime.ts.cpp 0a264d21327a
 instanceof-error-over-error-subclass-union-arm.runtime.ts.cpp 3f5bdc34a912
 instanceof-error-over-union-carrier.ts.cpp c0a862a2df14
 instanceof-over-union-with-record-arm-after-a-boxed-callable.runtime.ts.cpp 61940b54d14f
@@ -970,7 +970,7 @@ object-spread-later-keys-follow-the-next-spread.runtime.ts.cpp d0347034d4f3
 object-spread-of-a-literal-keeps-its-written-order.runtime.ts.cpp 4fd3c03499b2
 object-spread-optional-interface-fields-into-record.runtime.ts.cpp d3a640b441bc
 object-values-of-mixed-field-record.ts.cpp 9fdf7a2fa37e
-observed-indexed-absence-kept-in-a-store-a-comparison-and-instanceof.runtime.js.cpp a7db86927d68
+observed-indexed-absence-kept-in-a-store-a-comparison-and-instanceof.runtime.js.cpp 8e2e4b5499d8
 odd-divisor-remainder-skips-the-zero-check.runtime.ts.cpp 393f68fa7641
 open-document-adopted-into-record-key-order.runtime.ts.cpp 171f8f483664
 open-document-boxed-arm-into-document-field-is-viewed.runtime.ts.cpp 60b269220dfd
