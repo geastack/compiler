@@ -19830,6 +19830,15 @@ namespace detail {
 struct LiteralReadCache {
   std::atomic<const ValueMetadata*> absentOn[4]{};
   std::atomic<std::uint8_t> next{0};
+  /**
+   * Types whose declared field table answered this key here (see
+   * `Value::getLiteralProperty`): for a box of one of them the read goes to
+   * that table first, as `getProperty` itself would after its ladder of
+   * checks, and only a miss -- a field this instance has deleted -- walks the
+   * ladder. Two, for a site that sees two types (a 3- and a 4-vector).
+   */
+  std::atomic<const ValueMetadata*> fieldOn[2]{};
+  std::atomic<std::uint8_t> nextField{0};
   std::atomic<std::int8_t> stringAbsent{-1};
   // The same fact for an Array: this key is neither `length` nor an index and the Array prototype table holds nothing under it.
   std::atomic<std::int8_t> arrayAbsent{-1};
@@ -33378,9 +33387,15 @@ inline bool Value::readDeclaredField(const PropertyKey& key, Value& out) const {
 }
 
 inline Value Value::getLiteralProperty(const PropertyKey& key, detail::LiteralReadCache& cache) const {
+  constexpr auto relaxed = std::memory_order_relaxed;
+  // A type this site has already seen answer from its declared fields: the
+  // ladder below and `getProperty`'s own would only reach the same table.
+  if (!proxy_ && !dynamic_ && tag_ == Tag::Object && (cache.fieldOn[0].load(relaxed) == metadata_ || cache.fieldOn[1].load(relaxed) == metadata_)) {
+    Value answer;
+    if (metadata_->fields->read(payload(), key, answer)) return answer;
+  }
   Value viewed;
   if (nativeViewValue(viewed)) return viewed.getLiteralProperty(key, cache);
-  constexpr auto relaxed = std::memory_order_relaxed;
   if (!proxy_ && !dynamic_ && tag_ == Tag::Object) {
     // A serializer may ask every value it visits for a hook method, a type-tag key and @@toStringTag. A Document answers from its own table (or, when it
     // views a native object, from that object's cached read) and an Array from its prototype table, neither needing `getProperty`'s ladder.
@@ -33448,6 +33463,18 @@ inline Value Value::getLiteralProperty(const PropertyKey& key, detail::LiteralRe
         }
         break;
       }
+    }
+  }
+  // The conditions under which `getProperty` asks the declared field table
+  // before anything else (`readDeclaredField`): no view hook on the type, no
+  // proxy or dynamic object, not a Document, not a tuple. A hit there is
+  // remembered for the type, so the next box of it skips straight to it.
+  if (!proxy_ && !dynamic_ && tag_ == Tag::Object && metadata_->nativeViewValue == nullptr && metadata_->fields != nullptr &&
+      metadata_->elements == nullptr && metadata_->payloadType != detail::payloadTypeTagFor<gea::Ref<gea::Dictionary<gea::Value>>>()) {
+    Value declared;
+    if (metadata_->fields->read(payload(), key, declared)) {
+      cache.fieldOn[cache.nextField.fetch_add(1, relaxed) % 2].store(metadata_, relaxed);
+      return declared;
     }
   }
   Value answer = getProperty(key, *this);
