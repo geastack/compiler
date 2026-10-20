@@ -50767,6 +50767,14 @@ inline void gea_json_read(gea::json::Reader& reader, gea::embedded::ui::Signal<T
 // of a malformed percent sequence (`URIError`, ECMA-262 19.2.6.5 step 4.b),
 // and `new TextDecoder(label)` for a label this implementation does not
 // support (`RangeError`).
+//
+// `decodeURI`/`decodeURIComponent` throw a catchable `URIError` through
+// `gea::host::throwRuntimeError`, the runtime-owned Error carrier. `btoa`,
+// `atob` and the TextDecoder label check still abort BY NAME with the
+// specification's message: they predate that carrier and have not been moved
+// onto it, so a `try { atob(x) } catch {}` cannot recover yet. That is a real
+// difference from ECMAScript, stated here rather than papered over with a
+// plausible empty string.
 // ===========================================================================
 
 namespace gea::runtime::text {
