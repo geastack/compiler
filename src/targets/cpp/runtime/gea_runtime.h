@@ -3188,6 +3188,13 @@ struct CycleState {
   // fullCollectionEvery` candidates per full sweep is exactly what the
   // collection count meant when every young collection was a full buffer.
   std::size_t candidatesSinceFullCollection = 0;
+  // How many objects the last full collection found live: the size of the
+  // traced heap a full collection pays for. Both full-collection triggers
+  // (`fullCollectionBudget`, `deferredOverdue`) scale with it, so a program
+  // that keeps a large, stable graph and touches much of it every frame pays
+  // for a full trace in proportion to the work done since the last one rather
+  // than once per frame.
+  std::size_t survivorsOfLastFullCollection = 0;
   // Young-collection survivors whose "live" verdict rested on a clipped edge
   // (`Node::hadClippedEdge`). They are not re-entered into `candidates`: a
   // young pass can never decide them (the clipped edge is invisible to it by
@@ -3318,16 +3325,49 @@ inline bool& cycleSafepointArmed() {
 #endif
 }
 
+/**
+ * How many young candidates a run of young collections examines before the
+ * next automatic collection is promoted to full: `fullCollectionEvery`
+ * buffers' worth, or the heap the last full collection found live, whichever
+ * is larger.
+ *
+ * A full collection traces everything reachable from its roots, so its cost
+ * is the surviving heap, not the candidate count. With a fixed budget, a
+ * program holding a large graph paid that whole trace every `candidateThreshold
+ * * fullCollectionEvery` candidates however large the graph was; scaling the
+ * budget with the survivors makes the full trace's cost, amortized over the
+ * candidates that paid for it, a constant -- the rule a generational
+ * collector uses to size its old generation's collections. What it costs is
+ * latency: a garbage cycle only a full collection can free (one made of
+ * mature objects) waits until that much young work has been done, which is
+ * bounded by the heap, not by time.
+ */
+inline std::size_t fullCollectionBudget(const CycleState& state) {
+  return std::max(state.candidateThreshold * state.fullCollectionEvery, state.survivorsOfLastFullCollection);
+}
+
 /** The deferred list normally waits for the cadence-driven full collection,
  * which needs young candidates to keep arriving. A program whose only
  * releases are of permanent objects would otherwise never reach one, so the
- * list itself becomes the trigger once it holds what `fullCollectionEvery`
- * young collections' worth of candidates would have: the same bound the
- * cadence gives an all-mature garbage cycle, derived from the policy rather
- * than a third knob. Entries are unique objects (`cycleBuffered` keeps each
- * out twice), so a server's steady state cannot reach it by traffic alone. */
+ * list itself becomes the trigger once it is large against the heap.
+ *
+ * Entries are unique objects (`cycleBuffered` keeps each out twice), so the
+ * list never holds more than the permanent objects that dipped since the last
+ * full collection. A render loop re-touches thousands of long-lived objects
+ * every frame -- every node, attribute and uniform of a scene -- so against a
+ * fixed bound (`fullCollectionEvery` buffers' worth) the list refilled past it
+ * in a frame and every frame ended in a full trace of the whole scene. The
+ * bound is therefore that fixed allowance ON TOP of the heap the last full
+ * collection kept: re-touching that heap, however much of it, can never reach
+ * it; only that many objects beyond it can -- permanent objects allocated
+ * since, which is the heap growing. Soundness: a garbage structure only a
+ * full collection can free has a member in this list (the release that made
+ * it garbage dipped it), and the full collection this bound or the candidate
+ * cadence (`fullCollectionBudget`) eventually forces frees it; until then the
+ * garbage is made of objects the last full collection kept or of objects
+ * promoted since, which the two bounds cap in proportion to that heap. */
 inline bool deferredOverdue(const CycleState& state) {
-  return state.deferred.size() >= state.candidateThreshold * state.fullCollectionEvery;
+  return state.deferred.size() >= state.candidateThreshold * state.fullCollectionEvery + state.survivorsOfLastFullCollection;
 }
 
 /**
@@ -3857,7 +3897,7 @@ inline void filterBufferedCandidates(CycleState& state) {
  * collection (`full == true`) ignores the mature bit and traces everything
  * reachable from the candidates, then re-marks every survivor mature; this is
  * what `gea::collectCycles()` runs, and what the automatic path promotes to
- * every `fullCollectionEvery` young collections (see `CycleState`).
+ * once young collections have examined `fullCollectionBudget` candidates.
  *
  * Correctness of the young path -- why it can only OVER-retain, never
  * under-collect a live object:
@@ -3908,7 +3948,7 @@ inline void filterBufferedCandidates(CycleState& state) {
  *    way, the entry candidate is never lost after a false retain: it sits
  *    buffered, reachable from `state.candidates`, until the next FULL
  *    collection traces it without the mature filter, finds the true
- *    incoming count, and frees it -- bounded by `fullCollectionEvery`, never
+ *    incoming count, and frees it -- bounded by `fullCollectionBudget`, never
  *    indefinite, and never dependent on some unrelated later release
  *    happening to touch it again.
  *  - `restorePins`'s `restoreWeakCounts` replays `savedWeak` -- captured
@@ -3933,7 +3973,7 @@ GEA_EH_NOINLINE inline void collectReferenceCycles(bool full = false) {
   // ordinary (young) collection to full on the configured cadence, and on
   // the very first collection (nothing is mature yet, so this costs nothing
   // and establishes the baseline for the counter).
-  if (!full && (state.collections == 0 || state.candidatesSinceFullCollection >= state.candidateThreshold * state.fullCollectionEvery)) full = true;
+  if (!full && (state.collections == 0 || state.candidatesSinceFullCollection >= fullCollectionBudget(state))) full = true;
   // A full collection also owes the deferred survivors an answer (see
   // `CycleState::deferred`), so it runs for them even with no fresh candidate.
   if (state.candidates.empty() && !(full && !state.deferred.empty())) return;
@@ -4325,6 +4365,7 @@ GEA_EH_NOINLINE inline void collectReferenceCycles(bool full = false) {
     if (trace.runs % 32 == 0 && gea_heap_trace_print) gea_heap_trace_print();
   }
 #endif
+  if (full) state.survivorsOfLastFullCollection = graph.live.size();
   graph.clear();
   state.collecting = false;
   state.allocationPressure = 0;

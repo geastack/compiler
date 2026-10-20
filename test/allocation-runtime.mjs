@@ -25,6 +25,7 @@ const units = [
   'async-suspension',
   'promise-union-no-throwaway-state',
   'cycle-collector-generations',
+  'cycle-full-collection-pacing',
   'cycle-collector-task-handoff',
   'cycle-collector-untraced-owner-cascade',
   'callable-identity-lazy',
