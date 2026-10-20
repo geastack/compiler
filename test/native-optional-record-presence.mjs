@@ -15,8 +15,11 @@ test('optional record fields distinguish absence from present undefined and dele
   assert.deepEqual(result.loweringBlockers, [])
   assert.deepEqual(result.emissionRefusals, [])
   assert.ok(result.source)
+  // A record the program also reaches through another view (`Object.keys`,
+  // `delete`) is held by reference rather than embedded by value; either way
+  // its storage is native.
   const records = [...result.representations.plan.selected.values()].filter(
-    (carrier) => carrier.kind === 'record' || carrier.kind === 'record-with-index'
+    (carrier) => carrier.kind === 'record' || carrier.kind === 'record-with-index' || carrier.kind === 'native-record-ref'
   )
   assert.ok(records.length > 0)
   for (const carrier of records) {
