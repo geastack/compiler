@@ -6113,6 +6113,20 @@ template <typename Left, typename Right>
   }
 }
 /**
+ * `integerModulo` for a divisor the compiler proved odd (`oddValuesOf`), so
+ * never zero. The zero test is the one that costs: clang lays a trial-division
+ * loop out around it, 8% slower on Haswell, where the `MIN % -1` test hoists
+ * out as the dividend's and costs nothing -- and -1 is odd, so it stays.
+ */
+template <typename Left, typename Right>
+[[gnu::always_inline]] inline auto integerModuloNonZero(Left dividend, Right divisor) {
+  using Common = std::common_type_t<Left, Right>;
+  static_assert(std::is_integral_v<Common>, "a proved-odd divisor is an integer");
+  if constexpr (std::is_signed_v<Common>)
+    if (static_cast<Common>(dividend) == std::numeric_limits<Common>::min() && divisor == -1) [[unlikely]] return Common{0};
+  return static_cast<Common>(static_cast<Common>(dividend) % static_cast<Common>(divisor));
+}
+/**
  * `+ - *` over an `int`/`i32` binding's values, at the annotation's width.
  * They wrap, as an `int32_t` lane of a typed array does: computed in the
  * unsigned type of the same width, where overflow is defined, and converted

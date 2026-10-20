@@ -1744,6 +1744,8 @@ export interface EmitContext {
   readonly roundingArithmetic: ReadonlySet<IrValueId>
   /** See `IntegerNarrowing.integerDivisions`. */
   readonly integerDivisions: ReadonlySet<IrValueId>
+  /** See `IntegerNarrowing.nonZeroDivisors`. */
+  readonly nonZeroDivisors: ReadonlySet<IrValueId>
   /** See `IntegerNarrowing.declaredWidths`. */
   readonly declaredWidths: ReadonlyMap<IrValueId, DeclaredIntegerWidth>
   /** See `IntegerNarrowing.exactNumericConversions`; settled before rendering. */
@@ -1982,6 +1984,7 @@ export interface EmitBodyPrepassFacts {
   readonly remainderForms: Map<IrValueId, 'restated' | 'dynamic'>
   readonly roundingArithmetic: Set<IrValueId>
   readonly integerDivisions: Set<IrValueId>
+  readonly nonZeroDivisors: Set<IrValueId>
   readonly declaredWidths: Map<IrValueId, DeclaredIntegerWidth>
   readonly exactNumericConversions: Set<IrValueId>
   readonly declaredIntegerCells: Map<DeclarationId, DeclaredIntegerWidth>
@@ -2127,6 +2130,7 @@ export const createEmitContext = (
   const remainderForms = new Map<IrValueId, 'restated' | 'dynamic'>()
   const roundingArithmetic = new Set<IrValueId>()
   const integerDivisions = new Set<IrValueId>()
+  const nonZeroDivisors = new Set<IrValueId>()
   const declaredWidths = new Map<IrValueId, DeclaredIntegerWidth>()
   const exactNumericConversions = new Set<IrValueId>()
   const declaredIntegerCells = new Map<DeclarationId, DeclaredIntegerWidth>()
@@ -2289,6 +2293,7 @@ export const createEmitContext = (
     remainderForms,
     roundingArithmetic,
     integerDivisions,
+    nonZeroDivisors,
     declaredWidths,
     exactNumericConversions,
     declaredIntegerCells,
@@ -2335,6 +2340,7 @@ export const createEmitContext = (
       remainderForms,
       roundingArithmetic,
       integerDivisions,
+      nonZeroDivisors,
       declaredWidths,
       exactNumericConversions,
       declaredIntegerCells,

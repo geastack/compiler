@@ -947,6 +947,7 @@ object-spread-later-keys-follow-the-next-spread.runtime.ts.cpp d0347034d4f3
 object-spread-of-a-literal-keeps-its-written-order.runtime.ts.cpp 4fd3c03499b2
 object-spread-optional-interface-fields-into-record.runtime.ts.cpp d3a640b441bc
 object-values-of-mixed-field-record.ts.cpp 9fdf7a2fa37e
+odd-divisor-remainder-skips-the-zero-check.runtime.ts.cpp 393f68fa7641
 open-document-adopted-into-record-key-order.runtime.ts.cpp 171f8f483664
 open-document-boxed-arm-into-document-field-is-viewed.runtime.ts.cpp b848cfa0e30c
 open-document-narrowed-array-into-document-field-is-viewed.runtime.ts.cpp ce562c6a8a17
