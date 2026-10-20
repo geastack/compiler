@@ -1747,3 +1747,24 @@ test('a for-in head shared by many construction sites answers every key its opti
   assert.deepEqual(members(program(''), 'side'), ['0', ...applied].sort())
   assert.equal(members(program('new Left(externalOptions);'), 'opacity'), null)
 })
+
+test('a read joining many growing slots publishes every value they come to hold', () => {
+  // `clone` reads `this.x` across every instance, and each instance's slot
+  // grows as more setter calls are discovered: a re-evaluation adds only what
+  // each slot gained since the last one, so nothing may be dropped on the way.
+  const sites = 60
+  const checked = inspect(`
+    class Vec {
+      x = 0;
+      set(x) { this.x = x; return this; }
+      clone() { return new Vec().set(this.x); }
+    }
+    ${Array.from({ length: sites }, (_, site) => `const made${site} = new Vec().set(${site + 1}).clone();`).join('\n')}
+    const owner = made0.clone();
+    /* owner */ owner;
+  `)
+  const members = withLedger(checked, () => checked.session.memberValuesOf(targetExpression(checked.file, '/* owner */', 'owner'), 'x'))
+  assert.ok(members !== null)
+  const texts = new Set(members.map((value) => value.getText(checked.file)))
+  for (let site = 0; site <= sites; site++) assert.ok(texts.has(String(site)), `missing ${site}`)
+})

@@ -220,6 +220,8 @@ const noArrayKeys = process.env['GEA_NO_ARRAY_KEYS'] !== undefined
  * read nothing, and every such array's elements were unresolvable.
  */
 const ELEMENT_KEY = '[]'
+/** Past this many facts a dependency's facts are added to a reader incrementally (`addedThrough`). */
+const DELTA_MINIMUM = 8
 const CANONICAL_INDEX = /^(?:0|[1-9][0-9]*)$/
 const isCanonicalIndex = (key: string): boolean => CANONICAL_INDEX.test(key)
 /** Whether a store or read filed under `stored` can reach the slot `key` of `root`. */
@@ -1999,6 +2001,12 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     // A node's map is allocated on its first answer: most nodes never ask an
     // own-key question.
     const ownKeysAnswersByQuery = new Map<Query, Map<Value, OwnKeysAnswer>>()
+    /**
+     * Per node, how many of each dependency's facts its transfers have already
+     * returned (`add`). Only dependencies past `DELTA_MINIMUM` are tracked: a
+     * small one costs less to re-add than to look up.
+     */
+    const addedThrough = new Map<Query, Map<ReadonlySet<Value>, number>>()
     const evaluate = (
       query: Query,
       required: Read,
@@ -2036,7 +2044,27 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       const readUse = (root: Value, reference: ts.Expression): ReadonlySet<Value> =>
         inertUse(reference) ? NO_VALUES : read(use(root, reference))
       const add = (values: Iterable<Value>): void => {
-        for (const held of values) facts.add(held)
+        // A transfer only has to hand back what this node has not published
+        // yet: the solver adds every fact a transfer returns to the node and
+        // keeps it, and a dependency's facts only grow, in insertion order.
+        // So a dependency read again is added from where this node's last
+        // transfer stopped. Re-adding it whole made each re-evaluation of a
+        // node joining many slots (`this.x` read across every instance of a
+        // class, each slot holding every value its setters were passed) copy
+        // and re-test every fact again -- ~95% of all facts added on a large
+        // program. A seal still builds its full answer: it reads `facts`.
+        if (outcome !== null || !(values instanceof FactState) || values.size <= DELTA_MINIMUM) {
+          for (const held of values) facts.add(held)
+          return
+        }
+        let through = addedThrough.get(query)
+        if (through === undefined) addedThrough.set(query, (through = new Map()))
+        const before = through.get(values) ?? 0
+        const size = values.size
+        if (before === size) return
+        let at = 0
+        for (const held of values) if (at++ >= before) facts.add(held)
+        through.set(values, size)
       }
       /**
        * A member call whose receiver holds nothing but `null`/`undefined`
