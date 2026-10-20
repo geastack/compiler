@@ -52,8 +52,10 @@ int main() {
   assert(!gea::runtime::regex::dynamicSet(
       original, PropertyKey::string("flags"), Value::box(Value::Tag::String, std::string("y"))));
   assert(original->source == "ab" && original->flags == "gi");
-  assert(gea::nativeDynamicGet(original, PropertyKey::string("source")).tag() == Value::Tag::Undefined);
-  assert(gea::nativeDynamicGet(original, PropertyKey::string("flags")).tag() == Value::Tag::Undefined);
+  // The refused writes planted no own property: a read still reaches the
+  // RegExp.prototype accessors, as `r.source` / `r.flags` do in Node.
+  assert(gea::nativeDynamicGet(original, PropertyKey::string("source")).as<std::string>() == "ab");
+  assert(gea::nativeDynamicGet(original, PropertyKey::string("flags")).as<std::string>() == "gi");
 
   assert(gea::runtime::regex::dynamicSet(
       original, PropertyKey::string("lastIndex"), Value::box(Value::Tag::String, std::string("2"))));
