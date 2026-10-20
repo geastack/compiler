@@ -1699,3 +1699,51 @@ test('a body read into another cell finds the calls made through that cell', () 
   assert.deepEqual(texts(ledger.capture(() => session.parameterValuesOf(f.parameters[0]!)).value), ['1', '2', '3', '4', '5'])
   assert.deepEqual(ledger.capture(() => session.callerSitesOf(declared('idle'))).value, [])
 })
+
+test('a for-in head shared by many construction sites answers every key its options literals spell', () => {
+  // One `setValues( values )` applies every options literal any construction
+  // site passes; each `values[ key ]` and `this[ key ]` in its body asks the
+  // head's key set once per root that reaches it, so the key set must be the
+  // head's own answer rather than a walk of every literal per asking root.
+  const sites = 120
+  const program = (extra: string): string => `
+    declare const externalOptions: unknown;
+    class Base {
+      opacity = 1;
+      side = 0;
+      setValues(values) {
+        if (values === undefined) return;
+        for (const key in values) {
+          const current = this[key];
+          if (current === undefined) continue;
+          this[key] = values[key];
+        }
+      }
+    }
+    class Left extends Base { constructor(parameters?) { super(); this.setValues(parameters); } }
+    class Right extends Base { constructor(parameters?) { super(); this.setValues(parameters); } }
+    ${Array.from({ length: sites }, (_, site) => `new ${site % 2 ? 'Left' : 'Right'}({ opacity: ${site + 2} });`).join('\n')}
+    new Right({ side: 7 });
+    new Left();
+    ${extra}
+    const owner = new Left({ opacity: 1 });
+    /* owner */ owner;
+  `
+  const members = (source: string, key: string): readonly string[] | null => {
+    const checked = inspect(source)
+    return (
+      withLedger(checked, () => checked.session.memberValuesOf(targetExpression(checked.file, '/* owner */', 'owner'), key))
+        // The session's own `undefined` is a synthesized `void 0` with no text.
+        ?.map((value) => (ts.isVoidExpression(value) ? 'undefined' : value.getText(checked.file)))
+        .sort() ?? null
+    )
+  }
+  // `values[ key ]` reads every key of every literal the parameter holds, and
+  // `undefined` for a key a literal lacks: each enumerated slot gets that
+  // union -- the owner's own `opacity: 1` and the one-off `side: 7` included --
+  // beside the field's own initializer.
+  const applied = ['1', ...Array.from({ length: sites }, (_, site) => String(site + 2)), '7', 'undefined']
+  assert.deepEqual(members(program(''), 'opacity'), ['1', ...applied].sort())
+  assert.deepEqual(members(program(''), 'side'), ['0', ...applied].sort())
+  assert.equal(members(program('new Left(externalOptions);'), 'opacity'), null)
+})

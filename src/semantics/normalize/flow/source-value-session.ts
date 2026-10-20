@@ -80,6 +80,7 @@ type QueryShape =
   | { readonly kind: 'closure'; readonly node: Value }
   | { readonly kind: 'slot' | 'stored-slot'; readonly node: ObjectRoot; readonly key: string }
   | { readonly kind: 'own-keys'; readonly node: ObjectRoot }
+  | { readonly kind: 'enumerated-keys'; readonly node: ts.Expression }
   | { readonly kind: 'use'; readonly node: ts.Expression; readonly root: Value }
   | { readonly kind: 'publication'; readonly node: ObjectRoot; readonly key: string; readonly root: Value }
   | { readonly kind: 'unknown-reads'; readonly node: ObjectRoot }
@@ -556,6 +557,26 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     if (!literal) keys.set(key, (literal = ts.factory.createStringLiteral(key)))
     return literal
   }
+  // An `enumerated-keys` node's facts: one literal per key text, for the same
+  // identity reason as `keyValue`. They name keys and are no root's value.
+  const enumeratedKeyValues = new Map<string, ts.StringLiteral>()
+  const enumeratedKeyValue = (key: string): ts.StringLiteral => {
+    let literal = enumeratedKeyValues.get(key)
+    if (!literal) enumeratedKeyValues.set(key, (literal = ts.factory.createStringLiteral(key)))
+    return literal
+  }
+  // Each head's key list, rebuilt only when its node gained a key: facts only
+  // grow, so an unchanged size is an unchanged set, and the accesses that ask
+  // are many.
+  const enumeratedKeyLists = new Map<Query, { readonly size: number; readonly keys: readonly string[] }>()
+  const enumeratedKeyListOf = (query: Query, held: ReadonlySet<Value>): readonly string[] => {
+    const known = enumeratedKeyLists.get(query)
+    if (known !== undefined && known.size === held.size) return known.keys
+    const keys: string[] = []
+    for (const key of held) keys.push((key as ts.StringLiteral).text)
+    enumeratedKeyLists.set(query, { size: held.size, keys })
+    return keys
+  }
   const sites = new Map(flow.calls.map((site) => [site.call, site]))
   const ownInvocationEntries = new Map<ts.CallExpression, FlowInvocationOperands>()
   const candidateOrdinaryOwnCallableOperandsOf = (call: ts.CallExpression): FlowInvocationOperands | null => {
@@ -646,6 +667,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       | 'closure'
       | 'unknown-reads'
       | 'own-keys'
+      | 'enumerated-keys'
       | 'callers'
   >(
     kind: K,
@@ -1871,19 +1893,21 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    * head walks keys no root spells. That obligation is deferred to the ledger,
    * exactly as the legacy key-set authority defers it; with no ledger to carry
    * it there is nothing to discharge it later, so the enumeration refuses.
+   *
+   * This is the transfer of the head's own `enumerated-keys` node, never run
+   * inline by an access: every `values[ key ]` and `this[ key ]` in the loop
+   * body is asked once per root that reaches it, so an inline walk of every
+   * enumerated root -- every options literal passed to any constructor of a
+   * family -- made the work roots x roots, and each walk paid for every root's
+   * own-key and holder checks again.
    */
   const enumeratedKeysOf = (
-    access: ts.ElementAccessExpression,
     enumerated: ts.Expression,
     read: Read,
     fail: (reason: string, node?: ts.Node) => void,
     sealing: boolean,
     ownKeysOf: (root: Value) => readonly string[] | null
-  ): readonly string[] => {
-    if (!deferredIntrinsicProtocolLedgerOf(flow)?.require('Object', access)) {
-      fail('undeferrable-enumeration-protocol', access)
-      return []
-    }
+  ): ReadonlySet<string> => {
     const keys = new Set<string>()
     const roots = read(value(enumerated))
     for (const root of roots) {
@@ -1905,7 +1929,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       for (const key of own) keys.add(key)
     }
     if (sealing && roots.size === 0) fail('unresolved-enumeration', enumerated)
-    return [...keys]
+    return keys
   }
 
   // One object per (node, reason) for the whole session. The solver compares
@@ -2224,7 +2248,14 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         if (direct !== null) return [direct]
         if (!ts.isElementAccessExpression(access)) return []
         const enumerated = enumerationHeadOf(access.argumentExpression)
-        if (enumerated !== null) return enumeratedKeysOf(access, enumerated, read, fail, sealing, ownKeysOf)
+        if (enumerated !== null) {
+          if (!deferredIntrinsicProtocolLedgerOf(flow)?.require('Object', access)) {
+            fail('undeferrable-enumeration-protocol', access)
+            return []
+          }
+          const head = nodeQuery('enumerated-keys', enumerated)
+          return enumeratedKeyListOf(head, read(head))
+        }
         const keyReference = unwrapErasedExpression(access.argumentExpression)
         const keyDeclaration = ts.isIdentifier(keyReference) ? flow.targetOf(keyReference)?.declaration : undefined
         if (keyDeclaration && ts.isVariableDeclaration(keyDeclaration)) {
@@ -4122,6 +4153,11 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           // Program order, the order the scan this replaces discovered them in.
           found.sort((a, b) => a - b)
           for (const position of found) facts.add(flow.propertyAccesses[position]!)
+          break
+        }
+        case 'enumerated-keys': {
+          for (const key of enumeratedKeysOf(query.node, read, fail, sealing, ownKeysOf)) facts.add(enumeratedKeyValue(key))
+          seeded = true
           break
         }
         case 'own-keys': {
