@@ -212,6 +212,8 @@ const exactListOf = <T>(set: ReadonlySet<T>): readonly T[] => {
 }
 // Read once at load, not per value transfer: `process.env` is a native interceptor.
 const noArrayKeys = process.env['GEA_NO_ARRAY_KEYS'] !== undefined
+// `GEA_JOINED_ONLY_OFF` re-runs every transfer in full (`joinedOnly`), so the claim stays checkable from one build.
+const joinedOnlyEnabled = process.env['GEA_JOINED_ONLY_OFF'] === undefined
 /**
  * The element slot of an array root: every position at once. A computed
  * index names no single key (`this.items[ i ]` in a constructor that fills
@@ -224,6 +226,19 @@ const noArrayKeys = process.env['GEA_NO_ARRAY_KEYS'] !== undefined
 const ELEMENT_KEY = '[]'
 /** Past this many facts a dependency's facts are added to a reader incrementally (`addedThrough`). */
 const DELTA_MINIMUM = 8
+/**
+ * What a node's last full transfer read (`joinedOnly`): each set it tested,
+ * with its size then, each holder question with its answer's size, and
+ * each set it only joined, with the size it has been handed back through.
+ * Kept for the length of one solve.
+ */
+interface TransferInputs {
+  readonly tested: ReadonlySet<Value>[]
+  readonly testedSizes: number[]
+  readonly holders: (readonly [Value, number])[]
+  readonly joined: ReadonlySet<Value>[]
+  readonly joinedSizes: number[]
+}
 const CANONICAL_INDEX = /^(?:0|[1-9][0-9]*)$/
 const isCanonicalIndex = (key: string): boolean => CANONICAL_INDEX.test(key)
 /** Whether a store or read filed under `stored` can reach the slot `key` of `root`. */
@@ -1352,7 +1367,6 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       (ts.isIfStatement(parent) && parent.expression === reference)
     )
   }
-  const NO_VALUES: ReadonlySet<Value> = new Set()
   /**
    * `return this` in a body's own frame (not in a nested arrow, whose return
    * is the arrow's): the completion is the frame's receiver.
@@ -2151,6 +2165,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    * one evaluation's own (`seeded`, and the causes and grounding a seal reads
    * back through `outcome`) or a per-node cache kept in a map below.
    */
+  const transferInputs = new Map<Query, TransferInputs>()
   const definition = ((): DependencyFactDefinition<Query, Value, Cause> => {
     /** What a seal reads back from the evaluation it ran. */
     interface SealOutcome {
@@ -2203,14 +2218,33 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     const evaluate = (
       query: Query,
       required: Read,
-      observe: Read,
-      holdersOf: DependencyFactHoldersOf<Query, Value>,
+      observeFrom: Read,
+      holdersOfFrom: DependencyFactHoldersOf<Query, Value>,
       sealing: boolean,
       outcome: SealOutcome | null
     ): ReadonlySet<Value> => {
       let seeded = false
       let ownKeysAnswers = ownKeysAnswersByQuery.get(query) ?? null
       const facts = new Set<Value>()
+      // A transfer's inputs, kept for `joinedOnly` (seals keep none).
+      const inputs: TransferInputs | null =
+        outcome === null ? { tested: [], testedSizes: [], holders: [], joined: [], joinedSizes: [] } : null
+      const joinedHere = inputs === null ? null : new Set<ReadonlySet<Value>>()
+      const tested = (held: ReadonlySet<Value>): ReadonlySet<Value> => {
+        if (inputs !== null) {
+          inputs.tested.push(held)
+          inputs.testedSizes.push(held.size)
+        }
+        return held
+      }
+      const observe: Read = (dependency) => tested(observeFrom(dependency))
+      const holdersOf: DependencyFactHoldersOf<Query, Value> = (fact) => {
+        const found = holdersOfFrom(fact)
+        if (inputs === null) return found
+        const list = Array.isArray(found) ? (found as readonly Query[]) : [...found]
+        inputs.holders.push([fact, list.length])
+        return list
+      }
       const causes: Cause[] = []
       const grounding = new Set<Query>()
       const fail = (reason: string, node: ts.Node = query.node): void => {
@@ -2228,14 +2262,35 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       // single self-time entry in a large program's profile once the state lookup
       // beside it was gone -- and a duplicate of the whole proof graph in a
       // solve that was already running out of heap.
-      const read: Read = required
+      const read: Read = (dependency) => tested(required(dependency))
+      /** A required edge whose facts this transfer does not look at: an input of its answer's completeness only. */
+      const need = (dependency: Query): void => void required(dependency)
       const carry = (dependency: Query): ReadonlySet<Value> => {
         grounding.add(dependency)
         return read(dependency)
       }
-      /** `read(use(root, reference))`, without minting the node for a use that does nothing (`inertUse`). */
-      const readUse = (root: Value, reference: ts.Expression): ReadonlySet<Value> =>
-        inertUse(reference) ? NO_VALUES : read(use(root, reference))
+      /**
+       * `add(read( dependency ))`: the dependency's facts become this node's and
+       * nothing else is asked of them, so it is a joined input rather than a
+       * tested one (`joinedOnly`).
+       */
+      const join = (dependency: Query): void => {
+        const held = required(dependency)
+        if (joinedHere !== null && held instanceof FactState && !joinedHere.has(held)) {
+          joinedHere.add(held)
+          inputs!.joined.push(held)
+          inputs!.joinedSizes.push(held.size)
+        }
+        add(held)
+      }
+      const joinCarried = (dependency: Query): void => {
+        grounding.add(dependency)
+        join(dependency)
+      }
+      /** `join(use(root, reference))`, without minting the node for a use that does nothing (`inertUse`). */
+      const joinUse = (root: Value, reference: ts.Expression): void => {
+        if (!inertUse(reference)) join(use(root, reference))
+      }
       /**
        * The gates this node answers for its own root (`resolveGates`), when it
        * is the closure of a family member or reads a family walk for one: a
@@ -2299,9 +2354,9 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         const log = gating!
         for (let at = 0; at < log.list.length; at++) {
           const gate = gates.get(log.list[at]!)!
-          if (gate.declaration === null) add(read(rootUse(root, gate.reference)))
+          if (gate.declaration === null) join(rootUse(root, gate.reference))
           else if (!parameterRebindingsOf(gate.declaration).every((write) => write.value !== null && !read(value(write.value)).has(root)))
-            add(readUse(root, gate.reference))
+            joinUse(root, gate.reference)
         }
       }
       /**
@@ -2410,6 +2465,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         if (kept !== undefined && kept.stamps.every(([held, size]) => held.size === size) && holdersUnchanged(kept.holderStamps)) {
           for (const stamps of stampLists) stamps.push(...kept.stamps)
           for (const stamps of holderStampLists) stamps.push(...kept.holderStamps)
+          // Replayed without being read again, so the sets the answer was read
+          // from are this transfer's inputs too (the holders are asked again in
+          // `holdersUnchanged`).
+          for (const [held] of kept.stamps) tested(held)
           ownKeys.set(root, kept.keys)
           return kept.keys
         }
@@ -2622,7 +2681,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           for (const key of keys) {
             if (key !== 'name' && key !== 'length' && sourceCallableOwnDataWriteOf(checker, flow, root, key, access) === null)
               fail('unproven-callable-data-read', access)
-            else add(carry(slot(root, key)))
+            else joinCarried(slot(root, key))
           }
           return
         }
@@ -2631,14 +2690,14 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             ? enumerationHeadOf(access.argumentExpression)
             : null
         if (enumerated !== null) {
-          add(carry(enumeratedSlots(enumerated, root)))
+          joinCarried(enumeratedSlots(enumerated, root))
           return
         }
         const family = coveringFamilyOf(root, receivers)
-        if (family === null) for (const key of keys) add(carry(slot(root, key)))
+        if (family === null) for (const key of keys) joinCarried(slot(root, key))
         else if (!familiesRead.has(family)) {
           familiesRead.add(family)
-          for (const key of keys) add(carry(familySlot(family as ObjectRoot, key)))
+          for (const key of keys) joinCarried(familySlot(family as ObjectRoot, key))
         }
       }
       // A root this lane cannot read refuses the binding, and the literal
@@ -2716,9 +2775,9 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             }
             if (parameterRebindingsOf(declaration).every((write) => write.value !== null && !read(value(write.value)).has(root))) continue
           }
-          add(readUse(root, reference))
+          joinUse(root, reference)
         }
-        for (const reference of importerMentions(declaration) ?? []) add(readUse(root, reference))
+        for (const reference of importerMentions(declaration) ?? []) joinUse(root, reference)
       }
       /**
        * A binding pattern taken apart over this value: every element reads one
@@ -2777,7 +2836,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         if (!ts.isNewExpression(root)) return false
         const bodies = settersOf(root, key)
         if (bodies === null) return false
-        for (const setter of bodies) for (const reference of flow.receiverReferencesToDeclaration(setter)) add(readUse(root, reference))
+        for (const setter of bodies) for (const reference of flow.receiverReferencesToDeclaration(setter)) joinUse(root, reference)
         return true
       }
       /**
@@ -2856,7 +2915,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           for (const fact of read(closure(instance))) {
             if (!ts.isPropertyAccessExpression(fact) && !ts.isElementAccessExpression(fact)) continue
             if (writeEdgeByAccess.has(fact) || !keysOf(fact).includes(key)) continue
-            add(readUse(root, fact))
+            joinUse(root, fact)
           }
       }
       const setterStores = (setter: ts.SetAccessorDeclaration): void => {
@@ -2898,7 +2957,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             const write = edge.write
             if (write.value === null || !['property-assignment', 'index-assignment', 'logical-assignment'].includes(write.edge))
               fail('unmodelled-setter-store', write.site)
-            else add(carry(value(write.value)))
+            else joinCarried(value(write.value))
           }
       }
       /**
@@ -2939,7 +2998,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               fail('arguments-object-frame', body)
               continue
             }
-            for (const mention of spread) add(readUse(root, mention))
+            for (const mention of spread) joinUse(root, mention)
             const parameter = runtimeParametersOf(body)[position]
             if (parameter?.dotDotDotToken) fail('rest-frame', parameter)
             else if (parameter && ts.isIdentifier(parameter.name)) refs(root, parameter)
@@ -2958,11 +3017,11 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             // `arguments` never holds the receiver, so an arguments-using body
             // says nothing about where `this` goes.
             if (!ts.isArrowFunction(body)) {
-              for (const reference of flow.receiverReferencesToDeclaration(body)) add(readUse(root, reference))
+              for (const reference of flow.receiverReferencesToDeclaration(body)) joinUse(root, reference)
               // `return this`: the call evaluates to its own receiver, so the
               // root comes back out HERE, at the call it entered through --
               // see `returnsOwnReceiver`.
-              if (returnsOwnReceiver(body) && callableCompletionSummaryOf(flow, body)?.execution === 'sync') add(readUse(root, site.call))
+              if (returnsOwnReceiver(body) && callableCompletionSummaryOf(flow, body)?.execution === 'sync') joinUse(root, site.call)
             }
           } else {
             const mentions = argumentsReads(body)
@@ -2970,7 +3029,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               fail('arguments-object-frame', body)
               continue
             }
-            for (const mention of mentions) add(readUse(root, mention))
+            for (const mention of mentions) joinUse(root, mention)
             const parameter = runtimeParametersOf(body)[position]
             if (parameter?.dotDotDotToken) fail('rest-frame', parameter)
             else if (parameter && ts.isIdentifier(parameter.name)) refs(root, parameter)
@@ -2987,7 +3046,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         }
         const positioned = outermostErasureOf(reference)
         if (positioned !== reference) {
-          if (ts.isExpression(positioned)) add(readUse(root, positioned))
+          if (ts.isExpression(positioned)) joinUse(root, positioned)
           else fail('unindexed-use', positioned)
           return
         }
@@ -3015,7 +3074,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             const moduleUses = sourceCommonJsExportUsesOf(flow, parent)
             if (moduleUses !== null) {
               if (parent.right !== reference) fail('unmatched-commonjs-export', reference)
-              else for (const alias of moduleUses) add(readUse(root, alias))
+              else for (const alias of moduleUses) joinUse(root, alias)
               return
             }
             const left = unwrapNaming(parent.left)
@@ -3042,8 +3101,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                 const installed = sourceIntrinsicMemberDataWriteOf(checker, flow, left)
                 if (installed === null || installed.site !== parent || sourceCallableObjectOf(checker, flow, reference) !== installed.body)
                   fail('unproven-intrinsic-member-installation', left)
-                else for (const access of installed.reads) add(readUse(root, access))
-                add(readUse(root, parent))
+                else for (const access of installed.reads) joinUse(root, access)
+                joinUse(root, parent)
                 return
               }
               const keys = keysOf(left)
@@ -3061,13 +3120,13 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                 }
                 for (const key of keys) {
                   if (descriptorOf(container, key)) {
-                    add(read(publication(root, container, key)))
+                    join(publication(root, container, key))
                     continue
                   }
                   // A store to an accessor key hands the value to the
                   // SETTER's parameter, never to a slot of the container.
                   if (ts.isNewExpression(container) && dataStoreOf(container, key)) {
-                    add(read(publication(root, container, key)))
+                    join(publication(root, container, key))
                     continue
                   }
                   const setters = ts.isNewExpression(container) ? settersOf(container, key) : null
@@ -3081,7 +3140,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                 }
               }
             } else fail('unmodelled-store', left)
-            add(readUse(root, parent))
+            joinUse(root, parent)
             return
           }
           if (
@@ -3090,7 +3149,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
             parent.operatorToken.kind === ts.SyntaxKind.CommaToken
           ) {
-            add(readUse(root, parent))
+            joinUse(root, parent)
             return
           }
           if (
@@ -3112,13 +3171,13 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           return
         }
         if (ts.isConditionalExpression(parent)) {
-          if (parent.condition !== reference) add(readUse(root, parent))
+          if (parent.condition !== reference) joinUse(root, parent)
           return
         }
         if (ts.isPropertyAssignment(parent) && parent.initializer === reference) {
           const key = declarationKey(parent.name)
           if (key === null || key === '__proto__') fail('computed-publication', parent)
-          else add(read(publication(root, parent.parent, key)))
+          else join(publication(root, parent.parent, key))
           return
         }
         if (ts.isSpreadAssignment(parent) && parent.expression === reference && ts.isObjectLiteralExpression(root)) {
@@ -3127,13 +3186,13 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           // the same complete key/storage queries still reject opaque readers.
           for (const key of read(nodeQuery('own-keys', root))) {
             if (!ts.isStringLiteral(key)) fail('unmodelled-own-key-value', root)
-            else read(storedSlot(root, key.text))
+            else need(storedSlot(root, key.text))
           }
           facts.add(reference)
           return
         }
         if (ts.isShorthandPropertyAssignment(parent)) {
-          add(read(publication(root, parent.parent, parent.name.text)))
+          join(publication(root, parent.parent, parent.name.text))
           return
         }
         if (ts.isPropertyDeclaration(parent) && parent.initializer === reference) {
@@ -3142,12 +3201,12 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             fail('static-or-computed-publication', parent)
             return
           }
-          for (const construction of constructionsOf(parent)) add(read(publication(root, construction, key)))
+          for (const construction of constructionsOf(parent)) join(publication(root, construction, key))
           return
         }
         if (ts.isArrayLiteralExpression(parent)) {
           if (parent.elements.some(ts.isSpreadElement)) fail('spread-publication', parent)
-          else add(read(publication(root, parent, String(parent.elements.indexOf(reference)))))
+          else join(publication(root, parent, String(parent.elements.indexOf(reference))))
           return
         }
         if (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) {
@@ -3160,7 +3219,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             // sites as a key coercion, so `this.run()` had no callable slot at
             // all -- the one place a member name is not a key being coerced.
             if (ts.isPropertyAccessExpression(parent) && parent.name === reference) {
-              add(readUse(root, parent))
+              joinUse(root, parent)
               return
             }
             fail('coercing-property-key', reference)
@@ -3271,7 +3330,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) {
           if (parent.expression === reference) {
             if (reference.kind === ts.SyntaxKind.SuperKeyword && ts.isCallExpression(parent) && ts.isNewExpression(root)) {
-              read(nodeQuery('construct-targets', parent))
+              need(nodeQuery('construct-targets', parent))
               return
             }
             if (!isBody(root)) fail('non-callable-use', reference)
@@ -3345,7 +3404,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                   continue
                 }
                 if (installation.target === reference) facts.add(parent)
-                else add(read(publication(root, held, installation.key)))
+                else join(publication(root, held, installation.key))
               }
               return
             }
@@ -3358,7 +3417,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               // through this fact) and is handed to nobody but, when the
               // intrinsic returns it, whoever reads the call.
               facts.add(parent)
-              if (plan.returnsTarget && !ts.isExpressionStatement(parent.parent)) add(readUse(root, parent))
+              if (plan.returnsTarget && !ts.isExpressionStatement(parent.parent)) joinUse(root, parent)
             } else if (parent.arguments[2] === reference) {
               // The descriptor literal: its `value` is copied into the target
               // (`case 'publication'` forwards it); the literal goes nowhere.
@@ -3376,7 +3435,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               // and a source literal itself goes nowhere. A source that is
               // not a literal could run getters, which this does not enter.
               facts.add(parent)
-              if (bulk.target === reference) add(readUse(root, parent))
+              if (bulk.target === reference) joinUse(root, parent)
               else if (!ts.isObjectLiteralExpression(root)) fail('bulk-assign-source-unmodelled', reference)
               return
             }
@@ -3400,7 +3459,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           if (ts.isCallExpression(parent)) {
             const continuations = collectionValueContinuationsOf(checker, flow, parent, reference, nativeProtocolClosed)
             if (continuations !== null) {
-              for (const continued of continuations) add(readUse(root, continued))
+              for (const continued of continuations) joinUse(root, continued)
               return
             }
           }
@@ -3421,12 +3480,12 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             fail('deferred-completion', parent)
             return
           }
-          read(closure(body))
+          need(closure(body))
           // The body's own receiver, returned: it reaches only the calls it was
           // the receiver of, and `forward` continues it at each of those. See
           // `returnsOwnReceiver`.
           if (isOwnReceiverReturn(reference, body)) return
-          for (const call of read(callersOf(body))) if (ts.isCallExpression(call)) add(readUse(root, call))
+          for (const call of read(callersOf(body))) if (ts.isCallExpression(call)) joinUse(root, call)
           return
         }
         // Enumerating an object reads its KEY SET and nothing else: no slot is
@@ -3475,10 +3534,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           fail('unmodelled-parameter-frame')
           return
         }
-        if (isBody(owner)) read(closure(owner))
-        for (const site of constructionSitesTargeting(owner)) add(carry(frameQuery('frame-argument', site.call, owner, parameter)))
+        if (isBody(owner)) need(closure(owner))
+        for (const site of constructionSitesTargeting(owner)) joinCarried(frameQuery('frame-argument', site.call, owner, parameter))
         for (const call of read(callersOf(owner)))
-          if (ts.isCallExpression(call) || ts.isNewExpression(call)) add(carry(frameQuery('frame-argument', call, owner, parameter)))
+          if (ts.isCallExpression(call) || ts.isNewExpression(call)) joinCarried(frameQuery('frame-argument', call, owner, parameter))
         for (const write of flow.writesToDeclaration(parameter)) {
           if (write.site === excluded) continue
           if (write.edge === 'call-argument' || write.edge === 'super-argument' || write.edge === 'default-parameter') continue
@@ -3493,7 +3552,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             fail('unmodelled-parameter-write', write.site)
             continue
           }
-          add(carry(value(write.value)))
+          joinCarried(value(write.value))
         }
       }
       seeded = false
@@ -3502,7 +3561,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           const expression = query.node
           const moduleExport = sourceCommonJsExportValueOf(flow, expression)
           if (moduleExport !== null) {
-            add(carry(value(moduleExport)))
+            joinCarried(value(moduleExport))
             break
           }
           if (isObjectRoot(expression)) {
@@ -3518,7 +3577,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               // the value is the call's completion, solved through the same
               // frame a call would be. Anything else under `new` that is not
               // a source construction stays opaque.
-              if (constructorFunctionCalleeOf(expression) !== null) add(carry(nodeQuery('completion', expression)))
+              if (constructorFunctionCalleeOf(expression) !== null) joinCarried(nodeQuery('completion', expression))
               else fail('opaque-construction')
             } else {
               facts.add(expression)
@@ -3569,13 +3628,13 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               if (!sourceGlobalCallableBindingIsClosed(checker, flow, declaration)) fail('global-object-callable', declaration)
               for (const write of flow.writesToDeclaration(declaration)) {
                 if (write.slot !== 'whole' || write.edge === 'return' || write.edge === 'yield') continue
-                if (write.value && ['identifier-assignment', 'logical-assignment'].includes(write.edge)) add(carry(value(write.value)))
+                if (write.value && ['identifier-assignment', 'logical-assignment'].includes(write.edge)) joinCarried(value(write.value))
                 else fail('unmodelled-callable-binding-write', write.site)
               }
             } else if (declaration && ts.isVariableDeclaration(declaration)) {
               const incoming = sourceBindingValuesOf(checker, flow, declaration, iterationValuesAt)
               if (incoming === null) fail('unaccounted-binding-write', declaration)
-              else for (const entry of incoming) add(carry(value(entry)))
+              else for (const entry of incoming) joinCarried(value(entry))
               if (incoming !== null && bindingReadMayPrecedeFirstWrite(declaration, expression)) {
                 facts.add(undefinedValue)
                 seeded = true
@@ -3588,9 +3647,9 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               // value it is about to store. Joining it anyway made the copy's
               // source include its own target.
               const rebinding = rebindingAfterRead(declaration, expression)
-              if (rebinding === null) add(carry(nodeQuery('parameter', declaration)))
+              if (rebinding === null) joinCarried(nodeQuery('parameter', declaration))
               else parameterValues(declaration, rebinding)
-            } else if (declaration && ts.isBindingElement(declaration)) add(carry(nodeQuery('binding-element', declaration)))
+            } else if (declaration && ts.isBindingElement(declaration)) joinCarried(nodeQuery('binding-element', declaration))
             else if (expression.text === 'undefined' && (!declaration || declaration.getSourceFile().hasNoDefaultLib)) {
               facts.add(undefinedValue)
               seeded = true
@@ -3598,14 +3657,14 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           } else if (expression.kind === ts.SyntaxKind.ThisKeyword || expression.kind === ts.SyntaxKind.SuperKeyword) {
             const owner = flow.receiverOwnerOf(expression)
             if (!owner) fail('unindexed-receiver')
-            else add(carry(nodeQuery('receiver', owner)))
+            else joinCarried(nodeQuery('receiver', owner))
           } else if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
             if (sourceIntrinsicMemberMayBeWrittenOf(checker, flow, expression)) {
               const installed = sourceIntrinsicMemberDataWriteOf(checker, flow, expression)
               if (installed === null) fail('unproven-intrinsic-member-read', expression)
               else {
-                add(carry(value(installed.value)))
-                read(closure(installed.body))
+                joinCarried(value(installed.value))
+                need(closure(installed.body))
               }
               break
             }
@@ -3628,23 +3687,23 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             // holds nothing. Empty is the answer, witnessed here, not a
             // value still waiting on some origin.
             if (roots.size > 0 && [...roots].every(isNullish)) seeded = true
-          } else if (ts.isCallExpression(expression)) add(carry(nodeQuery('completion', expression)))
+          } else if (ts.isCallExpression(expression)) joinCarried(nodeQuery('completion', expression))
           else if (ts.isConditionalExpression(expression)) {
-            add(carry(value(expression.whenTrue)))
-            add(carry(value(expression.whenFalse)))
+            joinCarried(value(expression.whenTrue))
+            joinCarried(value(expression.whenFalse))
           } else if (
             ts.isBinaryExpression(expression) &&
             [ts.SyntaxKind.EqualsToken, ts.SyntaxKind.CommaToken].includes(expression.operatorToken.kind)
           )
-            add(carry(value(expression.right)))
+            joinCarried(value(expression.right))
           else if (
             ts.isBinaryExpression(expression) &&
             [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.QuestionQuestionToken].includes(
               expression.operatorToken.kind
             )
           ) {
-            add(carry(value(expression.left)))
-            add(carry(value(expression.right)))
+            joinCarried(value(expression.left))
+            joinCarried(value(expression.right))
           } else if (
             ts.isLiteralExpression(expression) ||
             expression.kind === ts.SyntaxKind.NullKeyword ||
@@ -3664,8 +3723,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             fail('unproven-proxy-construction')
             break
           }
-          read(nodeQuery('proxy-target', query.node))
-          read(nodeQuery('proxy-handler', query.node))
+          need(nodeQuery('proxy-target', query.node))
+          need(nodeQuery('proxy-handler', query.node))
           // This identity domain is deliberately separate from generic value
           // roots: existing class-field consumers interpret NewExpression
           // origins as physical data, which is not a Proxy get-trap proof.
@@ -3701,7 +3760,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               (ts.isObjectLiteralExpression(root) || isFreshOrdinaryObject(root)) &&
               absentOwnKey(root, key, root, descriptorOf, hasUnnamedWrite)
             ) {
-              read(closure(root))
+              need(closure(root))
               if (query.kind === 'slot') {
                 facts.add(undefinedValue)
                 seeded = true
@@ -3711,7 +3770,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               break
             }
           }
-          read(closure(root))
+          need(closure(root))
           if (isSourceCallableObject(root)) {
             if (key === 'name' || key === 'length') {
               const parameters = runtimeParametersOf(root)
@@ -3736,12 +3795,12 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             } else {
               const installed = sourceCallableOwnDataWriteOf(checker, flow, root, key)
               if (installed === null) fail('unproven-callable-data-slot', root)
-              else add(carry(value(installed.value)))
+              else joinCarried(value(installed.value))
             }
           } else if (ts.isObjectLiteralExpression(root)) {
             for (const entry of ownEntries(root, key) ?? []) {
-              if (ts.isPropertyAssignment(entry)) add(carry(value(entry.initializer)))
-              else if (ts.isShorthandPropertyAssignment(entry)) add(carry(value(entry.name)))
+              if (ts.isPropertyAssignment(entry)) joinCarried(value(entry.initializer))
+              else if (ts.isShorthandPropertyAssignment(entry)) joinCarried(value(entry.name))
               else if (ts.isMethodDeclaration(entry)) {
                 facts.add(entry)
                 seeded = true
@@ -3750,7 +3809,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           } else if (ts.isArrayLiteralExpression(root)) {
             if (key === ELEMENT_KEY) {
               // Every position at once; an index never written reads undefined.
-              for (const element of root.elements) if (!ts.isOmittedExpression(element)) add(carry(value(element)))
+              for (const element of root.elements) if (!ts.isOmittedExpression(element)) joinCarried(value(element))
               facts.add(undefinedValue)
               seeded = true
             } else if (key === 'length') {
@@ -3760,7 +3819,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               seeded = true
             } else {
               const element = root.elements[Number(key)]
-              if (element !== undefined && !ts.isOmittedExpression(element)) add(carry(value(element)))
+              if (element !== undefined && !ts.isOmittedExpression(element)) joinCarried(value(element))
               else {
                 facts.add(undefinedValue)
                 seeded = true
@@ -3773,13 +3832,13 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                 seeded = true
               }
               if (ts.isPropertyDeclaration(declaration)) {
-                if (declaration.initializer) add(carry(value(declaration.initializer)))
+                if (declaration.initializer) joinCarried(value(declaration.initializer))
                 else {
                   facts.add(undefinedValue)
                   seeded = true
                 }
               }
-              if (ts.isParameter(declaration)) add(carry(nodeQuery('parameter', declaration)))
+              if (ts.isParameter(declaration)) joinCarried(nodeQuery('parameter', declaration))
             }
             if (getterRead !== null) {
               // The getter runs with this construction as its receiver, and
@@ -3788,11 +3847,11 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               // family member, whose gates are this root's to answer.
               if (getterRead.getters.length > 0 && isFamilyMember(root)) gating = gateLogOf(query)
               for (const getter of getterRead.getters) {
-                for (const reference of flow.receiverReferencesToDeclaration(getter)) add(readUse(root, reference))
+                for (const reference of flow.receiverReferencesToDeclaration(getter)) joinUse(root, reference)
                 const summary = callableCompletionSummaryOf(flow, getter)
                 if (summary === null || summary.execution !== 'sync') fail('unmodelled-getter-completion', getter)
                 else {
-                  for (const completion of summary.values) add(carry(value(completion)))
+                  for (const completion of summary.values) joinCarried(value(completion))
                   if (summary.mayCompleteUndefined) {
                     facts.add(undefinedValue)
                     seeded = true
@@ -3828,7 +3887,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             if (isSourceCallableObject(root) && ts.isCallExpression(stored)) {
               const installation = sourceCallableReflectSetOf(checker, stored)
               if (installation && installation.key === key && read(value(installation.target)).has(root))
-                add(carry(value(installation.value)))
+                joinCarried(value(installation.value))
               continue
             }
             if (ts.isCallExpression(stored) && definitionPlans.has(stored)) {
@@ -3838,7 +3897,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                 facts.add(undefinedValue)
                 seeded = true
               }
-              for (const defined of plan.values) add(carry(value(defined)))
+              for (const defined of plan.values) joinCarried(value(defined))
               continue
             }
             if (ts.isCallExpression(stored)) {
@@ -3853,7 +3912,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                   if (held === undefinedValue || held.kind === ts.SyntaxKind.NullKeyword || ts.isVoidExpression(held)) continue
                   if (!ts.isObjectLiteralExpression(held)) fail('bulk-assign-source-unmodelled', source)
                   else if (literalSpelledKeys(held) === null || hasUnnamedWrite(held)) fail('bulk-assign-source-keys-open', source)
-                  else if (ownKeysOf(held)?.includes(key)) add(carry(storedSlot(held, key)))
+                  else if (ownKeysOf(held)?.includes(key)) joinCarried(storedSlot(held, key))
                 }
               continue
             }
@@ -3880,7 +3939,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               fail('unmodelled-property-write', stored)
               continue
             }
-            add(carry(value(write.value)))
+            joinCarried(value(write.value))
           }
           break
         }
@@ -3917,7 +3976,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         case 'targets': {
           const site = sites.get(query.node)
           if (site?.operands && !site.explicitThis && site.operands.dispatch.kind === 'lexical-super') {
-            add(carry(superTargets(query.node)))
+            joinCarried(superTargets(query.node))
             break
           }
           // `super()` selects a BASE CONSTRUCTOR, which is the construction
@@ -3925,7 +3984,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           // `new Base()` makes, reached from the subclass's heritage instead of
           // from a spelled callee.
           if (site?.operands && !site.explicitThis && site.operands.dispatch.kind === 'super-constructor') {
-            add(carry(nodeQuery('construct-targets', query.node)))
+            joinCarried(nodeQuery('construct-targets', query.node))
             break
           }
           // `.call`/`.apply` needs no separate resolver here: `operands.callee`
@@ -3952,7 +4011,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           if (ts.isCallExpression(query.node)) {
             const bulk = bulkAssignOf(query.node)
             if (bulk !== null) {
-              add(carry(value(bulk.target)))
+              joinCarried(value(bulk.target))
               break
             }
             // `store.get( key )` on a native Map this program alone fills:
@@ -3971,7 +4030,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             // proved object-truthy and the install branch pruned.
             const stored = collectionStoredValuesOf(checker, flow, query.node, nativeProtocolClosed)
             if (stored !== null) {
-              for (const candidate of stored) add(carry(value(candidate)))
+              for (const candidate of stored) joinCarried(value(candidate))
               facts.add(undefinedValue)
               seeded = true
               break
@@ -3985,14 +4044,14 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                 candidate === constructorFunctionCalleeOf(query.node) &&
                 constructionYieldsCompletionOf(flow, candidate)
               )
-                add(carry(frameQuery('frame-completion', query.node, candidate)))
+                joinCarried(frameQuery('frame-completion', query.node, candidate))
               else fail('opaque-construction', candidate)
             }
             break
           }
           for (const body of read(targets(query.node))) {
             if (!isBody(body)) fail('unindexed-body', body)
-            else add(carry(frameQuery('frame-completion', query.node, body)))
+            else joinCarried(frameQuery('frame-completion', query.node, body))
           }
           if (ts.isCallExpression(query.node) && lookupThrows(query.node)) seeded = true
           break
@@ -4014,7 +4073,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             const summary = callableCompletionSummaryOf(flow, query.body)
             if (!summary || summary.execution !== 'sync' || summary.mayCompleteUndefined || summary.values.length === 0)
               fail('incomplete-constructor-object-completion', query.body)
-            else for (const returned of summary.values) add(carry(contextual(returned)))
+            else for (const returned of summary.values) joinCarried(contextual(returned))
             break
           }
           const subject = query.subject
@@ -4041,14 +4100,14 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               break
             }
             if (!slot.actual) {
-              if (slot.defaultValue) add(carry(contextual(slot.defaultValue)))
+              if (slot.defaultValue) joinCarried(contextual(slot.defaultValue))
               else {
                 facts.add(undefinedValue)
                 seeded = true
               }
             } else
               for (const candidate of carry(value(slot.actual))) {
-                if (ts.isVoidExpression(candidate) && slot.defaultValue) add(carry(contextual(slot.defaultValue)))
+                if (ts.isVoidExpression(candidate) && slot.defaultValue) joinCarried(contextual(slot.defaultValue))
                 else facts.add(candidate)
               }
             break
@@ -4060,11 +4119,11 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           const expression = unwrapErasedExpression(subject)
           const declaration = ts.isIdentifier(expression) ? flow.targetOf(expression)?.declaration : null
           if (declaration && ts.isParameter(declaration) && declaration.parent === query.body)
-            add(carry(frameQuery('constructor-parameter', query.node, query.body, declaration)))
+            joinCarried(frameQuery('constructor-parameter', query.node, query.body, declaration))
           else if (declaration && ts.isVariableDeclaration(declaration) && ts.findAncestor(declaration, ts.isFunctionLike) === query.body) {
             const incoming = sourceBindingValuesOf(checker, flow, declaration, iterationValuesAt)
             if (incoming === null) fail('unaccounted-constructor-binding', declaration)
-            else for (const entry of incoming) add(carry(contextual(entry)))
+            else for (const entry of incoming) joinCarried(contextual(entry))
             if (incoming !== null && bindingReadMayPrecedeFirstWrite(declaration, expression)) {
               facts.add(undefinedValue)
               seeded = true
@@ -4092,10 +4151,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             // condition refuses this context rather than dropping that path.
             for (const condition of read(contextual(expression.condition))) {
               const truth = conditionTruthOf(condition)
-              if (truth !== false) add(carry(contextual(expression.whenTrue)))
-              if (truth !== true) add(carry(contextual(expression.whenFalse)))
+              if (truth !== false) joinCarried(contextual(expression.whenTrue))
+              if (truth !== true) joinCarried(contextual(expression.whenFalse))
             }
-          } else add(carry(value(expression)))
+          } else joinCarried(value(expression))
           break
         }
         case 'frame-receiver':
@@ -4133,7 +4192,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                     receiver.expression
                   )
               }
-            } else if (receiver.kind === 'constructed') add(carry(value(receiver.call)))
+            } else if (receiver.kind === 'constructed') joinCarried(value(receiver.call))
             else if (receiver.kind === 'lexical' && receiver.source !== 'arrow') {
               // `super.m()` and `super()` run with the calling frame's own
               // `this`; the class the layout names is only where the lookup
@@ -4149,14 +4208,14 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                       ? callee.expression
                       : null
               if (keyword === null) fail('unresolved-super-home', query.node)
-              else add(carry(value(keyword)))
+              else joinCarried(value(keyword))
             } else if (receiver.kind === 'lexical' && receiver.owner) {
               if (ts.isSourceFile(receiver.owner)) {
                 if (ts.isExternalModule(receiver.owner)) {
                   facts.add(undefinedValue)
                   seeded = true
                 } else fail('global-object-receiver-origin', receiver.owner)
-              } else add(carry(nodeQuery('receiver', receiver.owner)))
+              } else joinCarried(nodeQuery('receiver', receiver.owner))
             } else fail(receiver.kind === 'unsupported' ? receiver.reason : 'global-object-receiver-origin')
           } else if (query.kind === 'frame-argument' || query.kind === 'frame-parameter') {
             const parameter = query.subject
@@ -4165,13 +4224,13 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               break
             }
             if (query.kind === 'frame-parameter') {
-              add(carry(frameQuery('frame-argument', query.node, query.body, parameter)))
+              joinCarried(frameQuery('frame-argument', query.node, query.body, parameter))
               for (const write of flow.writesToDeclaration(parameter)) {
                 if (write.edge === 'call-argument' || write.edge === 'super-argument' || write.edge === 'default-parameter') continue
                 if (write.slot !== 'whole') continue
                 if (!['identifier-assignment', 'logical-assignment'].includes(write.edge) || !write.value)
                   fail('unmodelled-parameter-write', write.site)
-                else add(carry(contextual(write.value)))
+                else joinCarried(contextual(write.value))
               }
               break
             }
@@ -4186,10 +4245,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             }
             if (slot.actual) {
               for (const candidate of carry(value(slot.actual))) {
-                if (ts.isVoidExpression(candidate) && slot.defaultValue) add(carry(contextual(slot.defaultValue)))
+                if (ts.isVoidExpression(candidate) && slot.defaultValue) joinCarried(contextual(slot.defaultValue))
                 else facts.add(candidate)
               }
-            } else if (slot.defaultValue) add(carry(contextual(slot.defaultValue)))
+            } else if (slot.defaultValue) joinCarried(contextual(slot.defaultValue))
             else {
               facts.add(undefinedValue)
               seeded = true
@@ -4198,7 +4257,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             const summary = callableCompletionSummaryOf(flow, query.body)
             if (!summary || summary.execution !== 'sync') fail('deferred-completion', query.body)
             else {
-              for (const expression of summary.values) add(carry(contextual(expression)))
+              for (const expression of summary.values) joinCarried(contextual(expression))
               if (summary.mayCompleteUndefined || (ts.isCallExpression(query.node) && ts.isCallChain(query.node))) {
                 facts.add(undefinedValue)
                 seeded = true
@@ -4212,7 +4271,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             }
             const declaration = ts.isIdentifier(expression) ? flow.targetOf(expression)?.declaration : null
             if (declaration && ts.isParameter(declaration) && declaration.parent === query.body)
-              add(carry(frameQuery('frame-parameter', query.node, query.body, declaration)))
+              joinCarried(frameQuery('frame-parameter', query.node, query.body, declaration))
             else if (
               declaration &&
               ts.isVariableDeclaration(declaration) &&
@@ -4220,7 +4279,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             ) {
               const incoming = sourceBindingValuesOf(checker, flow, declaration, iterationValuesAt)
               if (incoming === null) fail('unaccounted-binding-write', declaration)
-              else for (const entry of incoming) add(carry(contextual(entry)))
+              else for (const entry of incoming) joinCarried(contextual(entry))
               if (incoming !== null && bindingReadMayPrecedeFirstWrite(declaration, expression)) {
                 facts.add(undefinedValue)
                 seeded = true
@@ -4229,10 +4288,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               (expression.kind === ts.SyntaxKind.ThisKeyword || expression.kind === ts.SyntaxKind.SuperKeyword) &&
               (ts.isArrowFunction(query.body) || flow.receiverOwnerOf(expression) === query.body)
             )
-              add(carry(frameQuery('frame-receiver', query.node, query.body)))
+              joinCarried(frameQuery('frame-receiver', query.node, query.body))
             else if (ts.isConditionalExpression(expression)) {
-              add(carry(contextual(expression.whenTrue)))
-              add(carry(contextual(expression.whenFalse)))
+              joinCarried(contextual(expression.whenTrue))
+              joinCarried(contextual(expression.whenFalse))
             } else if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
               const keys = keysOf(expression)
               const receivers = read(contextual(expression.expression))
@@ -4244,16 +4303,16 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               ts.isBinaryExpression(expression) &&
               [ts.SyntaxKind.EqualsToken, ts.SyntaxKind.CommaToken].includes(expression.operatorToken.kind)
             )
-              add(carry(contextual(expression.right)))
+              joinCarried(contextual(expression.right))
             else if (
               ts.isBinaryExpression(expression) &&
               [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.QuestionQuestionToken].includes(
                 expression.operatorToken.kind
               )
             ) {
-              add(carry(contextual(expression.left)))
-              add(carry(contextual(expression.right)))
-            } else add(carry(value(expression)))
+              joinCarried(contextual(expression.left))
+              joinCarried(contextual(expression.right))
+            } else joinCarried(value(expression))
           }
           break
         }
@@ -4308,7 +4367,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                     sourceCallableOwnDataWriteOf(checker, flow, root, key, element) === null
                   )
                     fail('unproven-callable-data-read', element)
-                  else if (isObjectRoot(root)) add(carry(slot(root, key)))
+                  else if (isObjectRoot(root)) joinCarried(slot(root, key))
                   else fail('non-object-destructured-container', element)
                 }
             }
@@ -4326,11 +4385,11 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             ts.isGetAccessorDeclaration(owner) ||
             ts.isSetAccessorDeclaration(owner)
           ) {
-            for (const construction of constructionsOf(owner)) add(carry(value(construction)))
+            for (const construction of constructionsOf(owner)) joinCarried(value(construction))
           } else if (isBody(owner)) {
-            read(closure(owner))
-            for (const construction of constructionsOf(owner)) add(carry(value(construction)))
-            for (const call of read(callersOf(owner))) if (ts.isCallExpression(call)) add(carry(frameQuery('frame-receiver', call, owner)))
+            need(closure(owner))
+            for (const construction of constructionsOf(owner)) joinCarried(value(construction))
+            for (const call of read(callersOf(owner))) if (ts.isCallExpression(call)) joinCarried(frameQuery('frame-receiver', call, owner))
           } else fail('unmodelled-receiver-owner')
           break
         }
@@ -4366,7 +4425,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           for (const call of unnamed) seed(targets(call))
           if (ts.isClassElement(owner) && ts.isClassLike(owner.parent)) {
             if ((ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Static) !== 0) fail('static-member-callers-open', owner)
-            else for (const instance of familyInstancesOf(owner.parent, 'member-family-open') ?? []) read(closure(instance))
+            else for (const instance of familyInstancesOf(owner.parent, 'member-family-open') ?? []) need(closure(instance))
           }
           // Which candidates target this owner is asked the other way round:
           // the `targets` states that hold the owner, from the reverse index,
@@ -4428,9 +4487,9 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             if (ts.isObjectLiteralExpression(root.parent)) {
               const key = declarationKey(root.name)
               if (key === null) fail('computed-method')
-              else add(read(publication(root, root.parent, key)))
+              else join(publication(root, root.parent, key))
             } else refs(root, root)
-          } else if (ts.isExpression(root)) add(readUse(root, root))
+          } else if (ts.isExpression(root)) joinUse(root, root)
           else fail('unmodelled-root')
           if (ts.isNewExpression(root) && !isFreshOrdinaryObject(root)) {
             const owners = constructionFrames.receiverOwnersOf(root)
@@ -4438,7 +4497,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             else
               for (const owner of owners) {
                 if (!isClassSpelledSourceClass(owner)) {
-                  for (const reference of flow.receiverReferencesToDeclaration(owner)) add(readUse(root, reference))
+                  for (const reference of flow.receiverReferencesToDeclaration(owner)) joinUse(root, reference)
                   continue
                 }
                 for (const member of owner.members) {
@@ -4446,7 +4505,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                     ts.isConstructorDeclaration(member) ||
                     (ts.isPropertyDeclaration(member) && (ts.getCombinedModifierFlags(member) & ts.ModifierFlags.Static) === 0)
                   )
-                    for (const reference of flow.receiverReferencesToDeclaration(member)) add(readUse(root, reference))
+                    for (const reference of flow.receiverReferencesToDeclaration(member)) joinUse(root, reference)
                 }
               }
           }
@@ -4502,13 +4561,13 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           break
         }
         case 'family-slot': {
-          for (const member of familyMembersOf(query.node)) add(carry(slot(member, query.key)))
+          for (const member of familyMembersOf(query.node)) joinCarried(slot(member, query.key))
           break
         }
         case 'enumerated-slots': {
           const root = query.root as ObjectRoot
           const head = nodeQuery('enumerated-keys', query.node)
-          for (const key of enumeratedKeyListOf(head, read(head))) add(carry(slot(root, key)))
+          for (const key of enumeratedKeyListOf(head, read(head))) joinCarried(slot(root, key))
           break
         }
         case 'enumerated-keys': {
@@ -4549,13 +4608,13 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         case 'publication': {
           // The value continues at every reference the container's key is used
           // at (`keyUsesOf`), which is the same for every value it holds.
-          for (const reference of read(keyUsesOf(query.node, query.key))) add(readUse(query.root, reference as ts.Expression))
+          for (const reference of read(keyUsesOf(query.node, query.key))) joinUse(query.root, reference as ts.Expression)
           break
         }
         case 'key-uses': {
           const container = query.node
           const key = query.key
-          read(closure(container))
+          need(closure(container))
           const copySites = read(copySitesOf(container))
           // A container merged into another by `Object.assign` hands this
           // key's value to the target as well.
@@ -4563,17 +4622,17 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             if (!ts.isCallExpression(stored)) continue
             const bulk = bulkAssignOf(stored)
             if (bulk === null || !bulk.sources.some((source) => read(value(source)).has(container))) continue
-            for (const held of read(value(bulk.target))) if (isObjectRoot(held)) add(read(keyUsesOf(held, key)))
+            for (const held of read(value(bulk.target))) if (isObjectRoot(held)) join(keyUsesOf(held, key))
           }
           for (const stored of copySites) {
             const copied = ts.isExpression(stored) ? outermostErasureOf(stored).parent : undefined
             if (copied && ts.isSpreadAssignment(copied) && read(value(copied.expression)).has(container))
-              add(read(keyUsesOf(copied.parent, key)))
+              join(keyUsesOf(copied.parent, key))
             if (!ts.isCallExpression(stored) || !definitionPlans.has(stored) || key !== 'value') continue
             const plan = definitionOf(stored)
             if (plan === null || !read(value(stored.arguments[2]!)).has(container)) continue
             for (const held of read(value(stored.arguments[0]!)))
-              if (isObjectRoot(held)) for (const defined of plan.keys) add(read(keyUsesOf(held, defined)))
+              if (isObjectRoot(held)) for (const defined of plan.keys) join(keyUsesOf(held, defined))
           }
           // Discovery-only, as the per-read receiver test it replaces was.
           for (const access of observe(keyReadsOf(container, key))) {
@@ -4627,6 +4686,54 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           grounding.size === 0 ? NO_GROUNDING : grounding.size === 1 ? grounding.values().next().value! : exactListOf(grounding)
         outcome.seeded = seeded
       }
+      // A node answering gates for its root keeps a gate log across its
+      // evaluations and asks every gate again each time; it always runs in full.
+      if (inputs !== null && !gateLogs.has(query)) transferInputs.set(query, inputs)
+      return facts
+    }
+    /**
+     * A transfer re-run only because something it joined grew: the joined
+     * facts it has not handed back yet, without running it again.
+     *
+     * Most of a node's re-evaluations are of that kind -- a closure is woken
+     * each time one of its uses gains a place, a publication each time one of
+     * its key's uses does -- and a full re-run repeated all of the node's own
+     * work to hand back only the joined facts' growth. A transfer is a
+     * function of what it tests (its other reads, each a set that only grows,
+     * so an unchanged size is the same set), the holders it asks for and the
+     * program; a joined input it only adds whole. So while every tested set
+     * and holder count is as the last full run left it, that run would do
+     * everything the same and hand back, in the same order, exactly the joined
+     * inputs' new facts. Seals and any change still run the transfer in full.
+     */
+    const joinedOnly = (query: Query, holdersOf: DependencyFactHoldersOf<Query, Value>): ReadonlySet<Value> | null => {
+      if (!joinedOnlyEnabled) return null
+      const inputs = transferInputs.get(query)
+      if (inputs === undefined) return null
+      for (let index = 0; index < inputs.tested.length; index++) if (inputs.tested[index]!.size !== inputs.testedSizes[index]) return null
+      for (const [fact, count] of inputs.holders) {
+        let now = 0
+        for (const _holder of holdersOf(fact)) now++
+        if (now !== count) return null
+      }
+      const facts = new Set<Value>()
+      let through = addedThrough.get(query)
+      for (let index = 0; index < inputs.joined.length; index++) {
+        const held = inputs.joined[index]!
+        const size = held.size
+        if (size === inputs.joinedSizes[index]) continue
+        inputs.joinedSizes[index] = size
+        // `add`, for a transfer: past `DELTA_MINIMUM` from where the last one stopped.
+        if (size <= DELTA_MINIMUM) {
+          for (const value of held) facts.add(value)
+          continue
+        }
+        if (through === undefined) addedThrough.set(query, (through = new Map()))
+        const before = through.get(held) ?? 0
+        let at = 0
+        for (const value of held) if (at++ >= before) facts.add(value)
+        through.set(held, size)
+      }
       return facts
     }
     const run = (
@@ -4637,6 +4744,12 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       sealing: boolean,
       outcome: SealOutcome | null
     ): ReadonlySet<Value> => {
+      // Before the ledger capture: a transfer that is not re-run raises no
+      // obligation, and must keep the ones its last full run raised.
+      if (outcome === null) {
+        const joined = joinedOnly(query, holdersOf)
+        if (joined !== null) return joined
+      }
       const ledger = deferredIntrinsicProtocolLedgerOf(flow)
       if (!ledger) return evaluate(query, read, observe, holdersOf, sealing, outcome)
       const captured = ledger.capture(() => evaluate(query, read, observe, holdersOf, sealing, outcome))
@@ -4704,7 +4817,15 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       }
     }
   })()
-  const { solve, requiredDependenciesOf, seed } = dependencyFactSolver(definition, 'grounding-domains', true)
+  const { solve: solveGraph, requiredDependenciesOf, seed } = dependencyFactSolver(definition, 'grounding-domains', true)
+  // A node's transfer inputs serve the re-runs of one solve; a later root wakes few nodes, and keeping them all would hold a second copy of every edge.
+  const solve: typeof solveGraph = (query) => {
+    try {
+      return solveGraph(query)
+    } finally {
+      transferInputs.clear()
+    }
+  }
   // `case 'unknown-reads'` now asks `holdersOf` for the receivers that hold a
   // container, instead of `observe`-ing all 968 of them itself -- but a
   // reverse index only finds states that already EXIST and have already run.

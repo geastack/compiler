@@ -1291,6 +1291,9 @@ export const dependencyFactSolver = <K, V, R>(
     // which `propagate` below wakes through this same set.
     const holding = holders.get(fact)
     if (holding === undefined) return NO_HOLDERS
+    // A key that is its own state needs no copy: the collection only grows in
+    // `index`, which runs after the transfer asking has returned.
+    if (keysAreStates) return edgeStates(holding) as Iterable<unknown> as Iterable<K>
     const found: K[] = []
     for (const holder of edgeStates(holding)) found.push(holder.solverKey)
     return found
