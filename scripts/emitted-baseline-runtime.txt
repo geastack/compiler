@@ -621,7 +621,9 @@ in-boxed-key.ts.cpp 14990bb803ed
 in-dynamic-key-on-guarded-open-interface.runtime.ts.cpp f73d73aeacd6
 in-over-error-or-interface-extending-error.runtime.ts.cpp da25cd375bfa
 in-unique-symbol-key-sidecar.ts.cpp 83051dca530a
+index-signature-primitive-read-logical-and-observes-absence.runtime.ts.cpp ba933aa620d4
 index-signature-primitive-read-typeof-and-nullish-observe-absence.runtime.ts.cpp f2b123dc496e
+index-signature-read-typed-assertion-keeps-asserted-type.runtime.ts.cpp 8997db467acf
 indexed-absence-forwarded-cache.runtime.js.cpp 5aa0e98dd88c
 indexed-document-view-open-key-writes.runtime.js.cpp b7c9c2275200
 indexed-filter-into-any-document-parameter.runtime.ts.cpp 27130ed3fcbc
@@ -1203,7 +1205,7 @@ single-ref-capture-promise-executor.runtime.ts.cpp 8a15c4095d8e
 sloppy-compound-add-of-census-typed-element.runtime.js.cpp a4d09d6a9acc
 sloppy-null-field-writer.ts.cpp 5fe1347a8240
 slot-write-closure.runtime.ts.cpp 21085af02194
-small-string-copies-cross-the-inline-boundary.runtime.ts.cpp c3912f833ff2
+small-string-copies-cross-the-inline-boundary.runtime.ts.cpp e88628e050fe
 sparse-record-layout-construct-spread-delete.runtime.ts.cpp 7e8c057c7fec
 sparse-record-layout-family-base-view-and-dynamic.runtime.ts.cpp cc8499880184
 sparse-record-layout-rebuilt-from-dynamic.runtime.ts.cpp a91034cf101f

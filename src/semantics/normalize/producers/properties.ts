@@ -564,12 +564,7 @@ const testsItsOperand = (node: ts.Expression): boolean => {
 
 /**
  * A test that observes this value immediately: a condition, `!`, `typeof`,
- * the left operand of `||` / `??`, or a logical assignment's own guard.
- *
- * The left operand of `&&` is NOT one: `logicalMergeTypeOf`'s `&&` rule takes
- * the kept left half from the checker's left type, so a widened left arm
- * would be dereferenced on the kept branch. It joins once that merge reads
- * the cited left type the way `||` and `??` already do.
+ * the left operand of `&&` / `||` / `??`, or a logical assignment's own guard.
  */
 const directlyTestsItsOperand = (node: ts.Expression): boolean => {
   let inner: ts.Node = node
@@ -586,7 +581,10 @@ const directlyTestsItsOperand = (node: ts.Expression): boolean => {
   if (ts.isBinaryExpression(parent) && parent.left === inner) {
     const operator = parent.operatorToken.kind
     return (
-      logicalAssignmentOperators.has(operator) || operator === ts.SyntaxKind.BarBarToken || operator === ts.SyntaxKind.QuestionQuestionToken
+      logicalAssignmentOperators.has(operator) ||
+      operator === ts.SyntaxKind.AmpersandAmpersandToken ||
+      operator === ts.SyntaxKind.BarBarToken ||
+      operator === ts.SyntaxKind.QuestionQuestionToken
     )
   }
   return ts.isPrefixUnaryExpression(parent) && parent.operator === ts.SyntaxKind.ExclamationToken

@@ -26,7 +26,6 @@ import {
   type SemanticOperand
 } from '../../model/operands.js'
 import type { BindingOperation, ComputationOperation } from '../../model/operations.js'
-import { propertyExpressionValueTypeAt } from './properties.js'
 import { citedValueTypeAt } from './cited-value-type.js'
 import { constantConditionalGuardId, constantConditionalGuardResult } from './conditional-guard.js'
 import { ordinaryObjectDataWriteIsAbsent } from '../callable-data-write.js'
@@ -441,10 +440,7 @@ const contributeConditional = (
     }
   }
   const condition = operand('condition', 0, conditionSource, context.types.typeAt(node.condition))
-  const branchValueTypeAt = (branch: ts.Expression) =>
-    ts.isPropertyAccessExpression(branch) || ts.isElementAccessExpression(branch)
-      ? propertyExpressionValueTypeAt(context, branch)
-      : citedValueTypeAt(context, branch)
+  const branchValueTypeAt = (branch: ts.Expression) => citedValueTypeAt(context, branch)
   const consequent = operand('consequent', 0, sourceForValue(context, node.whenTrue), branchValueTypeAt(node.whenTrue), {
     kind: 'conditional',
     guard: conditionSource.result,

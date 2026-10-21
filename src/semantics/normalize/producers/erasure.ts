@@ -36,6 +36,22 @@ export const unwrapErased = (node: ts.Node): ts.Node => {
 /** The same rule where the caller already knows it holds an expression. */
 export const unwrapErasedExpression = (expression: ts.Expression): ts.Expression => unwrapErased(expression) as ts.Expression
 
+/** Whether a non-null assertion is among the erased wrappers `unwrapErased` sees through from `node`. */
+export const assertsPresence = (node: ts.Node): boolean => {
+  let current = node
+  while (
+    ts.isParenthesizedExpression(current) ||
+    ts.isNonNullExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isSatisfiesExpression(current) ||
+    ts.isTypeAssertionExpression(current)
+  ) {
+    if (ts.isNonNullExpression(current)) return true
+    current = current.expression
+  }
+  return false
+}
+
 /**
  * Whether one of the erased wrappers around `expression` is a type assertion
  * that names a type -- `SemanticOperand.asserted`. `as any`/`as unknown`

@@ -4,18 +4,35 @@ import { classOfConstructorType } from '../derived-expression-type.js'
 import { keptLeftPartTypeOf } from '../logical-result-type.js'
 import type { ProducerContext } from '../producer-context.js'
 
+const isNullish = (context: ProducerContext, id: StructuralTypeId): boolean => {
+  const shape = context.table.get(id).shape
+  return shape.kind === 'primitive' && (shape.primitive === 'undefined' || shape.primitive === 'null')
+}
+
+const membersOf = (context: ProducerContext, id: StructuralTypeId): readonly StructuralTypeId[] => {
+  const shape = context.table.get(id).shape
+  return shape.kind === 'union' ? shape.members : [id]
+}
+
+/** The union of `members` (each possibly a union itself), or the one member when they collapse to one. */
+const unionOf = (context: ProducerContext, members: readonly StructuralTypeId[]): StructuralTypeId => {
+  const distinct = [...new Set(members.flatMap((member) => membersOf(context, member)))]
+  return distinct.length === 1 ? distinct[0]! : context.table.intern({ kind: 'union', members: distinct })
+}
+
 /** `type` less its `undefined`/`null` members, or `null` when nothing else is left. */
 const presentPartOf = (context: ProducerContext, type: StructuralTypeId): StructuralTypeId | null => {
-  const nullish = (id: StructuralTypeId): boolean => {
-    const shape = context.table.get(id).shape
-    return shape.kind === 'primitive' && (shape.primitive === 'undefined' || shape.primitive === 'null')
-  }
-  const shape = context.table.get(type).shape
-  if (shape.kind !== 'union') return nullish(type) ? null : type
-  const present = shape.members.filter((member) => !nullish(member))
-  if (present.length === shape.members.length) return type
+  const members = membersOf(context, type)
+  const present = members.filter((member) => !isNullish(context, member))
+  if (present.length === members.length) return type
   if (present.length === 0) return null
-  return present.length === 1 ? present[0]! : context.table.intern({ kind: 'union', members: present })
+  return unionOf(context, present)
+}
+
+/** The `undefined`/`null` members of `type`, or `null` when it has none. */
+const absentPartOf = (context: ProducerContext, type: StructuralTypeId): StructuralTypeId | null => {
+  const absent = membersOf(context, type).filter((member) => isNullish(context, member))
+  return absent.length === 0 ? null : unionOf(context, absent)
 }
 
 /**
@@ -39,12 +56,8 @@ export const guardedReceiverTypeOf = (context: ProducerContext, receiver: ts.Exp
   if (cited === context.types.typeOf(raw) || context.table.get(cited).shape.kind !== 'union') return checkerPresent
   const present = presentPartOf(context, cited)
   if (present === null || present === checkerPresent) return checkerPresent
-  const membersOf = (id: StructuralTypeId): readonly StructuralTypeId[] => {
-    const shape = context.table.get(id).shape
-    return shape.kind === 'union' ? shape.members : [id]
-  }
-  const held = membersOf(present)
-  const declared = membersOf(checkerPresent)
+  const held = membersOf(context, present)
+  const declared = membersOf(context, checkerPresent)
   return held.length > declared.length && declared.every((member) => held.includes(member)) ? present : checkerPresent
 }
 
@@ -142,8 +155,28 @@ export const logicalMergeTypeOf = (
   // -- an object-typed guard, `obj && obj.x` -- the expression IS the right
   // operand, and saying so is what keeps a class carrier from being unioned
   // into a numeric answer.
+  //
+  // A left operand a census widened by absence alone -- `dict[key] && x`,
+  // where the checker says `string` and the read's own carrier is `string |
+  // undefined` -- keeps that absence as a falsy arm the checker's left type
+  // never had, so the checker's answer for the whole expression (`"" | "x"`)
+  // cannot stand: the kept branch would dereference the absent read. The
+  // merge then holds the absent members, the present part where the
+  // checker's rule finds a falsy arm in it (the whole part, wider but sound,
+  // as `||` keeps it), and the right operand.
+  const checkerLeft = context.checker.getTypeAtLocation(node.left)
+  const absent = absentPartOf(context, leftType)
+  if (
+    absent !== null &&
+    leftType !== context.types.typeOf(checkerLeft) &&
+    presentPartOf(context, leftType) === context.types.typeOf(context.checker.getNonNullableType(checkerLeft))
+  ) {
+    const present = presentPartOf(context, leftType)
+    const presentKept = keptLeftPartTypeOf(context.checker, '&&', context.checker.getNonNullableType(checkerLeft))
+    return unionOf(context, [absent, ...(present !== null && presentKept !== null ? [present] : []), rightType])
+  }
   if (rightType === context.types.typeOf(context.checker.getTypeAtLocation(node.right))) return null
-  const keptType = keptLeftPartTypeOf(context.checker, '&&', context.checker.getTypeAtLocation(node.left))
+  const keptType = keptLeftPartTypeOf(context.checker, '&&', checkerLeft)
   // An `any`/`unknown` guard keeps an arm that states nothing, and a union
   // built on it states nothing either -- `inferred-logical-result` (`/**
   // @param {*} value */ value && value.isMarker`) is the measured case: this
