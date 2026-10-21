@@ -373,6 +373,7 @@ dynamic-iterator-header-close.ts.cpp 04689f18c680
 dynamic-method-logical-receiver.runtime.ts.cpp 0529eac68abd
 dynamic-method-native-view-origin.runtime.ts.cpp c45d8c05099a
 dynamic-nested-field-load-keeps-native-live-aliases.runtime.ts.cpp 055ae9fe9f74
+dynamic-number-and-boolean-read-their-prototype-methods.runtime.js.cpp ea5bdf22bda3
 dynamic-optional-absence-mismatch.ts.cpp ed2499511ca5
 dynamic-record-method-binds-the-object-as-this.runtime.ts.cpp 002d0ce76aae
 dynamic-regexp.ts.cpp 990d4ac4b0b5
@@ -1045,7 +1046,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp 2a67d2df0367
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 2d5f8c6f08eb
-printer-drift.txt 5c1952faa3df
+printer-drift.txt 190ea8c02e39
 private-names-are-not-own-properties.ts.cpp 862d394b5f45
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp 3a9f81f60107

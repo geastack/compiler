@@ -414,6 +414,76 @@ inline Value dynamicStringPrototypeGet(const PropertyKey& key) {
   return found == methods.end() ? Value() : found->second;
 }
 
+/**
+ * `Number.prototype`'s methods read off a number the program holds as a
+ * dynamic value (`value.toFixed(3)` where `value` came out of a parsed
+ * document). Each is the native function the typed path already calls
+ * (`toFixed`, `toPrecision`, `toExponential`, `toStringRadix`), reached
+ * through the boxed receiver. A method not listed reads `undefined`, so
+ * calling it is the language's own TypeError rather than an answer this
+ * table invented.
+ */
+inline Value dynamicNumberPrototypeGet(const PropertyKey& key) {
+  if (key.isSymbol()) return Value();
+  using Args = gea::Ref<ArrayObject<Value>>;
+  using Method = CallableObject<Value(Value, Args)>;
+  static const std::map<std::string, Value> methods = [] {
+    std::map<std::string, Value> result;
+    for (const char* name : {"toFixed", "toPrecision", "toExponential", "toString", "valueOf"}) {
+      auto callable = Method(+[](void* environment, Value receiver, Args args) -> Value {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        const std::string& method = *gea::unpackEnvironment<std::string>(environment, slot);
+        if (receiver.tag() != Value::Tag::Number)
+          host::throwRuntimeError("TypeError", "Number.prototype." + method + " requires that 'this' be a Number");
+        const double number = detail::unboxAs<double>(receiver, Value::Tag::Number, "Number.prototype method receiver");
+        const Value first = args->size() ? args->readElement(0) : Value();
+        const bool given = first.tag() != Value::Tag::Undefined;
+        const auto string = [](std::string value) { return Value::box(Value::Tag::String, std::move(value)); };
+        if (method == "valueOf") return Value::box(Value::Tag::Number, number);
+        if (method == "toString") return string(given ? host::detail::toStringRadix(number, dynamicToNumber(first)) : host::detail::toString(number));
+        // ECMA-262 21.1.3.5 step 2: an undefined precision is ToString(x).
+        if (method == "toPrecision") return string(given ? host::detail::toPrecision(number, dynamicToNumber(first)) : host::detail::toString(number));
+        // ECMA-262 21.1.3.3: an undefined fractionDigits is ToIntegerOrInfinity(undefined), 0.
+        const double digits = given ? dynamicToNumber(first) : 0.0;
+        if (method == "toFixed") return string(host::detail::toFixed(number, std::isnan(digits) ? 0.0 : digits));
+        // ECMA-262 21.1.3.2: an undefined fractionDigits means as many digits
+        // as the value needs, a form the typed path does not spell either.
+        if (!given) host::throwRuntimeError("TypeError", "Number.prototype.toExponential without fractionDigits is not supported through a dynamic receiver");
+        return string(host::detail::toExponential(number, std::isnan(digits) ? 0.0 : digits));
+      }, gea::packEnvironment<std::string>(std::string(name)));
+      result.emplace(name, Value::boxMethod<1>(callable));
+    }
+    return result;
+  }();
+  const auto found = methods.find(key.text());
+  return found == methods.end() ? Value() : found->second;
+}
+
+/** `Boolean.prototype`'s two methods read off a boolean held as a dynamic value. */
+inline Value dynamicBooleanPrototypeGet(const PropertyKey& key) {
+  if (key.isSymbol()) return Value();
+  using Args = gea::Ref<ArrayObject<Value>>;
+  using Method = CallableObject<Value(Value, Args)>;
+  static const std::map<std::string, Value> methods = [] {
+    std::map<std::string, Value> result;
+    for (const char* name : {"toString", "valueOf"}) {
+      auto callable = Method(+[](void* environment, Value receiver, Args) -> Value {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        const std::string& method = *gea::unpackEnvironment<std::string>(environment, slot);
+        if (receiver.tag() != Value::Tag::Boolean)
+          host::throwRuntimeError("TypeError", "Boolean.prototype." + method + " requires that 'this' be a Boolean");
+        const bool value = detail::unboxAs<bool>(receiver, Value::Tag::Boolean, "Boolean.prototype method receiver");
+        if (method == "valueOf") return Value::box(Value::Tag::Boolean, value);
+        return Value::box(Value::Tag::String, std::string(value ? "true" : "false"));
+      }, gea::packEnvironment<std::string>(std::string(name)));
+      result.emplace(name, Value::boxMethod<1>(callable));
+    }
+    return result;
+  }();
+  const auto found = methods.find(key.text());
+  return found == methods.end() ? Value() : found->second;
+}
+
 // The intrinsic is one ordinary native array with its own method properties.
 // Identity sidecars already carry descriptors on arrays; a new representation
 // or a boxed array would lose that existing native ownership for no reason.
