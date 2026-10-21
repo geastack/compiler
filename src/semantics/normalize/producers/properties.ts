@@ -517,10 +517,13 @@ const chainValueTypeOf = (context: ProducerContext, node: AccessNode): Structura
   return context.table.intern({ kind: 'union', members: [own, context.table.intern({ kind: 'primitive', primitive: 'undefined' })] })
 }
 
+/** Whether `typeof` takes this expression as its operand: it answers `"undefined"` for an absent read without consuming the value (ECMA-262 13.5.3). */
+const typeofTakesItsOperand = (inner: ts.Node, parent: ts.Node): boolean => ts.isTypeOfExpression(parent) && parent.expression === inner
+
 /**
  * Whether an expression sits where ECMA-262 turns its value into a BOOLEAN --
- * `ToBoolean` of whatever it evaluated to -- rather than where the value
- * itself is consumed.
+ * `ToBoolean` of whatever it evaluated to -- or into a type tag (`typeof`),
+ * rather than where the value itself is consumed.
  *
  * These are test positions that can observe an `undefined` no type mentions.
  * Equality with `undefined` is the other direct observation. See
@@ -534,6 +537,7 @@ const testsItsOperand = (node: ts.Expression): boolean => {
     parent = parent.parent
   }
   if (!parent) return false
+  if (typeofTakesItsOperand(inner, parent)) return true
   if (ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent)) return parent.expression === inner
   if (ts.isForStatement(parent)) return parent.condition === inner
   if (ts.isConditionalExpression(parent)) return parent.condition === inner
@@ -558,7 +562,15 @@ const testsItsOperand = (node: ts.Expression): boolean => {
   return false
 }
 
-/** A test that consumes this value immediately, including a logical assignment's own guard. */
+/**
+ * A test that observes this value immediately: a condition, `!`, `typeof`,
+ * the left operand of `||` / `??`, or a logical assignment's own guard.
+ *
+ * The left operand of `&&` is NOT one: `logicalMergeTypeOf`'s `&&` rule takes
+ * the kept left half from the checker's left type, so a widened left arm
+ * would be dereferenced on the kept branch. It joins once that merge reads
+ * the cited left type the way `||` and `??` already do.
+ */
 const directlyTestsItsOperand = (node: ts.Expression): boolean => {
   let inner: ts.Node = node
   let parent = inner.parent
@@ -567,10 +579,16 @@ const directlyTestsItsOperand = (node: ts.Expression): boolean => {
     parent = parent.parent
   }
   if (!parent) return false
+  if (typeofTakesItsOperand(inner, parent)) return true
   if (ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent)) return parent.expression === inner
   if (ts.isForStatement(parent)) return parent.condition === inner
   if (ts.isConditionalExpression(parent)) return parent.condition === inner
-  if (ts.isBinaryExpression(parent) && parent.left === inner) return logicalAssignmentOperators.has(parent.operatorToken.kind)
+  if (ts.isBinaryExpression(parent) && parent.left === inner) {
+    const operator = parent.operatorToken.kind
+    return (
+      logicalAssignmentOperators.has(operator) || operator === ts.SyntaxKind.BarBarToken || operator === ts.SyntaxKind.QuestionQuestionToken
+    )
+  }
   return ts.isPrefixUnaryExpression(parent) && parent.operator === ts.SyntaxKind.ExclamationToken
 }
 

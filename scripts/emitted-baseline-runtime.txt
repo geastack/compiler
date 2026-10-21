@@ -480,7 +480,7 @@ fresh-array-map-result-into-union-element-parameter.runtime.ts.cpp 3d7eb53b3a18
 fresh-literal-widened-into-union-cell-moves.runtime.ts.cpp de39ecbba5bc
 fresh-local-table-stored-as-last-use-into-wider-entries.ts.cpp da622b7bd5f2
 fresh-object-store-skips-integrity-guard.runtime.ts.cpp 760088ad24cd
-fresh-table-arrow-return-preserves-alias-writes.runtime.ts.cpp ec65a90548b4
+fresh-table-arrow-return-preserves-alias-writes.runtime.ts.cpp 5f92d38ddd3c
 from-char-code-spread-local-buffer.ts.cpp d5c4b87cabbb
 function-and-constructor-own-properties.ts.cpp 2c649b84501b
 function-arm-union-slot-default.ts.cpp 528865985eec
@@ -556,7 +556,7 @@ generic-method-at-two-type-arguments.ts.cpp 7784c3dab345
 generic-method-default-type-parameter.ts.cpp c2bb098c8a0b
 generic-method-explicit-type-argument-only-in-rest.runtime.ts.cpp 29e4bea66346
 generic-method-overload-conditional-schema.runtime.ts.cpp 9a0f4a3583d5
-generic-method-override-minted-at-every-base-copy.runtime.ts.cpp 49f4950054a6
+generic-method-override-minted-at-every-base-copy.runtime.ts.cpp 744ba31444c4
 generic-method-override-through-base-receiver.runtime.ts.cpp cfc322326c14
 generic-method-parameters-rest.runtime.ts.cpp a464a321fbf4
 generic-method-under-a-later-class-copy.ts.cpp 9ac4fdf4d53d
@@ -621,6 +621,7 @@ in-boxed-key.ts.cpp 14990bb803ed
 in-dynamic-key-on-guarded-open-interface.runtime.ts.cpp f73d73aeacd6
 in-over-error-or-interface-extending-error.runtime.ts.cpp da25cd375bfa
 in-unique-symbol-key-sidecar.ts.cpp 83051dca530a
+index-signature-primitive-read-typeof-and-nullish-observe-absence.runtime.ts.cpp f2b123dc496e
 indexed-absence-forwarded-cache.runtime.js.cpp 5aa0e98dd88c
 indexed-document-view-open-key-writes.runtime.js.cpp b7c9c2275200
 indexed-filter-into-any-document-parameter.runtime.ts.cpp 27130ed3fcbc
@@ -1168,7 +1169,7 @@ repeated-union-selection-reuses-the-dominating-one.runtime.ts.cpp a5e5d879a11b
 rest-array-of-any-spread-into-a-null-absent-parameter.runtime.ts.cpp 4ca441c332a3
 rest-forwarding-spread-argument.ts.cpp 17dfc09c6a23
 rest-parameter-rebase.ts.cpp 749eb8d7d071
-rest-parameter-union-of-tuples-mixed.ts.cpp 64ee2f9267fd
+rest-parameter-union-of-tuples-mixed.ts.cpp 8ab3f9353e8a
 rest-parameter-union-of-tuples.ts.cpp 311f88b55805
 rest-tuple-element-union-keeps-every-member.ts.cpp dc31120d68c7
 rest-tuple-spread.ts.cpp 5a759a51e29e

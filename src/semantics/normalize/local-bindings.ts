@@ -932,6 +932,17 @@ export const censusLocalBindings = (
     )
   }
 
+  /** Whether `typeof` takes this reference as its operand; it answers `"undefined"` for an absent read. */
+  const directTypeofOperand = (expression: ts.Expression): boolean => {
+    let inner: ts.Node = expression
+    let parent = inner.parent
+    while (parent && ts.isParenthesizedExpression(parent)) {
+      inner = parent
+      parent = parent.parent
+    }
+    return parent !== undefined && ts.isTypeOfExpression(parent) && parent.expression === inner
+  }
+
   const registerObservedIndexedAbsence = (declaration: ts.VariableDeclaration): void => {
     if (declaration.type || ts.getJSDocType(declaration) || !ts.isIdentifier(declaration.name) || !declaration.initializer) return
     let initializer: ts.Expression = declaration.initializer
@@ -966,7 +977,7 @@ export const censusLocalBindings = (
     if (!symbol) return
     const observing = flow
       .referencesToSymbol(symbol)
-      .filter((reference) => directUndefinedComparison(reference) || directTruthinessTest(reference))
+      .filter((reference) => directUndefinedComparison(reference) || directTruthinessTest(reference) || directTypeofOperand(reference))
     if (observing.length === 0) return
     if (untyped) {
       untypedObservedAbsence.push({ declaration, nodes: [declaration, declaration.name, ...observing] })
