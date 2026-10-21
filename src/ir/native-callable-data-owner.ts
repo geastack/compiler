@@ -888,5 +888,15 @@ const createOwnerAuthority = (
   }
 }
 
-export const nativeCallableDataOwnerAuthorityOf = (input: NativeCallableDataOwnerInput): NativeCallableDataOwnerAuthority =>
-  createOwnerAuthority(input)
+/**
+ * One authority per input object: the slot discovery, its optional reads and
+ * the write census each asked for one over the same input within a single
+ * publication or certification, and each built the program-wide tables again.
+ * The authority is a function of the input alone, which nothing mutates.
+ */
+const ownerAuthorities = new WeakMap<NativeCallableDataOwnerInput, NativeCallableDataOwnerAuthority>()
+export const nativeCallableDataOwnerAuthorityOf = (input: NativeCallableDataOwnerInput): NativeCallableDataOwnerAuthority => {
+  let authority = ownerAuthorities.get(input)
+  if (authority === undefined) ownerAuthorities.set(input, (authority = createOwnerAuthority(input)))
+  return authority
+}
