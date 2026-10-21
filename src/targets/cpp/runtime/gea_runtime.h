@@ -3188,6 +3188,13 @@ struct CycleState {
   // fullCollectionEvery` candidates per full sweep is exactly what the
   // collection count meant when every young collection was a full buffer.
   std::size_t candidatesSinceFullCollection = 0;
+  // How many objects the last full collection found live: the size of the
+  // traced heap a full collection pays for. Both full-collection triggers
+  // (`fullCollectionBudget`, `deferredOverdue`) scale with it, so a program
+  // that keeps a large, stable graph and touches much of it every frame pays
+  // for a full trace in proportion to the work done since the last one rather
+  // than once per frame.
+  std::size_t survivorsOfLastFullCollection = 0;
   // Young-collection survivors whose "live" verdict rested on a clipped edge
   // (`Node::hadClippedEdge`). They are not re-entered into `candidates`: a
   // young pass can never decide them (the clipped edge is invisible to it by
@@ -3318,16 +3325,49 @@ inline bool& cycleSafepointArmed() {
 #endif
 }
 
+/**
+ * How many young candidates a run of young collections examines before the
+ * next automatic collection is promoted to full: `fullCollectionEvery`
+ * buffers' worth, or the heap the last full collection found live, whichever
+ * is larger.
+ *
+ * A full collection traces everything reachable from its roots, so its cost
+ * is the surviving heap, not the candidate count. With a fixed budget, a
+ * program holding a large graph paid that whole trace every `candidateThreshold
+ * * fullCollectionEvery` candidates however large the graph was; scaling the
+ * budget with the survivors makes the full trace's cost, amortized over the
+ * candidates that paid for it, a constant -- the rule a generational
+ * collector uses to size its old generation's collections. What it costs is
+ * latency: a garbage cycle only a full collection can free (one made of
+ * mature objects) waits until that much young work has been done, which is
+ * bounded by the heap, not by time.
+ */
+inline std::size_t fullCollectionBudget(const CycleState& state) {
+  return std::max(state.candidateThreshold * state.fullCollectionEvery, state.survivorsOfLastFullCollection);
+}
+
 /** The deferred list normally waits for the cadence-driven full collection,
  * which needs young candidates to keep arriving. A program whose only
  * releases are of permanent objects would otherwise never reach one, so the
- * list itself becomes the trigger once it holds what `fullCollectionEvery`
- * young collections' worth of candidates would have: the same bound the
- * cadence gives an all-mature garbage cycle, derived from the policy rather
- * than a third knob. Entries are unique objects (`cycleBuffered` keeps each
- * out twice), so a server's steady state cannot reach it by traffic alone. */
+ * list itself becomes the trigger once it is large against the heap.
+ *
+ * Entries are unique objects (`cycleBuffered` keeps each out twice), so the
+ * list never holds more than the permanent objects that dipped since the last
+ * full collection. A render loop re-touches thousands of long-lived objects
+ * every frame -- every node, attribute and uniform of a scene -- so against a
+ * fixed bound (`fullCollectionEvery` buffers' worth) the list refilled past it
+ * in a frame and every frame ended in a full trace of the whole scene. The
+ * bound is therefore that fixed allowance ON TOP of the heap the last full
+ * collection kept: re-touching that heap, however much of it, can never reach
+ * it; only that many objects beyond it can -- permanent objects allocated
+ * since, which is the heap growing. Soundness: a garbage structure only a
+ * full collection can free has a member in this list (the release that made
+ * it garbage dipped it), and the full collection this bound or the candidate
+ * cadence (`fullCollectionBudget`) eventually forces frees it; until then the
+ * garbage is made of objects the last full collection kept or of objects
+ * promoted since, which the two bounds cap in proportion to that heap. */
 inline bool deferredOverdue(const CycleState& state) {
-  return state.deferred.size() >= state.candidateThreshold * state.fullCollectionEvery;
+  return state.deferred.size() >= state.candidateThreshold * state.fullCollectionEvery + state.survivorsOfLastFullCollection;
 }
 
 /**
@@ -3857,7 +3897,7 @@ inline void filterBufferedCandidates(CycleState& state) {
  * collection (`full == true`) ignores the mature bit and traces everything
  * reachable from the candidates, then re-marks every survivor mature; this is
  * what `gea::collectCycles()` runs, and what the automatic path promotes to
- * every `fullCollectionEvery` young collections (see `CycleState`).
+ * once young collections have examined `fullCollectionBudget` candidates.
  *
  * Correctness of the young path -- why it can only OVER-retain, never
  * under-collect a live object:
@@ -3908,7 +3948,7 @@ inline void filterBufferedCandidates(CycleState& state) {
  *    way, the entry candidate is never lost after a false retain: it sits
  *    buffered, reachable from `state.candidates`, until the next FULL
  *    collection traces it without the mature filter, finds the true
- *    incoming count, and frees it -- bounded by `fullCollectionEvery`, never
+ *    incoming count, and frees it -- bounded by `fullCollectionBudget`, never
  *    indefinite, and never dependent on some unrelated later release
  *    happening to touch it again.
  *  - `restorePins`'s `restoreWeakCounts` replays `savedWeak` -- captured
@@ -3933,7 +3973,7 @@ GEA_EH_NOINLINE inline void collectReferenceCycles(bool full = false) {
   // ordinary (young) collection to full on the configured cadence, and on
   // the very first collection (nothing is mature yet, so this costs nothing
   // and establishes the baseline for the counter).
-  if (!full && (state.collections == 0 || state.candidatesSinceFullCollection >= state.candidateThreshold * state.fullCollectionEvery)) full = true;
+  if (!full && (state.collections == 0 || state.candidatesSinceFullCollection >= fullCollectionBudget(state))) full = true;
   // A full collection also owes the deferred survivors an answer (see
   // `CycleState::deferred`), so it runs for them even with no fresh candidate.
   if (state.candidates.empty() && !(full && !state.deferred.empty())) return;
@@ -4325,6 +4365,7 @@ GEA_EH_NOINLINE inline void collectReferenceCycles(bool full = false) {
     if (trace.runs % 32 == 0 && gea_heap_trace_print) gea_heap_trace_print();
   }
 #endif
+  if (full) state.survivorsOfLastFullCollection = graph.live.size();
   graph.clear();
   state.collecting = false;
   state.allocationPressure = 0;
@@ -13887,6 +13928,7 @@ class Dictionary {
     if (first_ && first_->first == key) return first_->second;
     if (!first_ && entries_.empty()) {
       enumerableKeys_.reset();
+      noteKey(key);
       first_.emplace(detail::duplicateString(key), V{});
       if constexpr (aliasable) detail::noteDocumentDataKeyCreated(this, key);
       return first_->second;
@@ -13894,6 +13936,7 @@ class Dictionary {
     const std::size_t found = findPosition(key);
     if (found != npos) return entries_[found].second;
     enumerableKeys_.reset();
+    noteKey(key);
     Entry& entry = entries_.emplace_back(detail::duplicateString(key), V{});
     GEA_EH_TRY_ANY(gea_eh_failed) {
       indexInsert(entries_.size() - 1);
@@ -13952,6 +13995,7 @@ class Dictionary {
   V readHinted(std::string_view key, std::atomic<std::uint32_t>& hint) const {
     if constexpr (!aliasable) {
       if (!view_) [[likely]] {
+        if (!mayHoldKey(key)) return V{};
         if (first_ && first_->first == key) return first_->second;
         const std::size_t found = hintedPosition(key, hint);
         return found == npos ? V{} : entries_[found].second;
@@ -13964,6 +14008,7 @@ class Dictionary {
   Carrier readIfPresentHinted(std::string_view key, std::atomic<std::uint32_t>& hint) const {
     if constexpr (!aliasable) {
       if (!view_) [[likely]] {
+        if (!mayHoldKey(key)) return Carrier();
         if (first_ && first_->first == key) return Carrier(first_->second);
         const std::size_t found = hintedPosition(key, hint);
         return found == npos ? Carrier() : Carrier(entries_[found].second);
@@ -14477,6 +14522,7 @@ class Dictionary {
   void appendAbsent(const std::string& key, V value) {
     if (view_) [[unlikely]] detail::refuseAliasedDictionaryStore();
     enumerableKeys_.reset();
+    noteKey(key);
     if (!first_ && entries_.empty()) {
       first_.emplace(detail::duplicateString(key), std::move(value));
       return;
@@ -14592,6 +14638,28 @@ class Dictionary {
   // `std::map` that cost one node allocation per key.
   static constexpr std::size_t kScanLimit = 8;
   static constexpr std::size_t npos = static_cast<std::size_t>(-1);
+  /**
+   * One bit per key this table has ever stored, chosen from the key's length
+   * and its first and last bytes (`keyBit`), so a read of a key whose bit is
+   * clear is answered "absent" without touching an entry.
+   *
+   * A renderer probes every geometry for entries it rarely has -- a color or
+   * tangent attribute, morph targets -- once per draw, each a different table,
+   * so a miss walked every entry's key and no per-site hint could remember it.
+   * The bit is set by every insertion and never cleared: a deleted key leaves
+   * it set, and two keys may share one, which only sends the read on to the
+   * lookup it always made. A clear bit is proof, because nothing stores a key
+   * without setting it. Only the plain own-entry reads consult it; a view or
+   * an alias holds no entries of its own here.
+   */
+  std::uint64_t keyMask_ = 0;
+  static constexpr unsigned keyBit(std::string_view key) {
+    const std::size_t size = key.size();
+    const unsigned edges = size == 0 ? 0u : static_cast<unsigned>(static_cast<unsigned char>(key[0])) * 3u + static_cast<unsigned char>(key[size - 1]);
+    return static_cast<unsigned>(size * 7u + edges) & 63u;
+  }
+  void noteKey(std::string_view key) { keyMask_ |= std::uint64_t{1} << keyBit(key); }
+  bool mayHoldKey(std::string_view key) const { return (keyMask_ & (std::uint64_t{1} << keyBit(key))) != 0; }
   static constexpr std::uint32_t kEmptySlot = static_cast<std::uint32_t>(-1);
   std::vector<std::uint32_t> index_;
   std::size_t findPosition(std::string_view key) const {
@@ -15347,6 +15415,10 @@ class Map {
     entries_.clear();
     serials_.clear();
     if constexpr (indexable) index_.clear();
+    if constexpr (directable) {
+      direct_.clear();
+      directOk_ = true;
+    }
   }
 
   /**
@@ -15403,12 +15475,49 @@ class Map {
    * of an unchanging Map (parallel regions) stay read-only.
    */
   static constexpr bool indexable = detail::MapKeyIndexable<K>::value;
+  /**
+   * Key -> position + 1 for a Map whose every key is a small non-negative
+   * integer Number -- object ids, slot numbers -- held in a plain array the
+   * key indexes. Such a Map is typically read per frame per object (a
+   * renderer's per-geometry and per-program state tables): below `indexFrom`
+   * a read compared the key against every entry, and above it hashed into a
+   * node-based table, where one array load answers either.
+   *
+   * It is kept while every key so far qualifies and the array stays within
+   * a constant factor of the entry count; the first key that does not
+   * (fractional, negative, NaN, or far past the others) drops it for good and
+   * the Map falls back to `index_` and the scan. Like `index_`, it is only a
+   * position cache: storage order, serials and iteration are untouched.
+   */
+  static constexpr bool directable = std::is_same_v<K, double>;
+  static constexpr std::uint32_t directSlotLimit = std::uint32_t{1} << 20;
+  /** Whether `key` is an integer in [0, directSlotLimit), and which slot it names. -0 is 0, as SameValueZero says. */
+  static bool directSlotOf(const K& key, std::uint32_t& slot) {
+    if constexpr (directable) {
+      if (!(key >= 0.0 && key < static_cast<double>(directSlotLimit))) return false;
+      slot = static_cast<std::uint32_t>(key);
+      return static_cast<double>(slot) == key;
+    } else {
+      (void)key;
+      (void)slot;
+      return false;
+    }
+  }
   static constexpr std::size_t indexFrom = 8;
   static constexpr std::size_t notFound = static_cast<std::size_t>(-1);
   using Index = std::conditional_t<indexable, std::unordered_map<K, std::size_t, detail::MapKeyHash, detail::MapKeyEqual>,
                                    detail::NoMapIndex>;
 
   std::size_t positionOf(const K& key) const {
+    if constexpr (directable) {
+      // Every key is a small non-negative integer (`direct_`), so a key that
+      // is not one is absent, and one that is names its slot.
+      if (directOk_) {
+        std::uint32_t slot = 0;
+        if (!directSlotOf(key, slot) || slot >= direct_.size()) return notFound;
+        return static_cast<std::size_t>(direct_[slot]) - 1;
+      }
+    }
     if constexpr (indexable) {
       if (!index_.empty()) {
         const auto found = index_.find(key);
@@ -15429,6 +15538,26 @@ class Map {
     }
   }
   void indexAppended() {
+    if constexpr (directable) {
+      if (directOk_) {
+        std::uint32_t slot = 0;
+        const std::size_t count = entries_.size();
+        if (directSlotOf(entries_.back().first, slot) && slot < directSlotLimit && slot < 64 + 16 * count) {
+          if (slot >= direct_.size()) direct_.resize(static_cast<std::size_t>(slot) + 1, 0);
+          direct_[slot] = static_cast<std::uint32_t>(count);
+          return;
+        }
+        // A key outside the direct table's domain: the Map answers through
+        // the scan and the hashed index from here on, as it always did.
+        directOk_ = false;
+        direct_.clear();
+        direct_.shrink_to_fit();
+        if constexpr (indexable) {
+          if (entries_.size() >= indexFrom) rebuildIndex();
+        }
+        return;
+      }
+    }
     if constexpr (indexable) {
       if (!index_.empty()) index_.emplace(entries_.back().first, entries_.size() - 1);
       else if (entries_.size() >= indexFrom) rebuildIndex();
@@ -15437,6 +15566,18 @@ class Map {
   // Erasing shifted every later entry down one position (an O(n) move already),
   // so the index is renumbered by rebuilding it, or dropped below `indexFrom`.
   void indexRemoved() {
+    if constexpr (directable) {
+      if (directOk_) {
+        // Erasing shifted every later entry down one position: renumber.
+        std::fill(direct_.begin(), direct_.end(), 0u);
+        for (std::size_t index = 0; index < entries_.size(); ++index) {
+          std::uint32_t slot = 0;
+          directSlotOf(entries_[index].first, slot);
+          direct_[slot] = static_cast<std::uint32_t>(index + 1);
+        }
+        return;
+      }
+    }
     if constexpr (indexable) {
       if (!index_.empty()) rebuildIndex();
     }
@@ -15447,6 +15588,8 @@ class Map {
   std::uint64_t nextSerial_ = 1;
   std::shared_ptr<const detail::MapViewSource<K, V>> view_;
   Index index_;
+  std::vector<std::uint32_t> direct_;
+  bool directOk_ = true;
 };
 
 namespace detail {
@@ -19687,6 +19830,15 @@ namespace detail {
 struct LiteralReadCache {
   std::atomic<const ValueMetadata*> absentOn[4]{};
   std::atomic<std::uint8_t> next{0};
+  /**
+   * Types whose declared field table answered this key here (see
+   * `Value::getLiteralProperty`): for a box of one of them the read goes to
+   * that table first, as `getProperty` itself would after its ladder of
+   * checks, and only a miss -- a field this instance has deleted -- walks the
+   * ladder. Two, for a site that sees two types (a 3- and a 4-vector).
+   */
+  std::atomic<const ValueMetadata*> fieldOn[2]{};
+  std::atomic<std::uint8_t> nextField{0};
   std::atomic<std::int8_t> stringAbsent{-1};
   // The same fact for an Array: this key is neither `length` nor an index and the Array prototype table holds nothing under it.
   std::atomic<std::int8_t> arrayAbsent{-1};
@@ -33235,9 +33387,15 @@ inline bool Value::readDeclaredField(const PropertyKey& key, Value& out) const {
 }
 
 inline Value Value::getLiteralProperty(const PropertyKey& key, detail::LiteralReadCache& cache) const {
+  constexpr auto relaxed = std::memory_order_relaxed;
+  // A type this site has already seen answer from its declared fields: the
+  // ladder below and `getProperty`'s own would only reach the same table.
+  if (!proxy_ && !dynamic_ && tag_ == Tag::Object && (cache.fieldOn[0].load(relaxed) == metadata_ || cache.fieldOn[1].load(relaxed) == metadata_)) {
+    Value answer;
+    if (metadata_->fields->read(payload(), key, answer)) return answer;
+  }
   Value viewed;
   if (nativeViewValue(viewed)) return viewed.getLiteralProperty(key, cache);
-  constexpr auto relaxed = std::memory_order_relaxed;
   if (!proxy_ && !dynamic_ && tag_ == Tag::Object) {
     // A serializer may ask every value it visits for a hook method, a type-tag key and @@toStringTag. A Document answers from its own table (or, when it
     // views a native object, from that object's cached read) and an Array from its prototype table, neither needing `getProperty`'s ladder.
@@ -33305,6 +33463,18 @@ inline Value Value::getLiteralProperty(const PropertyKey& key, detail::LiteralRe
         }
         break;
       }
+    }
+  }
+  // The conditions under which `getProperty` asks the declared field table
+  // before anything else (`readDeclaredField`): no view hook on the type, no
+  // proxy or dynamic object, not a Document, not a tuple. A hit there is
+  // remembered for the type, so the next box of it skips straight to it.
+  if (!proxy_ && !dynamic_ && tag_ == Tag::Object && metadata_->nativeViewValue == nullptr && metadata_->fields != nullptr &&
+      metadata_->elements == nullptr && metadata_->payloadType != detail::payloadTypeTagFor<gea::Ref<gea::Dictionary<gea::Value>>>()) {
+    Value declared;
+    if (metadata_->fields->read(payload(), key, declared)) {
+      cache.fieldOn[cache.nextField.fetch_add(1, relaxed) % 2].store(metadata_, relaxed);
+      return declared;
     }
   }
   Value answer = getProperty(key, *this);
@@ -46918,9 +47088,13 @@ void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
     gea::embedded::ui::Document::instance().addEventListener(name.c_str(), std::move(run));
     return;
   }
-  if (name == "keydown" || name == "keyup") {
+  if (name == "keydown" || name == "keyup" || name == "scroll") {
     // The native root dispatcher now walks the real allocation-bound node
     // path. Document delegation bypassed that path and outlived raw removal.
+    // Scroll never reached the body at all: the engine stops a non-bubbling
+    // dispatch at its target, so a <virtual-list> scrolled by the watch Crown
+    // or hardware Up/Down buttons left its recycled rows where the last touch
+    // put them.
     const auto listenerId = target.addEventListener(name.c_str(), std::move(run));
     recordNodeSubscription(target.id(), [target, name, listenerId]() {
       target.removeEventListener(name.c_str(), listenerId);
@@ -46958,8 +47132,8 @@ void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
 
 template <typename Node, typename Result>
 void addNodeListener(Node& node, const std::string& type, const gea::CallableObject<Result()>& handler) {
-  // Keys are owned by the real node and follow the native root's ancestor
-  // path. Pointer handlers retain the existing body-delegation compatibility
+  // Keys and scroll are owned by the real node and follow the native root's
+  // ancestor path. Pointer handlers retain the existing body-delegation compatibility
   // path, gated by containment. Both record early JSX disposal; native node
   // removal additionally releases the node-owned keyboard listener itself.
   const gea::CallableObject<Result()> held = handler;

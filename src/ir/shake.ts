@@ -11,6 +11,7 @@ import { nativeCallableFlowOf } from './callable-class-flow.js'
 import { allOperationsOf, type IrBlock, type IrBlockId, type IrBody, type IrNonTerminatorOperation, type IrOperation } from './model.js'
 import { arrayAllocationDrainsDynamicIterator, operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import { verifyIrBody, type IrViolation } from './verify.js'
+import { hostTemplateMemberOf } from './host-template-conversions.js'
 
 /**
  * Whole-program reachability over the lowered IR.
@@ -552,6 +553,25 @@ const sliceBody = (
           if (operation.intrinsicReflection === 'get' && operation.result)
             for (const scope of scopes) computedMemberHazards.push({ scope, target: operation.result.representation })
         }
+      }
+    }
+    // `Object.values(x)`, `Object.entries(x)` and `Object.assign(t, x)` read
+    // every own field of `x` without spelling a key and without lowering to
+    // `own-property-keys`: they are host calls. Missed here, a field only
+    // ever observed through one of them had its initializer pruned, and the
+    // walk read the struct's default-constructed slot (`''`, `0`) instead.
+    if (operation.kind === 'call') {
+      const host = hostTemplateMemberOf(operation, (value) => definitions.get(value) ?? null)
+      if (host?.protocol === 'ObjectConstructor') {
+        const walked =
+          host.member === 'values' || host.member === 'entries' || host.member === 'getOwnPropertyDescriptors'
+            ? operation.arguments.slice(0, 1)
+            : host.member === 'assign'
+              ? operation.arguments.slice(1)
+              : []
+        if (operation.argumentsAreSpread && walked.length > 0) fieldHazardScopes.add(anyClassScope)
+        for (const argument of walked)
+          for (const scope of receiverClassScopes(argument.representation, structuralViewScopes)) fieldHazardScopes.add(scope)
       }
     }
     // OrdinaryToPrimitive invokes `toString`/`valueOf` without an explicit

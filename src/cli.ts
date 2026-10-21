@@ -11,7 +11,7 @@ import { preflightReportLines } from './preflight/report.js'
 import { structuralShapeKey } from './semantics/model/structural-types.js'
 import { closeSync, openSync, writeSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { setFlagsFromString } from 'node:v8'
+import { getHeapStatistics, setFlagsFromString } from 'node:v8'
 
 // V8 grows the heap after each collection by up to four times what survived
 // it, bounded only by the old-space limit -- which builds raise to 32 GB so a
@@ -19,10 +19,16 @@ import { setFlagsFromString } from 'node:v8'
 // a few GB live, so with that headroom a large app's compile held 15.8 GB of
 // resident memory for 3.3 GB of live data. A 25% margin bounded it at 4.6 GB
 // for 9% more wall time. A caller that states its own percentage keeps it.
+//
+// The margin is only for a heap that limit leaves unbounded. A process given a
+// few gigabytes is bounded by them already, and a 25% margin under them only
+// makes it collect more often: a large three.js program compiling under a 4 GB
+// heap took 5% longer with it (406 s against 387 s) and peaked 0.5 GB lower.
 const statedGrowth = [...process.execArgv, ...(process.env['NODE_OPTIONS'] ?? '').split(/\s+/)].some((flag) =>
   /^--heap[-_]growing[-_]percent/.test(flag)
 )
-if (!statedGrowth) setFlagsFromString('--heap-growing-percent=25')
+const boundedHeap = getHeapStatistics().heap_size_limit <= 8 * 1024 * 1024 * 1024
+if (!statedGrowth && !boundedHeap) setFlagsFromString('--heap-growing-percent=25')
 
 /**
  * The command line.

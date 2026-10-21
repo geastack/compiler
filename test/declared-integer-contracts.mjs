@@ -199,7 +199,10 @@ for (const scenario of scenarios) {
     {
       input: `${result.source}\n${scenario.host ?? ''}\nint main() { __gea_top_level(); ${scenario.postlude ?? ''} }`,
       env: { ...process.env, TMPDIR: resolve(root, 'measurements') },
-      timeout: 180_000
+      // An -O2 sanitizer build of the whole runtime header takes well under a
+      // minute alone, but the release suite runs it beside hundreds of other
+      // compiles and it passed 180 s there; the bound only catches a hang.
+      timeout: 900_000
     }
   )
   // Windows opens a C++ program's stdout in text mode, so its `\n` arrives as `\r\n`.

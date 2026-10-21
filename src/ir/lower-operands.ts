@@ -1615,7 +1615,12 @@ export const packRestArguments = (
           throw new IrLoweringBlockedError(`a tuple-shaped rest slot's required field ${index} has no matching trailing argument`)
         return []
       }
-      return [{ key: field.key, value: packingValueOf(entry) }]
+      // Converted here, as a packed array's element is below: a position
+      // several call forms fill (a number in one, an image source in another)
+      // carries their join, and the record's store is not where a conversion
+      // into it can be certified.
+      const actual = packingValueOf(entry)
+      return [{ key: field.key, value: convertTo(ctx, block, lineage, actual, field.value) ?? actual }]
     })
     const packed = ctx.builder.allocateRecord(block, lineage, fields, slot.value)
     return [...args.slice(0, abi.restFrom).map((entry) => entry.value), { value: packed, representation: slot.value }]

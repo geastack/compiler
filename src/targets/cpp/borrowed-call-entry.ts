@@ -1,6 +1,7 @@
 import type { FunctionId, IrValueId } from '../../identity/ids.js'
 import { borrowWorthy, dynamicFormalIsReadOnly, readonlyBorrowFormalsOf, type PrivateBorrowCell } from '../../ir/borrowed-call-arguments.js'
-import type { IrBody, IrOperand } from '../../ir/model.js'
+import { allOperationsOf, type IrBody, type IrOperand } from '../../ir/model.js'
+import { DyingArgumentSet } from '../../ir/transfer.js'
 import { representationKey, type CallableAbi } from '../../representation/model.js'
 import { cppBodyName } from './types.js'
 
@@ -12,6 +13,14 @@ export interface StableBorrowEntry {
   readonly name: string
   readonly abi: CallableAbi
   readonly formals: ReadonlySet<number>
+  /**
+   * Whether the body's declared signature narrows an integer formal or its
+   * result. The entry then spells those narrowed types exactly as the owning
+   * entry does, so a direct call reaches either with the same arguments; a
+   * carrier-level adapter (`callKnownBorrowed`) passes the unnarrowed ABI and
+   * must keep the thunk, which converts at that boundary.
+   */
+  readonly narrowedNumericAbi: boolean
 }
 
 export const stableBorrowEntryOf = (
@@ -24,18 +33,11 @@ export const stableBorrowEntryOf = (
     readonly captureFree: boolean
     readonly synchronous: boolean
     readonly singleBody: boolean
-    readonly unchangedNumericAbi: boolean
+    readonly narrowedNumericAbi: boolean
   }
 ): StableBorrowEntry | null => {
   const abi = body.abi
-  if (
-    body.sourceOwner !== owner ||
-    !admission.captureFree ||
-    !admission.synchronous ||
-    !admission.singleBody ||
-    !admission.unchangedNumericAbi
-  )
-    return null
+  if (body.sourceOwner !== owner || !admission.captureFree || !admission.synchronous || !admission.singleBody) return null
   // A receiver is not disqualifying: `signatureOf`/`bodyFormalsOf` already
   // spell a method's `this` from `borrowsReceiver`, independently of the
   // `formals` this function returns, so a method's OWN non-receiver formals
@@ -71,7 +73,7 @@ export const stableBorrowEntryOf = (
   if (![...formals].some((ordinal) => !originalBorrowed.has(ordinal))) return null
   // Never revoke an established, stronger effect-based borrow proof.
   for (const ordinal of originalBorrowed) formals.add(ordinal)
-  return { owner, name: `${cppBodyName(owner)}_stable_borrow`, abi, formals }
+  return { owner, name: `${cppBodyName(owner)}_stable_borrow`, abi, formals, narrowedNumericAbi: admission.narrowedNumericAbi }
 }
 
 /** A private caller slot survives arbitrary program re-entry. All extra
@@ -104,4 +106,98 @@ export const stableBorrowEntryAccepts = (
       !dyingArguments.has(actual.value) ||
       !(borrowWorthy(actual.representation) || actual.representation.kind === 'dynamic')
   )
+}
+
+/**
+ * The borrowed positions a call copies into a temporary of the formal's own
+ * carrier so that it can still enter the borrowed entry, or null when the
+ * entry is refused.
+ *
+ * A reference formal bound to a temporary the call itself made is as private
+ * as a caller-owned local: nothing else can name it, and it lives until the end
+ * of the full-expression, past the callee's return. So an actual that is not a
+ * stable slot -- a field or element read the printer may withhold as a
+ * reference into mutable storage, or a value converted on the way in -- is
+ * copied by itself, which is exactly the copy the owning entry's by-value
+ * formal made. Refusing the whole entry for it sent every other argument of
+ * the call through by-value formals too: one union read from a field cost a
+ * copy and release of each handle beside it, and a move of each local.
+ *
+ * Mixed move/borrow evaluation is still refused, for `stableBorrowEntryAccepts`'s
+ * reason: an owning sibling's `std::move` may be evaluated before a copy or a
+ * reference of the same slot is taken.
+ */
+export const stableBorrowEntryCopies = (
+  entry: StableBorrowEntry,
+  actuals: readonly IrOperand[],
+  stable: ReadonlySet<IrValueId>,
+  dyingArguments: ReadonlySet<IrValueId>
+): ReadonlySet<number> | null => {
+  const copies = new Set<number>()
+  for (const ordinal of entry.formals) {
+    const actual = actuals[ordinal]
+    const formal = entry.abi.parameters[ordinal]
+    if (!formal) return null
+    // An omitted argument is padded with a temporary of the formal's carrier.
+    if (!actual) continue
+    if (!stable.has(actual.value) || representationKey(actual.representation) !== representationKey(formal.value)) copies.add(ordinal)
+  }
+  const siblingsStayPut = actuals.every(
+    (actual, ordinal) =>
+      entry.formals.has(ordinal) ||
+      !dyingArguments.has(actual.value) ||
+      !(borrowWorthy(actual.representation) || actual.representation.kind === 'dynamic')
+  )
+  return siblingsStayPut ? copies : null
+}
+
+/**
+ * Dying argument reads a call hands to a position its callee's borrowed entry
+ * takes by reference -- a direct call's, or every arm's of a union dispatch: the entry binds them in place, so they move
+ * nothing. Only a call that will enter the entry counts -- one where no other
+ * position moves a handle (`stableBorrowEntryCopies`' refusal) -- and only an
+ * argument already carried as the formal, since a conversion builds a
+ * temporary of its own and the move feeds that.
+ */
+export const borrowForwardedArgumentsOf = (
+  bodies: readonly IrBody[],
+  entries: ReadonlyMap<string, StableBorrowEntry>,
+  dyingArguments: ReadonlySet<IrValueId>
+): ReadonlySet<IrValueId> => {
+  const forwarded = new Set<IrValueId>()
+  for (const body of bodies)
+    for (const block of body.blocks.values())
+      for (const operation of allOperationsOf(block)) {
+        if (operation.kind !== 'call') continue
+        const target = operation.target
+        const targets =
+          target?.kind === 'direct' ? [target.functionId] : target?.kind === 'union-arm' ? target.arms.map((arm) => arm.functionId) : []
+        const callees = targets.map((functionId) => entries.get(cppBodyName(functionId)))
+        if (callees.length === 0) continue
+        // A union dispatch enters one arm's body, so every arm must take the position by reference.
+        operation.arguments.forEach((argument, ordinal) => {
+          if (!dyingArguments.has(argument.value)) return
+          const borrowed = callees.every((entry) => {
+            const formal = entry?.abi.parameters[ordinal]
+            return (
+              entry !== undefined &&
+              formal !== undefined &&
+              entry.formals.has(ordinal) &&
+              representationKey(argument.representation) === representationKey(formal.value) &&
+              stableBorrowEntryCopies(entry, operation.arguments, new Set(), dyingArguments) !== null
+            )
+          })
+          if (borrowed) forwarded.add(argument.value)
+        })
+      }
+  return forwarded
+}
+
+/** `dying` without `released`, keeping the sunk stores of the reads that remain. */
+export const withoutDyingArguments = (dying: ReadonlySet<IrValueId>, released: ReadonlySet<IrValueId>): ReadonlySet<IrValueId> => {
+  const kept = new DyingArgumentSet()
+  for (const value of dying) if (!released.has(value)) kept.add(value)
+  if (dying instanceof DyingArgumentSet)
+    for (const [value, store] of dying.sunkStores) if (!released.has(value)) kept.sunkStores.set(value, store)
+  return kept
 }

@@ -1,3 +1,4 @@
+import { getHeapStatistics } from 'node:v8'
 import { nativeBodyIgnoresLogicalReceiver } from './native-logical-receiver-body.js'
 import { nativeConstructorMethodBodiesOf } from './native-constructor-reads.js'
 import type { DeclarationId, FunctionId, IrValueId, PhysicalBodyId, StructuralTypeId } from '../identity/ids.js'
@@ -264,8 +265,11 @@ class ValueTable<T extends object> implements Iterable<[IrValueId, T]> {
       ordinal = ordinal * 10 + digit
     }
     this.ordinal = ordinal
-    if (this.lastSlots !== null && bar === 4 + this.lastBody.length && id.startsWith(this.lastBody, 4)) return this.lastSlots
+    // The body spelled out and compared whole: `id.startsWith(this.lastBody, 4)`
+    // asks the same, but took about eight times as long on these long ids, and
+    // this is asked millions of times a solve.
     const body = id.slice(4, bar)
+    if (this.lastSlots !== null && body === this.lastBody) return this.lastSlots
     let slots = this.byBody.get(body)
     if (slots === undefined) {
       if (!create) return null
@@ -3373,35 +3377,39 @@ const repointed = (
   value: unknown,
   pairs: ReadonlyMap<object, object>,
   seen: Map<object, unknown>,
-  fresh: { readonly objects: ReadonlySet<object>; reached: boolean }
+  fresh: { readonly objects: ReadonlySet<object>; reached: boolean; readonly copy?: boolean }
 ): unknown => {
   if (typeof value !== 'object' || value === null) return value
   const partner = pairs.get(value)
   if (partner !== undefined) return partner
-  if (fresh.objects.has(value)) fresh.reached = true
   if (seen.has(value)) return seen.get(value)
+  // An object the new program holds that this answer allocated (`flowOverCopy`):
+  // copied when asked to, so the answer holds its own as a solve's would.
+  const copied = fresh.objects.has(value)
+  if (copied && !fresh.copy) fresh.reached = true
   seen.set(value, value)
   let result: unknown = value
   if (Array.isArray(value)) {
     const items = value.map((item) => repointed(item, pairs, seen, fresh))
-    if (items.some((item, index) => item !== value[index])) result = items
+    if (copied || items.some((item, index) => item !== value[index])) result = items
   } else if (value instanceof Map) {
     const entries = [...value].map(([key, item]) => [repointed(key, pairs, seen, fresh), repointed(item, pairs, seen, fresh)] as const)
-    if ([...value].some(([key, item], index) => entries[index]![0] !== key || entries[index]![1] !== item)) result = new Map(entries)
+    if (copied || [...value].some(([key, item], index) => entries[index]![0] !== key || entries[index]![1] !== item))
+      result = new Map(entries)
   } else if (value instanceof Set) {
     const items = [...value].map((item) => repointed(item, pairs, seen, fresh))
-    if ([...value].some((item, index) => items[index] !== item)) result = new Set(items)
+    if (copied || [...value].some((item, index) => items[index] !== item)) result = new Set(items)
   } else {
     const prototype = Object.getPrototypeOf(value) as unknown
     if (prototype === Object.prototype || prototype === null) {
-      let copy: Record<string, unknown> | null = null
+      let copy: Record<string, unknown> | null = copied ? { ...(value as Record<string, unknown>) } : null
       for (const key of Object.keys(value)) {
         const item = (value as Record<string, unknown>)[key]
         const moved = repointed(item, pairs, seen, fresh)
         if (moved !== item) (copy ??= { ...(value as Record<string, unknown>) })[key] = moved
       }
       if (copy !== null) result = copy
-    }
+    } else if (copied) fresh.reached = true
   }
   seen.set(value, result)
   return result
@@ -3411,9 +3419,9 @@ const repointed = (
  * A remembered answer re-pointed from the program it was solved over to a
  * same-data copy of it, or null when it cannot stand for a solve of the copy.
  */
-const flowOverCopy = (flow: NativeCallableFlow, pairs: ReadonlyMap<object, object>): NativeCallableFlow | null => {
+const flowOverCopy = (flow: NativeCallableFlow, pairs: ReadonlyMap<object, object>, copy = false): NativeCallableFlow | null => {
   const seen = new Map<object, unknown>()
-  const fresh = { objects: new Set(pairs.values()), reached: false }
+  const fresh = { objects: new Set(pairs.values()), reached: false, copy }
   const { nativeFieldViewAbsentRoutesOf: absentRoutesOf, callables, ...data } = flow
   const moved = repointed(data, pairs, seen, fresh) as Omit<NativeCallableFlow, 'nativeFieldViewAbsentRoutesOf' | 'callables'>
   // A solve allocates each callee identity afresh, and the dispatch passes then
@@ -3423,7 +3431,11 @@ const flowOverCopy = (flow: NativeCallableFlow, pairs: ReadonlyMap<object, objec
   const callees = new Map(
     [...callables].map(([value, callee]) => [value, repointed({ ...callee }, pairs, seen, fresh) as CallCalleeIdentity] as const)
   )
-  if (fresh.reached) return null
+  // An answer holding an object a pass wrote into the program after the solve
+  // is re-pointed once more, copying each such object: a solve of the new
+  // program would allocate its own, equal to the copy and shared with
+  // nothing. Only a plain object, array, map or set can be copied.
+  if (fresh.reached) return copy ? null : flowOverCopy(flow, pairs, true)
   const answer = { ...moved, callables: callees }
   if (absentRoutesOf === undefined) return answer
   return { ...answer, nativeFieldViewAbsentRoutesOf: repointedAbsentRoutesOf(absentRoutesOf, pairs) }
@@ -3586,8 +3598,13 @@ const releasePropagation = (cells: readonly OriginCell[]): void => {
   }
 }
 
+// `id.substring(...) === owner` rather than `id.startsWith(owner, 4)`: the same
+// question, several times faster for a long owner (see `ValueTable.slotsOf`).
 const valueOwnedBy = (id: string, owner: string): boolean =>
-  id.startsWith('ssa|') && id.startsWith(owner, 4) && id.charCodeAt(4 + owner.length) === 124 && id.indexOf('|', 5 + owner.length) === -1
+  id.startsWith('ssa|') &&
+  id.substring(4, 4 + owner.length) === owner &&
+  id.charCodeAt(4 + owner.length) === 124 &&
+  id.indexOf('|', 5 + owner.length) === -1
 
 /**
  * Every SSA value's carrier, read through the bodies rather than copied into
@@ -3669,6 +3686,8 @@ let rememberedClasses: WeakRef<ReadonlyMap<DeclarationId, ClassLayout>> | null =
  * other kind. A newer answer of the same kind replaces the older one, which
  * was solved over an earlier body generation and is only ever a worse match.
  */
+/** The heap limit from which a solve keeps the other kind's remembered answer (`nativeCallableFlowOf`). */
+const KEEP_OTHER_KIND_HEAP = 3 * 1024 * 1024 * 1024
 const flowKindOf = (programConversions: unknown, constructionTopology: unknown): number =>
   (programConversions == null ? 0 : 1) + (constructionTopology == null ? 0 : 2)
 
@@ -3744,7 +3763,20 @@ export const nativeCallableFlowOf = (...args: Parameters<typeof computeNativeCal
   // solve -- the compile's peak -- held beside its own state. An answer of the
   // other kind is still reused when no solve comes between, which is most
   // reuses; on a large program two more are solved.
-  entries.length = 0
+  //
+  // Unless the heap is large enough to hold it: then only this kind's answer
+  // goes, and the other kind's is kept for when the program comes back to it.
+  // A large three.js program under a 4 GB heap asks again, after a solve of
+  // the other kind, for the same data it last asked for of its own kind, and
+  // each was a solve of several seconds. The choice follows the heap the
+  // process was given, never what it holds at the moment: a reuse is the same
+  // data either way, so it changes no answer.
+  if (getHeapStatistics().heap_size_limit < KEEP_OTHER_KIND_HEAP) entries.length = 0
+  else {
+    const kind = flowKindOf(programConversions, constructionTopology)
+    for (let index = entries.length - 1; index >= 0; index--)
+      if (flowKindOf(entries[index]!.programConversions, entries[index]!.constructionTopology) === kind) entries.splice(index, 1)
+  }
   const flow = computeNativeCallableFlow(...args)
   return remember(flow, -1)
 }

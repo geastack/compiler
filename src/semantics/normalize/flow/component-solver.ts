@@ -775,6 +775,8 @@ export interface DependencyFactSolver<K, V, R> {
 type EdgeStates<S extends object> = S | readonly S[] | null
 /** Past this many entries an edge collection becomes a hash table: a lookup is a linear scan below it. */
 const SMALL_EDGES = 8
+/** How far ahead of its last edge read `observedState` looks before asking the dependency. */
+const CURSOR_WINDOW = 4
 const edgeCount = (edges: unknown): number =>
   edges === null ? 0 : edges instanceof Map || edges instanceof Set ? edges.size : Array.isArray(edges) ? edges.length : 1
 const NO_EDGE_STATES: readonly never[] = []
@@ -1110,11 +1112,32 @@ export const dependencyFactSolver = <K, V, R>(
       for (const candidate of observed as readonly State[]) if (candidate.solverKey === dependency) return candidate
       return undefined
     }
+    // A transfer re-reads its edges in the order it first read them, so the
+    // running owner's next edge is nearly always the one asked for: checked
+    // first, a few places ahead for a read the transfer skipped this time.
+    // The test below asks a dependency's dependents, which for a node read
+    // from everywhere is a table of hundreds of thousands of states; on a
+    // large three.js program it was a tenth of the session's time.
+    if (owner === cursorOwner) {
+      const end = Math.min(observed.length, readCursor + CURSOR_WINDOW)
+      for (let at = readCursor; at < end; at++) {
+        const candidate = (observed as readonly State[])[at]!
+        if (candidate.solverKey === dependency) {
+          readCursor = at + 1
+          return candidate
+        }
+      }
+    }
     // An owner is among a dependency's dependents exactly when it observes
     // it: the two edges are only ever added together (`factsFrom`).
     const state = existingStateOf(dependency)
     return state !== undefined && edgeHas(state.dependents, owner) ? state : undefined
   }
+  // The state whose transfer or seal is running and where its edge reads have
+  // reached (`observedState`). Only a hint: every hit is checked against the
+  // dependency's key, so a stale cursor costs a miss, never a wrong edge.
+  let cursorOwner: State | null = null
+  let readCursor = 0
   const withObserved = (observed: State['observedDependencies'], dependencyState: State): State['observedDependencies'] => {
     if (observed === null) return dependencyState
     if (!Array.isArray(observed)) return [observed as State, dependencyState]
@@ -1268,6 +1291,9 @@ export const dependencyFactSolver = <K, V, R>(
     // which `propagate` below wakes through this same set.
     const holding = holders.get(fact)
     if (holding === undefined) return NO_HOLDERS
+    // A key that is its own state needs no copy: the collection only grows in
+    // `index`, which runs after the transfer asking has returned.
+    if (keysAreStates) return edgeStates(holding) as Iterable<unknown> as Iterable<K>
     const found: K[] = []
     for (const holder of edgeStates(holding)) found.push(holder.solverKey)
     return found
@@ -1330,20 +1356,26 @@ export const dependencyFactSolver = <K, V, R>(
   const observeFrom = (ownerState: State, dependency: K): ReadonlySet<V> => factsFrom(ownerState, dependency, false)
   // A state's edge readers, minted per transfer or seal call rather than kept
   // on every state (see `stateOf`).
-  const transferOf = (state: State): ReadonlySet<V> =>
-    definitionOf(state).transfer(
+  const transferOf = (state: State): ReadonlySet<V> => {
+    cursorOwner = state
+    readCursor = 0
+    return definitionOf(state).transfer(
       (dependency) => readFrom(state, dependency),
       (dependency) => observeFrom(state, dependency),
       (fact) => holdersOfFrom(state, fact),
       state.solverKey
     )
-  const sealOf = (state: State): Seal =>
-    definitionOf(state).seal(
+  }
+  const sealOf = (state: State): Seal => {
+    cursorOwner = state
+    readCursor = 0
+    return definitionOf(state).seal(
       (dependency) => readFrom(state, dependency),
       (dependency) => observeFrom(state, dependency),
       (fact) => holdersOfFrom(state, fact),
       state.solverKey
     )
+  }
 
   const propagate = (): void => {
     for (let cursor = 0; cursor < queue.length; cursor++) {
