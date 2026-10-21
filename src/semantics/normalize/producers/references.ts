@@ -64,6 +64,10 @@ const includesUndefined = (type: ts.Type): boolean => {
   return type.isUnion() && type.types.some(includesUndefined)
 }
 
+/** Whether a consumer of this checker type has a home for `undefined`: an explicit `undefined` constituent, or `unknown`/`any`. */
+const holdsUndefined = (type: ts.Type): boolean =>
+  (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 || includesUndefined(type)
+
 /**
  * Whether this expression is an equality operand, `instanceof`'s left
  * operand, or `typeof`'s operand. All answer for `undefined` without reading
@@ -148,7 +152,7 @@ const destinationPreservesDeclaredAbsence = (
       : (context.parameters.preferredTypeAt?.(declaration) ?? null)
   if (!declared || !includesUndefined(declared)) return null
   const contextual = context.checker.getContextualType(node)
-  if ((contextual === undefined || !includesUndefined(contextual)) && !comparesItsOperand(node) && !testsItsOperand(node)) return null
+  if ((contextual === undefined || !holdsUndefined(contextual)) && !comparesItsOperand(node) && !testsItsOperand(node)) return null
   return context.types.typeAt(declaration)
 }
 

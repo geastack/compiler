@@ -2600,6 +2600,36 @@ export const censusParameterBindings = (
     }
     return false
   }
+  /**
+   * An index-signature read handed to a parameter whose contextual type has a
+   * home for `undefined` (`unknown`, `any`, or an explicit `undefined`). The
+   * read's producer publishes it as `T | undefined` there
+   * (`properties.ts`'s `observablyAbsentElementTypeOf`), because a missing key
+   * is `undefined`, not `T`; the parameter must hold that absence too.
+   */
+  const passesAbsentIndexRead = (argument: ts.Expression, resolved: ts.Type): boolean => {
+    let read: ts.Expression = argument
+    while (ts.isParenthesizedExpression(read)) read = read.expression
+    if (!ts.isElementAccessExpression(read) && !ts.isPropertyAccessExpression(read)) return false
+    if ((resolved.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return false
+    if (resolved.isUnion() && resolved.types.some((member) => (member.flags & ts.TypeFlags.Undefined) !== 0)) return false
+    const contextual = checker.getContextualType(argument)
+    if (contextual === undefined) return false
+    const holds =
+      (contextual.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Undefined)) !== 0 ||
+      (contextual.isUnion() && contextual.types.some((member) => (member.flags & ts.TypeFlags.Undefined) !== 0))
+    if (!holds) return false
+    const receiver = checker.getTypeAtLocation(read.expression)
+    if (checker.isArrayType(receiver) || checker.isTupleType(receiver)) return false
+    if (checker.getIndexInfosOfType(receiver).length === 0) return false
+    const key = ts.isPropertyAccessExpression(read)
+      ? read.name.text
+      : ts.isStringLiteralLike(read.argumentExpression) || ts.isNumericLiteral(read.argumentExpression)
+        ? read.argumentExpression.text
+        : null
+    return key === null || checker.getPropertyOfType(receiver, key) === undefined
+  }
+
   const collectPassedArguments = (
     calls: readonly (ts.CallExpression | ts.NewExpression)[],
     declaration: ts.SignatureDeclaration,
@@ -2719,6 +2749,7 @@ export const censusParameterBindings = (
       // type is a fact about the call, not about the storage it lands in, and a
       // second call site passing `6` would then read as a disagreement.
       passed.push(resolved.isLiteral() ? checker.getBaseTypeOfLiteralType(resolved) : resolved)
+      if (passesAbsentIndexRead(argument, resolved)) passed.push(checker.getUndefinedType())
       record(argument)
     }
     return { passed, sawBackEdge, sawOmitted, sawSilentSite, deferredRecursiveArguments }

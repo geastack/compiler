@@ -35,6 +35,14 @@ const absentPartOf = (context: ProducerContext, type: StructuralTypeId): Structu
   return absent.length === 0 ? null : unionOf(context, absent)
 }
 
+/** The members of `type` that can hold a falsy value: primitives and literals, never an object. */
+const falsyCapableMembersOf = (context: ProducerContext, type: StructuralTypeId): readonly StructuralTypeId[] =>
+  membersOf(context, type).filter((member) => {
+    const shape = context.table.get(member).shape
+    if (shape.kind === 'literal') return true
+    return shape.kind === 'primitive' && shape.primitive !== 'symbol' && shape.primitive !== 'never' && shape.primitive !== 'void'
+  })
+
 /**
  * The receiver an optional chain (`value?.member`) reads once the guard has
  * passed: the cell less its absence.
@@ -163,15 +171,19 @@ export const logicalMergeTypeOf = (
   // cannot stand: the kept branch would dereference the absent read. The
   // merge then holds the absent members, the present part where the
   // checker's rule finds a falsy arm in it (the whole part, wider but sound,
-  // as `||` keeps it), and the right operand.
+  // as `||` keeps it), and the right operand. A left the checker sees only
+  // through `as any`/`as unknown` states no falsy arms at all, so there the
+  // present members that can be falsy are read off the cited type itself.
   const checkerLeft = context.checker.getTypeAtLocation(node.left)
   const absent = absentPartOf(context, leftType)
+  const erasedLeft = (checkerLeft.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0
   if (
     absent !== null &&
     leftType !== context.types.typeOf(checkerLeft) &&
-    presentPartOf(context, leftType) === context.types.typeOf(context.checker.getNonNullableType(checkerLeft))
+    (erasedLeft || presentPartOf(context, leftType) === context.types.typeOf(context.checker.getNonNullableType(checkerLeft)))
   ) {
     const present = presentPartOf(context, leftType)
+    if (erasedLeft) return unionOf(context, [absent, ...(present === null ? [] : falsyCapableMembersOf(context, present)), rightType])
     const presentKept = keptLeftPartTypeOf(context.checker, '&&', context.checker.getNonNullableType(checkerLeft))
     return unionOf(context, [absent, ...(present !== null && presentKept !== null ? [present] : []), rightType])
   }

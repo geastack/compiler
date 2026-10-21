@@ -596,6 +596,10 @@ const includesUndefined = (type: ts.Type): boolean => {
   return type.isUnion() && type.types.some(includesUndefined)
 }
 
+/** Whether a consumer of this checker type has a home for `undefined`: an explicit `undefined` constituent, or `unknown`/`any`. */
+const holdsUndefined = (type: ts.Type): boolean =>
+  (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 || includesUndefined(type)
+
 /** Whether an equality operation directly compares this expression with `undefined`. */
 const comparesWithUndefined = (context: ProducerContext, node: ts.Expression): boolean => {
   let inner: ts.Node = node
@@ -695,7 +699,7 @@ const observablyAbsentElementTypeOf = (context: ProducerContext, node: AccessNod
   const receiverType = context.types.typeAt(node.expression)
   const indexedObject = isIndexedObjectFor(context, receiverType, symbol ? 'symbol' : numeric ? 'number' : 'string')
   if (
-    ((contextual !== undefined && includesUndefined(contextual)) ||
+    ((contextual !== undefined && holdsUndefined(contextual)) ||
       comparesWithUndefined(context, node) ||
       directlyTestsItsOperand(node)) &&
     indexedObject &&
