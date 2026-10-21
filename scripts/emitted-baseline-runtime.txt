@@ -327,6 +327,7 @@ descriptor-function-this-is-the-lookup-receiver.ts.cpp 85e62ec6a07c
 destructured-default-host-options.ts.cpp e2bb13133a09
 destructured-module-namespace-function-call.runtime.ts.cpp 350821c4bd61
 destructured-read-over-proxy-error-module-union.runtime.ts.cpp dcfef0004dde
+destructuring-assignment-reads-an-instance-member-the-checker-types-any.runtime.js.cpp 1c66274c93fe
 destructuring-defaults.ts.cpp 81155bcc70ab
 dictionary-define-property-nondefault.ts.cpp 343c5d669f93
 dictionary-define-property.ts.cpp d8b783faec11
