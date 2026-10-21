@@ -1,7 +1,7 @@
 import { proxyArmWithoutHome } from '../../representation/proxy-carriers.js'
 import { operationNativeCallReceiverText } from './emit-native-method.js'
 import { genericNativeLogicalReceiverOf, hostConstructFrameOf, receivableArguments } from '../../ir/call-entry.js'
-import { stableBorrowEntryAccepts } from './borrowed-call-entry.js'
+import { stableBorrowEntryAccepts, stableBorrowEntryCopies, type StableBorrowEntry } from './borrowed-call-entry.js'
 import { callableMemberAlternateSlot, callableMemberSlot } from '../../ir/callable-member-candidates.js'
 import { transferOf } from '../../ir/transfer.js'
 import { boxedValueText } from './emit-dynamic-properties.js'
@@ -100,6 +100,7 @@ import {
   cppRecordFieldPresenceName,
   cppRefcountedReceiver,
   cppStringLiteral,
+  cppAbiParameterType,
   cppTypeOf,
   cppResultTypeOf,
   cppUndefinedValue
@@ -608,6 +609,56 @@ const restPackedArguments = (
   ]
 }
 
+/** Which arguments of `operation` may move, and which name a slot no callee can write -- the evidence a borrowed entry is admitted on. */
+const borrowEvidenceOf = (
+  ctx: EmitContext,
+  operation: CallOperation
+): { readonly potentiallyMovingArguments: ReadonlySet<IrValueId>; readonly stableActuals: ReadonlySet<IrValueId> } => {
+  const potentiallyMovingArguments = new Set(
+    operation.arguments
+      .filter(
+        (argument) =>
+          transferOf(ctx.dyingArguments, ctx.ownedValues, ctx.transferDyingValues, argument.value, ctx.receiverRenames) === 'move'
+      )
+      .map((argument) => argument.value)
+  )
+  // `stableBorrowActualsOf` leaves out every value an operation computes, because
+  // the printer may withhold one as an expression naming mutable storage. By the
+  // time a call renders, every argument's own definition has rendered, so that
+  // choice is settled: an owned SSA temporary the printer declared a local of its
+  // own (`defineValue`) and did not withhold is a slot of this frame no callee can
+  // name, exactly like a private cell. `setNativeUniformValue(u, gl, v.value, t)`
+  // sent its freshly read uniform value through the owning wrapper, copying the
+  // seq element union and the optional texture table into by-value formals per
+  // uniform per draw.
+  // A repeated conversion spelled as an earlier one's storage (`repeatedConversions`) is that storage.
+  const storageOf = (value: IrValueId): IrValueId => ctx.repeatedConversions.get(value) ?? value
+  const stableActuals = new Set(
+    operation.arguments
+      .map((argument) => argument.value)
+      .filter(
+        (value) => ctx.stableBorrowActuals.has(value) || (ctx.ownedValues.has(storageOf(value)) && !isDeferredValue(ctx, storageOf(value)))
+      )
+  )
+  return { potentiallyMovingArguments, stableActuals }
+}
+
+/** The arguments of a call into `entry`, each position `stableBorrowEntryCopies` named copied into its formal's own carrier. */
+const copiedBorrowArguments = (
+  padded: readonly string[],
+  offset: number,
+  entry: StableBorrowEntry | undefined,
+  copies: ReadonlySet<number> | null
+): readonly string[] =>
+  entry === undefined || copies === null || copies.size === 0
+    ? padded
+    : padded.map((text, index) => {
+        const parameter = entry.abi.parameters[index - offset]
+        return index >= offset && copies.has(index - offset) && parameter !== undefined
+          ? `static_cast<${cppAbiParameterType(parameter)}>(${text})`
+          : text
+      })
+
 const emitUnionMethodCall = (ctx: EmitContext, lines: string[], operation: CallOperation): boolean => {
   const read = ctx.unionMethodReads.get(operation.callee.value)
   if (read === undefined) return false
@@ -619,6 +670,7 @@ const emitUnionMethodCall = (ctx: EmitContext, lines: string[], operation: CallO
   // paths the claim recorded are indices into the carrier, and `armAt`/`armIs`
   // turn them into text against a receiver that has a name by now.
   const receiverText = operandText(ctx, read.receiver)
+  const evidence = borrowEvidenceOf(ctx, operation)
   const branches = arms.map((arm, index) => {
     const tests: string[] = []
     let armText = receiverText
@@ -664,10 +716,21 @@ const emitUnionMethodCall = (ctx: EmitContext, lines: string[], operation: CallO
       )
     }
     const heldAbi = abiOfCallee(operation.callee.representation)
+    const packed = heldAbi === null ? null : restPackedArguments(ctx, heldAbi, abi, operation)
     const supplied =
-      (heldAbi === null ? null : restPackedArguments(ctx, heldAbi, abi, operation)) ??
-      receivableArguments(abi, operation.arguments).map((argument, position) => argumentText(ctx, abi, position, argument))
-    const invocation = `${cppBodyName(arm.callable)}(${paddedArguments(abi, [...(receiver === null ? [] : [receiver]), ...supplied], 'union method call').join(', ')})`
+      packed ?? receivableArguments(abi, operation.arguments).map((argument, position) => argumentText(ctx, abi, position, argument))
+    const padded = paddedArguments(abi, [...(receiver === null ? [] : [receiver]), ...supplied], 'union method call')
+    // Each arm names its body, so it may enter that body's borrowed entry on the
+    // same evidence a direct call does.
+    const entry = packed === null ? ctx.stableBorrowEntries.get(cppBodyName(arm.callable)) : undefined
+    const copies =
+      entry === undefined
+        ? null
+        : stableBorrowEntryCopies(entry, operation.arguments, evidence.stableActuals, evidence.potentiallyMovingArguments)
+    const invocation =
+      entry === undefined || copies === null
+        ? `${cppBodyName(arm.callable)}(${padded.join(', ')})`
+        : `${entry.name}(${copiedBorrowArguments(padded, receiver === null ? 0 : 1, entry, copies).join(', ')})`
     let body: string
     if (operation.result === null || operation.result.representation.kind === 'void') {
       body = `${invocation}; return;`
@@ -1546,42 +1609,24 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   const alternate = memberSlot === undefined ? undefined : ctx.callableMemberCandidates.get(callableMemberAlternateSlot(memberSlot))
 
   const stableCandidate = ctx.stableBorrowEntries.get(direct ?? (candidate === undefined ? '' : cppBodyName(candidate)))
-  const potentiallyMovingArguments = new Set(
-    operation.arguments
-      .filter(
-        (argument) =>
-          transferOf(ctx.dyingArguments, ctx.ownedValues, ctx.transferDyingValues, argument.value, ctx.receiverRenames) === 'move'
-      )
-      .map((argument) => argument.value)
-  )
-  // `stableBorrowActualsOf` leaves out every value an operation computes, because
-  // the printer may withhold one as an expression naming mutable storage. By the
-  // time a call renders, every argument's own definition has rendered, so that
-  // choice is settled: an owned SSA temporary the printer declared a local of its
-  // own (`defineValue`) and did not withhold is a slot of this frame no callee can
-  // name, exactly like a private cell. `setNativeUniformValue(u, gl, v.value, t)`
-  // sent its freshly read uniform value through the owning wrapper, copying the
-  // seq element union and the optional texture table into by-value formals per
-  // uniform per draw.
-  // A repeated conversion spelled as an earlier one's storage (`repeatedConversions`) is that storage.
-  const storageOf = (value: IrValueId): IrValueId => ctx.repeatedConversions.get(value) ?? value
-  const stableActuals = new Set(
-    operation.arguments
-      .map((argument) => argument.value)
-      .filter(
-        (value) => ctx.stableBorrowActuals.has(value) || (ctx.ownedValues.has(storageOf(value)) && !isDeferredValue(ctx, storageOf(value)))
-      )
-  )
-  const stableEntry =
-    stableCandidate !== undefined &&
-    stableBorrowEntryAccepts(stableCandidate, operation.arguments, stableActuals, potentiallyMovingArguments)
-      ? stableCandidate
-      : undefined
+  const { potentiallyMovingArguments, stableActuals } = borrowEvidenceOf(ctx, operation)
+  // A narrowed integer formal is spelled alike by both entries only for a call
+  // that names the body; a carrier adapter passes the unnarrowed ABI.
+  const stableCopies =
+    stableCandidate === undefined || (direct === undefined && stableCandidate.narrowedNumericAbi)
+      ? null
+      : stableBorrowEntryCopies(stableCandidate, operation.arguments, stableActuals, potentiallyMovingArguments)
+  const stableEntry = stableCopies === null ? undefined : stableCandidate
+  const stableArguments = copiedBorrowArguments(padded, declaredReceiverOperand ? 1 : 0, stableEntry, stableCopies)
   // A candidate's borrowed entry for this call, when it has one: the stable
   // entry its arguments are accepted by, or its borrowable body.
   const borrowedEntryOf = (target: FunctionId): string | undefined => {
     const stable = ctx.stableBorrowEntries.get(cppBodyName(target))
-    if (stable !== undefined && stableBorrowEntryAccepts(stable, operation.arguments, stableActuals, potentiallyMovingArguments))
+    if (
+      stable !== undefined &&
+      !stable.narrowedNumericAbi &&
+      stableBorrowEntryAccepts(stable, operation.arguments, stableActuals, potentiallyMovingArguments)
+    )
       return stable.name
     return ctx.borrowableMemberBodies.has(target) ? cppBodyName(target) : undefined
   }
@@ -1604,6 +1649,11 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
     candidate === undefined && direct === undefined && dispatched === undefined && calleeOperand.value === operation.callee.value
       ? flowKnownText(ctx, operation.callee)
       : null
+  const candidateEntersStableEntry =
+    candidate !== undefined &&
+    !(firstEntry !== undefined && alternate !== undefined && alternateEntry !== undefined) &&
+    !alternateOnly &&
+    stableEntry !== undefined
   const callMember =
     candidate === undefined
       ? flowKnown !== null
@@ -1680,14 +1730,14 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
     dispatched !== undefined
       ? `${virtualPadded[0]}->${dispatched.member}(${virtualPadded.slice(1).join(', ')})`
       : direct !== undefined
-        ? `${stableEntry?.name ?? direct}(${padded.join(', ')})`
+        ? `${stableEntry?.name ?? direct}(${stableArguments.join(', ')})`
         : abi.receiver === null && logicalThis !== null
           ? lazyLogicalReceiver(logicalThis)
             ? `${operandText(ctx, calleeOperand)}.callWithLazyReceiver(${[`[&]() -> gea::NativeCallReceiver { return ${operationNativeCallReceiverText(ctx, operation, logicalThis.representation, operandText(ctx, logicalThis))}; }`, ...padded].join(', ')})`
             : `${operandText(ctx, calleeOperand)}.callWithReceiver(${[operationNativeCallReceiverText(ctx, operation, logicalThis.representation, operandText(ctx, logicalThis)), ...padded].join(', ')})`
           : guardable
             ? guardedInvocation()
-            : `${operandText(ctx, calleeOperand)}.${callMember}(${padded.join(', ')})`
+            : `${operandText(ctx, calleeOperand)}.${callMember}(${(candidateEntersStableEntry ? stableArguments : padded).join(', ')})`
   // A result the integer census narrowed from the candidate body's returns is
   // checked where it lands, on every path the call can take: the guard above
   // may miss and run whatever callable the member holds.

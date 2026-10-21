@@ -3,7 +3,7 @@ import { prototypePropertyDeclarationsOf, type ProgramConversionRecipe } from '.
 import { dynamicProtocolOmissionsOf } from '../../ir/dynamic-protocol.js'
 import { createNativeDebugSource, type NativeDebugInfo } from './native-debug-source.js'
 import type { DiagnosticLocation } from '../../diagnostics/model.js'
-import type { SemanticResultId } from '../../identity/ids.js'
+import type { IrValueId, SemanticResultId } from '../../identity/ids.js'
 import { publishRealmStorage } from './realm-storage.js'
 import { nativeSelectionHelpers } from './native-selection-helpers.js'
 import { nativeViewTargetsOf } from './native-view-targets.js'
@@ -17,7 +17,7 @@ import { nativePromiseBaseInitializeStatements } from './native-promise-base.js'
 import { classFieldStorageOwnerOf, classMemberOf, classMethodOverrideOf } from '../../projection/fields.js'
 import { balanceCppUnits, chunkCppItems, cppChunkFileName, cppUnitByteBudget, type CppUnitItem } from './balanced-units.js'
 import { readonlyBorrowFormalsOf } from '../../ir/borrowed-call-arguments.js'
-import { stableBorrowEntryOf, type StableBorrowEntry } from './borrowed-call-entry.js'
+import { borrowForwardedArgumentsOf, stableBorrowEntryOf, withoutDyingArguments, type StableBorrowEntry } from './borrowed-call-entry.js'
 import { programFactsOf } from '../../ir/program-facts.js'
 import { integrityRestrictionsOf } from '../../ir/integrity-restrictions.js'
 import { keyOrderObservationOf, nothingProvenUnobserved } from '../../ir/key-order-observation.js'
@@ -1254,7 +1254,8 @@ const thunkOf = (
   narrowed: ReadonlySet<number>,
   narrowedResult: boolean,
   linkage: CppLinkage,
-  taskResult = false
+  taskResult = false,
+  stableEntry: StableBorrowEntry | undefined = undefined
 ): RenderedThunk | null => {
   if (!body.abi) return null
   const abi = body.abi
@@ -1286,7 +1287,12 @@ const thunkOf = (
       : admission.kind === 'ok' && admission.layout.receiver !== null
         ? [`${cppEnvironmentLocalName}->${cppCaptureReceiverFieldName}`]
         : []
-  const call = `${cppBodyName(body.sourceOwner)}(${[
+  // The thunk's by-value formals are slots of its own frame that nothing else
+  // can name, so they are stable actuals for the borrowed entry: entering it
+  // directly binds them in place, where the owning entry moved each one into a
+  // formal of its own and released the emptied shell on the way out.
+  const borrowedEntry = stableEntry !== undefined && !hasEnvironment && !isCoroutineBody(body) ? stableEntry : undefined
+  const call = `${borrowedEntry?.name ?? cppBodyName(body.sourceOwner)}(${[
     ...(hasEnvironment ? [isCoroutineBody(body) ? `*${cppEnvironmentLocalName}` : cppEnvironmentLocalName] : []),
     ...receiverActual,
     // The thunk's own formals stay the ABI's, so the carrier's function-pointer
@@ -1295,7 +1301,9 @@ const thunkOf = (
     ...abi.parameters.map((parameter, ordinal) =>
       narrowed.has(ordinal)
         ? `static_cast<${cppNarrowedIntegerType}>(${cppFormalName(ordinal)})`
-        : `std::forward<${cppAbiParameterType(parameter)}>(${cppFormalName(ordinal)})`
+        : borrowedEntry?.formals.has(ordinal)
+          ? cppFormalName(ordinal)
+          : `std::forward<${cppAbiParameterType(parameter)}>(${cppFormalName(ordinal)})`
     )
   ].join(', ')})`
   // The thunk's own result stays the ABI's, so the carrier's function-pointer
@@ -2644,9 +2652,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   const stableBorrowEntries = new Map<string, StableBorrowEntry>()
   const physicalCounts = new Map<string, number>()
   for (const body of input.bodies) physicalCounts.set(String(body.sourceOwner), (physicalCounts.get(String(body.sourceOwner)) ?? 0) + 1)
-  for (const body of input.bodies) {
-    if (isRegionId(body.sourceOwner)) continue
-    const entry = constructorBodies.has(String(body.sourceOwner))
+  const stableEntryOf = (body: IrBody, dying: ReadonlySet<IrValueId>): StableBorrowEntry | null =>
+    isRegionId(body.sourceOwner) || constructorBodies.has(String(body.sourceOwner))
       ? null
       : stableBorrowEntryOf(
           body,
@@ -2658,14 +2665,37 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
               : null
           },
           formalsBorrowedIn(body.sourceOwner),
-          dyingArguments,
+          dying,
           {
             captureFree: captures.of(body.sourceOwner).kind === 'none',
             synchronous: !isCoroutineBody(body),
             singleBody: physicalCounts.get(String(body.sourceOwner)) === 1,
-            unchangedNumericAbi: formalsNarrowedIn(body.sourceOwner).size === 0 && !resultNarrowedIn(body.sourceOwner)
+            narrowedNumericAbi: formalsNarrowedIn(body.sourceOwner).size > 0 || resultNarrowedIn(body.sourceOwner)
           }
         )
+  // A formal handed on as the last use of its cell is "dying", and a dying
+  // read keeps its formal owning so the read can move. Into a position the
+  // callee's own borrowed entry takes by reference, nothing moves: the entry
+  // binds the slot in place. So such reads stop counting as dying, which can
+  // admit the caller's formal to its own entry, which can in turn release the
+  // read that forwards IT -- a fixed point, growing until no entry gains a
+  // formal. A chain of setters forwarding one union or handle down to a
+  // read-only leaf then passes it by reference at every level instead of
+  // moving it once per level.
+  let borrowDying: ReadonlySet<IrValueId> = dyingArguments
+  for (;;) {
+    const entries = new Map<string, StableBorrowEntry>()
+    for (const body of input.bodies) {
+      const entry = stableEntryOf(body, borrowDying)
+      if (entry) entries.set(cppBodyName(body.sourceOwner), entry)
+    }
+    const forwarded = borrowForwardedArgumentsOf(input.bodies, entries, dyingArguments)
+    if ([...forwarded].every((value) => !borrowDying.has(value))) break
+    borrowDying = withoutDyingArguments(dyingArguments, forwarded)
+  }
+  for (const body of input.bodies) {
+    if (isRegionId(body.sourceOwner)) continue
+    const entry = stableEntryOf(body, borrowDying)
     if (entry) stableBorrowEntries.set(cppBodyName(body.sourceOwner), entry)
     if (process.env.GEA_BORROW_DEBUG) {
       const abi = body.abi
@@ -2679,7 +2709,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
                 ? placement.representation
                 : null
             },
-            dyingArguments
+            borrowDying
           ).size
         : 0
       const flags = [
@@ -2709,7 +2739,12 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   const signatures = input.bodies.flatMap((body) => {
     const original = `${signatureOf(body, captures, formalsNarrowedIn(body.sourceOwner), resultNarrowedIn(body.sourceOwner), formalsBorrowedIn(body.sourceOwner), cppBodyName(body.sourceOwner), taskResultOf(body))};`
     const entry = stableBorrowEntries.get(cppBodyName(body.sourceOwner))
-    return entry === undefined ? [original] : [original, `${signatureOf(body, captures, new Set(), false, entry.formals, entry.name)};`]
+    return entry === undefined
+      ? [original]
+      : [
+          original,
+          `${signatureOf(body, captures, formalsNarrowedIn(body.sourceOwner), resultNarrowedIn(body.sourceOwner), entry.formals, entry.name)};`
+        ]
   })
   const thunks = new Map<IrBody, RenderedThunk>()
   // The functions whose minted values publish a `[[Construct]]` entry.
@@ -2721,7 +2756,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
       formalsNarrowedIn(body.sourceOwner),
       resultNarrowedIn(body.sourceOwner),
       linkage,
-      taskResultOf(body)
+      taskResultOf(body),
+      isRegionId(body.sourceOwner) ? undefined : stableBorrowEntries.get(cppBodyName(body.sourceOwner))
     )
     if (thunk) thunks.set(body, thunk)
     if (thunk?.publishesConstruct && !isRegionId(body.sourceOwner)) constructEntries.add(body.sourceOwner)
@@ -2833,7 +2869,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
         narrowedStorage.factsOf(body.sourceOwner),
         formalsNarrowedIn(body.sourceOwner),
         repeatedConstructors,
-        dyingArguments,
+        borrowDying,
         instantiation,
         (callable) => abiByBody.get(String(callable)) ?? null,
         functionFacts,
@@ -2893,7 +2929,11 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
           ...(stableEntry === undefined
             ? []
             : [
-                plain(`${signatureOf(body, captures, new Set(), false, formalsBorrowedIn(body.sourceOwner))} {`),
+                // The wrapper keeps the declared signature's narrowed integer formals and
+                // result, so it forwards them to the entry without a conversion.
+                plain(
+                  `${signatureOf(body, captures, formalsNarrowedIn(body.sourceOwner), resultNarrowedIn(body.sourceOwner), formalsBorrowedIn(body.sourceOwner))} {`
+                ),
                 plain(
                   // The stable entry's own signature always states `gea_this`
                   // first when the body has a receiver (`formalsOf` spells it
