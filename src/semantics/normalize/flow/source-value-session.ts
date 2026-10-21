@@ -85,6 +85,7 @@ type QueryShape =
   | { readonly kind: 'enumerated-slots'; readonly node: ts.Expression; readonly root: Value }
   | { readonly kind: 'publication'; readonly node: ObjectRoot; readonly key: string; readonly root: Value }
   | { readonly kind: 'unknown-reads'; readonly node: ObjectRoot }
+  | { readonly kind: 'copy-sites'; readonly node: ObjectRoot }
   | { readonly kind: 'key-reads' | 'key-uses' | 'family-slot'; readonly node: ObjectRoot; readonly key: string }
   | { readonly kind: 'callers'; readonly node: ts.SignatureDeclaration }
 type Query = QueryShape & QueryState
@@ -673,6 +674,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       | 'completion'
       | 'closure'
       | 'unknown-reads'
+      | 'copy-sites'
       | 'own-keys'
       | 'enumerated-keys'
       | 'callers'
@@ -759,6 +761,21 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    * solver carries on a large program. It is one node's fact, asked once per container.
    */
   const unknownReadsOf = (container: ObjectRoot): Query => nodeQuery('unknown-reads', container)
+  /**
+   * The places in a container's closure that can copy a key's value into
+   * another container: an `Object.assign` call, an object spread, or a
+   * `defineProperty` call. The test is syntax alone and does not depend on
+   * the value or the key, yet every key's uses (`key-uses`, one per key of
+   * the container) ran it over the container's whole closure, twice, on every
+   * re-evaluation. Asked once per container, a key's uses walk only the
+   * candidates and apply the same value tests to them they applied to every
+   * closure entry before, so their reads, facts and ledger requirements are
+   * what they were.
+   */
+  const copySitesOf = (container: ObjectRoot): Query => nodeQuery('copy-sites', container)
+  const isCopySite = (stored: Value): boolean =>
+    (ts.isCallExpression(stored) && (definitionPlans.has(stored) || isGlobalObjectAssign(checker, stored))) ||
+    (ts.isExpression(stored) && ts.isSpreadAssignment(outermostErasureOf(stored).parent))
   /**
    * The named reads of `key` (and of the keys that alias it on an array)
    * whose receiver can hold THIS container.
@@ -4456,6 +4473,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             for (const entry of unknownReadsByReceiver.get(holder) ?? NO_READS) facts.add(entry.access)
           break
         }
+        case 'copy-sites': {
+          for (const stored of read(closure(query.node))) if (isCopySite(stored)) facts.add(stored)
+          break
+        }
         case 'key-reads': {
           // `unknown-reads`' inversion for the reads that spell their key:
           // the receivers holding this container, from the reverse index,
@@ -4535,15 +4556,16 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           const container = query.node
           const key = query.key
           read(closure(container))
+          const copySites = read(copySitesOf(container))
           // A container merged into another by `Object.assign` hands this
           // key's value to the target as well.
-          for (const stored of read(closure(container))) {
+          for (const stored of copySites) {
             if (!ts.isCallExpression(stored)) continue
             const bulk = bulkAssignOf(stored)
             if (bulk === null || !bulk.sources.some((source) => read(value(source)).has(container))) continue
             for (const held of read(value(bulk.target))) if (isObjectRoot(held)) add(read(keyUsesOf(held, key)))
           }
-          for (const stored of read(closure(container))) {
+          for (const stored of copySites) {
             const copied = ts.isExpression(stored) ? outermostErasureOf(stored).parent : undefined
             if (copied && ts.isSpreadAssignment(copied) && read(value(copied.expression)).has(container))
               add(read(keyUsesOf(copied.parent, key)))
