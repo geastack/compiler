@@ -1185,6 +1185,20 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    */
   const familyTokens = new Map<string, ts.NewExpression>()
   const familyReps = new Set<Value>()
+  /**
+   * Every object literal shares one walk the same way. The walk asks a
+   * literal about itself only through the keys it reads or stores through it
+   * (whether the literal has the key, and what holds it there), its whole key
+   * set (a spread of it, a `JSON.stringify` of it), a destructuring of it,
+   * and whether a parameter rebinding stores it. Each of those is left to the
+   * literal as a gate; everything else the walk meets -- where the literal is
+   * passed, stored, returned and published -- is the same for every literal
+   * that reaches it. On a large three.js program the uniform and option
+   * literals handed to materials were each walked through the same seven
+   * thousand uses of the renderer.
+   */
+  let literalToken: ts.ObjectLiteralExpression | null = null
+  const literalReps = new Set<Value>()
   const tokens = new Map<Value, Value>()
   const classIds = new Map<SourceClass, number>()
   const classIdOf = (owner: SourceClass): number => {
@@ -1207,11 +1221,15 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         }
         token = representative
       }
+    } else if (ts.isObjectLiteralExpression(root)) {
+      if (literalToken === null) literalReps.add((literalToken = root))
+      token = literalToken
     }
     tokens.set(root, token)
     return token
   }
   const isFamilyMember = (root: Value): boolean => familyReps.has(tokenOf(root))
+  const isLiteralGroupMember = (root: Value): boolean => literalReps.has(tokenOf(root))
   /**
    * Every construction in the program a family token stands for, from the
    * call index: what `family-slot` joins. Built once, and only when a slot
@@ -2301,6 +2319,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       let gating: GateLog | null = null
       /** This node walks a family token: identity questions become gates. */
       let familyWalk = false
+      /** This node walks an object literal group's token: a key the group does not spell, or its key set, becomes a gate. */
+      let literalWalk = false
       /** The reference a `use` node walks: a root gate re-walks it. */
       let walkedReference: ts.Expression | null = null
       const add = (values: Iterable<Value>): void => {
@@ -2771,7 +2791,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           // longer reachable through it. Whether one stores it is a question
           // about the root, so a family walk leaves it to each root.
           if (ts.isParameter(declaration) && readsAfterRebinding(declaration, reference)) {
-            if (familyWalk) {
+            if (familyWalk || literalWalk) {
               facts.add(gateOf(reference, declaration))
               continue
             }
@@ -2799,11 +2819,11 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           return
         }
         if (
-          familyWalk &&
+          (familyWalk || literalWalk) &&
           pattern.elements.some((element) => {
             if (ts.isOmittedExpression(element) || element.dotDotDotToken) return false
             const key = bindingElementKey(element)
-            return key !== null && definitionDecides(root, key)
+            return key !== null && (literalWalk || definitionDecides(root, key))
           })
         ) {
           facts.add(gateOf(walkedReference!, null))
@@ -3183,6 +3203,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           return
         }
         if (ts.isSpreadAssignment(parent) && parent.expression === reference && ts.isObjectLiteralExpression(root)) {
+          if (literalWalk) {
+            facts.add(gateOf(reference, null))
+            return
+          }
           // CopyDataProperties observes own data slots without retaining the
           // source owner. Copied identities continue through publication below;
           // the same complete key/storage queries still reject opaque readers.
@@ -3303,6 +3327,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             facts.add(gateOf(reference, null))
             return
           }
+          if (literalWalk) {
+            facts.add(gateOf(reference, null))
+            return
+          }
           // `instance.constructor` READS the class object off the prototype
           // -- a value this graph does not carry, and one whose escape opens
           // the family: `unknown( value.constructor )` can construct and
@@ -3363,6 +3391,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               parent.arguments[0] === reference &&
               intrinsicJsonStringifyQueryOf(checker, unwrapErasedExpression(parent.expression))
             ) {
+              if (literalWalk) {
+                facts.add(gateOf(reference, null))
+                return
+              }
               // This bounded observation has no replacer or coercing space
               // argument, and enters no toJSON/getter/recursive object frame.
               // Actual stored values and all future keys remain solver inputs.
@@ -4478,7 +4510,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         }
         case 'closure': {
           const root = query.node
-          if (isFamilyMember(root)) gating = gateLogOf(query)
+          if (isFamilyMember(root) || isLiteralGroupMember(root)) gating = gateLogOf(query)
           if (ts.isFunctionDeclaration(root)) {
             // `refs` follows the same import inventory as stored cells. A
             // factory imported by a source module is not an external escape.
@@ -4516,6 +4548,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         }
         case 'use':
           familyWalk = familyReps.has(query.root)
+          literalWalk = literalReps.has(query.root)
           walkedReference = query.node
           visitUse(query.root, query.node)
           break

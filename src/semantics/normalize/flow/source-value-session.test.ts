@@ -1880,3 +1880,48 @@ test('a read through some constructions of a class reads only their slots', () =
   assert.deepEqual(read('v.x'), ['0'])
   assert.deepEqual(read('this.x'), ['0', '5'])
 })
+
+test('object literals share a walk but each answers the keys it spells', () => {
+  // `take` destructures `id` out of whatever it is passed: `marked` spells the
+  // key and `plain` does not, so only `plain`'s pattern names no descriptor,
+  // although both literals walk the same `take`.
+  const checked = inspect(`
+    function take(t) { const { id } = t; return id; }
+    const plain = { name: 'tag' };
+    const marked = { name: 'tag', id: 7 };
+    take(plain);
+    take(marked);
+    /* plain */ plain;
+    /* marked */ marked;
+  `)
+  const closed = (marker: string, text: string) =>
+    withLedger(checked, () => checked.session.closedValuesOf(targetExpression(checked.file, marker, text)))
+  assert.equal(closed('/* plain */', 'plain'), null)
+  assert.notEqual(closed('/* marked */', 'marked'), null)
+})
+
+test('object literals share a walk but each answers its own parameter rebinding', () => {
+  // `reset` rebinds its parameter to a fresh literal before storing through
+  // it: the store never reaches a literal passed in, although every literal
+  // walks the same `reset`.
+  const checked = inspect(`
+    function reset(v) {
+      v = { x: 0 };
+      v.x = 5;
+      return v;
+    }
+    const passed = { x: 1 };
+    const other = { x: 2 };
+    reset(passed);
+    reset(other);
+    /* passed */ passed;
+    /* other */ other;
+  `)
+  const members = (marker: string, text: string) =>
+    valueTexts(
+      checked,
+      withLedger(checked, () => checked.session.memberValuesOf(targetExpression(checked.file, marker, text), 'x'))
+    )
+  assert.deepEqual(members('/* passed */', 'passed'), ['1'])
+  assert.deepEqual(members('/* other */', 'other'), ['2'])
+})
