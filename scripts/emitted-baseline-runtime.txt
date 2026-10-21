@@ -969,6 +969,7 @@ object-spread-into-index-signature.runtime.ts.cpp e4c708bd7843
 object-spread-later-keys-follow-the-next-spread.runtime.ts.cpp d0347034d4f3
 object-spread-of-a-literal-keeps-its-written-order.runtime.ts.cpp 4fd3c03499b2
 object-spread-optional-interface-fields-into-record.runtime.ts.cpp d3a640b441bc
+object-values-entries-of-base-typed-subclass-instances.runtime.ts.cpp 2842fcf8a0d7
 object-values-of-mixed-field-record.ts.cpp 9fdf7a2fa37e
 object-values-reads-fields-nothing-else-spells.runtime.ts.cpp b01b29d09fa1
 observed-indexed-absence-kept-in-a-store-a-comparison-and-instanceof.runtime.js.cpp 8e2e4b5499d8

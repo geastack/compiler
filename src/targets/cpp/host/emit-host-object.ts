@@ -353,6 +353,30 @@ const valuesOfView = (ctx: EmitContext, operation: CallOperation, view: ObjectVi
         `"${result === undefined ? 'nothing' : representationKey(result)}"`
     )
   }
+  if (!classOwnKeysAreStatic(ctx, view.representation)) {
+    const walked = creationOrderedOwnCopyText(
+      ctx,
+      view,
+      'values',
+      (_key, value, walkCtx) => {
+        const converted = alignedValueText(
+          walkCtx,
+          'host/emit-host-object.ts:values-of-class-instance',
+          dynamicCarrier,
+          result.element,
+          value
+        )
+        return converted === null ? null : `__gea_values.push_back(${converted});`
+      },
+      null,
+      true
+    )
+    if (walked === null) return refuseClassInstanceWalk('values', view.representation)
+    return (
+      `([&]() { ${classWalkProtocolAssertion(view)} std::vector<${cppTypeOf(result.element)}> __gea_values; ${walked}; ` +
+      `return gea::detail::hostArrayResult(std::move(__gea_values)); })()`
+    )
+  }
   const element = representationKey(result.element)
   const ordered = ownKeyFields(view)
   // A field whose carrier differs from the element (`{ on: true, none: 'none' }`
@@ -616,6 +640,30 @@ const entriesOfView = (ctx: EmitContext, operation: CallOperation, view: ObjectV
       `[](std::string __gea_key, ${cppTypeOf(view.value)} __gea_value) { ${entryText(entry, '__gea_key', value)} })`
     )
   }
+  if (!classOwnKeysAreStatic(ctx, view.representation)) {
+    const walked = creationOrderedOwnCopyText(
+      ctx,
+      view,
+      'entries',
+      (key, value, walkCtx) => {
+        const converted = alignedValueText(
+          walkCtx,
+          'host/emit-host-object.ts:entries-of-class-instance',
+          dynamicCarrier,
+          entry.value,
+          value
+        )
+        return converted === null ? null : `__gea_entries.push_back([&]() { ${entryText(entry, key, converted)} }());`
+      },
+      null,
+      true
+    )
+    if (walked === null) return refuseClassInstanceWalk('entries', view.representation)
+    return (
+      `([&]() { ${classWalkProtocolAssertion(view)} std::vector<${cppTypeOf(entry.element)}> __gea_entries; ${walked}; ` +
+      `return gea::detail::hostArrayResult(std::move(__gea_entries)); })()`
+    )
+  }
   const ordered = ownKeyFields(view)
   const entryOf = (field: RecordField): string => {
     const read = getOwnValue(ctx, view, field)
@@ -648,6 +696,54 @@ const entriesOfView = (ctx: EmitContext, operation: CallOperation, view: ObjectV
 }
 
 /**
+ * Whether a class instance's own keys are exactly the field list its carrier's
+ * shape names, in that order, so the static arms of `values` and `entries`
+ * may list them.
+ *
+ * A `class-ref` names the class its handle is DECLARED at, and the object
+ * behind it can be any subclass: a `Material`-typed handle holding a
+ * `DashedMaterial` owns `dashSize`, which no struct the handle can name has.
+ * Its carrier's shape need not even be the class's own -- the struct is
+ * rendered from the class's instance shape, a use site's handle may carry a
+ * wider one (`model.ts`'s `class-ref`), and listing that shape's fields
+ * read members the struct does not have. And with a base class, the base's
+ * fields are created first while the shape lists the derived class's own
+ * first. Each of those is a run-time or chain-order fact the struct's own
+ * field dispatcher already answers (`nativeEnumerableStringKeys`), which is
+ * how `keys` enumerates every shared object, so only a class with no base,
+ * no subclass and its own instance shape keeps the static list.
+ */
+const classOwnKeysAreStatic = (ctx: EmitContext, representation: Representation): boolean => {
+  if (representation.kind !== 'class-ref') return true
+  if (representation.ancestors.length > 0 || representation.nativeBase !== undefined) return false
+  const layout = ctx.classes.get(representation.declaration)
+  const instance = layout?.instance
+  if (layout === undefined || layout.base !== null || instance === null || instance === undefined) return false
+  if (!('shapeId' in instance) || instance.shapeId !== representation.shapeId) return false
+  for (const other of ctx.classes.values()) if (other.base === representation.declaration) return false
+  return true
+}
+
+/**
+ * The runtime walk is the only arm a class instance gets, and without the
+ * struct's property protocol it answers false and copies nothing -- an empty
+ * array where the instance has keys. Stated to the C++ compiler, so that case
+ * cannot build at all.
+ */
+const classWalkProtocolAssertion = (view: Extract<ObjectView, { kind: 'known' }>): string =>
+  `static_assert(gea::detail::NativeFieldTable<typename std::remove_cvref_t<decltype(${view.receiver})>::element_type>, ` +
+  '"the own properties of a class instance are walked through its property protocol");'
+
+const refuseClassInstanceWalk = (member: string, representation: Representation): never => {
+  throw createCppEmitBlockedError(
+    `host-member-call:Object.${member}`,
+    `"Object.${member}" of a "${representationKey(representation)}" handle enumerates whatever class the instance really is, ` +
+      "which only the runtime's creation-order walk can see, and no conversion from its dynamic values into this call's " +
+      'result was admitted for that walk'
+  )
+}
+
+/**
  * The own enumerable properties of a shared record, walked by the runtime in
  * creation order, as a call answering whether it walked them.
  *
@@ -661,7 +757,9 @@ const entriesOfView = (ctx: EmitContext, operation: CallOperation, view: ObjectV
  * then the static arm is exactly its own keys. The call answers false where
  * it does not walk, so the static arm still runs. `each` renders the store of
  * one key and its property value, or null when that value has no conversion
- * into the destination; there is then no runtime walk.
+ * into the destination; there is then no runtime walk. `always` walks
+ * unconditionally, for a class instance with no static arm to fall back to
+ * (`classOwnKeysAreStatic`).
  */
 type HostObjectContext = EmitContext & { readonly hostObjectWalkPlan?: HostObjectWalkPlan }
 
@@ -670,7 +768,8 @@ const creationOrderedOwnCopyText = (
   view: Extract<ObjectView, { kind: 'known' }>,
   destination: string,
   each: (key: string, value: string, ctx: EmitContext) => string | null,
-  assigned: { readonly target: string; readonly staticCopy: string; readonly orderless?: boolean } | null = null
+  assigned: { readonly target: string; readonly staticCopy: string; readonly orderless?: boolean } | null = null,
+  always = false
 ): string | null => {
   const indexed = indexedRecordViewOf(ctx.deriver, view.representation)
   const ownership = indexed !== null ? indexed.ownership : ownershipOfGeneratedCarrier(view.representation)
@@ -705,7 +804,7 @@ const creationOrderedOwnCopyText = (
     )
   return (
     `gea::copyOwnPropertiesInCreationOrder(${view.receiver}, ` +
-    `[&](const std::string& __gea_ordered_key, const gea::Value& __gea_ordered_value) { ${body} }${indexed !== null ? ', true' : ''})`
+    `[&](const std::string& __gea_ordered_key, const gea::Value& __gea_ordered_value) { ${body} }${indexed !== null || always ? ', true' : ''})`
   )
 }
 
