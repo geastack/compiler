@@ -970,6 +970,7 @@ object-spread-later-keys-follow-the-next-spread.runtime.ts.cpp d0347034d4f3
 object-spread-of-a-literal-keeps-its-written-order.runtime.ts.cpp 4fd3c03499b2
 object-spread-optional-interface-fields-into-record.runtime.ts.cpp d3a640b441bc
 object-values-of-mixed-field-record.ts.cpp 9fdf7a2fa37e
+object-values-reads-fields-nothing-else-spells.runtime.ts.cpp b01b29d09fa1
 observed-indexed-absence-kept-in-a-store-a-comparison-and-instanceof.runtime.js.cpp 8e2e4b5499d8
 odd-divisor-remainder-skips-the-zero-check.runtime.ts.cpp 393f68fa7641
 open-document-adopted-into-record-key-order.runtime.ts.cpp 171f8f483664
@@ -1039,7 +1040,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp ba66f3c8919a
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp a623138224be
-printer-drift.txt 8d1000147647
+printer-drift.txt 5c1952faa3df
 private-names-are-not-own-properties.ts.cpp 5d0e90d41f28
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp 3a9f81f60107
