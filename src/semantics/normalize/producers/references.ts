@@ -65,10 +65,10 @@ const includesUndefined = (type: ts.Type): boolean => {
 }
 
 /**
- * Whether this expression is an equality operand or `instanceof`'s left
- * operand. Both answer for `undefined` without reading it: IsStrictlyEqual and
- * IsLooselyEqual compare it, and OrdinaryHasInstance returns false for a
- * non-object.
+ * Whether this expression is an equality operand, `instanceof`'s left
+ * operand, or `typeof`'s operand. All answer for `undefined` without reading
+ * it: IsStrictlyEqual and IsLooselyEqual compare it, OrdinaryHasInstance
+ * returns false for a non-object, and `typeof` answers `"undefined"`.
  */
 const comparesItsOperand = (node: ts.Expression): boolean => {
   let inner: ts.Node = node
@@ -77,7 +77,9 @@ const comparesItsOperand = (node: ts.Expression): boolean => {
     inner = parent
     parent = parent.parent
   }
-  if (!parent || !ts.isBinaryExpression(parent)) return false
+  if (!parent) return false
+  if (ts.isTypeOfExpression(parent)) return parent.expression === inner
+  if (!ts.isBinaryExpression(parent)) return false
   const operator = parent.operatorToken.kind
   if (operator === ts.SyntaxKind.InstanceOfKeyword) return parent.left === inner
   return (
