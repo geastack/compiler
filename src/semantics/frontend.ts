@@ -1304,22 +1304,19 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // consumers now also see one set of write and call-site objects instead
     // of two that are equal only field by field.
     const valueFlow: ValueFlowIndex = contentEqual ? { ...contentEqual } : built
-    const sharedFrom = contentEqual && shareSourceValueSession(contentEqual, valueFlow) ? contentEqual : undefined
-    // A round's solver is asked nothing once the next round's index replaces
-    // it (`retireSourceValueSession`); keeping it cost ~1 GB per round. A
-    // solver handed on above is the new round's own, and stays.
-    //
-    // Except the first round's. Its index is `baseValueFlow`, which the
-    // parameter index and the CommonJS module records hold for the whole
-    // fixpoint, and its census is the bottom of every later round's
-    // `upstream` chain: a later round falling through to it asks that
-    // session again, and a retired session answers by solving the whole
-    // program again from nothing. On a large three.js program that happened
-    // in the second round every time -- one full solve, a sixth of the
-    // fixpoint -- and the rebuilt solver then lived to the end anyway.
-    for (const earlier of roundFlows)
-      if (earlier !== valueFlow && earlier !== sharedFrom && earlier !== baseValueFlow) retireSourceValueSession(earlier)
-    roundFlows.length = 0
+    if (contentEqual) shareSourceValueSession(contentEqual, valueFlow)
+    // No round's solver is retired when the next round replaces it. Every
+    // round's census stays on the `upstream` chain of every later one, down
+    // to the settled census the structural censuses read, and a question it
+    // cannot answer itself falls through to an earlier round's census and
+    // that round's session. A retired session answers by solving the whole
+    // program again from nothing, and the rebuilt solver then lives as long
+    // as its index does: on a large three.js program the second round rebuilt
+    // the first round's solver and the structural censuses rebuilt the second
+    // and third rounds', three full solves (about a third of the frontend)
+    // to reach the very heap that keeping them reaches. The final round's
+    // solver is still released once the producers are done (`produced`
+    // below); an earlier one lives as long as its index, as a rebuilt one did.
     roundFlows.push(valueFlow)
     attachDeferredIntrinsicProtocolLedger(valueFlow, intrinsicProtocols)
     commonJsModuleRecords.attachToFlow(valueFlow)
@@ -2284,9 +2281,9 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // mappers all agree on what "the same copy" means.
     copyKey: (candidate) => identities.copyKeyOf(candidate.specialization),
     // The final round's solver answers the producers and nothing after them.
-    produced: () => {
-      for (const flow of roundFlows) retireSourceValueSession(flow)
-    },
+    // Only the final round's: an earlier one stays as long as its index, as
+    // it did when the structural censuses rebuilt it.
+    produced: () => retireSourceValueSession(roundFlows[roundFlows.length - 1]!),
     gates: (operations) =>
       gatingEdges({
         files: compiled.sourceFiles,
@@ -2323,7 +2320,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     })
   )
 
-  for (const flow of roundFlows) retireSourceValueSession(flow)
+  retireSourceValueSession(roundFlows[roundFlows.length - 1]!)
 
   return {
     dynamicFallbackTypes,
