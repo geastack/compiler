@@ -18,17 +18,18 @@ import {
  *
  * - `tuple`: every read names a FIXED position -- a literal index, or a final
  *   `...arguments` spread into a callee convention with no rest formal, which
- *   reads positions `0..n-1` exactly. Each position is then its own fact,
- *   joined over the closed callers that fill it. This is the shape WebGL
- *   forwarding shims need: `texImage3D()` is called with numbers in its
- *   leading positions and `ArrayBufferView | null` in its last, and one element
- *   type over all ten positions could only be a union no caller wrote.
- *   Positions from `required` on are ones some closed caller omits, so they
- *   are optional: a read there is `T | undefined`, and the rest slot leaves
- *   the field absent rather than inventing a value.
+ *   reads positions `0..n-1` exactly -- or reads the frame's `length`. Each
+ *   position is then its own fact, joined over the closed callers that fill
+ *   it. This is the shape WebGL forwarding shims need: `texImage3D()` is
+ *   called with numbers in its leading positions and `ArrayBufferView | null`
+ *   in its last, and one element type over all ten positions could only be a
+ *   union no caller wrote. Positions from `required` on are ones some closed
+ *   caller omits, so they are optional: a read there is `T | undefined`, the
+ *   rest slot leaves the field absent rather than inventing a value, and the
+ *   frame's length counts the fields present.
  * - `array`: the body reads a position only known at run time
- *   (`arguments[i]`, `arguments.length`), reads its own element back through
- *   a recursive call, or declares parameters in front of the phantom slot.
+ *   (`arguments[i]`), reads its own element back through a recursive call,
+ *   or declares parameters in front of the phantom slot.
  *   The frame is then a runtime-sized Array of one element type joined over
  *   every supplied position -- the frame this fact published before positions
  *   existed.
@@ -120,12 +121,15 @@ const fixedPositionOf = (checker: ts.TypeChecker, access: ts.ElementAccessExpres
 const useOf = (
   checker: ts.TypeChecker,
   use: ts.Identifier
-): { readonly read: 'fixed' | 'indexed'; readonly access: ts.Expression } | null => {
+): { readonly read: 'fixed' | 'length' | 'indexed'; readonly access: ts.Expression } | null => {
   const access = use.parent
   if (ts.isElementAccessExpression(access) && access.expression === use)
     return { read: fixedPositionOf(checker, access) === null ? 'indexed' : 'fixed', access }
-  if (ts.isPropertyAccessExpression(access) && access.expression === use && access.name.text === 'length')
-    return { read: 'indexed', access }
+  // The count of arguments a call passed is the tuple's own length: the
+  // positions from `required` on are optional elements, present exactly when
+  // the caller wrote them (an explicit `undefined` included), so a body that
+  // picks a call form by `arguments.length` keeps its positional frame.
+  if (ts.isPropertyAccessExpression(access) && access.expression === use && access.name.text === 'length') return { read: 'length', access }
   if (ts.isSpreadElement(access) && access.expression === use) {
     const call = access.parent
     if ((ts.isCallExpression(call) || ts.isNewExpression(call)) && call.arguments) {
@@ -168,6 +172,7 @@ export type ImplicitArgumentsInference =
 export const inferImplicitArgumentsTuple = (evidence: ImplicitArgumentsEvidence): ImplicitArgumentsInference => {
   const { checker, owner, slot, uses } = evidence
   let indexed = slot.ordinal > 0
+  let readsLength = false
   for (const use of uses) {
     // A lexical arguments capture needs a frame identity shared with its
     // outer function; a local ordinal alone cannot establish that identity.
@@ -177,6 +182,7 @@ export const inferImplicitArgumentsTuple = (evidence: ImplicitArgumentsEvidence)
     const reading = useOf(checker, use)
     if (reading === null) return { refused: 'implicit-arguments-object-escapes' }
     if (reading.read === 'indexed') indexed = true
+    if (reading.read === 'length') readsLength = true
     // The shared write inventory already includes parenthesized targets,
     // destructuring, updates, loops and deletes. Do not invent a second
     // assignment classifier for this one binding.
@@ -221,10 +227,14 @@ export const inferImplicitArgumentsTuple = (evidence: ImplicitArgumentsEvidence)
     const elements: ts.Type[] = []
     for (const [position, written] of Array.from(positions, (entry) => entry ?? []).entries()) {
       const element = written.length > 0 ? (joinOfWrites(checker, written) ?? disjointUnionTypeOf(checker, written)) : null
-      if (!element) return { refused: 'implicit-arguments-disjoint-position' }
+      if (!element) break
       elements[position] = element
     }
-    return { tuple: { frame: 'tuple', elements, required: Math.min(required, elements.length), sourcePositions } }
+    if (elements.length === positions.length)
+      return { tuple: { frame: 'tuple', elements, required: Math.min(required, elements.length), sourcePositions } }
+    // A length read was an Array frame's before it was a tuple's; a position
+    // with no join keeps that frame rather than refusing the owner.
+    if (!readsLength) return { refused: 'implicit-arguments-disjoint-position' }
   }
   // An annotation can supply a common upper bound absent from the
   // observed subclasses. It is only a candidate: every supplied position,

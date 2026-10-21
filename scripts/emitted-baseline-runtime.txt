@@ -22,6 +22,7 @@ any-record-union-arm-into-interface-parameter.runtime.ts.cpp 84f0dc3be12e
 any-sourced-null-into-optional-class-field.runtime.ts.cpp 3918304237f8
 app-root-through-factory-and-host-callback.runtime.ts.cpp 53d9c8dcf76b
 arguments-forwarding-function-in-reflective-record.runtime.js.cpp 93cb1515e096
+arguments-length-selects-call-form-over-positional-frame.runtime.js.cpp 37e299717af8
 arithmetic-over-two-dynamic-operands.runtime.js.cpp baacabab8a66
 array-assignment-rest-target.ts.cpp ef7af69b9332
 array-buffer-inline-storage-aliasing.runtime.ts.cpp 4760b613e64b
