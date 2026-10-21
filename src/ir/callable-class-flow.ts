@@ -265,8 +265,11 @@ class ValueTable<T extends object> implements Iterable<[IrValueId, T]> {
       ordinal = ordinal * 10 + digit
     }
     this.ordinal = ordinal
-    if (this.lastSlots !== null && bar === 4 + this.lastBody.length && id.startsWith(this.lastBody, 4)) return this.lastSlots
+    // The body spelled out and compared whole: `id.startsWith(this.lastBody, 4)`
+    // asks the same, but took about eight times as long on these long ids, and
+    // this is asked millions of times a solve.
     const body = id.slice(4, bar)
+    if (this.lastSlots !== null && body === this.lastBody) return this.lastSlots
     let slots = this.byBody.get(body)
     if (slots === undefined) {
       if (!create) return null
@@ -3595,8 +3598,13 @@ const releasePropagation = (cells: readonly OriginCell[]): void => {
   }
 }
 
+// `id.substring(...) === owner` rather than `id.startsWith(owner, 4)`: the same
+// question, several times faster for a long owner (see `ValueTable.slotsOf`).
 const valueOwnedBy = (id: string, owner: string): boolean =>
-  id.startsWith('ssa|') && id.startsWith(owner, 4) && id.charCodeAt(4 + owner.length) === 124 && id.indexOf('|', 5 + owner.length) === -1
+  id.startsWith('ssa|') &&
+  id.substring(4, 4 + owner.length) === owner &&
+  id.charCodeAt(4 + owner.length) === 124 &&
+  id.indexOf('|', 5 + owner.length) === -1
 
 /**
  * Every SSA value's carrier, read through the bodies rather than copied into
