@@ -1308,7 +1308,17 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // A round's solver is asked nothing once the next round's index replaces
     // it (`retireSourceValueSession`); keeping it cost ~1 GB per round. A
     // solver handed on above is the new round's own, and stays.
-    for (const earlier of roundFlows) if (earlier !== valueFlow && earlier !== sharedFrom) retireSourceValueSession(earlier)
+    //
+    // Except the first round's. Its index is `baseValueFlow`, which the
+    // parameter index and the CommonJS module records hold for the whole
+    // fixpoint, and its census is the bottom of every later round's
+    // `upstream` chain: a later round falling through to it asks that
+    // session again, and a retired session answers by solving the whole
+    // program again from nothing. On a large three.js program that happened
+    // in the second round every time -- one full solve, a sixth of the
+    // fixpoint -- and the rebuilt solver then lived to the end anyway.
+    for (const earlier of roundFlows)
+      if (earlier !== valueFlow && earlier !== sharedFrom && earlier !== baseValueFlow) retireSourceValueSession(earlier)
     roundFlows.length = 0
     roundFlows.push(valueFlow)
     attachDeferredIntrinsicProtocolLedger(valueFlow, intrinsicProtocols)
