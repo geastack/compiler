@@ -776,7 +776,9 @@ export const prototypeReadHooks = (
                     // of a sibling class -- with seventy `strlen`+`memcmp`s.
                     '    const std::string_view gea_name = gea_key.text();',
                     ...switchedByKeyLength(
-                      texts.map((getter) => `    if (gea_name == ${cppStringLiteral(getter.key)}) { gea_out = ${getter.text}; return true; }`)
+                      texts.map(
+                        (getter) => `    if (gea_name == ${cppStringLiteral(getter.key)}) { gea_out = ${getter.text}; return true; }`
+                      )
                     ),
                     '  }'
                   ]),
