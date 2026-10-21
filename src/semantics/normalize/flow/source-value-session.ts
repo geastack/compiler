@@ -2166,6 +2166,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    * back through `outcome`) or a per-node cache kept in a map below.
    */
   const transferInputs = new Map<Query, TransferInputs>()
+  /** Counts transfers and seals: what `obligations` keeps is good until the next one. */
+  const graphRevision = { value: 0 }
   const definition = ((): DependencyFactDefinition<Query, Value, Cause> => {
     /** What a seal reads back from the evaluation it ran. */
     interface SealOutcome {
@@ -4744,6 +4746,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       sealing: boolean,
       outcome: SealOutcome | null
     ): ReadonlySet<Value> => {
+      graphRevision.value++
       // Before the ledger capture: a transfer that is not re-run raises no
       // obligation, and must keep the ones its last full run raised.
       if (outcome === null) {
@@ -4839,19 +4842,41 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   for (const entry of unknownReads) seed(entry.receiver)
   // `hasUnnamedWrite` asks the same reverse question of every computed write's receiver.
   for (const receiver of computedWriteReceiverQueries) seed(receiver)
+  /**
+   * Every obligation a root's answer rests on: a walk of its whole required
+   * graph, which for a root in a large program's main component is half the
+   * session. The same roots are asked again and again once the solver has
+   * stopped growing (the structural censuses ask most of them), so an answer
+   * is kept while no transfer or seal has run since (`graphRevision`): only
+   * those change the required edges or a node's obligations.
+   */
+  let obligationsRevision = -1
+  const obligationsByRoot = new Map<Query, readonly IntrinsicProtocolRequirement[]>()
   const obligations = (root: Query): readonly IntrinsicProtocolRequirement[] => {
+    if (obligationsRevision !== graphRevision.value) {
+      obligationsByRoot.clear()
+      obligationsRevision = graphRevision.value
+    }
+    const known = obligationsByRoot.get(root)
+    if (known !== undefined) return known
     const found: IntrinsicProtocolRequirement[] = []
-    const visited = new Set<Query>()
+    // Marked when queued rather than when taken: a node is visited at its
+    // first place in the queue either way, and the queue no longer holds an
+    // entry per edge into it.
+    const visited = new Set<Query>([root])
     const queue = [root]
     for (let index = 0; index < queue.length; index++) {
       const query = queue[index]!
-      if (visited.has(query)) continue
-      visited.add(query)
       const held = requirements.get(query)
       if (Array.isArray(held)) found.push(...(held as readonly IntrinsicProtocolRequirement[]))
       else if (held !== undefined) found.push(held as IntrinsicProtocolRequirement)
-      for (const dependency of requiredDependenciesOf(query)) queue.push(dependency)
+      for (const dependency of requiredDependenciesOf(query))
+        if (!visited.has(dependency)) {
+          visited.add(dependency)
+          queue.push(dependency)
+        }
     }
+    obligationsByRoot.set(root, found)
     return found
   }
   // A literal's function-valued entry (`convert: function ( ... ) { ... }`)
