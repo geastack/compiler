@@ -323,7 +323,7 @@ export const stableFieldReadsOf = (
   receivers: ReadonlySet<IrValueId>,
   fields: ConstructionOnlyFields,
   integrity: { readonly restricts: (representation: Representation) => boolean },
-  dying: ReadonlySet<IrValueId>
+  dying: Pick<ReadonlySet<IrValueId>, 'has'>
 ): ReadonlySet<IrValueId> => {
   if (fields.constructing.has(body.sourceOwner as FunctionId)) return new Set()
   const keys = stringConstantsOf(body)
@@ -431,7 +431,9 @@ export const stableFieldReadsAndCellsOf = (
       if (operation.kind === 'binding-write') written.set(operation.value.value, operation.declaration)
     }
   const intoCell = (value: IrValueId): boolean => written.has(value) && uses.get(value) === 1
-  const candidates = stableFieldReadsOf(body, receivers, fields, integrity, new Set([...dying].filter((value) => !intoCell(value))))
+  // Asked of this body's values only, so the program's whole dying set is
+  // filtered as it is asked, not copied for every body rendered.
+  const candidates = stableFieldReadsOf(body, receivers, fields, integrity, { has: (value) => dying.has(value) && !intoCell(value) })
   const cells = stableFieldCellsOf(body, candidates, admits)
   const all = new Set(reads)
   for (const value of candidates) {
