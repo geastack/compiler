@@ -1026,6 +1026,14 @@ export const censusGlobalHostMutations = (
   const isDefinitelyProgramSymbolElementKey = (expression: ts.PropertyAccessExpression | ts.ElementAccessExpression): boolean =>
     ts.isElementAccessExpression(expression) && isProgramSymbolKeyExpression(expression.argumentExpression)
   const overwrittenIntrinsicSymbols = new Set<ts.Symbol>()
+  // Every declaration of an overwritten symbol, so `intrinsicSymbolIsOverwritten`
+  // asks of a symbol's own declarations rather than scanning every assignment
+  // target of the program on each question.
+  const overwrittenDeclarations = new Set<ts.Declaration>()
+  const overwriteIntrinsicSymbol = (symbol: ts.Symbol): void => {
+    overwrittenIntrinsicSymbols.add(symbol)
+    for (const declaration of symbol.declarations ?? []) overwrittenDeclarations.add(declaration)
+  }
   const propertyKeyDomains = createPropertyKeyDomains(checker, flow, flowSiteIsReachable, publishedTypeAt)
   // A computed key set, with Object.prototype's possible enumerable keys
   // added when it leans on them; its assumptions are checked at the end.
@@ -1134,10 +1142,7 @@ export const censusGlobalHostMutations = (
     if (trustSeed.names.has(symbol.name)) return true
     if (overwrittenIntrinsicSymbols.has(symbol)) return true
     if ([...computedIntrinsicKeys].some((domain) => propertyKeyDomains.mayName(domain, symbol.name))) return true
-    const declarations = new Set(symbol.declarations ?? [])
-    const overwritten = [...overwrittenIntrinsicSymbols].some((candidate) =>
-      (candidate.declarations ?? []).some((declaration) => declarations.has(declaration))
-    )
+    const overwritten = (symbol.declarations ?? []).some((declaration) => overwrittenDeclarations.has(declaration))
     if (!overwritten) trustedIntrinsicNames.add(symbol.name)
     return overwritten
   }
@@ -1365,12 +1370,12 @@ export const censusGlobalHostMutations = (
       return
     }
     const symbol = actualSymbol(checker.getPropertyOfType(checker.getTypeAtLocation(target), key))
-    if (symbol) overwrittenIntrinsicSymbols.add(symbol)
+    if (symbol) overwriteIntrinsicSymbol(symbol)
   }
   for (const node of nodes) {
     if (ts.isIdentifier(node) && isDirectAssignmentTarget(node)) {
       const symbol = actualSymbol(checker.getSymbolAtLocation(node))
-      if (symbol) overwrittenIntrinsicSymbols.add(symbol)
+      if (symbol) overwriteIntrinsicSymbol(symbol)
       continue
     }
     if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && isDirectAssignmentTarget(node)) {
@@ -1398,7 +1403,7 @@ export const censusGlobalHostMutations = (
       // aborts at run time (`static-intrinsic-reflection.runtime.js`).
       if (!ts.isDeleteExpression(node.parent) && replacesStandardGlobalMember(node.expression)) intrinsicSurfaceMemberReplaced = true
       const symbol = memberSymbolOf(node)
-      if (symbol) overwrittenIntrinsicSymbols.add(symbol)
+      if (symbol) overwriteIntrinsicSymbol(symbol)
       else if (
         staticKeyOf(node) === null &&
         !isDefinitelyNumericElementKey(node) &&
@@ -1410,7 +1415,7 @@ export const censusGlobalHostMutations = (
           for (const key of actualKeys) {
             if (key.kind !== 'name') continue
             const member = actualSymbol(checker.getPropertyOfType(checker.getTypeAtLocation(node.expression), key.name))
-            if (member) overwrittenIntrinsicSymbols.add(member)
+            if (member) overwriteIntrinsicSymbol(member)
           }
           continue
         }
