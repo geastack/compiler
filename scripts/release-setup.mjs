@@ -44,6 +44,8 @@ const siblings = [
   'demos',
   'cli',
   'targets',
+  // core's and the cli's tests read the Raspberry Pi and Sailfish OS build scripts from it.
+  'linux',
   'simulator',
   'native-webgl-angle',
   'windows',

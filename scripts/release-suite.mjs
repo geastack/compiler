@@ -147,6 +147,8 @@ if (wanted('core')) {
   const examples = checkout('examples', 'apps')
   const core = checkout('core', 'packages/core/test/run-tests.sh')
   const tests = join(core, 'packages/core/test')
+  // Its desktop source-list tests read the Linux targets' build scripts.
+  checkout('linux', 'targets/raspberry-pi-os/build-raspberry-pi-os.sh')
   const apple = join(checkout('apple', 'packages/geastack-apple/targets/macos'), 'packages/geastack-apple')
   // The app pipelines compile against the plugin, core and host of this
   // checkout -- the ones released with this compiler -- not whatever copies
@@ -303,6 +305,8 @@ const unitTests = (lane, path, notHere = {}) => {
 // refuse, and the transport tests have no transport to run.
 const posixClient = process.platform === 'win32' && 'native Linux deployment needs a POSIX client'
 const posixTransport = process.platform === 'win32' && 'runs the device-side Linux transaction transport, which needs POSIX'
+// The cli's native-link and Linux target tests read the Raspberry Pi build script.
+if (wanted('cli')) checkout('linux', 'targets/raspberry-pi-os/build-raspberry-pi-os.sh')
 unitTests('cli', 'cli', {
   'runExternal resolves commands that exist only as a PATH shim': process.platform !== 'win32' && 'win32 only',
   'macOS enables LLDB symbols by default and accepts an explicit source debugging option': process.platform !== 'darwin' && 'macOS only',
