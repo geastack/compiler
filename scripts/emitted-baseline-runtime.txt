@@ -8,6 +8,7 @@ abstract-method-returning-this-dispatches-across-siblings.runtime.ts.cpp 54dc67a
 abstract-method-with-no-implementation.ts.cpp c44925ca641e
 ambient-record-global-unused-stays-harmless.runtime.ts.cpp 3b2db285007b
 and-condition-over-optional-string-mode.runtime.ts.cpp 5cdafef6c9bf
+annotated-field-stores-an-any-value.runtime.ts.cpp b8960d5c91c4
 annotated-generic-function-alias.ts.cpp e8d7a1d8e3d3
 any-argument-guard-copy-beside-typed-callers.runtime.ts.cpp a1990842961a
 any-argument-outside-a-guard-parameter-domain.runtime.ts.cpp f450de861e24
@@ -17,9 +18,10 @@ any-asserted-to-promise-then-dispatches-on-the-box.runtime.ts.cpp d029a930797e
 any-cast-this-member-call-dispatches-over-the-receiver-classes.runtime.ts.cpp 972bdbcad5ef
 any-dictionary-into-named-interface.runtime.ts.cpp 55c834f37aa1
 any-generic-binding-takes-its-consumer-representation.runtime.ts.cpp 3807300d3268
+any-member-of-a-typed-record-into-inferred-field.runtime.js.cpp 8ceeb97473ec
 any-object-literal-accessors-enumerate-through-get.runtime.ts.cpp 9e01e8fd78d7
 any-record-union-arm-into-interface-parameter.runtime.ts.cpp 84f0dc3be12e
-any-sourced-null-into-optional-class-field.runtime.ts.cpp 3918304237f8
+any-sourced-null-into-optional-class-field.runtime.ts.cpp 6fd72d8ac1af
 app-root-through-factory-and-host-callback.runtime.ts.cpp 53d9c8dcf76b
 arguments-forwarding-function-in-reflective-record.runtime.js.cpp 93cb1515e096
 arguments-length-selects-call-form-over-positional-frame.runtime.js.cpp 37e299717af8
@@ -279,6 +281,7 @@ construction-only-field-alias.runtime.ts.cpp a44222a268e6
 constructor-alias-installed-members-class.runtime.js.cpp bb654b656899
 constructor-alias-installed-members.runtime.js.cpp ef1b0a15fea7
 constructor-carried-by-abi-reads-its-properties.runtime.ts.cpp 2044c6d5dae7
+constructor-dispatch-copy-from-a-plain-record-into-inferred-fields.runtime.js.cpp 033ad14fdd3d
 constructor-dispatch-into-typed-parameters-with-uniform-table.runtime.js.cpp ddd3dbf2aad2
 constructor-family-into-narrower-constructor-type.runtime.ts.cpp ec19ded7a958
 constructor-family-into-open-constructor-type.runtime.ts.cpp 25565aa8c500
@@ -327,6 +330,7 @@ descriptor-function-this-is-the-lookup-receiver.ts.cpp 85e62ec6a07c
 destructured-default-host-options.ts.cpp e2bb13133a09
 destructured-module-namespace-function-call.runtime.ts.cpp 350821c4bd61
 destructured-read-over-proxy-error-module-union.runtime.ts.cpp dcfef0004dde
+destructuring-assignment-reads-an-instance-member-the-checker-types-any.runtime.js.cpp 1c66274c93fe
 destructuring-defaults.ts.cpp 81155bcc70ab
 dictionary-define-property-nondefault.ts.cpp 343c5d669f93
 dictionary-define-property.ts.cpp d8b783faec11
@@ -362,6 +366,8 @@ dynamic-callable-rest-adapter.runtime.js.cpp 22ebe076f9d8
 dynamic-callable-union-identity.runtime.ts.cpp 90b0eef9cefa
 dynamic-class-family-roundtrip.ts.cpp f123ec48c108
 dynamic-class-family-wrong.ts.cpp a163e3005000
+dynamic-destructured-binding-into-inferred-field.runtime.js.cpp 6b9e528c839d
+dynamic-destructuring-assignment-into-inferred-field.runtime.js.cpp e262452b9ab4
 dynamic-expando-read-into-an-optional-union.ts.cpp 49964b27452b
 dynamic-fallback-call-bind.js.cpp 9431845dc523
 dynamic-finite-destructuring-close.ts.cpp 29df20803cb8
@@ -370,13 +376,22 @@ dynamic-function-comparator.js.cpp fb406416695e
 dynamic-into-union-of-records-other-layout.runtime.ts.cpp ed73e1e95eb5
 dynamic-iterator-gather.ts.cpp 19653e307489
 dynamic-iterator-header-close.ts.cpp 04689f18c680
+dynamic-keyed-copy-into-inferred-fields.runtime.js.cpp 3b43c4d6efa4
 dynamic-method-logical-receiver.runtime.ts.cpp 0529eac68abd
 dynamic-method-native-view-origin.runtime.ts.cpp c45d8c05099a
 dynamic-nested-field-load-keeps-native-live-aliases.runtime.ts.cpp 055ae9fe9f74
+dynamic-number-and-boolean-read-their-prototype-methods.runtime.js.cpp ea5bdf22bda3
+dynamic-object-assign-into-inferred-fields.runtime.js.cpp e665b2aa923b
+dynamic-operands-in-arithmetic-comparison-and-unary-operators.runtime.js.cpp 88d6568b5385
 dynamic-optional-absence-mismatch.ts.cpp ed2499511ca5
+dynamic-parameter-and-call-results-into-inferred-fields.runtime.js.cpp 9834ddb8ad7e
 dynamic-record-method-binds-the-object-as-this.runtime.ts.cpp 002d0ce76aae
 dynamic-regexp.ts.cpp 990d4ac4b0b5
 dynamic-spread-into-string-dictionary.runtime.ts.cpp 1fc06045a778
+dynamic-store-into-inferred-boolean-field.runtime.js.cpp 7ac800e0bb62
+dynamic-store-into-inferred-class-field.runtime.js.cpp 4c70f1c71dea
+dynamic-store-into-inferred-number-field.runtime.js.cpp 708259123b2e
+dynamic-store-into-inferred-string-field.runtime.js.cpp 7d9c7879672d
 dynamic-string-replace.runtime.ts.cpp f54482eaa82f
 dynamic-tonumber-bigint.ts.cpp d381f4d118f3
 dynamic-tonumber-symbol.ts.cpp 8b9a96be3ca2
@@ -609,6 +624,10 @@ indexed-replacement-into-document-or-array-parameter.runtime.ts.cpp 5263afe65071
 inference-fact-stability.js.cpp 8b841d762707
 inferred-array-index-absence.ts.cpp 8adfbe4653bb
 inferred-callable-union.ts.cpp 10becfe4955b
+inferred-field-filled-from-a-parameter-its-callers-type-stays-narrow.runtime.js.cpp 950e0e8a4104
+inferred-field-read-off-a-parameter-its-callers-type-stays-narrow.runtime.js.cpp a4e76c0589f8
+inferred-field-written-only-its-own-type-stays-narrow.runtime.js.cpp 9012980d5d4f
+inferred-fields-filled-from-typed-sources-stay-narrow.runtime.js.cpp 391a686a67e5
 inferred-logical-result.runtime.js.cpp 578011c473d8
 inferred-polymorphic-this.js.cpp b16705c65b11
 inherited-class-family-field-projection.runtime.js.cpp 4c9c8c62fa0b
@@ -677,7 +696,7 @@ iterator-result-arm-read-off-done.runtime.ts.cpp 92f39903538b
 iterator-result-literal-into-promise-of-union.runtime.ts.cpp 8d9c08c9df7b
 iterator-view-captures-next-and-reads-return-at-close.runtime.ts.cpp 1d5c9125cad0
 js-constructor-with-statics.js.cpp 8ae071607ed1
-js-field-seeded-null-holds-every-later-write.runtime.js.cpp 01bf3a52ff4d
+js-field-seeded-null-holds-every-later-write.runtime.js.cpp 4a6a8e52cf94
 jsdoc-asserted-class-method.runtime.js.cpp fc6d25d832f2
 jsdoc-defaulted-class-constructor.runtime.js.cpp 7fef347adb7c
 jsdoc-object-or-string-optional-param-takes-boolean.runtime.js.cpp 76f7da907fb7
@@ -1045,7 +1064,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp 2a67d2df0367
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 2d5f8c6f08eb
-printer-drift.txt 5c1952faa3df
+printer-drift.txt e9a26507d8b7
 private-names-are-not-own-properties.ts.cpp 862d394b5f45
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp 3a9f81f60107
@@ -1390,5 +1409,6 @@ wide-family-assign-walks-a-step-table.runtime.ts.cpp 12227da34d6e
 wide-offset-rounds-past-two-to-the-53.runtime.ts.cpp 0765e8abcb75
 wide-optional-options-spread-prefix-keys.runtime.ts.cpp b080a9f41d95
 wide-record-spread-short-flag-tail.runtime.ts.cpp b6c4bdcbd25e
+widened-field-in-arithmetic-and-locals.runtime.js.cpp 50e59a9a69a9
 wider-options-record-into-nullable-narrower-options.runtime.ts.cpp 1c9fb2237e60
 worker-module-realms.ts.cpp 7309a7a741ba

@@ -1,6 +1,6 @@
 import '../scripts/host-toolchain.mjs'
 import { spawn } from 'node:child_process'
-import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { availableParallelism, freemem } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -9,6 +9,16 @@ const output = join(root, 'measurements')
 mkdirSync(join(output, 'cxx'), { recursive: true })
 // Native tests must not put their output below the compiler's dist directory.
 const env = { ...process.env, TMPDIR: output }
+// Two native checks build against @geastack/core's own sources (GEA_CORE, GEA_CORE_ROOT), as CI and the release
+// suite set them. Unset here, they name the core checkout under GEASTACK_ROOT (a release-setup workspace), or else the
+// one beside this checkout; the reflection check also needs that checkout's packages built (release-setup does both).
+if (!env.GEA_CORE_ROOT) {
+  const core = resolve(process.env.GEASTACK_ROOT ?? resolve(root, '..'), 'core')
+  if (existsSync(join(core, 'packages/core/include/gea/embedded.h'))) {
+    env.GEA_CORE_ROOT = core
+    env.GEA_CORE ??= join(core, 'packages/core')
+  }
+}
 // Every command is its own process, so the suite is a pool. Size it by cores
 // and free memory (~1 GB per concurrent compile) rather than letting a serial
 // loop leave the machine idle. TEST_JOBS overrides.

@@ -85,7 +85,15 @@ const supportedPayload = (value: Representation, callable = false): boolean =>
  * authenticate a native write. The ordinary descriptor engine retains setter,
  * inherited writable, extensibility and strict-assignment effects.
  */
+// One census per input object (`nativeCallableDataOwnerAuthorityOf`): slot
+// discovery's optional reads and its publication each asked for it again.
+const writeCensuses = new WeakMap<NativeCallableDataWriteInput, ReadonlyMap<IrOperation, NativeCallableDataWrite>>()
 export const nativeCallableDataWritesOf = (input: NativeCallableDataWriteInput): ReadonlyMap<IrOperation, NativeCallableDataWrite> => {
+  let census = writeCensuses.get(input)
+  if (census === undefined) writeCensuses.set(input, (census = nativeCallableDataWritesUncached(input)))
+  return census
+}
+const nativeCallableDataWritesUncached = (input: NativeCallableDataWriteInput): ReadonlyMap<IrOperation, NativeCallableDataWrite> => {
   const owners = nativeCallableDataOwnerAuthorityOf(input)
   const definitions = new Map<IrValueId, IrOperation>()
   const operations: IrOperation[] = []

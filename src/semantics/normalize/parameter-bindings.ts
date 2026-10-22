@@ -71,6 +71,7 @@ import {
   impliedPatternElementRootOf,
   impliedPatternParameterOf
 } from './derived-expression-type.js'
+import { readsStatedDynamicValue } from './stated-dynamic-value.js'
 import { isUnreducedTypeForm } from './unreduced-type-form.js'
 import { noHostProvidedNames, valueSymbolAt } from './unresolvable-names.js'
 import { isHomelessRecordArm, recordArmUnionStatementOf, recordHomeArmsAtRead } from './record-home-arms.js'
@@ -1883,6 +1884,10 @@ export const censusParameterBindings = (
       const cached = memo.get(node)
       if (cached !== undefined) return cached
       if (resolving.has(node)) return null
+      if (readsStatedDynamicValue(upstream.statedTypeAt, node)) {
+        memo.set(node, null)
+        return null
+      }
       resolving.add(node)
       const answer = compute(node)
       resolving.delete(node)
@@ -1915,6 +1920,10 @@ export const censusParameterBindings = (
       }
       const argument = implicitArgumentsReadTypeAt(checker, node, (owner) => upstream.implicitArgumentsTupleAt?.(owner) ?? null)
       if (argument) return argument
+      // A read of a field the prior round widened to `any` (and of anything
+      // read off it) is typed by the checker from the field's narrow inference;
+      // it carries whatever the field holds, exactly as an `any` read does.
+      if (readsStatedDynamicValue(upstream.statedTypeAt, node)) return null
       const type =
         (node.kind === ts.SyntaxKind.ThisKeyword ? concreteThisTypeOf(node) : null) ??
         objectAssignTargetType(checker, node) ??
@@ -2680,6 +2689,14 @@ export const censusParameterBindings = (
         const supplied = checker.getTypeAtLocation(argument)
         if (parameter.initializer && (supplied.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) {
           passed.push(supplied)
+          record(argument)
+          continue
+        }
+        // A read of a field the prior round widened supplies whatever the
+        // field holds, although the checker still types it from the field's
+        // narrow inference.
+        if (skipSilentSites && !resolved && readsStatedDynamicValue(upstream.statedTypeAt, argument)) {
+          passed.push(checker.getAnyType())
           record(argument)
           continue
         }

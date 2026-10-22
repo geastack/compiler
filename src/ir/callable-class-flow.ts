@@ -642,6 +642,24 @@ const ownedOperationKinds: ReadonlySet<IrOperation['kind']> = new Set<IrOperatio
   'super-initialize'
 ])
 
+/**
+ * The conversion nodes whose field views the solve installs: the ones the
+ * bodies cite, the program-level recipes', and everything they reach. This is
+ * the only thing the solve reads of `programConversions` (`nativeCallableFlowOf`).
+ */
+const flowViewNodesOf = (
+  bodies: readonly IrBody[],
+  conversions: (Pick<ConversionCensus, 'nodeById'> & Partial<Pick<ConversionCensus, 'nodeFor'>>) | undefined,
+  programConversions: readonly ProgramConversionRecipe[] | undefined
+): readonly ConversionNode[] => {
+  const citedViewNodes = bodies
+    .flatMap((body) => nativeFieldViewBodyCitationsOf(body).map((id) => conversions?.nodeById(id)))
+    .filter((node): node is ConversionNode => node !== null && node !== undefined)
+  for (const recipe of programConversions ?? [])
+    if (conversions?.nodeById(recipe.conversion.id) === recipe.conversion) citedViewNodes.push(recipe.conversion)
+  return [...recipeClosureOf(citedViewNodes, conversions?.nodeById).values()]
+}
+
 const computeNativeCallableFlow = (
   bodies: readonly IrBody[],
   placements: ReadonlyMap<DeclarationId, BindingPlacement>,
@@ -650,6 +668,27 @@ const computeNativeCallableFlow = (
   trace?: (read: Extract<IrOperation, { kind: 'get' }>, reason: string) => void,
   deriver?: Pick<RepresentationDeriver, 'layoutOf'> | null,
   programConversions?: readonly ProgramConversionRecipe[],
+  constructionTopology?: readonly IrBody[]
+): NativeCallableFlow =>
+  solveNativeCallableFlow(
+    flowViewNodesOf(bodies, conversions, programConversions),
+    bodies,
+    placements,
+    classes,
+    conversions,
+    trace,
+    deriver,
+    constructionTopology
+  )
+
+const solveNativeCallableFlow = (
+  viewNodes: readonly ConversionNode[],
+  bodies: readonly IrBody[],
+  placements: ReadonlyMap<DeclarationId, BindingPlacement>,
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  conversions?: Pick<ConversionCensus, 'nodeById'> & Partial<Pick<ConversionCensus, 'nodeFor'>>,
+  trace?: (read: Extract<IrOperation, { kind: 'get' }>, reason: string) => void,
+  deriver?: Pick<RepresentationDeriver, 'layoutOf'> | null,
   constructionTopology?: readonly IrBody[]
 ): NativeCallableFlow => {
   const propertyLayoutCache = new Map<string, boolean>()
@@ -919,12 +958,6 @@ const computeNativeCallableFlow = (
     }
     return [...found]
   }
-  const citedViewNodes = bodies
-    .flatMap((body) => nativeFieldViewBodyCitationsOf(body).map((id) => conversions?.nodeById(id)))
-    .filter((node): node is ConversionNode => node !== null && node !== undefined)
-  for (const recipe of programConversions ?? [])
-    if (conversions?.nodeById(recipe.conversion.id) === recipe.conversion) citedViewNodes.push(recipe.conversion)
-  const viewNodes = [...recipeClosureOf(citedViewNodes, conversions?.nodeById).values()]
   const viewShapes = new Set(nativeFieldViewPlansOf(viewNodes).map((plan) => plan.target.shapeId))
   const viewMethodFields = new Map<string, Map<string, Representation>>()
   for (const node of viewNodes) {
@@ -3321,6 +3354,8 @@ interface RememberedCallableFlow {
   readonly deriver: Pick<RepresentationDeriver, 'layoutOf'> | null
   readonly programConversions: readonly ProgramConversionRecipe[] | null
   readonly constructionTopology: readonly IrBody[] | null
+  /** The view nodes the answer was solved with (`flowViewNodesOf`). */
+  readonly viewNodes: readonly ConversionNode[]
   readonly flow: NativeCallableFlow
 }
 type ConversionsArgument = Parameters<typeof computeNativeCallableFlow>[3]
@@ -3702,7 +3737,12 @@ export const nativeCallableFlowOf = (...args: Parameters<typeof computeNativeCal
   let held = rememberedFlows.get(classes)
   if (held === undefined) rememberedFlows.set(classes, (held = []))
   const entries = held
-  const remember = (flow: NativeCallableFlow, replaced: number): NativeCallableFlow => {
+  // The request's view nodes, built once and only when an answer is solved or a
+  // remembered one differs from it only in its program conversions.
+  let requestViewNodes: readonly ConversionNode[] | null = null
+  const viewNodesOfRequest = (): readonly ConversionNode[] =>
+    (requestViewNodes ??= flowViewNodesOf(bodies, conversions, programConversions))
+  const remember = (flow: NativeCallableFlow, replaced: number, viewNodes: readonly ConversionNode[]): NativeCallableFlow => {
     if (replaced !== -1) entries.splice(replaced, 1)
     const kind = flowKindOf(programConversions, constructionTopology)
     for (let index = entries.length - 1; index >= 0; index--)
@@ -3714,6 +3754,7 @@ export const nativeCallableFlowOf = (...args: Parameters<typeof computeNativeCal
       deriver: deriver ?? null,
       programConversions: programConversions ?? null,
       constructionTopology: constructionTopology ?? null,
+      viewNodes,
       flow
     })
     return flow
@@ -3743,16 +3784,18 @@ export const nativeCallableFlowOf = (...args: Parameters<typeof computeNativeCal
         (entry.constructionTopology === null) !== (constructionTopology === undefined)
       )
         continue
-      const pairs = new Map<object, object>()
-      if (
-        !pairSameData(entry.bodies, bodies, pairs) ||
-        !pairSameData(entry.programConversions, programConversions ?? null, pairs) ||
-        !pairSameData(entry.constructionTopology, constructionTopology ?? null, pairs)
-      )
-        continue
+      let pairs = new Map<object, object>()
+      if (!pairSameData(entry.bodies, bodies, pairs)) continue
+      // Program conversions reach the answer only through its view nodes
+      // (`flowViewNodesOf`): recipes that differ but cite nodes already in the
+      // closure leave the very same view nodes, and so the same answer.
+      const withConversions = new Map(pairs)
+      if (pairSameData(entry.programConversions, programConversions ?? null, withConversions)) pairs = withConversions
+      else if (!sameNodeSequence(entry.viewNodes, viewNodesOfRequest())) continue
+      if (!pairSameData(entry.constructionTopology, constructionTopology ?? null, pairs)) continue
       const reused = flowOverCopy(entry.flow, pairs)
       if (reused === null) continue
-      return remember(reused, index)
+      return remember(reused, index, entry.viewNodes)
     }
     return null
   })()
@@ -3777,9 +3820,12 @@ export const nativeCallableFlowOf = (...args: Parameters<typeof computeNativeCal
     for (let index = entries.length - 1; index >= 0; index--)
       if (flowKindOf(entries[index]!.programConversions, entries[index]!.constructionTopology) === kind) entries.splice(index, 1)
   }
-  const flow = computeNativeCallableFlow(...args)
-  return remember(flow, -1)
+  const viewNodes = viewNodesOfRequest()
+  const flow = solveNativeCallableFlow(viewNodes, bodies, placements, classes, conversions, undefined, deriver, constructionTopology)
+  return remember(flow, -1, viewNodes)
 }
+const sameNodeSequence = (left: readonly ConversionNode[], right: readonly ConversionNode[]): boolean =>
+  left === right || (left.length === right.length && left.every((node, index) => node === right[index]))
 
 /** Compatibility view of the same execution/escape census; no second analysis policy. */
 export const closedClassFieldCallablesOf = (...args: Parameters<typeof nativeCallableFlowOf>): ReadonlyMap<IrValueId, CallCalleeIdentity> =>

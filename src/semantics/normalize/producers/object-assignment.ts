@@ -116,9 +116,13 @@ export const contributeObjectAssignmentElement = (
     memberTypeOf(context.checker, rawSource, key, node) ?? context.checker.getIndexTypeOfType(rawSource, ts.IndexKind.String)
   // The extracted property's type belongs to the source, not to the target
   // slot. A real conversion between those two is audited at the store.
-  const extractedType = context.types.typeOf(
-    rawMember ?? ((rawSource.flags & ts.TypeFlags.Any) !== 0 ? rawSource : context.checker.getUndefinedType())
-  )
+  // A member the source DECLARES but the checker types `any` -- a JavaScript
+  // field assigned from an unannotated parameter -- is unusable evidence to
+  // `memberTypeOf`, never an absent one: reading it as `undefined` made the
+  // store's value a dead `unreachableValue` that threw on the first run.
+  // It reads as the dynamic value it is, and the store converts it.
+  const declared = (rawSource.flags & ts.TypeFlags.Any) !== 0 || context.checker.getPropertyOfType(rawSource, key) !== undefined
+  const extractedType = context.types.typeOf(rawMember ?? (declared ? context.checker.getAnyType() : context.checker.getUndefinedType()))
   const sourceResult = semanticResultId(operationId(context.identities.nodeIdOf(pattern), 'destructuring', 0), 'value')
   const getId = mintOperationId(context.ordinals, candidate.id, 'destructuring')
   const get: DestructuringOperation = {

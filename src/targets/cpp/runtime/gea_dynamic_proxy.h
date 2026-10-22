@@ -213,6 +213,57 @@ inline Value dynamicAdd(const Value& left, const Value& right) {
   return Value::box(Value::Tag::Number, dynamicToNumber(a) + dynamicToNumber(b));
 }
 
+/**
+ * ECMA-262 7.2.13 IsLessThan over two dynamic values: 1 for true, 0 for false
+ * and -1 for undefined (a NaN on either side), which each relational operator
+ * reads its own way. ToPrimitive with hint Number runs in source order -- the
+ * left operand first unless the operator swapped them (`>`, `<=`). Two
+ * strings compare by code unit, as the typed string path compares them.
+ */
+inline int dynamicIsLessThan(const Value& x, const Value& y, bool leftFirst) {
+  Value px;
+  Value py;
+  if (leftFirst) {
+    px = dynamicToPrimitive(x, ToPrimitiveHint::Number);
+    py = dynamicToPrimitive(y, ToPrimitiveHint::Number);
+  } else {
+    py = dynamicToPrimitive(y, ToPrimitiveHint::Number);
+    px = dynamicToPrimitive(x, ToPrimitiveHint::Number);
+  }
+  if (px.tag() == Value::Tag::String && py.tag() == Value::Tag::String) return px.as<std::string>() < py.as<std::string>() ? 1 : 0;
+  if (px.tag() == Value::Tag::BigInt && py.tag() == Value::Tag::BigInt) return px.as<BigInt>() < py.as<BigInt>() ? 1 : 0;
+  if (px.tag() == Value::Tag::BigInt || py.tag() == Value::Tag::BigInt)
+    host::throwRuntimeError("TypeError", "comparing a BigInt with another type is not supported through dynamic values");
+  const double nx = dynamicToNumber(px);
+  const double ny = dynamicToNumber(py);
+  if (std::isnan(nx) || std::isnan(ny)) return -1;
+  return nx < ny ? 1 : 0;
+}
+
+/**
+ * ECMA-262 7.2.14 IsLooselyEqual over two dynamic values. Same-type operands
+ * compare strictly; `null` and `undefined` equal each other and nothing
+ * else; a string meets a number as a number, a boolean as a number, and an
+ * object meets a primitive through ToPrimitive. A BigInt meeting another type
+ * is refused by name rather than approximated.
+ */
+inline bool dynamicLooselyEquals(const Value& x, const Value& y) {
+  if (x.tag() == y.tag()) return Value::strictEquals(x, y);
+  const auto nullish = [](const Value& value) { return value.tag() == Value::Tag::Null || value.tag() == Value::Tag::Undefined; };
+  if (nullish(x) || nullish(y)) return nullish(x) && nullish(y);
+  if (x.tag() == Value::Tag::Number && y.tag() == Value::Tag::String) return x.as<double>() == host::detail::toNumber(y.as<std::string>());
+  if (x.tag() == Value::Tag::String && y.tag() == Value::Tag::Number) return host::detail::toNumber(x.as<std::string>()) == y.as<double>();
+  if (x.tag() == Value::Tag::Boolean) return dynamicLooselyEquals(Value::box(Value::Tag::Number, x.as<bool>() ? 1.0 : 0.0), y);
+  if (y.tag() == Value::Tag::Boolean) return dynamicLooselyEquals(x, Value::box(Value::Tag::Number, y.as<bool>() ? 1.0 : 0.0));
+  const bool xObject = isObjectValue(x);
+  const bool yObject = isObjectValue(y);
+  if (xObject && !yObject) return dynamicLooselyEquals(dynamicToPrimitive(x), y);
+  if (yObject && !xObject) return dynamicLooselyEquals(x, dynamicToPrimitive(y));
+  if (x.tag() == Value::Tag::BigInt || y.tag() == Value::Tag::BigInt)
+    host::throwRuntimeError("TypeError", "loose equality between a BigInt and another type is not supported through dynamic values");
+  return false;
+}
+
 inline bool dynamicArrayPrototypeHas(const PropertyKey& key) {
   if (key.isSymbol()) return false;
   std::size_t index = 0;
@@ -405,6 +456,76 @@ inline Value dynamicStringPrototypeGet(const PropertyKey& key) {
         if (method == "includes") return Value::box(Value::Tag::Boolean, runtime::string::includes(text, needle, position(second, 0.0)));
         if (method == "startsWith") return Value::box(Value::Tag::Boolean, runtime::string::startsWith(text, needle, position(second, 0.0)));
         return Value::box(Value::Tag::Boolean, runtime::string::endsWith(text, needle, position(second, std::numeric_limits<double>::infinity())));
+      }, gea::packEnvironment<std::string>(std::string(name)));
+      result.emplace(name, Value::boxMethod<1>(callable));
+    }
+    return result;
+  }();
+  const auto found = methods.find(key.text());
+  return found == methods.end() ? Value() : found->second;
+}
+
+/**
+ * `Number.prototype`'s methods read off a number the program holds as a
+ * dynamic value (`value.toFixed(3)` where `value` came out of a parsed
+ * document). Each is the native function the typed path already calls
+ * (`toFixed`, `toPrecision`, `toExponential`, `toStringRadix`), reached
+ * through the boxed receiver. A method not listed reads `undefined`, so
+ * calling it is the language's own TypeError rather than an answer this
+ * table invented.
+ */
+inline Value dynamicNumberPrototypeGet(const PropertyKey& key) {
+  if (key.isSymbol()) return Value();
+  using Args = gea::Ref<ArrayObject<Value>>;
+  using Method = CallableObject<Value(Value, Args)>;
+  static const std::map<std::string, Value> methods = [] {
+    std::map<std::string, Value> result;
+    for (const char* name : {"toFixed", "toPrecision", "toExponential", "toString", "valueOf"}) {
+      auto callable = Method(+[](void* environment, Value receiver, Args args) -> Value {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        const std::string& method = *gea::unpackEnvironment<std::string>(environment, slot);
+        if (receiver.tag() != Value::Tag::Number)
+          host::throwRuntimeError("TypeError", "Number.prototype." + method + " requires that 'this' be a Number");
+        const double number = detail::unboxAs<double>(receiver, Value::Tag::Number, "Number.prototype method receiver");
+        const Value first = args->size() ? args->readElement(0) : Value();
+        const bool given = first.tag() != Value::Tag::Undefined;
+        const auto string = [](std::string value) { return Value::box(Value::Tag::String, std::move(value)); };
+        if (method == "valueOf") return Value::box(Value::Tag::Number, number);
+        if (method == "toString") return string(given ? host::detail::toStringRadix(number, dynamicToNumber(first)) : host::detail::toString(number));
+        // ECMA-262 21.1.3.5 step 2: an undefined precision is ToString(x).
+        if (method == "toPrecision") return string(given ? host::detail::toPrecision(number, dynamicToNumber(first)) : host::detail::toString(number));
+        // ECMA-262 21.1.3.3: an undefined fractionDigits is ToIntegerOrInfinity(undefined), 0.
+        const double digits = given ? dynamicToNumber(first) : 0.0;
+        if (method == "toFixed") return string(host::detail::toFixed(number, std::isnan(digits) ? 0.0 : digits));
+        // ECMA-262 21.1.3.2: an undefined fractionDigits means as many digits
+        // as the value needs, a form the typed path does not spell either.
+        if (!given) host::throwRuntimeError("TypeError", "Number.prototype.toExponential without fractionDigits is not supported through a dynamic receiver");
+        return string(host::detail::toExponential(number, std::isnan(digits) ? 0.0 : digits));
+      }, gea::packEnvironment<std::string>(std::string(name)));
+      result.emplace(name, Value::boxMethod<1>(callable));
+    }
+    return result;
+  }();
+  const auto found = methods.find(key.text());
+  return found == methods.end() ? Value() : found->second;
+}
+
+/** `Boolean.prototype`'s two methods read off a boolean held as a dynamic value. */
+inline Value dynamicBooleanPrototypeGet(const PropertyKey& key) {
+  if (key.isSymbol()) return Value();
+  using Args = gea::Ref<ArrayObject<Value>>;
+  using Method = CallableObject<Value(Value, Args)>;
+  static const std::map<std::string, Value> methods = [] {
+    std::map<std::string, Value> result;
+    for (const char* name : {"toString", "valueOf"}) {
+      auto callable = Method(+[](void* environment, Value receiver, Args) -> Value {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        const std::string& method = *gea::unpackEnvironment<std::string>(environment, slot);
+        if (receiver.tag() != Value::Tag::Boolean)
+          host::throwRuntimeError("TypeError", "Boolean.prototype." + method + " requires that 'this' be a Boolean");
+        const bool value = detail::unboxAs<bool>(receiver, Value::Tag::Boolean, "Boolean.prototype method receiver");
+        if (method == "valueOf") return Value::box(Value::Tag::Boolean, value);
+        return Value::box(Value::Tag::String, std::string(value ? "true" : "false"));
       }, gea::packEnvironment<std::string>(std::string(name)));
       result.emplace(name, Value::boxMethod<1>(callable));
     }

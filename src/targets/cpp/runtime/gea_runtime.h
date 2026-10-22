@@ -19840,6 +19840,9 @@ struct LiteralReadCache {
   std::atomic<const ValueMetadata*> fieldOn[2]{};
   std::atomic<std::uint8_t> nextField{0};
   std::atomic<std::int8_t> stringAbsent{-1};
+  // The same fact for a number and for a boolean: their prototype tables hold nothing under this key.
+  std::atomic<std::int8_t> numberAbsent{-1};
+  std::atomic<std::int8_t> booleanAbsent{-1};
   // The same fact for an Array: this key is neither `length` nor an index and the Array prototype table holds nothing under it.
   std::atomic<std::int8_t> arrayAbsent{-1};
 };
@@ -22115,8 +22118,12 @@ inline Value dynamicArrayPrototypeGet(const PropertyKey&, const Value&);
 inline Ref<ArrayObject<Value>> arrayPrototypeObject();
 inline bool dynamicArrayPrototypeHas(const PropertyKey&);
 inline Value dynamicStringPrototypeGet(const PropertyKey&);
+inline Value dynamicNumberPrototypeGet(const PropertyKey&);
+inline Value dynamicBooleanPrototypeGet(const PropertyKey&);
 inline Value dynamicFunctionPrototypeGet(const PropertyKey&);
 inline double dynamicToNumber(const Value&);
+inline int dynamicIsLessThan(const Value&, const Value&, bool);
+inline bool dynamicLooselyEquals(const Value&, const Value&);
 inline std::string dynamicToString(const Value&);
 namespace detail {
 [[noreturn]] inline void refusePayloadMismatch(const char* site);
@@ -33368,10 +33375,14 @@ inline Value Value::getProperty(const PropertyKey& key, const Value& receiver) c
     }
   }
   if (tag_ == Tag::Object || tag_ == Tag::Function) detail::refuseOpaquePropertyAccess("a property read", key);
-  // Every remaining box is a primitive, whose properties all live on a
-  // prototype this runtime does not model. `undefined` is what the language
-  // answers for a key no prototype in the chain holds, and this runtime's
-  // chain for a primitive is empty.
+  // Every remaining box is a primitive, whose properties live on its
+  // prototype: `Number.prototype` and `Boolean.prototype` answer from their
+  // method tables, and a key no table holds reads `undefined`, as the
+  // language answers for a key no prototype in the chain holds.
+  if (metadata_->fields == nullptr && metadata_->elements == nullptr) {
+    if (tag_ == Tag::Number) return dynamicNumberPrototypeGet(key);
+    if (tag_ == Tag::Boolean) return dynamicBooleanPrototypeGet(key);
+  }
   return Value();
 }
 
@@ -33423,11 +33434,22 @@ inline Value Value::getLiteralProperty(const PropertyKey& key, detail::LiteralRe
     }
   }
   if (!proxy_ && !dynamic_) {
-    // A literal-keyed read of a primitive: a number, boolean or bigint reads every key
-    // as `undefined` (`getProperty` falls through to its closing return for
-    // them), and a serializer may ask each value it visits for a hook method.
-    if ((tag_ == Tag::Number || tag_ == Tag::Boolean || tag_ == Tag::BigInt) && metadata_->fields == nullptr && metadata_->elements == nullptr)
-      return Value();
+    // A literal-keyed read of a primitive. A number or boolean answers from
+    // its prototype's method table, and the miss -- which is what a
+    // serializer asking each value it visits for a hook method sees -- is
+    // remembered per key, as a string's is. A bigint reads every key as
+    // `undefined` (`getProperty`'s closing return).
+    if ((tag_ == Tag::Number || tag_ == Tag::Boolean) && metadata_->fields == nullptr && metadata_->elements == nullptr) {
+      const bool number = tag_ == Tag::Number;
+      std::atomic<std::int8_t>& slot = number ? cache.numberAbsent : cache.booleanAbsent;
+      std::int8_t absent = slot.load(relaxed);
+      if (absent < 0) {
+        absent = (number ? dynamicNumberPrototypeGet(key) : dynamicBooleanPrototypeGet(key)).tag() == Tag::Undefined ? 1 : 0;
+        slot.store(absent, relaxed);
+      }
+      return absent == 1 ? Value() : number ? dynamicNumberPrototypeGet(key) : dynamicBooleanPrototypeGet(key);
+    }
+    if (tag_ == Tag::BigInt && metadata_->fields == nullptr && metadata_->elements == nullptr) return Value();
     if (tag_ == Tag::String) {
       std::int8_t absent = cache.stringAbsent.load(relaxed);
       if (absent < 0) {
@@ -33442,12 +33464,6 @@ inline Value Value::getLiteralProperty(const PropertyKey& key, detail::LiteralRe
         cache.stringAbsent.store(absent, relaxed);
       }
       if (absent == 1) return Value();
-    } else if ((tag_ == Tag::Number || tag_ == Tag::Boolean) && metadata_->fields == nullptr && metadata_->elements == nullptr) {
-      // `getProperty`'s own tail for a bare number or boolean: no field table,
-      // no elements, no prototype this runtime models, so every key reads
-      // `undefined`. A serializer may ask each number and boolean it visits for
-      // a hook method, and the ten branches before that tail were the whole cost.
-      return Value();
     } else if (tag_ == Tag::Object && metadata_->fields != nullptr && metadata_->elements == nullptr) {
       for (const auto& entry : cache.absentOn) {
         if (entry.load(relaxed) != metadata_) continue;
