@@ -220,3 +220,23 @@ test('an untyped read off the clone that yields the clone itself is still follow
   sameAnswers(published)
   for (const call of CYCLE_CALLS) assert.equal(published[0]!.get(call), null, call)
 })
+
+const permutations = (list: readonly string[]): (readonly string[])[] =>
+  list.length <= 1
+    ? [list]
+    : list.flatMap((item, at) => permutations([...list.slice(0, at), ...list.slice(at + 1)]).map((rest) => [item, ...rest]))
+
+test('the clone cycle answers the same in every order its calls can be asked in', () => {
+  // Call targets are shared across the proofs of a round. A shared success is
+  // only order independent while no top-level walk refuses what nested walks,
+  // meeting the family parked, admit; all 720 orders must give one answer.
+  const program = programOf(cycle)
+  const orders = permutations(CYCLE_CALLS)
+  assert.equal(orders.length, 720)
+  const expected = answersIn(program, CYCLE_CALLS)
+  for (const order of orders) {
+    const answers = answersIn(program, order)
+    for (const call of CYCLE_CALLS) assert.equal(answers.get(call), expected.get(call), `${call} in order ${order.join(' | ')}`)
+  }
+  assert.equal(expected.get('super.copy(source)'), 'Material.copy')
+})

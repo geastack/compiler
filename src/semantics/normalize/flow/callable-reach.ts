@@ -6124,7 +6124,31 @@ const closedMemberCallableUses = (
         { roots, terminalUse: () => null }
       )
     })
+  /**
+   * Every source body one call can enter, shared across the proofs of a round
+   * exactly as a provenance answer is (`sharedAnswerOf`): valid wherever the
+   * member and family parks it leaned on are in force again, and replayed
+   * with the open uses and intrinsic obligations its computation reported.
+   *
+   * Target identity is a question about the program and the parks, not about
+   * the proof that asks it: the bodies are declarations, and every proof the
+   * answer rests on -- slot closure, receiver family, caller inventory -- is
+   * a nested proof that reports its parks on the trail. Unshared, each proof
+   * re-derived the same targets from scratch.
+   *
+   * A success found under a park is replayed wherever that park is in force
+   * again, so sharing is order independent only while a family's top-level
+   * walk agrees with the nested ones that meet it parked. It did not for the
+   * clone idiom until an untyped read off the clone closed through the key
+   * plan's carriers; clone-cycle-entry-order.test.ts asks that cycle's six
+   * calls in all 720 orders and requires one answer.
+   */
   const invocationTargetsOf = (call: ts.CallExpression): readonly ts.SignatureDeclaration[] | null => {
+    const answer = sharedAnswerOf(`call-targets:${nodePathToken(call)}`, () => invocationTargetsUncached(call))
+    const ledger = deferredIntrinsicProtocolLedgerOf(flow)
+    return answer.requirements.length === 0 || ledger?.include(answer.requirements) === true ? answer.value : null
+  }
+  const invocationTargetsUncached = (call: ts.CallExpression): readonly ts.SignatureDeclaration[] | null => {
     // Ordinary source interface member calls belong to the joint value/storage/use
     // graph. A refusal is final for this domain: the former receiver-origin
     // fallback would reopen the same field in a fresh proof session.
