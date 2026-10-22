@@ -7,6 +7,7 @@ import {
   disjointUnionMembersOf,
   exactEmptyObjectLiteralType,
   indexedTypeOf,
+  isGlobalObjectConstructor,
   explicitThisCallReturnType,
   overloadInvariantReturnTypeAt,
   joinOfWrites,
@@ -25,9 +26,10 @@ import { createCensusComputedKeysOf, type CensusComputedKeysOf } from './host-mu
 import { closedCallableAuthorityOf } from './flow/callable-reach.js'
 import { argumentsObjectUsesAt } from './arguments-objects.js'
 import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
-import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
+import { forEachReachableStatement, nodeIsReachable, type ProgramReachability } from './reachability.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
 import { NullableMemo } from './nullable-memo.js'
+import { readsStatedDynamicValue } from './stated-dynamic-value.js'
 
 /**
  * The type an unannotated class FIELD holds, when the program never declares
@@ -148,6 +150,8 @@ export interface FieldBindingCensus {
   readonly statedTypeAt: (node: ts.Node) => ts.Type | null
   /** How many field symbols this census bound, for measurement. */
   readonly boundCount: number
+  /** How many unstated fields this census widened to `any` because a write stores a value nothing types -- see `widenDynamicallyWrittenFields`. */
+  readonly widenedCount: number
   /**
    * Every field symbol this census could not bind, one `CensusRefusal` each --
    * the owner is what makes this a list something downstream can act on,
@@ -166,11 +170,13 @@ export const emptyFieldBindingCensus: FieldBindingCensus = {
   unionArmsAt: () => null,
   statedTypeAt: () => null,
   boundCount: 0,
+  widenedCount: 0,
   refusals: [],
   refusalOf: () => null
 }
 
 const WIDENED = process.env['GEA_FLOW_WIDE'] === '1'
+const WIDEN_DEBUG = process.env['GEA_WIDEN_DEBUG'] === '1'
 
 const isAnyType = (type: ts.Type): boolean => (type.flags & ts.TypeFlags.Any) !== 0
 
@@ -855,17 +861,24 @@ export const censusFieldBindings = (
     const keySymbol = checker.getSymbolAtLocation(key)
     return keySymbol && checker.getSymbolAtLocation(read.argumentExpression) === keySymbol ? read.expression : null
   }
-  /** Each proven-key store into `symbol`: the type it writes, or `null` where nothing types it. */
-  const keyedWriteTypesOf = (symbol: ts.Symbol): readonly (ts.Type | null)[] => {
-    const owners = new Set(
+  /** The classes that declare `symbol`'s storage. */
+  const ownersOf = (symbol: ts.Symbol): ReadonlySet<ts.ClassLikeDeclaration> =>
+    new Set(
       (symbol.declarations ?? []).map((declaration) => ts.findAncestor(declaration, ts.isClassLike)).filter((owner) => owner !== undefined)
     )
-    if (owners.size === 0) return []
+  /** Whether a store into an instance of `owner` can land in storage one of `owners` declares. */
+  const reachesOwners = (owners: ReadonlySet<ts.ClassLikeDeclaration>, owner: ts.ClassLikeDeclaration): boolean =>
+    [...owners].some((declared) => ancestryOf(declared).has(owner) || ancestryOf(owner).has(declared))
+  /** Every keyed store, proven or not, that can land in `symbol`'s storage. */
+  const keyedStoresInto = (symbol: ts.Symbol): readonly KeyedStore[] => {
+    const owners = ownersOf(symbol)
+    return owners.size === 0 ? [] : keyedStoresNamed(symbol.name).filter((store) => reachesOwners(owners, store.owner))
+  }
+  /** Each proven-key store into `symbol`: the type it writes, or `null` where nothing types it. */
+  const keyedWriteTypesOf = (symbol: ts.Symbol): readonly (ts.Type | null)[] => {
     const answers: (ts.Type | null)[] = []
     const requirements: IntrinsicProtocolRequirement[] = []
-    for (const store of keyedStoresNamed(symbol.name)) {
-      const related = [...owners].some((owner) => ancestryOf(owner).has(store.owner) || ancestryOf(store.owner).has(owner))
-      if (!related) continue
+    for (const store of keyedStoresInto(symbol)) {
       requirements.push(...store.requirements)
       const source = enumeratedSourceOf(store.value, store.key)
       if (source) {
@@ -1458,14 +1471,539 @@ export const censusFieldBindings = (
     return answer
   }
 
+  /**
+   * Storage the program never typed is laid out from what its writes say, and
+   * a write of a value nothing types says nothing -- yet it stores whatever
+   * the value is. `this.vertexShader = 'default'` in a constructor and
+   * `this.vertexShader = source.vertexShader` in a `copy(source)` whose
+   * `source` no census can type: the checker answers `string` from the
+   * constructor alone (and the relaxed phase above joins only the writes that
+   * speak), the copy converts its boxed value through a checked unbox, and the
+   * first source without the key aborts where Node stores `undefined`.
+   *
+   * Such a field can hold any value, so it holds `any`. Published through
+   * `statedTypeAt`, which the layout resolver and the member mapper both take
+   * ahead of the checker, so the slot, its writes and every read of it agree.
+   * A field written only with typed values -- including a copy whose source
+   * the parameter census typed -- keeps its narrow carrier. A program that
+   * typed the field (an annotation, a JSDoc tag) keeps its statement.
+   */
+  const statesNothingAbout = (declaration: ts.Declaration): boolean => {
+    if (isBareFieldDeclaration(checker, declaration)) return true
+    if (!isAssignmentDeclaration(declaration)) return false
+    const jsDocType = ts.getJSDocType(declaration)
+    return !jsDocType || jsDocTypeStatesNothing(checker, jsDocType)
+  }
+  const widenedFields = new Set<ts.Symbol>()
+  /**
+   * The candidate field a member read copies, by declaration: a read through a
+   * receiver only the census typed names the instance type's own property
+   * symbol, a different object from the one the writes declared, and that one
+   * was never resolved -- `this.text = source.text` with `source` bound to
+   * the class itself would otherwise read as a value nothing types.
+   */
+  const copiedFieldOf = (read: ts.PropertyAccessExpression): ts.Symbol | null => {
+    const symbol = memberSymbolAt(read)
+    if (!symbol) return null
+    if (candidateSymbols.has(symbol) || statedFieldSymbols.has(symbol)) return symbol
+    const first = symbol.declarations?.[0]
+    return first === undefined ? null : (candidateByDeclaration().get(first) ?? null)
+  }
+  let candidatesByDeclaration: Map<ts.Node, ts.Symbol> | undefined
+  const candidateByDeclaration = (): ReadonlyMap<ts.Node, ts.Symbol> => {
+    if (candidatesByDeclaration) return candidatesByDeclaration
+    candidatesByDeclaration = new Map()
+    for (const symbol of [...candidateSymbols, ...statedFieldSymbols])
+      for (const declaration of symbol.declarations ?? []) candidatesByDeclaration.set(declaration, symbol)
+    return candidatesByDeclaration
+  }
+  const readsWidenedField = (value: ts.Expression): boolean => {
+    const unwrapped = unwrapParens(value)
+    if (ts.isPropertyAccessExpression(unwrapped)) {
+      const symbol = copiedFieldOf(unwrapped)
+      return symbol !== null && widenedFields.has(symbol)
+    }
+    if (ts.isConditionalExpression(unwrapped)) return readsWidenedField(unwrapped.whenTrue) || readsWidenedField(unwrapped.whenFalse)
+    if (ts.isBinaryExpression(unwrapped)) {
+      const operator = unwrapped.operatorToken.kind
+      if (
+        operator === ts.SyntaxKind.QuestionQuestionToken ||
+        operator === ts.SyntaxKind.BarBarToken ||
+        operator === ts.SyntaxKind.AmpersandAmpersandToken
+      )
+        return readsWidenedField(unwrapped.left) || readsWidenedField(unwrapped.right)
+    }
+    return false
+  }
+  /**
+   * Whether `source` -- an object a field's value is read out of under
+   * `key` (`null` for a merge or a keyed copy, which reads only the keys the
+   * object holds) -- can hand the field a value nothing types.
+   *
+   * A source the census typed reads that layout, where a member it lacks is
+   * an absence, not an unknown value. A parameter no census typed holds what
+   * its callers pass: it is such a source only when some call site passes an
+   * object nothing types, or a record that lacks `key` or declares it `any`.
+   * Every caller passing a typed object -- a vector, a camera, an options
+   * literal -- leaves the read typed although the parameter itself is boxed.
+   * A class instance is not taken to lack a member a subclass may declare.
+   */
+  const untypedSource = (source: ts.Expression | ts.ParameterDeclaration, key: string | null, depth = 0): boolean => {
+    if (ts.isParameter(source)) return parameterSuppliesUntypedSource(source, key, depth)
+    if (readsWidenedField(source)) return true
+    if ((checker.getTypeAtLocation(source).flags & ts.TypeFlags.Any) === 0) return false
+    if (parameters.statedTypeAt(source) || receiverTypeOf(source)) return false
+    const unwrapped = unwrapParens(source)
+    // An object the checker types `any` is only as untyped as where it came
+    // from: a call's result, a member read, a `const` holding either.
+    if (ts.isCallExpression(unwrapped) || ts.isNewExpression(unwrapped)) return callReturnsDynamicValue(unwrapped, depth)
+    if (ts.isPropertyAccessExpression(unwrapped) || ts.isElementAccessExpression(unwrapped)) return writesDynamicValue(unwrapped, depth + 1)
+    if (!ts.isIdentifier(unwrapped)) return true
+    const declaration = checker.getSymbolAtLocation(unwrapped)?.valueDeclaration
+    if (declaration && ts.isParameter(declaration)) return parameterSuppliesUntypedSource(declaration, key, depth)
+    if (declaration && ts.isVariableDeclaration(declaration) && parameters.typeAt(declaration)) return false
+    if (
+      declaration &&
+      ts.isVariableDeclaration(declaration) &&
+      declaration.initializer &&
+      (ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) !== 0 &&
+      depth <= 8
+    )
+      return untypedSource(declaration.initializer, key, depth + 1)
+    return true
+  }
+  /** The values a parameter receives: its default, its call sites' arguments, and its body's own assignments to it. */
+  const valuesReceivedBy = (parameter: ts.ParameterDeclaration): readonly ts.Expression[] => {
+    const symbol = ts.isIdentifier(parameter.name) ? checker.getSymbolAtLocation(parameter.name) : undefined
+    const received: ts.Expression[] = parameter.initializer ? [parameter.initializer] : []
+    for (const write of symbol ? flow.writesToSymbol(symbol) : [])
+      if (
+        write.value !== null &&
+        write.slot === 'whole' &&
+        (write.edge === 'call-argument' ||
+          write.edge === 'super-argument' ||
+          write.edge === 'identifier-assignment' ||
+          write.edge === 'logical-assignment')
+      )
+        received.push(write.value)
+    return received
+  }
+  /** Whether a typed object of `type` can answer `key` with an absence or an `any`. */
+  const typedSourceLeavesKeyUntyped = (type: ts.Type, key: string, at: ts.Node): boolean => {
+    const holder = checker.getNonNullableType(type)
+    const arms = holder.isUnion() ? holder.types : [holder]
+    return arms.some((arm) => {
+      if ((arm.flags & ts.TypeFlags.Object) === 0) return false
+      const member = checker.getPropertyOfType(arm, key)
+      if (!member) {
+        if (isClassInstanceType(arm)) return false
+        const index = checker.getIndexTypeOfType(arm, ts.IndexKind.String)
+        return index === undefined || (index.flags & ts.TypeFlags.Any) !== 0
+      }
+      const declaration = member.valueDeclaration
+      if (declaration && ts.isPropertyAssignment(declaration)) return writesDynamicValue(declaration.initializer)
+      if (declaration && ts.isShorthandPropertyAssignment(declaration)) return writesDynamicValue(declaration.name)
+      if (declaration && ts.isBinaryExpression(declaration)) return false
+      return (checker.getTypeOfSymbolAtLocation(member, at).flags & ts.TypeFlags.Any) !== 0
+    })
+  }
+  const visitingSourceParameters = new Set<ts.ParameterDeclaration>()
+  const parameterSuppliesUntypedSource = (parameter: ts.ParameterDeclaration, key: string | null, depth: number): boolean => {
+    if (parameters.typeAt(parameter)) return false
+    // A destructured parameter names no slot the flow index files call-site
+    // arguments against, so its callers cannot be asked: its own type is the
+    // pattern's implied record of `any` members, and that is what it supplies.
+    if (!ts.isIdentifier(parameter.name)) return true
+    if (depth > 8 || visitingSourceParameters.has(parameter)) return false
+    visitingSourceParameters.add(parameter)
+    try {
+      return valuesReceivedBy(parameter).some((value) => {
+        if (untypedSource(value, key, depth + 1)) return true
+        if (key === null) return false
+        const type = knownOrResolve(value)
+        return type !== null && typedSourceLeavesKeyUntyped(type, key, value)
+      })
+    } finally {
+      visitingSourceParameters.delete(parameter)
+    }
+  }
+  /**
+   * A member read off a receiver the census typed, whose own type for the
+   * member is `any`: an index signature of `any` (`Record<string, any>`),
+   * a member a statement declares `any`, or an object literal's member
+   * filled with a dynamic value. The layout knows the receiver and not what
+   * the member holds. A member the receiver lacks is an absence, and a
+   * literal's member holds what its initializer does.
+   */
+  const readsDeclaredDynamicMember = (read: ts.PropertyAccessExpression | ts.ElementAccessExpression, depth: number): boolean => {
+    const receiver = receiverTypeOf(read.expression)
+    if (!receiver) return false
+    const holder = checker.getNonNullableType(receiver)
+    const key = ts.isPropertyAccessExpression(read) ? read.name.text : literalMemberNameOf(read)
+    const isAny = (type: ts.Type | undefined): boolean => type !== undefined && (type.flags & ts.TypeFlags.Any) !== 0
+    if (key === null) {
+      const keyType = ts.isElementAccessExpression(read) ? checker.getTypeAtLocation(read.argumentExpression) : undefined
+      const numeric = keyType !== undefined && (keyType.flags & ts.TypeFlags.NumberLike) !== 0
+      return isAny(checker.getIndexTypeOfType(holder, numeric ? ts.IndexKind.Number : ts.IndexKind.String) ?? undefined)
+    }
+    const member = checker.getPropertyOfType(holder, key)
+    if (!member) return isAny(checker.getIndexTypeOfType(holder, ts.IndexKind.String) ?? undefined)
+    const declaration = member.valueDeclaration
+    if (declaration && ts.isPropertyAssignment(declaration)) return writesDynamicValue(declaration.initializer, depth + 1)
+    if (declaration && ts.isShorthandPropertyAssignment(declaration)) return writesDynamicValue(declaration.name, depth + 1)
+    if (declaration && ts.isBinaryExpression(declaration)) return false
+    return isAny(checker.getTypeOfSymbolAtLocation(member, read))
+  }
+  /** The object a binding element destructures, when the pattern is one level deep. */
+  const destructuredSourceOf = (element: ts.BindingElement): ts.Expression | ts.ParameterDeclaration | null => {
+    if (element.dotDotDotToken || !ts.isObjectBindingPattern(element.parent)) return null
+    const holder = element.parent.parent
+    if (ts.isParameter(holder)) return holder
+    return ts.isVariableDeclaration(holder) && holder.initializer ? holder.initializer : null
+  }
+  /** Whether `value` reaches its field as an untyped dynamic value, whatever it holds. */
+  const writesDynamicValue = (value: ts.Expression, depth = 0): boolean => {
+    if (depth > 8) return false
+    if (readsWidenedField(value)) return true
+    if ((checker.getTypeAtLocation(value).flags & ts.TypeFlags.Any) === 0) return false
+    const unwrapped = unwrapParens(value)
+    // A copy out of another candidate field holds what that field holds:
+    // dynamic exactly when that field is widened, which the fixpoint decides.
+    if (ts.isPropertyAccessExpression(unwrapped) && copiedFieldOf(unwrapped)) return false
+    if (parameters.statedTypeAt(value) || exactEmptyObjectLiteralType(checker, value)) return false
+    // The checker's `any` for a conditional or a logical fallback is only as
+    // dynamic as its operands: `opts ? opts.deduplicate : null` or
+    // `opts.pageOffset || 0` over an `opts` the census typed stores that
+    // record's member, an absence, or the literal.
+    if (ts.isConditionalExpression(unwrapped))
+      return writesDynamicValue(unwrapped.whenTrue, depth + 1) || writesDynamicValue(unwrapped.whenFalse, depth + 1)
+    if (ts.isBinaryExpression(unwrapped)) {
+      const operator = unwrapped.operatorToken.kind
+      if (
+        operator === ts.SyntaxKind.QuestionQuestionToken ||
+        operator === ts.SyntaxKind.BarBarToken ||
+        operator === ts.SyntaxKind.AmpersandAmpersandToken
+      )
+        return writesDynamicValue(unwrapped.left, depth + 1) || writesDynamicValue(unwrapped.right, depth + 1)
+    }
+    // A member read out of an untyped object hands the field whatever the
+    // object holds: `source.label`, `values[ key ]`, a binding destructured
+    // from one, or a `const` holding one. Off a typed receiver it is dynamic
+    // only where the receiver declares the member `any`.
+    if (ts.isPropertyAccessExpression(unwrapped) || ts.isElementAccessExpression(unwrapped)) {
+      if (resolveExpr(value) !== null) return false
+      const key = ts.isPropertyAccessExpression(unwrapped) ? unwrapped.name.text : literalMemberNameOf(unwrapped)
+      return untypedSource(unwrapped.expression, key, depth) || readsDeclaredDynamicMember(unwrapped, depth)
+    }
+    if (ts.isCallExpression(unwrapped) || ts.isNewExpression(unwrapped)) return callReturnsDynamicValue(unwrapped, depth)
+    if (!ts.isIdentifier(unwrapped)) return false
+    const declaration = checker.getSymbolAtLocation(unwrapped)?.valueDeclaration
+    if (declaration && ts.isParameter(declaration)) return parameterReceivesDynamicValue(declaration, depth)
+    if (declaration && ts.isBindingElement(declaration)) {
+      const source = destructuredSourceOf(declaration)
+      const name = declaration.propertyName ?? declaration.name
+      const key = ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name) ? name.text : null
+      return source !== null && untypedSource(source, key, depth)
+    }
+    if (!declaration || !ts.isVariableDeclaration(declaration) || !declaration.initializer || !ts.isIdentifier(declaration.name))
+      return false
+    if ((ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) === 0) return false
+    return writesDynamicValue(declaration.initializer, depth + 1)
+  }
+  /**
+   * A parameter no census typed holds what its callers pass, and what its own
+   * body assigns it: dynamic only where one of those is. Every caller passing
+   * a typed value -- a vector's `set( x, y, z )` called with numbers and with
+   * a typed record's members -- leaves the field it fills native, although
+   * the parameter itself is boxed. A parameter that reaches itself (a
+   * recursive call forwarding it) adds nothing.
+   */
+  const visitingParameters = new Set<ts.ParameterDeclaration>()
+  const parameterReceivesDynamicValue = (parameter: ts.ParameterDeclaration, depth: number): boolean => {
+    if (parameters.typeAt(parameter) || visitingParameters.has(parameter) || !ts.isIdentifier(parameter.name)) return false
+    const symbol = checker.getSymbolAtLocation(parameter.name)
+    if (!symbol) return false
+    visitingParameters.add(parameter)
+    try {
+      const dynamic = valuesReceivedBy(parameter).find((value) => writesDynamicValue(value, depth + 1))
+      if (dynamic && WIDEN_DEBUG) {
+        const file = dynamic.getSourceFile()
+        const line = file.getLineAndCharacterOfPosition(dynamic.getStart()).line + 1
+        process.stderr.write(
+          `[WIDEN-ARG] ${parameter.name.getText()} <- ${file.fileName}:${line} ${dynamic.getText().replace(/\s+/g, ' ').slice(0, 100)}\n`
+        )
+      }
+      return dynamic !== undefined
+    } finally {
+      visitingParameters.delete(parameter)
+    }
+  }
+  /**
+   * A call the checker types `any` and no census resolved: a host function
+   * declared to return `any` (`JSON.parse`) or a callee nothing names
+   * returns whatever it produces; a function of the program returns what its
+   * `return` statements do.
+   */
+  const visitingCallees = new Set<ts.Node>()
+  const isGlobalObjectCreate = (call: ts.CallExpression | ts.NewExpression): boolean => {
+    const target = call.expression
+    return (
+      ts.isCallExpression(call) &&
+      ts.isPropertyAccessExpression(target) &&
+      target.name.text === 'create' &&
+      isGlobalObjectConstructor(checker, target.expression, checker.getTypeAtLocation(target.expression))
+    )
+  }
+  /**
+   * `attribute.getX( index )` where `attribute` is a parameter no census
+   * typed: the checker names no callee, but each call site passes an object
+   * the census types, and the method that object declares returns what its
+   * own `return` statements do. A receiver nothing types at some call site
+   * makes the result dynamic; any other receiver is asked through the
+   * census's own type for it, and one the census cannot type is no evidence.
+   * A call that is not a method call returns whatever it produces.
+   */
+  const methodOfUntypedReceiverReturnsDynamicValue = (call: ts.CallExpression | ts.NewExpression, depth: number): boolean => {
+    const target = unwrapParens(call.expression)
+    if (!ts.isCallExpression(call) || !ts.isPropertyAccessExpression(target)) return true
+    const receiver = unwrapParens(target.expression)
+    const declaration = ts.isIdentifier(receiver) ? checker.getSymbolAtLocation(receiver)?.valueDeclaration : undefined
+    const isUntypedParameter = declaration !== undefined && ts.isParameter(declaration) && !parameters.typeAt(declaration)
+    if (depth > 8) return false
+    if (!isUntypedParameter) {
+      // Any other receiver: the census's own type for it, when it has one.
+      if (untypedSource(receiver, null, depth + 1)) return true
+      const type = knownOrResolve(receiver)
+      return type !== null && methodOfTypeReturnsDynamicValue(type, target.name.text, call, depth)
+    }
+    const parameter = declaration as ts.ParameterDeclaration
+    if (visitingSourceParameters.has(parameter)) return false
+    visitingSourceParameters.add(parameter)
+    try {
+      return valuesReceivedBy(parameter).some((value) => {
+        if (untypedSource(value, null, depth + 1)) return true
+        const type = knownOrResolve(value)
+        return type !== null && methodOfTypeReturnsDynamicValue(type, target.name.text, call, depth)
+      })
+    } finally {
+      visitingSourceParameters.delete(parameter)
+    }
+  }
+  /** Whether calling `name` on an object of `type` can return a value nothing types. */
+  const methodOfTypeReturnsDynamicValue = (type: ts.Type, name: string, call: ts.CallExpression, depth: number): boolean => {
+    const holder = checker.getNonNullableType(type)
+    return (holder.isUnion() ? holder.types : [holder]).some((arm) => {
+      const method = checker.getPropertyOfType(arm, name)
+      const body = method?.valueDeclaration
+      if (!method || !body) return false
+      if (body.getSourceFile().isDeclarationFile) {
+        const signatures = checker.getTypeOfSymbolAtLocation(method, call).getCallSignatures()
+        return signatures.some((signature) => (checker.getReturnTypeOfSignature(signature).flags & ts.TypeFlags.Any) !== 0)
+      }
+      return ts.isFunctionLike(body) && functionReturnsDynamicValue(body, depth)
+    })
+  }
+  /** Whether one of a program function's own `return` statements hands back a value nothing types. */
+  const functionReturnsDynamicValue = (callee: ts.SignatureDeclaration, depth: number): boolean => {
+    if (!('body' in callee) || !callee.body) return true
+    if (visitingCallees.has(callee)) return false
+    visitingCallees.add(callee)
+    try {
+      const body = callee.body
+      if (!ts.isBlock(body)) return writesDynamicValue(body as ts.Expression, depth + 1)
+      let dynamic = false
+      const visit = (node: ts.Node): void => {
+        if (dynamic || (node !== body && ts.isFunctionLike(node))) return
+        if (ts.isReturnStatement(node) && node.expression && writesDynamicValue(node.expression, depth + 1)) dynamic = true
+        else ts.forEachChild(node, visit)
+      }
+      visit(body)
+      return dynamic
+    } finally {
+      visitingCallees.delete(callee)
+    }
+  }
+  /**
+   * `entries.get( key )` on a Map or Set the program built without type
+   * arguments: the checker answers `any`, but the collection holds what the
+   * program's own `set`/`add` calls put in it -- dynamic only where one of
+   * those values is.
+   */
+  const collectionReadIsTyped = (call: ts.CallExpression | ts.NewExpression, depth: number): boolean => {
+    const target = unwrapParens(call.expression)
+    if (!ts.isCallExpression(call) || !ts.isPropertyAccessExpression(target) || target.name.text !== 'get') return false
+    const receiver = unwrapParens(target.expression)
+    const symbol = ts.isIdentifier(receiver)
+      ? checker.getSymbolAtLocation(receiver)
+      : ts.isPropertyAccessExpression(receiver)
+        ? memberSymbolAt(receiver)
+        : null
+    if (!symbol) return false
+    const values = flow.writesToSymbol(symbol).filter((write) => write.edge === 'collection-value' && write.value !== null)
+    return values.length > 0 && !values.some((write) => writesDynamicValue(write.value!, depth + 1))
+  }
+  const callReturnsDynamicValue = (call: ts.CallExpression | ts.NewExpression, depth: number): boolean => {
+    if (resolveExpr(call) !== null) return false
+    const callee = checker.getResolvedSignature(call)?.getDeclaration()
+    if (!callee) return methodOfUntypedReceiverReturnsDynamicValue(call, depth)
+    // `Object.create( proto )` is declared to return `any`, but it builds a
+    // fresh object holding none of the program's values; storing it is the
+    // ordinary conversion of an empty object into the field's carrier.
+    if (callee.getSourceFile().isDeclarationFile) return !isGlobalObjectCreate(call) && !collectionReadIsTyped(call, depth)
+    return !ts.isFunctionLike(callee) || functionReturnsDynamicValue(callee, depth)
+  }
+  const dynamicWriteEvidence = (write: ValueWrite): boolean =>
+    write.slot === 'whole' &&
+    write.value !== null &&
+    (write.edge === 'property-assignment' ||
+      write.edge === 'class-field-initializer' ||
+      write.edge === 'index-assignment' ||
+      write.edge === 'logical-assignment' ||
+      write.edge === 'destructuring-default')
+  /**
+   * The object a destructuring ASSIGNMENT target is filled from, when the
+   * pattern is the left side of the `=` itself: `({ label: this.label } = source)`.
+   */
+  const assignedPatternSourceOf = (target: ts.Expression): ts.Expression | null => {
+    let node: ts.Node = target
+    // `this.label = fallback` inside the pattern is the target with a default.
+    if (ts.isBinaryExpression(node.parent) && node.parent.left === node) node = node.parent
+    const property = node.parent
+    if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) return null
+    const pattern = property.parent
+    const assignment = pattern.parent
+    if (!ts.isObjectLiteralExpression(pattern) || !ts.isBinaryExpression(assignment)) return null
+    return assignment.left === pattern && assignment.operatorToken.kind === ts.SyntaxKind.EqualsToken ? assignment.right : null
+  }
+  /**
+   * `Object.assign(target, source)` with an untyped `source` copies whatever
+   * keys it holds onto `target`: a write of an unknown value into every field
+   * of each class `target` may be an instance of.
+   */
+  let untypedMerges: readonly { readonly owners: readonly ts.ClassLikeDeclaration[]; readonly site: ts.Node }[] | undefined
+  const untypedMergeInto = (symbol: ts.Symbol): ts.Node | null => {
+    untypedMerges ??= flow.allWrites.flatMap((write) => {
+      if (write.edge !== 'object-assign' || !write.naming || !write.value || !untypedSource(write.value, null)) return []
+      const owners = instanceClassesOf(write.naming)
+      return owners.length > 0 ? [{ owners, site: write.site }] : []
+    })
+    if (untypedMerges.length === 0) return null
+    const owners = ownersOf(symbol)
+    return untypedMerges.find((merge) => merge.owners.some((owner) => reachesOwners(owners, owner)))?.site ?? null
+  }
+  /** The first write that stores a value nothing types into `symbol`'s storage, or `null`. */
+  const dynamicWriteInto = (symbol: ts.Symbol): ts.Node | null => {
+    // A JavaScript field's declarations are its writes, listed whether or not
+    // the program runs them; the flow index already leaves pruned code out.
+    for (const declaration of symbol.declarations ?? [])
+      if (ts.isBinaryExpression(declaration) && nodeIsReachable(reachable, declaration) && writesDynamicValue(declaration.right))
+        return declaration
+    for (const write of flow.writesToSymbol(symbol)) {
+      if (dynamicWriteEvidence(write) && writesDynamicValue(write.value!)) return write.site
+      if (write.edge !== 'destructuring' || write.slot !== 'whole' || !write.naming) continue
+      const source = assignedPatternSourceOf(write.naming)
+      const property = write.naming.parent
+      const name =
+        ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)
+          ? property.name
+          : ts.isBinaryExpression(property) &&
+              (ts.isPropertyAssignment(property.parent) || ts.isShorthandPropertyAssignment(property.parent))
+            ? property.parent.name
+            : undefined
+      const key = name && (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) ? name.text : null
+      if (source && untypedSource(source, key)) return write.site
+    }
+    for (const store of keyedStoresInto(symbol)) {
+      const source = enumeratedSourceOf(store.value, store.key)
+      if (source ? untypedSource(source, null) : writesDynamicValue(store.value)) return store.value
+    }
+    return untypedMergeInto(symbol)
+  }
+  const widenDynamicallyWrittenFields = (): void => {
+    // A field the program typed is held to that statement everywhere the
+    // checker relates a value to it -- and an `any` value is related to
+    // nothing: `this.label = document.label` off an `any`-valued record
+    // stores whatever the document held. Such a field is widened exactly as
+    // an untyped one is, from the same evidence; a typed field every write of
+    // which is typed keeps its native carrier.
+    const unstated = [
+      ...[...candidateSymbols].filter((symbol) => (symbol.declarations ?? []).every(statesNothingAbout)),
+      ...statedFieldSymbols
+    ]
+    if (unstated.length === 0) return
+    // Asked again of the settled census: a write read during the strict phase
+    // may have been silent only because the field it reads was still being
+    // resolved -- `this.text = source.text` copying another instance's own.
+    nodeMemo.clear()
+    for (let changed = true; changed;) {
+      changed = false
+      for (const symbol of unstated) {
+        if (widenedFields.has(symbol)) continue
+        const evidence = dynamicWriteInto(symbol)
+        if (!evidence) continue
+        widenedFields.add(symbol)
+        changed = true
+        // `GEA_WIDEN_DEBUG=1` names each widened field and the write that
+        // widened it -- the one fact a moved carrier needs to be judged by.
+        if (WIDEN_DEBUG) {
+          const file = evidence.getSourceFile()
+          const line = file.getLineAndCharacterOfPosition(evidence.getStart()).line + 1
+          const owner = ownersOf(symbol).values().next().value?.name?.text ?? '?'
+          const kind = statedFieldSymbols.has(symbol) ? 'stated' : 'inferred'
+          process.stderr.write(
+            `[WIDEN] ${owner}.${symbol.name} ${kind} <- ${file.fileName}:${line} ${evidence.getText().replace(/\s+/g, ' ').slice(0, 120)}\n`
+          )
+        }
+      }
+    }
+    if (widenedFields.size === 0) return
+    const dynamic = checker.getAnyType()
+    for (const symbol of widenedFields) {
+      // A field the checker already types `any` (or `Object`) and this census
+      // never narrowed is laid out dynamic as it is: stating it again would
+      // change nothing about its storage and would retype every read of it,
+      // re-laying out typed cells the program fills from those reads.
+      const anchor = symbol.declarations?.[0]
+      const checkerAnswer = anchor ? checker.getTypeOfSymbolAtLocation(symbol, anchor) : null
+      const alreadyDynamic =
+        !bound.has(symbol) &&
+        !unionArms.has(symbol) &&
+        !statedBindings.has(symbol) &&
+        checkerAnswer !== null &&
+        anchor !== undefined &&
+        (isUnusableEvidence(checkerAnswer) || annotationStatesNothing(checker, anchor, checkerAnswer))
+      bound.delete(symbol)
+      unionArms.delete(symbol)
+      refusalOf.set(symbol, 'write-dynamic')
+      if (!alreadyDynamic) state(symbol, dynamic)
+    }
+    nodeMemo.clear()
+  }
+
   // Enumerate every candidate SYMBOL up front, from every `x.field = expr`
   // write's left-hand side, so `boundCount`/`refusals` reflect the whole
   // program rather than only the nodes some other pass happened to query.
   const candidateSymbols = new Set<ts.Symbol>()
+  /** Class fields the program typed -- an annotation or a JSDoc tag -- that some write in the program assigns. */
+  const statedFieldSymbols = new Set<ts.Symbol>()
+  const statesFieldType = (declaration: ts.Declaration): boolean => {
+    if (declaration.getSourceFile().isDeclarationFile || isAmbientDeclaration(declaration)) return false
+    if (ts.isPropertyDeclaration(declaration)) {
+      if (!ts.isClassLike(declaration.parent)) return false
+      if (declaration.type) return true
+      const jsDocType = ts.getJSDocType(declaration)
+      return jsDocType !== undefined && !jsDocTypeStatesNothing(checker, jsDocType)
+    }
+    if (!isAssignmentDeclaration(declaration)) return false
+    const jsDocType = ts.getJSDocType(declaration)
+    return jsDocType !== undefined && !jsDocTypeStatesNothing(checker, jsDocType)
+  }
   const visit = (node: ts.Node): void => {
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isPropertyAccessExpression(node.left)) {
       const symbol = checker.getSymbolAtLocation(node.left)
       if (symbol && isCandidateSymbol(checker, symbol)) candidateSymbols.add(symbol)
+      const declarations = symbol?.declarations ?? []
+      if (symbol && declarations.length > 0 && declarations.every(statesFieldType)) statedFieldSymbols.add(symbol)
     }
     // A bare `field;` is a candidate whether or not anything writes it -- one
     // nothing writes must be REFUSED rather than absent, or `refusals` stops
@@ -1494,6 +2032,7 @@ export const censusFieldBindings = (
     for (const symbol of retry) resolveSymbol(symbol)
     if (bound.size === before) break
   }
+  widenDynamicallyWrittenFields()
   deferredIntrinsicProtocolLedgerOf(flow)?.replace(
     'field-bindings-keyed-stores',
     [...keyedRequirements].flatMap(([symbol, requirements]) => (bound.has(symbol) ? requirements : []))
@@ -1583,6 +2122,7 @@ export const censusFieldBindings = (
     unionArmsAt,
     statedTypeAt,
     boundCount: bound.size + unionArms.size,
+    widenedCount: widenedFields.size,
     refusals,
     refusalOf: (symbol) => refusalOf.get(symbol) ?? null
   }
@@ -1663,13 +2203,71 @@ export const withFieldBindings = (
     return callResultAt(declaration.initializer)
   }
   const held = new NullableMemo<ts.Node, ts.Type>()
+  /**
+   * A value read out of a field `widenDynamicallyWrittenFields` widened is
+   * whatever the field holds, and so is a cell initialized from one and
+   * anything read off it: the checker types all of these from the field's
+   * narrow inference, and a slot laid out from that answer would convert the
+   * boxed value through the checked unbox the widening removed from the field.
+   * Asked only once the census widened something.
+   */
+  const dynamic = fields.widenedCount > 0 ? checker.getAnyType() : null
+  const unstatedCellOf = (node: ts.Node): ts.VariableDeclaration | null => {
+    const declaration = ts.isVariableDeclaration(node)
+      ? node
+      : ts.isIdentifier(node) && !ts.isVariableDeclaration(node.parent)
+        ? checker.getSymbolAtLocation(node)?.valueDeclaration
+        : undefined
+    if (!declaration || !ts.isVariableDeclaration(declaration) || declaration.type || !declaration.initializer) return null
+    if (!ts.isIdentifier(declaration.name) || ts.getJSDocType(declaration)) return null
+    // A JSDoc tag on the statement types its declaration too: the program
+    // stated what the cell holds.
+    const statement = declaration.parent.parent
+    if (ts.isVariableStatement(statement) && ts.getJSDocTags(statement).some(ts.isJSDocTypeTag)) return null
+    return declaration
+  }
+  const checkerAnswersAny = (node: ts.Node): boolean => {
+    const declared = ts.isVariableDeclaration(node) ? checker.getSymbolAtLocation(node.name) : undefined
+    const type = declared ? checker.getTypeOfSymbolAtLocation(declared, node) : checker.getTypeAtLocation(node)
+    return (type.flags & ts.TypeFlags.Any) !== 0
+  }
+  const dynamicThrough = (node: ts.Node): boolean => {
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))
+      return readsStatedDynamicValue(statedTypeAt, node.expression)
+    if (ts.isCallExpression(node))
+      return (
+        (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression)) &&
+        readsStatedDynamicValue(statedTypeAt, node.expression.expression)
+      )
+    if (ts.isBinaryExpression(node))
+      return (
+        node.operatorToken.kind === ts.SyntaxKind.PlusToken &&
+        (readsStatedDynamicValue(statedTypeAt, node.left) || readsStatedDynamicValue(statedTypeAt, node.right))
+      )
+    const cell = unstatedCellOf(node)
+    return cell !== null && readsStatedDynamicValue(statedTypeAt, cell.initializer!)
+  }
   const statedTypeAt = (node: ts.Node): ts.Type | null => {
     const answer = own(node)
     if (answer) return answer
-    if (ts.isCallExpression(node)) return memberCallResultAt(node)
-    if (!ts.isVariableDeclaration(node) && !ts.isIdentifier(node)) return null
+    const reads = ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)
+    const sum = ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken
+    if (!reads && !sum && !ts.isCallExpression(node) && !ts.isVariableDeclaration(node) && !ts.isIdentifier(node)) return null
     if (held.has(node)) return held.get(node) ?? null
-    const result = heldCallResultAt(node)
+    // Placed first so a cell whose initializer reaches back to it answers
+    // nothing rather than looping.
+    held.set(node, null)
+    const result =
+      // Only where the checker types the node: an `any` it already answers is
+      // dynamic as it stands, and restating it would outrank a census that
+      // narrowed it.
+      dynamic && !checkerAnswersAny(node) && dynamicThrough(node)
+        ? dynamic
+        : ts.isCallExpression(node)
+          ? memberCallResultAt(node)
+          : reads
+            ? null
+            : heldCallResultAt(node)
     held.set(node, result)
     return result
   }
