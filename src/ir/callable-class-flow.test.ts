@@ -5,6 +5,7 @@ import { reflectionExposureOf } from './reflection-demand.js'
 import { nativeClassAccessorEntryOf } from './native-class-accessor.js'
 import { publishOmittedArgumentConversions } from './call-entry.js'
 import type { IrBody, IrNonTerminatorOperation, IrOperand } from './model.js'
+import type { ProgramConversionRecipe } from './program-conversions.js'
 import { representationKey, type CallableAbi, type Representation } from '../representation/model.js'
 import type { ClassLayout } from '../projection/classes.js'
 import { createConversionNodes } from '../conversion/nodes.js'
@@ -2118,3 +2119,38 @@ test('cyclic aliases carry late callable origins and propagate publication backw
     }
   }
 })
+
+test('a remembered flow answers a request whose program conversions differ but cite the same view nodes', () => {
+  const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+  const view = record('remembered-view', 'run', callable)
+  const node = conversions.nodeFor(dynamic, view)
+  const other = conversions.nodeFor(dynamic, record('other-view', 'go', callable))
+  const recipe = (conversion: typeof node): ProgramConversionRecipe => ({
+    role: 'dynamic-field-write',
+    owner: 'program',
+    slot: 'run',
+    source: dynamic,
+    target: conversion === node ? view : record('other-view', 'go', callable),
+    conversion
+  })
+  const program = (): IrBody[] => [body('root', []), body('worker', [])]
+  const classes = new Map()
+  const fresh = (recipes: readonly ProgramConversionRecipe[]) =>
+    nativeCallableFlowOf(program(), new Map(), new Map(), conversions, undefined, null, recipes)
+  const remembered = nativeCallableFlowOf(program(), new Map(), classes, conversions, undefined, null, [recipe(node)])
+  // The same view node cited twice: other recipe data, the very same view nodes.
+  const repeated = nativeCallableFlowOf(program(), new Map(), classes, conversions, undefined, null, [recipe(node), recipe(node)])
+  assert.deepEqual(summaryOf(repeated), summaryOf(fresh([recipe(node), recipe(node)])))
+  assert.deepEqual(summaryOf(repeated), summaryOf(remembered))
+  // A recipe that adds a view node is solved, not answered from memory.
+  const widened = nativeCallableFlowOf(program(), new Map(), classes, conversions, undefined, null, [recipe(node), recipe(other)])
+  assert.deepEqual(summaryOf(widened), summaryOf(fresh([recipe(node), recipe(other)])))
+})
+
+/** A flow's answers as plain data, for comparing two answers made over different objects. */
+const summaryOf = (flow: ReturnType<typeof nativeCallableFlowOf>): unknown =>
+  JSON.parse(
+    JSON.stringify(flow, (_key, value: unknown) =>
+      value instanceof Map ? [...value] : value instanceof Set ? [...value] : typeof value === 'function' ? 'function' : value
+    )
+  )
