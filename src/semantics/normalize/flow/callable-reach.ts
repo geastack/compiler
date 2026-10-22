@@ -7901,6 +7901,16 @@ const closedMemberCallableUses = (
       // thousands of reads the selected-data arm already accepted -- one large
       // library compile went from ~3 min to over 8 min at 23 GB before this ordering.
       const key = accessKeyOf(parent)
+      // A receiver the checker types `any` names no declaration, and the
+      // carrier question then falls back to `member`'s own class -- which a
+      // member-less family walk does not have. That refused `rawCopy.uniforms`
+      // off a fresh clone although the plan below had already resolved the
+      // receiver's allocations to the family and the key to the very data
+      // declarations a typed receiver would have named. Those declarations are
+      // the carriers: each one's own family must be closed, exactly as a
+      // resolved `target` requires of its one carrier.
+      const carriedByFamily = (plan: SourceClassKeyReadPlan): boolean =>
+        target === null && plan.carriers.length > 0 && plan.carriers.every(({ declaration }) => ownerOriginsClosed(declaration))
       let readerClosedHeld: boolean | null = null
       const readerClosed = (): boolean => {
         if (readerClosedHeld !== null) return readerClosedHeld
@@ -7924,7 +7934,7 @@ const closedMemberCallableUses = (
           plan.readBodies !== null &&
           !reflectiveDefinitionMayInstallGetterOf(checker, flow, key) &&
           plan.readBodies.every((body) => flow.receiverReferencesToDeclaration(body).every(receiverUse)) &&
-          (plan.primitive || ownerOriginsClosed(originsCarrierOf(reference, target)))
+          (plan.primitive || ownerOriginsClosed(originsCarrierOf(reference, target)) || carriedByFamily(plan))
         return readerClosedHeld
       }
       return traceReceiver(

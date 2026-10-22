@@ -229,6 +229,13 @@ classref-control.ts.cpp 3327bc41e5e6
 classref-mismatch.ts.cpp 570cd9739628
 classref-roundtrip.ts.cpp d65a3d29e736
 client-options-record-into-optional-write-concern-source.runtime.ts.cpp 58921d62109f
+clone-copy-source-also-a-full-record.runtime.js.cpp fe5683fabd82
+clone-copy-source-also-a-partial-record.runtime.js.cpp 05deb96e432e
+clone-copy-source-record-through-array.runtime.js.cpp 67aba8870378
+clone-copy-source-record-through-callback.runtime.js.cpp 6972946c1b56
+clone-copy-source-record-through-detached-call.runtime.js.cpp e3bac7011e60
+clone-copy-source-record-through-helper.runtime.js.cpp b2a959326f78
+clone-copy-source-record-through-holder.runtime.js.cpp 52700f6315e8
 clone-idiom-family-dispatch.runtime.js.cpp 94702b9a5c2b
 clone-idiom-override-narrows-copy-source.runtime.js.cpp f145deba5d48
 clone-idiom-unallocated-base-override-narrows-copy-source.runtime.js.cpp bd5913dce4a1
@@ -282,7 +289,7 @@ constructor-alias-installed-members-class.runtime.js.cpp bb654b656899
 constructor-alias-installed-members.runtime.js.cpp ef1b0a15fea7
 constructor-carried-by-abi-reads-its-properties.runtime.ts.cpp 2044c6d5dae7
 constructor-dispatch-copy-from-a-plain-record-into-inferred-fields.runtime.js.cpp 033ad14fdd3d
-constructor-dispatch-into-typed-parameters-with-uniform-table.runtime.js.cpp ddd3dbf2aad2
+constructor-dispatch-into-typed-parameters-with-uniform-table.runtime.js.cpp a8d1eb8f5f56
 constructor-family-into-narrower-constructor-type.runtime.ts.cpp ec19ded7a958
 constructor-family-into-open-constructor-type.runtime.ts.cpp 25565aa8c500
 constructor-function-absent-option-or-default-field.runtime.js.cpp 9b892aa8957f
@@ -1064,7 +1071,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp 2a67d2df0367
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 2d5f8c6f08eb
-printer-drift.txt e9a26507d8b7
+printer-drift.txt b698e03f4510
 private-names-are-not-own-properties.ts.cpp 862d394b5f45
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp 3a9f81f60107
