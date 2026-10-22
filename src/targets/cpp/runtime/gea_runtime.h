@@ -22122,6 +22122,8 @@ inline Value dynamicNumberPrototypeGet(const PropertyKey&);
 inline Value dynamicBooleanPrototypeGet(const PropertyKey&);
 inline Value dynamicFunctionPrototypeGet(const PropertyKey&);
 inline double dynamicToNumber(const Value&);
+inline int dynamicIsLessThan(const Value&, const Value&, bool);
+inline bool dynamicLooselyEquals(const Value&, const Value&);
 inline std::string dynamicToString(const Value&);
 namespace detail {
 [[noreturn]] inline void refusePayloadMismatch(const char* site);

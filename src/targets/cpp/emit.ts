@@ -435,9 +435,11 @@ const referenceIdentityOperators: ReadonlyMap<string, CppOperatorSpelling> = new
 ])
 
 /**
- * `-`, `*`, `/`, `%` and `**` over two genuinely dynamic operands (a JS
- * library's `this.pages.length * this.pageSize`, both read off an untyped
- * `opts`), where the checker typed the result `number`.
+ * `-`, `*`, `/`, `%`, `**` and the bitwise and shift operators over two
+ * genuinely dynamic operands (a JS library's `this.pages.length *
+ * this.pageSize`, both read off an untyped `opts`). Each yields a Number, so
+ * the result is that double, converted into whatever carrier the result
+ * holds (a field widened to `any` holds it boxed).
  *
  * 13.15.3 ApplyStringOrNumericBinaryOperator: ToNumeric the LEFT operand, then
  * the RIGHT -- in that order, since either may run user code (ToPrimitive) --
@@ -447,24 +449,91 @@ const referenceIdentityOperators: ReadonlyMap<string, CppOperatorSpelling> = new
  * BigInt: that aborts by name instead of producing a Number the language
  * never would.
  */
-const dynamicArithmeticOperators = new Set(['-', '*', '/', '%', '**'])
+const dynamicArithmeticOperators = new Set(['-', '*', '/', '%', '**', '&', '|', '^', '<<', '>>', '>>>'])
 const dynamicArithmeticText = (ctx: EmitContext, operation: ComputeOperation, first: IrOperand, second: IrOperand): string | null => {
   if (!dynamicArithmeticOperators.has(operation.operator)) return null
   if (first.representation.kind !== 'dynamic' || second.representation.kind !== 'dynamic') return null
   const result = operation.result.representation
-  if (result.kind !== 'scalar' || result.domain !== 'number') return null
   const numberCarrier: Representation = { kind: 'scalar', domain: 'number' }
   const spelling = binaryOperatorFor(operation.operator, numberCarrier)
   if (spelling === null) return null
   const applied =
     spelling.kind === 'infix' ? `gea_left_number ${spelling.text} gea_right_number` : `${spelling.text}(gea_left_number, gea_right_number)`
-  return (
+  const number =
     `([&]() -> double { const gea::Value& gea_left = ${operandText(ctx, first)}; const gea::Value& gea_right = ${operandText(ctx, second)}; ` +
     'if (gea_left.tag() == gea::Value::Tag::BigInt && gea_right.tag() == gea::Value::Tag::BigInt) ' +
     `gea::detail::refusePayloadMismatch("BigInt ${operation.operator} BigInt is a BigInt, and this cell was typed number"); ` +
     'const double gea_left_number = gea::dynamicToNumber(gea_left); const double gea_right_number = gea::dynamicToNumber(gea_right); ' +
     `return ${applied}; }())`
-  )
+  if (result.kind === 'scalar' && result.domain === 'number') return number
+  // A dynamic result holds the Number boxed: the box is the value itself, not
+  // a conversion of a carrier the program wrote.
+  if (result.kind === 'dynamic') return `gea::Value::box(gea::Value::Tag::Number, ${number})`
+  return alignedValueText(ctx, 'emit.ts:dynamic-arithmetic', numberCarrier, result, number)
+}
+
+/**
+ * The relational and equality operators over a genuinely dynamic operand:
+ * ECMA-262's IsLessThan (7.2.13) and IsLooselyEqual (7.2.14) as the runtime
+ * implements them over boxes, and IsStrictlyEqual as `Value::strictEquals`.
+ * A typed other side is boxed for the comparison -- the box is that value,
+ * so no coercion is invented -- and the census names none that would bring
+ * a dynamic side to it. Each yields a Boolean, held boxed when the result is
+ * dynamic.
+ */
+const dynamicComparisonOperators = new Set(['<', '>', '<=', '>=', '===', '!==', '==', '!='])
+const dynamicComparisonText = (ctx: EmitContext, operation: ComputeOperation, first: IrOperand, second: IrOperand): string | null => {
+  const firstDynamic = first.representation.kind === 'dynamic'
+  const secondDynamic = second.representation.kind === 'dynamic'
+  if (!firstDynamic && !secondDynamic) return null
+  if (!dynamicComparisonOperators.has(operation.operator)) return null
+  const left = firstDynamic ? operandText(ctx, first) : boxedValueText(ctx, first, 'dynamic comparison')
+  const right = secondDynamic ? operandText(ctx, second) : boxedValueText(ctx, second, 'dynamic comparison')
+  const condition = (() => {
+    switch (operation.operator) {
+      case '<':
+        return `gea::dynamicIsLessThan(${left}, ${right}, true) == 1`
+      case '>':
+        return `gea::dynamicIsLessThan(${right}, ${left}, false) == 1`
+      case '<=':
+        return `gea::dynamicIsLessThan(${right}, ${left}, false) == 0`
+      case '>=':
+        return `gea::dynamicIsLessThan(${left}, ${right}, true) == 0`
+      case '===':
+        return `gea::Value::strictEquals(${left}, ${right})`
+      case '!==':
+        return `!gea::Value::strictEquals(${left}, ${right})`
+      case '==':
+        return `gea::dynamicLooselyEquals(${left}, ${right})`
+      case '!=':
+        return `!gea::dynamicLooselyEquals(${left}, ${right})`
+      default:
+        return null
+    }
+  })()
+  if (condition === null) return null
+  const result = operation.result.representation
+  if (result.kind === 'scalar' && result.domain === 'boolean') return `(${condition})`
+  if (result.kind === 'dynamic') return `gea::Value::box(gea::Value::Tag::Boolean, static_cast<bool>(${condition}))`
+  return alignedValueText(ctx, 'emit.ts:dynamic-comparison', { kind: 'scalar', domain: 'boolean' }, result, `(${condition})`)
+}
+
+const dynamicUnaryText = (ctx: EmitContext, operation: ComputeOperation, operand: IrOperand): string | null => {
+  if (operand.representation.kind !== 'dynamic') return null
+  const number = `gea::dynamicToNumber(${operandText(ctx, operand)})`
+  const applied =
+    operation.operator === '-'
+      ? `(-${number})`
+      : operation.operator === '+'
+        ? number
+        : operation.operator === '~'
+          ? `gea::bitwiseNot(${number})`
+          : null
+  if (applied === null) return null
+  const result = operation.result.representation
+  if (result.kind === 'scalar' && result.domain === 'number') return applied
+  if (result.kind === 'dynamic') return `gea::Value::box(gea::Value::Tag::Number, ${applied})`
+  return alignedValueText(ctx, 'emit.ts:dynamic-unary', { kind: 'scalar', domain: 'number' }, result, applied)
 }
 
 const binaryOperatorFor = (operator: string, carrier: Representation): CppOperatorSpelling | null => {
@@ -714,6 +783,13 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
       return
     }
     if (operation.operator === 'ToNumeric') return emitToNumericCoercion(ctx, lines, first, operation.result)
+    // `-x`, `+x` and `~x` over a dynamic operand: ToNumber (ToPrimitive
+    // first) and the Number operator, as the binary operators above do.
+    const dynamicUnary = dynamicUnaryText(ctx, operation, first)
+    if (dynamicUnary !== null) {
+      lines.push(`${defineValue(ctx, operation.result)} = ${dynamicUnary};`)
+      return
+    }
     const spelling = unaryOperatorFor(operation.operator, first.representation)
     if (!spelling) {
       throw createCppEmitBlockedError(
@@ -991,8 +1067,12 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
   // flag: it is the one case left that boxes an operand this backend could
   // otherwise have kept native (the `firstDynamic !== secondDynamic` branch
   // just above, when it applies).
+  // Two dynamic operands have no native carrier to keep, so the full
+  // dispatch is the only spelling there is and needs no opt-in: a field
+  // widened to `any` added to another (`x + x` over a dynamic `x`).
+  const bothDynamic = first.representation.kind === 'dynamic' && second.representation.kind === 'dynamic'
   if (
-    ctx.deriver.dynamicFallback &&
+    (ctx.deriver.dynamicFallback || bothDynamic) &&
     operation.operator === '+' &&
     (first.representation.kind === 'dynamic' ||
       second.representation.kind === 'dynamic' ||
@@ -1001,7 +1081,11 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
   ) {
     const left = boxedValueText(ctx, first, 'dynamic addition')
     const right = boxedValueText(ctx, second, 'dynamic addition')
-    const dynamic: Representation = { kind: 'dynamic', reason: 'opt-in-fallback' }
+    // `gea::dynamicAdd` answers a box, which IS a dynamic result's carrier.
+    const dynamic: Representation =
+      operation.result.representation.kind === 'dynamic' && !ctx.deriver.dynamicFallback
+        ? operation.result.representation
+        : { kind: 'dynamic', reason: 'opt-in-fallback' }
     const text = alignedValueText(ctx, 'emit.ts:738', dynamic, operation.result.representation, `gea::dynamicAdd(${left}, ${right})`)
     if (text === null)
       throw createCppEmitBlockedError(
@@ -1096,6 +1180,11 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
       lines.push(`${defineValue(ctx, operation.result)} = ${negated}gea::Value::strictEquals(${left}, ${right});`)
       return
     }
+  }
+  const dynamicComparison = dynamicComparisonText(ctx, operation, first, second)
+  if (dynamicComparison !== null) {
+    lines.push(`${defineValue(ctx, operation.result)} = ${dynamicComparison};`)
+    return
   }
   if (representationKey(first.representation) !== representationKey(second.representation)) {
     throw createCppEmitBlockedError(

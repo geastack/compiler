@@ -213,6 +213,57 @@ inline Value dynamicAdd(const Value& left, const Value& right) {
   return Value::box(Value::Tag::Number, dynamicToNumber(a) + dynamicToNumber(b));
 }
 
+/**
+ * ECMA-262 7.2.13 IsLessThan over two dynamic values: 1 for true, 0 for false
+ * and -1 for undefined (a NaN on either side), which each relational operator
+ * reads its own way. ToPrimitive with hint Number runs in source order -- the
+ * left operand first unless the operator swapped them (`>`, `<=`). Two
+ * strings compare by code unit, as the typed string path compares them.
+ */
+inline int dynamicIsLessThan(const Value& x, const Value& y, bool leftFirst) {
+  Value px;
+  Value py;
+  if (leftFirst) {
+    px = dynamicToPrimitive(x, ToPrimitiveHint::Number);
+    py = dynamicToPrimitive(y, ToPrimitiveHint::Number);
+  } else {
+    py = dynamicToPrimitive(y, ToPrimitiveHint::Number);
+    px = dynamicToPrimitive(x, ToPrimitiveHint::Number);
+  }
+  if (px.tag() == Value::Tag::String && py.tag() == Value::Tag::String) return px.as<std::string>() < py.as<std::string>() ? 1 : 0;
+  if (px.tag() == Value::Tag::BigInt && py.tag() == Value::Tag::BigInt) return px.as<BigInt>() < py.as<BigInt>() ? 1 : 0;
+  if (px.tag() == Value::Tag::BigInt || py.tag() == Value::Tag::BigInt)
+    host::throwRuntimeError("TypeError", "comparing a BigInt with another type is not supported through dynamic values");
+  const double nx = dynamicToNumber(px);
+  const double ny = dynamicToNumber(py);
+  if (std::isnan(nx) || std::isnan(ny)) return -1;
+  return nx < ny ? 1 : 0;
+}
+
+/**
+ * ECMA-262 7.2.14 IsLooselyEqual over two dynamic values. Same-type operands
+ * compare strictly; `null` and `undefined` equal each other and nothing
+ * else; a string meets a number as a number, a boolean as a number, and an
+ * object meets a primitive through ToPrimitive. A BigInt meeting another type
+ * is refused by name rather than approximated.
+ */
+inline bool dynamicLooselyEquals(const Value& x, const Value& y) {
+  if (x.tag() == y.tag()) return Value::strictEquals(x, y);
+  const auto nullish = [](const Value& value) { return value.tag() == Value::Tag::Null || value.tag() == Value::Tag::Undefined; };
+  if (nullish(x) || nullish(y)) return nullish(x) && nullish(y);
+  if (x.tag() == Value::Tag::Number && y.tag() == Value::Tag::String) return x.as<double>() == host::detail::toNumber(y.as<std::string>());
+  if (x.tag() == Value::Tag::String && y.tag() == Value::Tag::Number) return host::detail::toNumber(x.as<std::string>()) == y.as<double>();
+  if (x.tag() == Value::Tag::Boolean) return dynamicLooselyEquals(Value::box(Value::Tag::Number, x.as<bool>() ? 1.0 : 0.0), y);
+  if (y.tag() == Value::Tag::Boolean) return dynamicLooselyEquals(x, Value::box(Value::Tag::Number, y.as<bool>() ? 1.0 : 0.0));
+  const bool xObject = isObjectValue(x);
+  const bool yObject = isObjectValue(y);
+  if (xObject && !yObject) return dynamicLooselyEquals(dynamicToPrimitive(x), y);
+  if (yObject && !xObject) return dynamicLooselyEquals(x, dynamicToPrimitive(y));
+  if (x.tag() == Value::Tag::BigInt || y.tag() == Value::Tag::BigInt)
+    host::throwRuntimeError("TypeError", "loose equality between a BigInt and another type is not supported through dynamic values");
+  return false;
+}
+
 inline bool dynamicArrayPrototypeHas(const PropertyKey& key) {
   if (key.isSymbol()) return false;
   std::size_t index = 0;
