@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noUncheckedIndexedAccess": false, "types": [] },
+  "files": ["./index-signature-read-optional-chain-observes-absence.runtime.ts"]
+}

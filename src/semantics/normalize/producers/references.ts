@@ -3,6 +3,7 @@ import { genericClassAliasTargetSymbol } from '../../class-alias.js'
 import { isScriptGlobalObjectPropertyDeclaration } from '../script-global-redefinition.js'
 import { enclosingCallIfCallee, flowNarrowsType, unwrapErasedExpression } from './erasure.js'
 import { publishesShortCircuit } from './optional-chain.js'
+import { holdsUndefined, includesUndefined, testsItsOperand } from './nullish.js'
 import {
   operationId,
   regionId,
@@ -58,16 +59,6 @@ const literalConstantOf = (expression: ts.Expression): { text: string; literal: 
   return null
 }
 
-/** Whether a checker type explicitly has an `undefined` constituent. */
-const includesUndefined = (type: ts.Type): boolean => {
-  if ((type.flags & ts.TypeFlags.Undefined) !== 0) return true
-  return type.isUnion() && type.types.some(includesUndefined)
-}
-
-/** Whether a consumer of this checker type has a home for `undefined`: an explicit `undefined` constituent, or `unknown`/`any`. */
-const holdsUndefined = (type: ts.Type): boolean =>
-  (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 || includesUndefined(type)
-
 /**
  * Whether this expression is an equality operand, `instanceof`'s left
  * operand, or `typeof`'s operand. All answer for `undefined` without reading
@@ -91,33 +82,6 @@ const comparesItsOperand = (node: ts.Expression): boolean => {
     operator === ts.SyntaxKind.ExclamationEqualsToken ||
     operator === ts.SyntaxKind.EqualsEqualsEqualsToken ||
     operator === ts.SyntaxKind.ExclamationEqualsEqualsToken
-  )
-}
-
-/**
- * Whether ToBoolean consumes this expression directly: a statement or
- * conditional-expression condition, `!`'s operand, or the left operand of
- * `&&` / `||` / `??`. Each answers for `undefined` without reading it
- * (ToBoolean(undefined) is false; `??` tests for it by identity).
- */
-const testsItsOperand = (node: ts.Expression): boolean => {
-  let inner: ts.Node = node
-  let parent = inner.parent
-  while (parent && ts.isParenthesizedExpression(parent)) {
-    inner = parent
-    parent = parent.parent
-  }
-  if (!parent) return false
-  if (ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent)) return parent.expression === inner
-  if (ts.isForStatement(parent)) return parent.condition === inner
-  if (ts.isConditionalExpression(parent)) return parent.condition === inner
-  if (ts.isPrefixUnaryExpression(parent)) return parent.operator === ts.SyntaxKind.ExclamationToken
-  if (!ts.isBinaryExpression(parent) || parent.left !== inner) return false
-  const operator = parent.operatorToken.kind
-  return (
-    operator === ts.SyntaxKind.AmpersandAmpersandToken ||
-    operator === ts.SyntaxKind.BarBarToken ||
-    operator === ts.SyntaxKind.QuestionQuestionToken
   )
 }
 

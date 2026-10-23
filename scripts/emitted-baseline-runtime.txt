@@ -624,6 +624,7 @@ in-unique-symbol-key-sidecar.ts.cpp 83051dca530a
 index-signature-primitive-read-logical-and-observes-absence.runtime.ts.cpp ba933aa620d4
 index-signature-primitive-read-typeof-and-nullish-observe-absence.runtime.ts.cpp f2b123dc496e
 index-signature-read-into-unknown-or-any-observes-absence.runtime.ts.cpp 826114d44c62
+index-signature-read-optional-chain-observes-absence.runtime.ts.cpp 248f198d22e5
 index-signature-read-typed-assertion-keeps-asserted-type.runtime.ts.cpp 8997db467acf
 indexed-absence-forwarded-cache.runtime.js.cpp 5aa0e98dd88c
 indexed-document-view-open-key-writes.runtime.js.cpp b7c9c2275200

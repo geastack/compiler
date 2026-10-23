@@ -31,6 +31,7 @@ import {
   impliedPatternPositionPresentEverywhere
 } from './parameter-slot.js'
 import { iteratorYieldTypesOf } from './producers/iteration-yield.js'
+import { holdsUndefined } from './producers/nullish.js'
 import {
   type AliasEvidence,
   annotationStatesNothing,
@@ -2611,14 +2612,9 @@ export const censusParameterBindings = (
     let read: ts.Expression = argument
     while (ts.isParenthesizedExpression(read)) read = read.expression
     if (!ts.isElementAccessExpression(read) && !ts.isPropertyAccessExpression(read)) return false
-    if ((resolved.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return false
-    if (resolved.isUnion() && resolved.types.some((member) => (member.flags & ts.TypeFlags.Undefined) !== 0)) return false
+    if (holdsUndefined(resolved)) return false
     const contextual = checker.getContextualType(argument)
-    if (contextual === undefined) return false
-    const holds =
-      (contextual.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Undefined)) !== 0 ||
-      (contextual.isUnion() && contextual.types.some((member) => (member.flags & ts.TypeFlags.Undefined) !== 0))
-    if (!holds) return false
+    if (contextual === undefined || !holdsUndefined(contextual)) return false
     const receiver = checker.getTypeAtLocation(read.expression)
     if (checker.isArrayType(receiver) || checker.isTupleType(receiver)) return false
     if (checker.getIndexInfosOfType(receiver).length === 0) return false

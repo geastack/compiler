@@ -25,6 +25,7 @@ import { emptyParameterBindingCensus, type ParameterBindingCensus } from './para
 import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
 import { emptyObjectBagCensus, type ObjectBagCensus } from './object-bag-bindings.js'
 import { iteratorYieldTypesOf } from './producers/iteration-yield.js'
+import { testsItsOperand } from './producers/nullish.js'
 import {
   arrayAssignmentPatternSourceExpression,
   arrayAssignmentTargetOf,
@@ -911,38 +912,6 @@ export const censusLocalBindings = (
     return other !== null && (checker.getTypeAtLocation(other).flags & ts.TypeFlags.Undefined) !== 0
   }
 
-  /** Whether this reference is consumed directly by ToBoolean. */
-  const directTruthinessTest = (expression: ts.Expression): boolean => {
-    let inner: ts.Node = expression
-    let parent = inner.parent
-    while (parent && ts.isParenthesizedExpression(parent)) {
-      inner = parent
-      parent = parent.parent
-    }
-    if (!parent) return false
-    if (ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent)) return parent.expression === inner
-    if (ts.isForStatement(parent)) return parent.condition === inner
-    if (ts.isConditionalExpression(parent)) return parent.condition === inner
-    if (ts.isPrefixUnaryExpression(parent)) return parent.operator === ts.SyntaxKind.ExclamationToken
-    if (!ts.isBinaryExpression(parent) || parent.left !== inner) return false
-    return (
-      parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
-      parent.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
-      parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
-    )
-  }
-
-  /** Whether `typeof` takes this reference as its operand; it answers `"undefined"` for an absent read. */
-  const directTypeofOperand = (expression: ts.Expression): boolean => {
-    let inner: ts.Node = expression
-    let parent = inner.parent
-    while (parent && ts.isParenthesizedExpression(parent)) {
-      inner = parent
-      parent = parent.parent
-    }
-    return parent !== undefined && ts.isTypeOfExpression(parent) && parent.expression === inner
-  }
-
   const registerObservedIndexedAbsence = (declaration: ts.VariableDeclaration): void => {
     if (declaration.type || ts.getJSDocType(declaration) || !ts.isIdentifier(declaration.name) || !declaration.initializer) return
     let initializer: ts.Expression = declaration.initializer
@@ -977,7 +946,7 @@ export const censusLocalBindings = (
     if (!symbol) return
     const observing = flow
       .referencesToSymbol(symbol)
-      .filter((reference) => directUndefinedComparison(reference) || directTruthinessTest(reference) || directTypeofOperand(reference))
+      .filter((reference) => directUndefinedComparison(reference) || testsItsOperand(reference))
     if (observing.length === 0) return
     if (untyped) {
       untypedObservedAbsence.push({ declaration, nodes: [declaration, declaration.name, ...observing] })
