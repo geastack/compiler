@@ -227,6 +227,8 @@ const packageLanes = [
   ['targets', 'targets', ['test'], { TMPDIR: output, GEA_TEST_BUILD_DIR: output }],
   ['simulator', 'simulator', ['check', 'test']],
   ['native-webgl-angle', 'native-webgl-angle', ['check', 'test']],
+  // The plugin compiles against the SDK's dist/, which a fresh checkout lacks.
+  ['windows', 'windows/packages/geastack-windows', ['build']],
   ['windows', 'windows/packages/geatsc-plugin-windows-native', ['build', 'test']],
   ['debugger', 'debugger', ['check']],
   ['apple', 'apple/packages/geastack-apple', ['build']],
