@@ -1387,6 +1387,7 @@ typed-shared-view-preserves-numeric-field-writes.runtime.ts.cpp 8cf83a8d7336
 typed-shared-view-preserves-primitive-sidecar-aliases.runtime.ts.cpp d08063850b01
 typeof-runtime-string.ts.cpp a1cd939b5d70
 typeof-then-discriminates-a-union.ts.cpp 95b96f1f5dc0
+unannotated-local-index-read-flows-into-undefined-home.runtime.ts.cpp b0cbedb67a7c
 unbound-native-method-absence-transport.runtime.ts.cpp d11107879fc8
 unbound-native-method-receiver-observations.runtime.ts.cpp d087ffd7b6c1
 unbox-nullable-union.ts.cpp 28f62c3d4062
