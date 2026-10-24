@@ -25,7 +25,7 @@ import { emptyParameterBindingCensus, type ParameterBindingCensus } from './para
 import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
 import { emptyObjectBagCensus, type ObjectBagCensus } from './object-bag-bindings.js'
 import { iteratorYieldTypesOf } from './producers/iteration-yield.js'
-import { testsItsOperand } from './producers/nullish.js'
+import { flowsIntoUndefinedHome, testsItsOperand } from './producers/nullish.js'
 import {
   arrayAssignmentPatternSourceExpression,
   arrayAssignmentTargetOf,
@@ -877,9 +877,12 @@ export const censusLocalBindings = (
    * `undefined`. The property producer already knows how to emit both optional
    * reads; this map supplies the missing fact across the local binding.
    *
-   * Only the declaration, initializer and direct comparison references are
-   * widened. Reads after the fallback assignment keep the checker's narrowed
-   * element type, as do indexed reads whose absence is not observed.
+   * Only the declaration, initializer and observing references are widened:
+   * a direct comparison or test, or -- for a dictionary read -- a use whose
+   * destination has a home for `undefined` (`flowsIntoUndefinedHome`), as
+   * `console.log(value)` or `f(value)` into an `unknown` parameter has. Reads
+   * after the fallback assignment keep the checker's narrowed element type,
+   * as do indexed reads whose absence is not observed.
    */
   const observedIndexedAbsence = new Map<ts.Node, ts.Type>()
   /**
@@ -924,10 +927,19 @@ export const censusLocalBindings = (
       key !== null &&
       (key.flags & ts.TypeFlags.NumberLike) !== 0 &&
       constituents.every((member) => checker.isArrayType(member) && !checker.isTupleType(member))
+    const symbolKey = key !== null && (key.flags & (ts.TypeFlags.ESSymbol | ts.TypeFlags.UniqueESSymbol)) !== 0
     const indexKind = key !== null && (key.flags & ts.TypeFlags.NumberLike) !== 0 ? ts.IndexKind.Number : ts.IndexKind.String
+    // `IndexKind` names only string and number; a `[key: symbol]` signature is
+    // found among the index infos by its key type.
+    const hasIndexForKey = (member: ts.Type): boolean =>
+      symbolKey
+        ? checker
+            .getIndexInfosOfType(member)
+            .some((info) => (info.keyType.flags & (ts.TypeFlags.ESSymbol | ts.TypeFlags.UniqueESSymbol)) !== 0)
+        : checker.getIndexTypeOfType(member, indexKind) !== undefined
     const dictionaryRead = constituents.every(
       (member) =>
-        checker.getIndexTypeOfType(checker.getNonNullableType(member), indexKind) !== undefined &&
+        hasIndexForKey(checker.getNonNullableType(member)) &&
         // A declared field has its own presence contract. Only a name resolved
         // through the index signature shares a computed lookup's missing key.
         (!ts.isPropertyAccessExpression(initializer) || checker.getPropertyOfType(member, initializer.name.text) === undefined)
@@ -946,7 +958,12 @@ export const censusLocalBindings = (
     if (!symbol) return
     const observing = flow
       .referencesToSymbol(symbol)
-      .filter((reference) => directUndefinedComparison(reference) || testsItsOperand(reference))
+      .filter(
+        (reference) =>
+          directUndefinedComparison(reference) ||
+          testsItsOperand(reference) ||
+          (dictionaryRead && flowsIntoUndefinedHome(checker, reference))
+      )
     if (observing.length === 0) return
     if (untyped) {
       untypedObservedAbsence.push({ declaration, nodes: [declaration, declaration.name, ...observing] })

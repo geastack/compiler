@@ -38,6 +38,54 @@ export const includesUndefined = (type: ts.Type): boolean => {
 export const holdsUndefined = (type: ts.Type): boolean =>
   (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 || includesUndefined(type)
 
+/**
+ * Whether `node` is the value assigned to a local declared without a type:
+ * `let node; ... node = this.#children[key]`. The checker reports such a
+ * local's declared type as `any` -- the auto type it then narrows by
+ * assignment -- so that contextual `any` is no home for `undefined`. The
+ * local's cell takes the read's own carrier, and an absence published at the
+ * read is dereferenced on the way into it: Hono's RegExpRouter `Node.insert`
+ * aborted on every route at its first missing child.
+ */
+const assignsAnUntypedLocal = (checker: ts.TypeChecker, node: ts.Expression): boolean => {
+  let inner: ts.Node = node
+  let parent = inner.parent
+  while (parent && ts.isParenthesizedExpression(parent)) {
+    inner = parent
+    parent = parent.parent
+  }
+  if (!parent || !ts.isBinaryExpression(parent) || parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken || parent.right !== inner)
+    return false
+  if (!ts.isIdentifier(parent.left)) return false
+  const declaration = checker.getSymbolAtLocation(parent.left)?.valueDeclaration
+  return (
+    declaration !== undefined &&
+    ts.isVariableDeclaration(declaration) &&
+    declaration.type === undefined &&
+    ts.getJSDocType(declaration) === undefined
+  )
+}
+
+/**
+ * Whether the position consuming this expression has a home for `undefined`:
+ * the checker's contextual type names `undefined`, or is `unknown`/`any` --
+ * except the `any` the checker reports for an untyped local's assignment.
+ *
+ * A missing key is `undefined`, and such a destination can hold it. An
+ * index-signature read publishes its absence there
+ * (`observablyAbsentElementTypeOf` in properties.ts); an unannotated local
+ * holding such a read is widened for a use there
+ * (`registerObservedIndexedAbsence` in local-bindings.ts); and an argument
+ * there adds `undefined` to its parameter (`passesAbsentIndexRead` in
+ * parameter-bindings.ts). The three ask this one question so that
+ * `f(dict[key])` and `const v = dict[key]; f(v)` cannot answer differently.
+ */
+export const flowsIntoUndefinedHome = (checker: ts.TypeChecker, node: ts.Expression): boolean => {
+  const contextual = checker.getContextualType(node)
+  if (contextual === undefined) return false
+  return includesUndefined(contextual) || (holdsUndefined(contextual) && !assignsAnUntypedLocal(checker, node))
+}
+
 /** Whether `typeof` takes this expression as its operand: it answers `"undefined"` for an absent read without consuming the value (ECMA-262 13.5.3). */
 const typeofTakesItsOperand = (inner: ts.Node, parent: ts.Node): boolean => ts.isTypeOfExpression(parent) && parent.expression === inner
 

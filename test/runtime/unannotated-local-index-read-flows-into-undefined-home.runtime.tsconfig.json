@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noUncheckedIndexedAccess": false, "types": [] },
+  "files": ["./unannotated-local-index-read-flows-into-undefined-home.runtime.ts"]
+}
