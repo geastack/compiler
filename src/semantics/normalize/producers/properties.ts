@@ -529,7 +529,12 @@ const directlyTestsItsOperand = (node: ts.Expression): boolean => {
     inner = parent
     parent = parent.parent
   }
-  return parent !== undefined && ts.isBinaryExpression(parent) && parent.left === inner && logicalAssignmentOperators.has(parent.operatorToken.kind)
+  return (
+    parent !== undefined &&
+    ts.isBinaryExpression(parent) &&
+    parent.left === inner &&
+    logicalAssignmentOperators.has(parent.operatorToken.kind)
+  )
 }
 
 /** Whether an equality operation directly compares this expression with `undefined`. */
@@ -605,6 +610,34 @@ const isIndexedObjectFor = (
  * A TUPLE is excluded: its element types are positional facts, and the checker
  * states out-of-range for one as an error rather than a silent `T`.
  */
+/**
+ * Whether `node` is the value assigned to a local declared without a type:
+ * `let node; ... node = this.#children[key]`. The checker reports such a
+ * local's declared type as `any` -- the auto type it then narrows by
+ * assignment -- so that contextual `any` is no home for `undefined`. The
+ * local's cell takes the read's own carrier, and an absence published at the
+ * read is dereferenced on the way into it: Hono's RegExpRouter `Node.insert`
+ * aborted on every route at its first missing child.
+ */
+const assignsAnUntypedLocal = (context: ProducerContext, node: AccessNode): boolean => {
+  let inner: ts.Node = node
+  let parent = inner.parent
+  while (parent && ts.isParenthesizedExpression(parent)) {
+    inner = parent
+    parent = parent.parent
+  }
+  if (!parent || !ts.isBinaryExpression(parent) || parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken || parent.right !== inner)
+    return false
+  if (!ts.isIdentifier(parent.left)) return false
+  const declaration = context.checker.getSymbolAtLocation(parent.left)?.valueDeclaration
+  return (
+    declaration !== undefined &&
+    ts.isVariableDeclaration(declaration) &&
+    declaration.type === undefined &&
+    ts.getJSDocType(declaration) === undefined
+  )
+}
+
 const observablyAbsentElementTypeOf = (context: ProducerContext, node: AccessNode, valueType: StructuralTypeId): StructuralTypeId => {
   // The local-binding census connects `const value = array[index]` to a later
   // direct `value === undefined` observation. Structural array reads normally
@@ -631,7 +664,8 @@ const observablyAbsentElementTypeOf = (context: ProducerContext, node: AccessNod
   const receiverType = context.types.typeAt(node.expression)
   const indexedObject = isIndexedObjectFor(context, receiverType, symbol ? 'symbol' : numeric ? 'number' : 'string')
   if (
-    ((contextual !== undefined && holdsUndefined(contextual)) ||
+    ((contextual !== undefined &&
+      (includesUndefined(contextual) || (holdsUndefined(contextual) && !assignsAnUntypedLocal(context, node)))) ||
       comparesWithUndefined(context, node) ||
       directlyTestsItsOperand(node)) &&
     indexedObject &&

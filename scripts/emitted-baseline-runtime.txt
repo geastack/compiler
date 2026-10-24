@@ -623,6 +623,7 @@ in-over-error-or-interface-extending-error.runtime.ts.cpp da25cd375bfa
 in-unique-symbol-key-sidecar.ts.cpp 83051dca530a
 index-signature-primitive-read-logical-and-observes-absence.runtime.ts.cpp ba933aa620d4
 index-signature-primitive-read-typeof-and-nullish-observe-absence.runtime.ts.cpp f2b123dc496e
+index-signature-read-assigned-to-untyped-local-keeps-its-carrier.runtime.ts.cpp e70e3014327f
 index-signature-read-into-unknown-or-any-observes-absence.runtime.ts.cpp 826114d44c62
 index-signature-read-optional-chain-observes-absence.runtime.ts.cpp 248f198d22e5
 index-signature-read-typed-assertion-keeps-asserted-type.runtime.ts.cpp 8997db467acf
