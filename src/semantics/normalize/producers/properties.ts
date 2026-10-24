@@ -18,7 +18,7 @@ import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { CensusCandidate } from '../census.js'
 import { blocked, mintOperationId, mintResult, operand } from './mint.js'
 import { optionalChainGuardOf, publishesShortCircuit } from './optional-chain.js'
-import { excludesNullish } from './nullish.js'
+import { excludesNullish, holdsUndefined, includesUndefined, testsItsOperand } from './nullish.js'
 import { guardedReceiverTypeOf } from './logical-merge-type.js'
 import { calleeAwareTypeAt, isStrictContext, logicalAssignmentOperators, sourceForValue, symbolMemberKeyOf } from './shared.js'
 import type { ProducerContext } from '../producer-context.js'
@@ -518,66 +518,18 @@ const chainValueTypeOf = (context: ProducerContext, node: AccessNode): Structura
 }
 
 /**
- * Whether an expression sits where ECMA-262 turns its value into a BOOLEAN --
- * `ToBoolean` of whatever it evaluated to -- rather than where the value
- * itself is consumed.
- *
- * These are test positions that can observe an `undefined` no type mentions.
- * Equality with `undefined` is the other direct observation. See
- * `observablyAbsentElementTypeOf` for why the widening is bounded to them.
+ * A test that observes this value immediately: a condition, `!`, `typeof`,
+ * `?.`, the left operand of `&&` / `||` / `??`, or a logical assignment's own guard.
  */
-const testsItsOperand = (node: ts.Expression): boolean => {
-  let inner: ts.Node = node
-  let parent = inner.parent
-  while (parent && ts.isParenthesizedExpression(parent)) {
-    inner = parent
-    parent = parent.parent
-  }
-  if (!parent) return false
-  if (ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent)) return parent.expression === inner
-  if (ts.isForStatement(parent)) return parent.condition === inner
-  if (ts.isConditionalExpression(parent)) return parent.condition === inner
-  if (ts.isPrefixUnaryExpression(parent)) return parent.operator === ts.SyntaxKind.ExclamationToken
-  if (ts.isBinaryExpression(parent)) {
-    const operator = parent.operatorToken.kind
-    const tested =
-      operator === ts.SyntaxKind.AmpersandAmpersandToken ||
-      operator === ts.SyntaxKind.BarBarToken ||
-      operator === ts.SyntaxKind.QuestionQuestionToken
-    return tested && parent.left === inner
-  }
-  // `?.` IS a test of its base, and the one that consumes nothing on the
-  // absent branch: ECMA-262 13.3.9.1 evaluates the whole chain to `undefined`
-  // without ever performing the `[[Get]]`. `root.children[3]?.value` therefore
-  // needs the same widening `if (array[i])` gets -- without it the base's
-  // carrier says never-absent, the chain's guard folds to `if (true)`, and
-  // `elementAt` aborts on the read the program wrote `?.` precisely to avoid.
-  if (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent) || ts.isCallExpression(parent)) {
-    return parent.expression === inner && ts.isOptionalChain(parent) && parent.questionDotToken !== undefined
-  }
-  return false
-}
-
-/** A test that consumes this value immediately, including a logical assignment's own guard. */
 const directlyTestsItsOperand = (node: ts.Expression): boolean => {
+  if (testsItsOperand(node)) return true
   let inner: ts.Node = node
   let parent = inner.parent
   while (parent && ts.isParenthesizedExpression(parent)) {
     inner = parent
     parent = parent.parent
   }
-  if (!parent) return false
-  if (ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent)) return parent.expression === inner
-  if (ts.isForStatement(parent)) return parent.condition === inner
-  if (ts.isConditionalExpression(parent)) return parent.condition === inner
-  if (ts.isBinaryExpression(parent) && parent.left === inner) return logicalAssignmentOperators.has(parent.operatorToken.kind)
-  return ts.isPrefixUnaryExpression(parent) && parent.operator === ts.SyntaxKind.ExclamationToken
-}
-
-/** Whether a checker type explicitly has an `undefined` constituent. */
-const includesUndefined = (type: ts.Type): boolean => {
-  if ((type.flags & ts.TypeFlags.Undefined) !== 0) return true
-  return type.isUnion() && type.types.some(includesUndefined)
+  return parent !== undefined && ts.isBinaryExpression(parent) && parent.left === inner && logicalAssignmentOperators.has(parent.operatorToken.kind)
 }
 
 /** Whether an equality operation directly compares this expression with `undefined`. */
@@ -679,7 +631,7 @@ const observablyAbsentElementTypeOf = (context: ProducerContext, node: AccessNod
   const receiverType = context.types.typeAt(node.expression)
   const indexedObject = isIndexedObjectFor(context, receiverType, symbol ? 'symbol' : numeric ? 'number' : 'string')
   if (
-    ((contextual !== undefined && includesUndefined(contextual)) ||
+    ((contextual !== undefined && holdsUndefined(contextual)) ||
       comparesWithUndefined(context, node) ||
       directlyTestsItsOperand(node)) &&
     indexedObject &&

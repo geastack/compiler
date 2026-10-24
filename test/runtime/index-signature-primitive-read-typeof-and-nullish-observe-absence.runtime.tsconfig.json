@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noUncheckedIndexedAccess": false, "types": [] },
+  "files": ["index-signature-primitive-read-typeof-and-nullish-observe-absence.runtime.ts"]
+}
