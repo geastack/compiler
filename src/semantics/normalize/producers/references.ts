@@ -3,6 +3,7 @@ import { genericClassAliasTargetSymbol } from '../../class-alias.js'
 import { isScriptGlobalObjectPropertyDeclaration } from '../script-global-redefinition.js'
 import { enclosingCallIfCallee, flowNarrowsType, unwrapErasedExpression } from './erasure.js'
 import { publishesShortCircuit } from './optional-chain.js'
+import { holdsUndefined, includesUndefined, testsItsOperand } from './nullish.js'
 import {
   operationId,
   regionId,
@@ -58,17 +59,11 @@ const literalConstantOf = (expression: ts.Expression): { text: string; literal: 
   return null
 }
 
-/** Whether a checker type explicitly has an `undefined` constituent. */
-const includesUndefined = (type: ts.Type): boolean => {
-  if ((type.flags & ts.TypeFlags.Undefined) !== 0) return true
-  return type.isUnion() && type.types.some(includesUndefined)
-}
-
 /**
- * Whether this expression is an equality operand or `instanceof`'s left
- * operand. Both answer for `undefined` without reading it: IsStrictlyEqual and
- * IsLooselyEqual compare it, and OrdinaryHasInstance returns false for a
- * non-object.
+ * Whether this expression is an equality operand, `instanceof`'s left
+ * operand, or `typeof`'s operand. All answer for `undefined` without reading
+ * it: IsStrictlyEqual and IsLooselyEqual compare it, OrdinaryHasInstance
+ * returns false for a non-object, and `typeof` answers `"undefined"`.
  */
 const comparesItsOperand = (node: ts.Expression): boolean => {
   let inner: ts.Node = node
@@ -77,7 +72,9 @@ const comparesItsOperand = (node: ts.Expression): boolean => {
     inner = parent
     parent = parent.parent
   }
-  if (!parent || !ts.isBinaryExpression(parent)) return false
+  if (!parent) return false
+  if (ts.isTypeOfExpression(parent)) return parent.expression === inner
+  if (!ts.isBinaryExpression(parent)) return false
   const operator = parent.operatorToken.kind
   if (operator === ts.SyntaxKind.InstanceOfKeyword) return parent.left === inner
   return (
@@ -94,17 +91,18 @@ const comparesItsOperand = (node: ts.Expression): boolean => {
  * dictionary[key]` to `T` when `noUncheckedIndexedAccess` is off, because its
  * checker type for the initializer omits the missing-key `undefined`. The
  * property producer restores that absence and the cell therefore physically
- * holds `Optional<T>`; dereferencing it at a later optional return or
- * `!== undefined` test would discard the very absence the producer recovered.
- * An unannotated local has the same cell when the local-binding census
- * restored the absence from a later test (`observedIndexedAbsence`), and the
- * checker types its other reads `T` just the same.
+ * holds `Optional<T>`; dereferencing it at a later optional return,
+ * `!== undefined` test or `if (value)` would discard the very absence the
+ * producer recovered. An unannotated local has the same cell when the
+ * local-binding census restored the absence from a later test
+ * (`observedIndexedAbsence`), and the checker types its other reads `T` just
+ * the same.
  *
  * This does not suppress ordinary control-flow narrowing: only a use whose
  * contextual destination itself admits `undefined`, or which compares it
- * (`comparesItsOperand`), keeps the declaration's stated carrier. A use that
- * requires `T` continues to use the checker's narrowed answer and its existing
- * presence proof/conversion.
+ * (`comparesItsOperand`) or tests it (`testsItsOperand`), keeps the
+ * declaration's stated carrier. A use that requires `T` continues to use the
+ * checker's narrowed answer and its existing presence proof/conversion.
  */
 const destinationPreservesDeclaredAbsence = (
   context: ProducerContext,
@@ -118,8 +116,19 @@ const destinationPreservesDeclaredAbsence = (
       : (context.parameters.preferredTypeAt?.(declaration) ?? null)
   if (!declared || !includesUndefined(declared)) return null
   const contextual = context.checker.getContextualType(node)
-  if ((contextual === undefined || !includesUndefined(contextual)) && !comparesItsOperand(node)) return null
+  if ((contextual === undefined || !holdsUndefined(contextual)) && !comparesItsOperand(node) && !testsItsOperand(node)) return null
   return context.types.typeAt(declaration)
+}
+
+/**
+ * The declared optional carrier a name's read publishes at a use that
+ * observes absence (`destinationPreservesDeclaredAbsence`), for an operand
+ * citing that read: a merge that re-asked the checker for `value && x` saw
+ * the flow-narrowed `T` and dereferenced the cell on its kept branch.
+ */
+export const declaredAbsenceTypeAt = (context: ProducerContext, node: ts.Identifier): StructuralTypeId | null => {
+  const symbol = valueSymbolAt(context.checker, node, context.unresolvableNames.hostProvidedNames)
+  return destinationPreservesDeclaredAbsence(context, node, symbol ? context.identities.valueDeclarationOfSymbol(symbol) : null)
 }
 
 export type ExpressionCitation =

@@ -31,6 +31,7 @@ import {
   impliedPatternPositionPresentEverywhere
 } from './parameter-slot.js'
 import { iteratorYieldTypesOf } from './producers/iteration-yield.js'
+import { holdsUndefined } from './producers/nullish.js'
 import {
   type AliasEvidence,
   annotationStatesNothing,
@@ -2600,6 +2601,31 @@ export const censusParameterBindings = (
     }
     return false
   }
+  /**
+   * An index-signature read handed to a parameter whose contextual type has a
+   * home for `undefined` (`unknown`, `any`, or an explicit `undefined`). The
+   * read's producer publishes it as `T | undefined` there
+   * (`properties.ts`'s `observablyAbsentElementTypeOf`), because a missing key
+   * is `undefined`, not `T`; the parameter must hold that absence too.
+   */
+  const passesAbsentIndexRead = (argument: ts.Expression, resolved: ts.Type): boolean => {
+    let read: ts.Expression = argument
+    while (ts.isParenthesizedExpression(read)) read = read.expression
+    if (!ts.isElementAccessExpression(read) && !ts.isPropertyAccessExpression(read)) return false
+    if (holdsUndefined(resolved)) return false
+    const contextual = checker.getContextualType(argument)
+    if (contextual === undefined || !holdsUndefined(contextual)) return false
+    const receiver = checker.getTypeAtLocation(read.expression)
+    if (checker.isArrayType(receiver) || checker.isTupleType(receiver)) return false
+    if (checker.getIndexInfosOfType(receiver).length === 0) return false
+    const key = ts.isPropertyAccessExpression(read)
+      ? read.name.text
+      : ts.isStringLiteralLike(read.argumentExpression) || ts.isNumericLiteral(read.argumentExpression)
+        ? read.argumentExpression.text
+        : null
+    return key === null || checker.getPropertyOfType(receiver, key) === undefined
+  }
+
   const collectPassedArguments = (
     calls: readonly (ts.CallExpression | ts.NewExpression)[],
     declaration: ts.SignatureDeclaration,
@@ -2719,6 +2745,7 @@ export const censusParameterBindings = (
       // type is a fact about the call, not about the storage it lands in, and a
       // second call site passing `6` would then read as a disagreement.
       passed.push(resolved.isLiteral() ? checker.getBaseTypeOfLiteralType(resolved) : resolved)
+      if (passesAbsentIndexRead(argument, resolved)) passed.push(checker.getUndefinedType())
       record(argument)
     }
     return { passed, sawBackEdge, sawOmitted, sawSilentSite, deferredRecursiveArguments }
