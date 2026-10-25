@@ -49518,10 +49518,11 @@ inline std::size_t jsonStringScan(const char* data, std::size_t size, std::size_
  * step 2 answers it: a catchable `SyntaxError`. Every grammar violation below
  * -- an unterminated container, a missing `:` or `,`, a bad literal, number,
  * escape or control character, trailing text after the root (`finish`) --
- * goes through `malformed`, which throws exactly that. The reader used to
- * stop silently at the first one instead and hand back whatever it had read
- * (`JSON.parse('')` was an empty record): a silently wrong answer, which is
- * worse than either throwing or refusing to compile.
+ * goes through one of the raisers below (`malformed`, `unexpectedToken`,
+ * `endOfInput`, `trailing`), which throw exactly that, with V8's message. The
+ * reader used to stop silently at the first one instead and hand back whatever
+ * it had read (`JSON.parse('')` was an empty record): a silently wrong answer,
+ * which is worse than either throwing or refusing to compile.
  *
  * Termination: every loop below either advances `pos_` or throws, and the
  * buffer's NUL terminator opens no token, so the end of the text always ends
@@ -49542,15 +49543,78 @@ class Reader {
    */
   explicit Reader(const std::string& text) : text_(text), data_(text.data()), size_(text.size()), pos_(0) {}
 
-  /** ECMA-262 25.5.1 step 2: text that is not valid JSON throws a `SyntaxError`. The message follows V8's shape, position included. */
-  [[noreturn]] void malformed(const char* what) const {
-    gea::host::throwRuntimeError("SyntaxError", std::string(what) + " in JSON at position " + std::to_string(pos_));
+  /**
+   * ECMA-262 25.5.1 step 2: text that is not valid JSON throws a `SyntaxError`.
+   *
+   * The message is V8's, shape for shape, because a compiled server hands it to
+   * its clients exactly as a Node server does (a body parser's 400 response).
+   * V8 counts in UTF-16 code units -- the position, the column and the ten
+   * units of context around an unexpected token -- so every report below maps
+   * the byte cursor onto code units first. Nothing here runs on a well-formed
+   * document: every raiser is `[[noreturn]]` and reached only from a grammar
+   * violation, so the error path may walk the text from its start.
+   *
+   * A positioned grammar error: `<what> in JSON at position P (line L column C)`.
+   */
+  [[noreturn]] void malformed(const char* what) const { syntaxError(std::string(what) + " in JSON" + location()); }
+
+  /** `finish`'s shape: V8 says `after JSON at position`, with no `in JSON` before it. */
+  [[noreturn]] void trailing() const { syntaxError("Unexpected non-whitespace character after JSON" + location()); }
+
+  /** The end of the text where a value should be: V8's one message with no position at all. */
+  [[noreturn]] void endOfInput() const { syntaxError("Unexpected end of JSON input"); }
+
+  /**
+   * A byte at the cursor that opens no value, or that is not the one a literal
+   * or a number needed (`ReportUnexpectedToken` in V8's `json-parser.cc`).
+   *
+   * Names the code unit at the cursor and quotes the source: whole when it is
+   * under 21 code units, otherwise ten units of context around the token with
+   * `...` marking what was cut. A source that is exactly `NaN`, `Infinity`,
+   * `undefined` or `[object Object]` -- the spellings `String(x)` gives the
+   * values JSON cannot carry -- gets V8's short form. At the end of the text
+   * this is `endOfInput`. An astral character is two code units, so the token
+   * is its lone high surrogate, as it is in V8; `substringUtf16` spells it the
+   * way the rest of this runtime does (WTF-8).
+   */
+  [[noreturn]] void unexpectedToken() const {
+    if (pos_ >= size_) endOfInput();
+    if (text_ == "NaN" || text_ == "Infinity" || text_ == "undefined" || text_ == "[object Object]")
+      syntaxError('"' + text_ + "\" is not valid JSON");
+    const std::size_t at = unitsBefore(pos_);
+    const std::size_t length = gea::runtime::string::utf16Length(text_);
+    std::string message = "Unexpected token '" + gea::runtime::string::substringUtf16(text_, at, at + 1) + "', ";
+    constexpr std::size_t context = 10;
+    if (length < 2 * context + 1) {
+      message += '"' + text_ + '"';
+    } else if (at < context) {
+      message += '"' + gea::runtime::string::substringUtf16(text_, 0, at + context) + "\"...";
+    } else if (at < length - context) {
+      message += "...\"" + gea::runtime::string::substringUtf16(text_, at - context, at + context) + "\"...";
+    } else {
+      message += "...\"" + gea::runtime::string::substringUtf16(text_, at - context, length) + '"';
+    }
+    syntaxError(message + " is not valid JSON");
+  }
+
+  /** The cursor moved to the first byte where the text stops matching `literal`, then reported as an unexpected token: the end of the text when every byte present matched (`nul` is `Unexpected end of JSON input`), otherwise the differing byte (`nulx` names the `x`). */
+  [[noreturn]] void literalMismatch(const char* literal, std::size_t length) {
+    std::size_t matched = 0;
+    while (matched < length && pos_ + matched < size_ && data_[pos_ + matched] == literal[matched]) ++matched;
+    pos_ += matched;
+    unexpectedToken();
+  }
+
+  /** The byte at the cursor must open a key. V8 words the first key of an object and a key after a comma differently; `advance` records which one this is, and consuming a `{` clears it. */
+  void expectKey() {
+    if (peek() == '"') return;
+    malformed(keyFollowsComma_ ? "Expected double-quoted property name" : "Expected property name or '}'");
   }
 
   /** The text after the root value may only be whitespace (the grammar's whole `JSONText` is one value). */
   void finish() {
     skipWhitespace();
-    if (pos_ < size_) malformed("Unexpected non-whitespace character after JSON");
+    if (pos_ < size_) trailing();
   }
 
   void skipWhitespace() {
@@ -49624,13 +49688,14 @@ class Reader {
       skipValue();
       return false;
     }
+    keyFollowsComma_ = false;
     if (consumeIf('}')) return false;
     return true;
   }
 
   /** Reads the next property key and consumes the following `:`, leaving the cursor at the value. Anything other than a quoted key and its colon is malformed; the `bool` is always `true` and kept so the generated key loop reads the same either way. */
   bool nextKey(std::string& key) {
-    if (peek() != '"') malformed("Expected double-quoted property name");
+    expectKey();
     readStringField(key);
     if (!consumeIf(':')) malformed("Expected ':' after property name");
     return true;
@@ -49676,7 +49741,7 @@ class Reader {
    * of the read -- `Reader` holds the text by reference already.
    */
   bool nextKey(std::string_view& key, std::string& scratch) {
-    if (peek() != '"') malformed("Expected double-quoted property name");
+    expectKey();
     const std::size_t opened = pos_ + 1;
     const std::size_t stop = jsonStringScan(data_, size_, opened);
     if (stop < size_ && data_[stop] == '"') {
@@ -49704,6 +49769,7 @@ class Reader {
     const char c = data_[pos_];
     if (c == ',') {
       ++pos_;
+      keyFollowsComma_ = true;
       return true;
     }
     if (c != '}') malformed("Expected ',' or '}' after property value");
@@ -49732,9 +49798,9 @@ class Reader {
       return std::numeric_limits<double>::quiet_NaN();
     }
     // `+` and `.` open no JSON number (RFC 8259 6), but they are admitted by
-    // the test above so that the error names the number rather than calling
-    // the byte a mismatched shape.
-    if (c == '+' || c == '.') malformed("Unexpected token in JSON number");
+    // the test above so that the byte is reported as the unexpected token it
+    // is rather than skipped as a mismatched shape.
+    if (c == '+' || c == '.') unexpectedToken();
     const std::size_t start = pos_;
     // `peek()` already read this byte and proved it opens a number, so the sign
     // is decided from `c` rather than loaded and bounds-checked again.
@@ -49764,7 +49830,11 @@ class Reader {
     // The integer part is `0` or a digit run with no leading zero: `-`, `-.5`
     // and `01` are all malformed.
     if (digits == 0) malformed("No number after minus sign");
-    if (digits > 1 && data_[digitsAt] == '0') malformed("Unexpected number");
+    if (digits > 1 && data_[digitsAt] == '0') {
+      // V8 reports the digit after the leading zero, not the end of the run.
+      pos_ = digitsAt + 1;
+      malformed("Unexpected number");
+    }
     const char next = data_[pos_];
     if (digits <= 19 && next != '.' && next != 'e' && next != 'E')
       return negative ? -static_cast<double>(whole) : static_cast<double>(whole);
@@ -49888,7 +49958,7 @@ class Reader {
         --pos_;
         malformed("Bad control character in string literal");
       }
-      if (pos_ >= size_) malformed("Unterminated string");
+      if (pos_ >= size_) endOfInput();
       const char escape = data_[pos_++];
       switch (escape) {
         case '"': out += '"'; break;
@@ -49900,18 +49970,18 @@ class Reader {
         case 'r': out += '\r'; break;
         case 't': out += '\t'; break;
         case 'u': {
-          if (pos_ + 4 > size_) malformed("Bad Unicode escape");
+          // Reported at the first of the four that is not a hex digit, the end
+          // of the text included: V8's position.
           unsigned code = 0;
-          bool validHex = true;
           for (int digit = 0; digit < 4; ++digit) {
-            const char h = data_[pos_++];
+            const char h = pos_ < size_ ? data_[pos_] : '\0';
             code <<= 4;
             if (h >= '0' && h <= '9') code |= static_cast<unsigned>(h - '0');
             else if (h >= 'a' && h <= 'f') code |= static_cast<unsigned>(h - 'a' + 10);
             else if (h >= 'A' && h <= 'F') code |= static_cast<unsigned>(h - 'A' + 10);
-            else validHex = false;
+            else malformed("Bad Unicode escape");
+            ++pos_;
           }
-          if (!validHex) malformed("Bad Unicode escape");
           // UTF-8 encode the code point. A surrogate pair (an astral
           // character split across two `\uXXXX` escapes) is not reassembled
           // -- no corpus document this backend parses has one -- so each
@@ -49963,18 +50033,24 @@ class Reader {
       if (c != '\\') malformed("Bad control character in string literal");
       // A skipped string is still part of the document, so its escapes are
       // held to the same grammar as a decoded one's.
+      if (pos_ + 1 >= size_) endOfInput();
       const char escape = data_[pos_ + 1];
       if (escape == 'u') {
         for (std::size_t digit = 2; digit < 6; ++digit) {
           const char h = pos_ + digit < size_ ? data_[pos_ + digit] : '\0';
-          if (!((h >= '0' && h <= '9') || (h >= 'a' && h <= 'f') || (h >= 'A' && h <= 'F'))) malformed("Bad Unicode escape");
+          if (!((h >= '0' && h <= '9') || (h >= 'a' && h <= 'f') || (h >= 'A' && h <= 'F'))) {
+            pos_ += digit;
+            malformed("Bad Unicode escape");
+          }
         }
         pos_ += 6;
         continue;
       }
       if (escape != '"' && escape != '\\' && escape != '/' && escape != 'b' && escape != 'f' && escape != 'n' && escape != 'r' &&
-          escape != 't')
+          escape != 't') {
+        ++pos_;
         malformed("Bad escaped character");
+      }
       pos_ += 2;
     }
   }
@@ -49982,14 +50058,15 @@ class Reader {
   /** Skips one well-formed JSON value this program's declared shape does not name -- an object key nothing here reads, or the wrong-shaped value behind a field whose static type doesn't match what's actually in the document (ECMA-262's own `JSON.parse` skips nothing at all; a `T` narrower than the document, and refusing a mismatch rather than coercing it, are this backend's own choices -- see `emit-json.ts`'s top comment). Text that is not a JSON value at all is malformed. Every branch either consumes at least one byte or throws, so this always terminates even on adversarial input. */
   void skipValue() {
     const char c = peek();
-    if (c == '\0') malformed("Unexpected end of JSON input");
+    if (pos_ >= size_) endOfInput();
     if (c == '"') {
       skipString();
     } else if (c == '{') {
       ++pos_;
+      keyFollowsComma_ = false;
       if (!consumeIf('}')) {
         for (;;) {
-          if (peek() != '"') malformed("Expected double-quoted property name");
+          expectKey();
           skipString();
           if (!consumeIf(':')) malformed("Expected ':' after property name");
           skipValue();
@@ -50005,18 +50082,18 @@ class Reader {
         }
       }
     } else if (c == 't') {
-      if (!consumeLiteral("true", 4)) malformed("Unexpected token");
+      if (!consumeLiteral("true", 4)) literalMismatch("true", 4);
     } else if (c == 'f') {
-      if (!consumeLiteral("false", 5)) malformed("Unexpected token");
+      if (!consumeLiteral("false", 5)) literalMismatch("false", 5);
     } else if (c == 'n') {
-      if (!consumeLiteral("null", 4)) malformed("Unexpected token");
+      if (!consumeLiteral("null", 4)) literalMismatch("null", 4);
     } else if (c == '-' || c == '+' || c == '.' || (c >= '0' && c <= '9')) {
       // Never a mismatch here: `readNumberField` either consumes a whole
       // grammatical number or throws, so it cannot hand the same byte back.
       readNumberField();
     } else {
       // A byte that opens no JSON value at all.
-      malformed("Unexpected token");
+      unexpectedToken();
     }
   }
 
@@ -50025,15 +50102,15 @@ class Reader {
     const char c = peek();
     if (c == '"') return gea::Value::box(gea::Value::Tag::String, readStringField());
     if (c == 't') {
-      if (!consumeLiteral("true", 4)) malformed("Unexpected token");
+      if (!consumeLiteral("true", 4)) literalMismatch("true", 4);
       return gea::Value::box(gea::Value::Tag::Boolean, true);
     }
     if (c == 'f') {
-      if (!consumeLiteral("false", 5)) malformed("Unexpected token");
+      if (!consumeLiteral("false", 5)) literalMismatch("false", 5);
       return gea::Value::box(gea::Value::Tag::Boolean, false);
     }
     if (c == 'n') {
-      if (!consumeLiteral("null", 4)) malformed("Unexpected token");
+      if (!consumeLiteral("null", 4)) literalMismatch("null", 4);
       return gea::Value::box(gea::Value::Tag::Null, static_cast<std::nullptr_t>(nullptr));
     }
     if (c == '[') {
@@ -50049,6 +50126,7 @@ class Reader {
     }
     if (c == '{') {
       consumeIf('{');
+      keyFollowsComma_ = false;
       // Dynamic JSON objects use the same native string-keyed carrier that
       // `Record<string, Value>` assertions expect.  `Value` already has exact
       // dictionary property, enumeration, and mutation dispatch, so keeping
@@ -50071,7 +50149,7 @@ class Reader {
     }
     // Every token that opens a JSON value was answered above, so this is the
     // end of the text or a byte no value starts with.
-    malformed(c == '\0' ? "Unexpected end of JSON input" : "Unexpected token");
+    unexpectedToken();
   }
 
   /** The cursor, for a caller measuring what one value cost to read. See `elementCapacityEstimate`. */
@@ -50081,10 +50159,46 @@ class Reader {
   std::size_t remaining() const { return pos_ < size_ ? size_ - pos_ : 0; }
 
  private:
+  [[noreturn]] static void syntaxError(const std::string& message) { gea::host::throwRuntimeError("SyntaxError", message); }
+
+  /** UTF-16 code units in the bytes before `byteOffset`: one per non-continuation byte, two for a four-byte sequence. */
+  std::size_t unitsBefore(std::size_t byteOffset) const {
+    std::size_t units = 0;
+    for (std::size_t i = 0; i < byteOffset; ++i) {
+      const unsigned char b = static_cast<unsigned char>(data_[i]);
+      if ((b & 0xC0) == 0x80) continue;
+      units += b >= 0xF0 ? 2 : 1;
+    }
+    return units;
+  }
+
+  /** ` at position P (line L column C)`, all in code units. `\n`, `\r` and `\r\n` each end a line, as in V8; U+2028 and U+2029 do not. */
+  std::string location() const {
+    std::size_t units = 0;
+    std::size_t line = 1;
+    std::size_t lineStart = 0;
+    for (std::size_t i = 0; i < pos_; ++i) {
+      const unsigned char b = static_cast<unsigned char>(data_[i]);
+      if ((b & 0xC0) == 0x80) continue;
+      units += b >= 0xF0 ? 2 : 1;
+      if (b != '\n' && b != '\r') continue;
+      if (b == '\r' && i + 1 < pos_ && data_[i + 1] == '\n') {
+        ++i;
+        ++units;
+      }
+      ++line;
+      lineStart = units;
+    }
+    return " at position " + std::to_string(units) + " (line " + std::to_string(line) + " column " +
+           std::to_string(units - lineStart + 1) + ")";
+  }
+
   const std::string& text_;
   const char* data_;
   std::size_t size_;
   std::size_t pos_;
+  /** Whether the key the cursor is about to read follows a `,` (set by `advance`) rather than the object's `{`. */
+  bool keyFollowsComma_ = false;
 };
 
 /**

@@ -720,6 +720,7 @@ json-parse-any-array-into-declared-record-element.runtime.ts.cpp ac19e3116a24
 json-parse-as-a-value.ts.cpp bdf46788c942
 json-parse-of-stringify-result-that-may-be-undefined.runtime.ts.cpp c8661d4fb8ed
 json-parse-reviver.runtime.ts.cpp beacaf1ee80b
+json-parse-syntax-error-messages.runtime.ts.cpp 55c68582343c
 json-reader-dispatch.ts.cpp ed866c82311f
 json-stringify-class-own-fields.ts.cpp 8eee92c5574d
 json-stringify-class-with-to-json.ts.cpp 5227eb700fa7
