@@ -409,6 +409,10 @@ export const createRepresentationDeriver = (
   /** The carrier a *stored* position holds -- see `storedCarrier`. */
   const deriveStored = (id: StructuralTypeId): Representation => storedCarrier(derive(id))
   const isDataOnlyBody = (id: StructuralTypeId): boolean => isDataOnlyObjectShape(shapeOf(id), shapeOf)
+  const isDictionaryBody = (id: StructuralTypeId): boolean => {
+    const body = shapeOf(id)
+    return body?.kind === 'object' && !body.membersDropped && dictionaryIndexOf(body) !== null
+  }
 
   type RecursiveContainerSource =
     | {
@@ -2890,7 +2894,8 @@ export const createRepresentationDeriver = (
         // operations belong to the host whether or not this compiler was told
         // the type's spelling, and inventing a layout for it would be the
         // guess this rule exists to prevent.
-        const boundWithoutCarrier = bound !== null && !bound.native && shape.body !== null && isDataOnlyBody(shape.body)
+        const boundWithoutCarrier =
+          bound !== null && !bound.native && shape.body !== null && (isDataOnlyBody(shape.body) || isDictionaryBody(shape.body))
         if (bound && !boundWithoutCarrier) {
           const invocable = shape.body ? shapeOf(shape.body) : null
           const call = invocable?.kind === 'signature' ? hostInvocationAbiOf(invocable.call, 'overload') : null
