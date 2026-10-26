@@ -10,8 +10,9 @@
 //   - runs `npm ci` in every directory holding a tracked package-lock.json
 //     (node-compat's apps carry their own), and a plain
 //     install where a package locks nothing (parallel);
-//   - builds @geastack/windows, which the Windows plugin's tests import, and
-//     this compiler's dist/ when there is none;
+//   - builds @geastack/windows, which the Windows plugin's tests import, core's
+//     geatsc-plugin-gea, which the reflection check imports, and this
+//     compiler's dist/ when there is none;
 //   - on Windows, installs the native libraries the checks link (libopus and
 //     libvpx for core's RTC and VP8 checks, zlib for node-compat) and pkgconf
 //     through vcpkg, when VCPKG_ROOT names a vcpkg checkout. The suite finds
@@ -95,6 +96,9 @@ for (const repository of [compiler, ...siblings.map((name) => join(workspace, na
 
 const windowsPackage = join(workspace, 'windows/packages/geastack-windows')
 if (reinstall || !existsSync(join(windowsPackage, 'dist/index.js'))) step(windowsPackage, ['npm', 'run', 'build'])
+// The reflection check (test/native-reflection-binding.mjs) imports core's built geatsc plugin.
+const corePlugin = join(workspace, 'core/packages/geatsc-plugin-gea')
+if (reinstall || !existsSync(join(corePlugin, 'dist/host-shims.js'))) step(corePlugin, ['npm', 'run', 'build'])
 if (!existsSync(join(compiler, 'dist/cli.js'))) step(compiler, ['npm', 'run', 'build'])
 
 if (process.platform === 'win32') {

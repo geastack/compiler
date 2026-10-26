@@ -1404,6 +1404,7 @@ unknown-valued-dictionary-parameter-takes-its-argument-dictionary.runtime.ts.cpp
 unshared-array-fresh-factory.ts.cpp 36ebff2b79b1
 unshared-array-read-only-argument.ts.cpp 0dda74940e17
 unshared-array-return-local.ts.cpp 48a04d4a0236
+untagged-host-native-scalar-arguments-keep-object-assign.ts.cpp d725c8d54125
 untyped-code-writes-forwarding-and-union-methods-into-typed-field.runtime.js.cpp b40947051e23
 untyped-code-writes-method-record-into-object-typed-field.runtime.js.cpp 40005fa795c0
 untyped-code-writes-method-record-into-typed-field.runtime.ts.cpp 8bfd82caf09c

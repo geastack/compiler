@@ -1149,14 +1149,14 @@ test('ordinary local and native receiver calls do not taint host globals', () =>
 // `fetch`/`Response` would resolve to lib.dom's declarations (a `Promise<Response>`
 // result), so the host protocol is spelled under names the library does not own.
 test('a native call result keeps its native receiver provenance, awaited or not', () => {
-  for (const spelling of ['hostFetch(url)', 'await hostFetch(url)']) {
+  for (const spelling of ['hostFetch(url, init)', 'await hostFetch(url, init)']) {
     const audit = globalHostMutationAuditOf(
       `
         interface Process {}
         declare var hostProcess: Process
         interface HostResponse { text(): string }
-        declare function hostFetch(url: string): HostResponse
-        async function load(url: string): Promise<string> {
+        declare function hostFetch(url: string, init: { retries: number }): HostResponse
+        async function load(url: string, init: { retries: number }): Promise<string> {
           const response = ${spelling}
           return response.text()
         }
