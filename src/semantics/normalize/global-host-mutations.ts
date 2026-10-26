@@ -6008,7 +6008,10 @@ export const censusGlobalHostMutations = (
     const inherited = classChainMemberOfMergedSignature(symbol)
     if (inherited !== undefined)
       return inherited !== null && !seen.has(inherited) && ambientCallableIsProgramSupplied(inherited, new Set([...seen, symbol]))
-    const signatures = checker.getSignaturesOfType(checker.getTypeOfSymbolAtLocation(symbol, declaration), ts.SignatureKind.Call)
+    const signatures = checker.getSignaturesOfType(
+      checker.getNonNullableType(checker.getTypeOfSymbolAtLocation(symbol, declaration)),
+      ts.SignatureKind.Call
+    )
     return (
       signatures.length > 0 &&
       signatures.every((signature) => {
