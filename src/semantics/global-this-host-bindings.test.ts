@@ -3171,7 +3171,7 @@ test('a host member declared as a bare string dictionary is carried as the dicti
   assert.match(source, /gea::dictionary::readHinted\(\(\*\(test::process_env\(\)\)\), \("PORT"\)/)
 })
 
-const hostHooksTaint = (declaration: string, use: string): string[] =>
+const hostHooksTaint = (declaration: string, use: string, modules: ReadonlyMap<string, string> = new Map()): string[] =>
   [
     ...globalHostMutationAuditOf(
       `/// <reference path="./global-host-hooks.d.ts" />
@@ -3186,7 +3186,7 @@ const hostHooksTaint = (declaration: string, use: string): string[] =>
       [],
       undefined,
       false,
-      new Map([[resolve('test/fixtures/global-host-hooks.d.ts'), declaration]])
+      new Map([[resolve('test/fixtures/global-host-hooks.d.ts'), declaration], ...modules])
     ).taint
   ].sort()
 
@@ -3224,6 +3224,25 @@ test('a host callable member is judged alike through every spelling and receiver
       ['delete hooks.run', "delete hooks['run']"]
     ] as const)
       assert.deepEqual(hostHooksTaint(receiver, bracket), hostHooksTaint(receiver, dot), `${receiver} :: ${bracket}`)
+})
+
+test('a host callable member is judged on every union arm a read may yield', () => {
+  const modules = new Map([[resolve('test/fixtures/program-run.ts'), 'export function programRun(value?: object): void {}']])
+  const arms =
+    "interface Program { readonly run: typeof import('./program-run.js').programRun } interface Host { readonly run: (value?: object) => void }"
+  for (const use of [
+    'hooks.run(box)',
+    'console.log([hooks.run].length)',
+    "hooks['run'](box)",
+    'const { run } = hooks; console.log([run].length)',
+    'let { run } = hooks'
+  ]) {
+    assert.deepEqual(hostHooksTaint(`${arms} declare var hooks: Program`, use, modules), [], use)
+    const expected = hostHooksTaint(`${arms} declare var hooks: Host`, use, modules)
+    assert.notDeepEqual(expected, [], use)
+    for (const union of ['Program | Host', 'Host | Program'])
+      assert.deepEqual(hostHooksTaint(`${arms} declare var hooks: ${union}`, use, modules), expected, `${union} :: ${use}`)
+  }
 })
 
 test('a host callable property declared with undefined escapes as a value as the bare property does', () => {
