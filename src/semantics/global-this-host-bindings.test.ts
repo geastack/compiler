@@ -3245,18 +3245,26 @@ test('a host callable member is judged on every union arm a read may yield', () 
   }
 })
 
-test('a host callable property declared with undefined escapes as a value as the bare property does', () => {
-  const bare = 'interface Hooks { readonly run: (value?: object) => void } declare var hooks: Hooks'
-  const optional = 'interface Hooks { readonly run: ((value?: object) => void) | undefined } declare var hooks: Hooks'
-  for (const use of [
-    'console.log([hooks.run].length)',
-    "console.log([hooks['run']].length)",
-    'const { run } = hooks; console.log([run].length)'
-  ]) {
-    const expected = hostHooksTaint(bare, use)
-    assert.notDeepEqual(expected, [], use)
-    assert.deepEqual(hostHooksTaint(optional, use), expected, use)
-  }
+test('a callable property declared with undefined is judged as the bare property is', () => {
+  const programRun = new Map([[resolve('test/fixtures/program-run.ts'), 'export function programRun(value?: object): void {}']])
+  const callables = [
+    ['(value?: object) => void', new Map<string, string>(), true],
+    ["typeof import('./program-run.js').programRun", programRun, false]
+  ] as const
+  for (const [callable, modules, escapes] of callables)
+    for (const use of [
+      'console.log([hooks.run].length)',
+      "console.log([hooks['run']].length)",
+      'const { run } = hooks; console.log([run].length)'
+    ]) {
+      const expected = hostHooksTaint(`interface Hooks { readonly run: ${callable} } declare var hooks: Hooks`, use, modules)
+      assert.equal(expected.length > 0, escapes, `${callable} :: ${use}`)
+      assert.deepEqual(
+        hostHooksTaint(`interface Hooks { readonly run: (${callable}) | undefined } declare var hooks: Hooks`, use, modules),
+        expected,
+        `${callable} :: ${use}`
+      )
+    }
 })
 
 test('a standard library global read by reflection keeps every intrinsic trusted', () => {
