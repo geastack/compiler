@@ -887,6 +887,9 @@ export const censusGlobalHostMutations = (
    * intrinsic prototype the component had been merged with, `Map.prototype`
    * among them, for every `x` and `width` handed to a `readPixels`-style
    * native, and refused obligations no native could touch.
+   *
+   * An argument whose own type is primitive as well reaches nothing at all
+   * (`primitiveArgumentReachesNothing` below).
    */
   const NO_SCALAR_POSITIONS: ReadonlyMap<number, ts.Type> = new Map()
   const hostNativeScalarParametersOf = (call: ts.CallExpression): ReadonlyMap<number, ts.Type> => {
@@ -6704,8 +6707,27 @@ export const censusGlobalHostMutations = (
           const component = target ? factsByComponent.get(target) : undefined
           // A scalar host parameter reaches what its primitive reaches, and
           // nothing else of the cell's component (`hostNativeScalarParametersOf`).
+          //
+          // A primitive argument reaches nothing at all. The wrapper chain is
+          // `Object.prototype` and the `Object` constructor, stamped `every`
+          // for each uncontracted native taking a `number`, which revoked
+          // `Object.assign` and every absent-key read in the program over one
+          // `bindBufferBase( target, index, buffer )`. A native that could
+          // reach those realm intrinsics through a `double` could reach them
+          // with no argument at all, and this stamp has never charged a
+          // zero-argument native with anything: what a native does to the
+          // realm on its own is its contract's business (`host-effect-contracts.ts`).
+          // Only the argument's OWN type answers that: `define as unknown as
+          // number` or an `any` cell may still hold an object, and keeps the
+          // wrapper chain.
           const scalar = scalarParameters.get(position)
-          const reach = scalar === undefined ? null : primitivePrototypeReachOf(scalar, current)
+          const primitiveArgumentReachesNothing = scalar !== undefined && primitiveResult(checker.getTypeAtLocation(current))
+          const reach =
+            scalar === undefined
+              ? null
+              : primitiveArgumentReachesNothing
+                ? new Set<DeclarationId>()
+                : primitivePrototypeReachOf(scalar, current)
           const facts =
             component === undefined || reach === null
               ? component

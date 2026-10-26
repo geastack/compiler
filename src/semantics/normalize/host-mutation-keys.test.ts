@@ -261,6 +261,29 @@ test('a bodiless host function is an unknown callee unless every declaration sta
   assert.ok(census('declare const unknownCallee: any; unknownCallee(globalThis)').taint.has('*'))
 })
 
+test('a scalar argument of an uncontracted host native reaches no intrinsic, not even its wrapper chain', () => {
+  const program = (parameter: string, argument: string) =>
+    census(`
+declare function hostBind(target: ${parameter}, index: number): void
+function bind(target: ${parameter}, index: number): void { hostBind(target, index) }
+bind(${argument}, 2)
+`)
+  const assign: Obligation = { intrinsic: 'Object', member: 'assign' }
+  for (const [parameter, argument] of [
+    ['number', '1'],
+    ['string', "'uniforms'"],
+    ['boolean', 'true'],
+    ['number | null', 'null']
+  ] as const) {
+    const scalar = program(parameter, argument)
+    assert.ok(scalar.holds(assign), `Object.assign under a ${parameter} parameter`)
+    assert.ok(scalar.holds(lacks('probeKey')), `Object.prototype under a ${parameter} parameter`)
+  }
+  // An object handed to the same uncontracted native is still charged with its prototype chain.
+  const object = program('{ value: number }', '{ value: 1 }')
+  assert.ok(!object.holds(lacks('probeKey')))
+})
+
 test('a host method that only writes typed-array elements leaves the intrinsics its argument reaches trusted', () => {
   const bytesKey = lacks('probeKey')
   const call = (tag: string) =>
