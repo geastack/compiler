@@ -7640,7 +7640,15 @@ struct CallableObject<Result(Arguments...)> {
     return CallableFacts{{}, "function () { [native code] }", 0};
   }
 
+  /** Whether `factsFor` answers published facts rather than its placeholder, which is wrong for a named builtin such as `Math.max`. */
+  static bool publishesFactsFor(const EntryRecord* record) {
+    for (; record != nullptr; record = record->declaration)
+      if (record->resolveFacts || record->hasFacts) return true;
+    return false;
+  }
+
   CallableFacts facts() const { return factsFor(record, environment); }
+  bool publishesFacts() const { return publishesFactsFor(record); }
 
   std::string_view sourceText() const { return facts().text; }
   /** ECMA-262 [[Name]] -- the declared name, or the `NamedEvaluation` name from where an anonymous literal was defined; empty when neither applies. */
@@ -8829,6 +8837,7 @@ struct CallableConstructorObject<Result(Arguments...), Constructed(ConstructArgu
   static constexpr std::size_t physicalArgumentCount = sizeof...(Arguments);
   NativeCallableFrame argumentFrame() const { return CallableView::argumentFrameFor(record, environment); }
   typename CallableView::CallableFacts facts() const { return CallableView::factsFor(record, environment); }
+  bool publishesFacts() const { return CallableView::publishesFactsFor(record); }
   std::string_view sourceText() const { return facts().text; }
   std::string_view name() const { return facts().name; }
   std::size_t length() const { return facts().length; }
@@ -20321,6 +20330,8 @@ class Value {
   Value callWithReceiver(const NativeCallReceiver& receiver, const std::vector<Value>& arguments) const;
   /** Function.prototype.toString for a boxed callable, through the source fact its erased call table retained. */
   std::string functionSourceText() const;
+  /** Whether that source fact was published, rather than the placeholder a host builtin's callable answers. */
+  bool functionPublishesSourceText() const;
   /**
    * ECMA-262 10.2.2 `[[Construct]]`, for a plain JS function boxed under
    * --dynamic-fallback because its own `.prototype` is read or written
@@ -26429,6 +26440,7 @@ struct NativeCallOps {
   Value (*callWithReceiver)(const void* payload, const Value& receiver, const Value* arguments, std::size_t count) = nullptr;
   Value (*callWithNativeReceiver)(const void* payload, const NativeCallReceiver& receiver,
                                 const Value* arguments, std::size_t count, bool physicalThis) = nullptr;
+  bool (*publishesFacts)(const void* payload) = nullptr;
 };
 
 template <typename T>
@@ -26441,14 +26453,18 @@ const NativeCallOps* nativeCallOpsFor() {
         +[](const void* payload) { return static_cast<const T*>(payload)->name(); },
         +[](const void* payload) { return static_cast<const T*>(payload)->length(); },
         &DynamicCallSignature<T>::callWithReceiver,
-        DynamicCallSignature<T>::callWithNativeReceiver};
+        DynamicCallSignature<T>::callWithNativeReceiver,
+        +[](const void* payload) { return static_cast<const T*>(payload)->publishesFacts(); }};
       return &ops;
     } else {
       static const NativeCallOps ops{
         nullptr,
         +[](const void* payload) { return std::string(static_cast<const T*>(payload)->sourceText()); },
         +[](const void* payload) { return static_cast<const T*>(payload)->name(); },
-        +[](const void* payload) { return static_cast<const T*>(payload)->length(); }};
+        +[](const void* payload) { return static_cast<const T*>(payload)->length(); },
+        nullptr,
+        nullptr,
+        +[](const void* payload) { return static_cast<const T*>(payload)->publishesFacts(); }};
       return &ops;
     }
   } else {
@@ -26714,14 +26730,18 @@ const NativeCallOps* nativeRestCallOpsFor() {
         +[](const void* payload) { return static_cast<const T*>(payload)->name(); },
         +[](const void* payload) { return static_cast<const T*>(payload)->length(); },
         &DynamicRestCallSignature<T, RestFrom, ActualArguments>::callWithReceiver,
-        DynamicRestCallSignature<T, RestFrom, ActualArguments>::callWithNativeReceiver};
+        DynamicRestCallSignature<T, RestFrom, ActualArguments>::callWithNativeReceiver,
+        +[](const void* payload) { return static_cast<const T*>(payload)->publishesFacts(); }};
       return &ops;
     } else {
       static const NativeCallOps ops{
         nullptr,
         +[](const void* payload) { return std::string(static_cast<const T*>(payload)->sourceText()); },
         +[](const void* payload) { return static_cast<const T*>(payload)->name(); },
-        +[](const void* payload) { return static_cast<const T*>(payload)->length(); }};
+        +[](const void* payload) { return static_cast<const T*>(payload)->length(); },
+        nullptr,
+        nullptr,
+        +[](const void* payload) { return static_cast<const T*>(payload)->publishesFacts(); }};
       return &ops;
     }
   } else {
@@ -33035,6 +33055,11 @@ inline void installNativeDescriptorSetter(PropertyDescriptor& descriptor, Native
   descriptor.setterValue = Value();
   descriptor.setIdentity = setter.identity();
   descriptor.nativeSet = std::move(setter);
+}
+
+inline bool Value::functionPublishesSourceText() const {
+  return tag_ == Tag::Function && metadata_->calls != nullptr && metadata_->calls->publishesFacts != nullptr &&
+         metadata_->calls->publishesFacts(payload());
 }
 
 inline std::string Value::functionSourceText() const {
@@ -44523,7 +44548,18 @@ inline bool isArrayBufferView(const gea::Value& value) {
 inline std::string functionPrototypeToString(const gea::Value& value) {
   if (value.tag() != gea::Value::Tag::Function)
     throwRuntimeError("TypeError", "Function.prototype.toString requires that 'this' be a Function");
-  return value.functionSourceText();
+  // 20.2.3.5 puts a builtin's own name in its text. A callable whose record
+  // published no facts (a host builtin such as `Math.max`, a bound function)
+  // gets `factsFor`'s anonymous placeholder, which is right only for a builtin
+  // with no name, and nothing here says which one this is. So the text is
+  // refused rather than guessed. Read first, so a payload that cannot be
+  // called at all keeps the refusal `functionSourceText` already gives it.
+  std::string text = value.functionSourceText();
+  if (!value.functionPublishesSourceText()) {
+    std::fprintf(stderr, "gea: Function.prototype.toString reached a callable whose source text this runtime does not know\n");
+    gea::detail::abortAfterFlush();
+  }
+  return text;
 }
 
 inline bool instanceOfMap(const gea::Value& value) {
