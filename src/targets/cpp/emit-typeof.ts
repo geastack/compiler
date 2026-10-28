@@ -42,6 +42,9 @@ const objectLike = new Set([
   'record',
   'record-with-index',
   'native-record-ref',
+  // A host CLASS answers "function" before this set is asked (its call or
+  // construct half, `typeofTextFor`). Known gap: a class carried with neither
+  // half -- `Map` is one -- still lands here as "object", against the rule above.
   'native-handle',
   'array-object',
   'dictionary',
@@ -111,6 +114,9 @@ export const typeofTextFor = (representation: Representation): string | null => 
   // proxy over a function is `"function"`.
   if (representation.kind === 'borrowed-ref') return typeofTextFor(representation.referent)
   if (representation.kind === 'proxy-object') return typeofTextFor(representation.target)
+  // A native handle with a call or construct half is a host CLASS object
+  // (`Object`, `Date`): it has [[Call]], so `typeof Object` is "function".
+  if (representation.kind === 'native-handle' && (representation.call !== null || representation.construct !== null)) return 'function'
   if (objectLike.has(representation.kind)) return 'object'
   if (functionLike.has(representation.kind)) return 'function'
   return null

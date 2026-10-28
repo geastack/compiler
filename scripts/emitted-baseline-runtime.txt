@@ -598,6 +598,7 @@ hoisted-function-declaration.ts.cpp 9060453da4ca
 hook-receives-arguments-its-declaration-omits.runtime.ts.cpp d0654aab4c2f
 hook-replacements-narrower-than-the-call-receive-every-argument.runtime.ts.cpp 6f28186f47af
 host-accessor-call-through-module-helper.runtime.ts.cpp fdb8bada245b
+host-class-typeof-is-function.runtime.ts.cpp b2a6c72c6dca
 host-function-call-through-captured-binding.runtime.ts.cpp 23fbe989e42d
 host-method-alias.runtime.js.cpp 61ceae313c3d
 host-method-read-as-value.ts.cpp 7b8e740796c1
