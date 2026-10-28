@@ -489,7 +489,7 @@ function-generator-overload-result.ts.cpp 8700641d23e9
 function-identity-does-not-retain-source.runtime.ts.cpp 8256f867f196
 function-metadata-does-not-retain-source.runtime.js.cpp 3c3a53032d2f
 function-name-length-descriptor.runtime.js.cpp 162d6bad838a
-function-prototype-tostring-read-as-a-value.runtime.js.cpp c4560c462c8e
+function-prototype-tostring-read-as-a-value.runtime.js.cpp d8ae47e79a1a
 function-prototype-tostring-refuses-an-unnamed-builtin.runtime.ts.cpp ca5e4912b110
 function-value-bind-current-facts.ts.cpp 153a4aa9fa6d
 function-value-bind.ts.cpp 4f50c9efc18c
@@ -1162,7 +1162,7 @@ ref-virtual-base-address.ts.cpp 16840897c352
 reflect-native-boundary.ts.cpp 6313c2f301ae
 reflect-native-operations.ts.cpp f1944ce79389
 regexp-anchors-line-terminators.ts.cpp bb54ee413b7e
-regexp-boolean-object-prototype-reflection.runtime.js.cpp 77d42433962a
+regexp-boolean-object-prototype-reflection.runtime.js.cpp 8b97c49c97e3
 regexp-clone-unsupported-flags.ts.cpp c0a8d5746f82
 regexp-exec-result-length.ts.cpp b01842b88957
 regexp-match-result-element-store.ts.cpp 94d2e91da935

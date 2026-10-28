@@ -1008,22 +1008,19 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
     }
   },
   {
-    // Ahead of `prototype-object-local`: a local holding
-    // `Function.prototype.toString` is the receiver-taking builtin, not the
-    // receiver-less `Function` interface member that rule would read.
-    name: 'intrinsic-accessor-getter',
-    forms: [ts.SyntaxKind.PropertyAccessExpression, ts.SyntaxKind.VariableDeclaration, ts.SyntaxKind.Identifier],
-    resolve(node) {
-      return this.intrinsicAccessorGetterTypeAt(node)
-    }
-  },
-  {
     name: 'prototype-object-local',
     forms: [ts.SyntaxKind.VariableDeclaration, ts.SyntaxKind.Identifier],
     resolve(node) {
       const prototypeLocal = this.prototypeObjectLocalTypeAt(node)
       if (prototypeLocal) return prototypeLocal
       return null
+    }
+  },
+  {
+    name: 'intrinsic-accessor-getter',
+    forms: [ts.SyntaxKind.PropertyAccessExpression, ts.SyntaxKind.VariableDeclaration, ts.SyntaxKind.Identifier],
+    resolve(node) {
+      return this.intrinsicAccessorGetterTypeAt(node)
     }
   },
   {
@@ -5516,10 +5513,10 @@ class StructuralView extends StructuralViewInputs {
     const shape = this.table.get(body).shape
     if (shape.kind !== 'object') return body
     const receiver = this.table.intern({ kind: 'primitive', primitive: 'any' })
-    const methods: StructuralMember[] = []
+    const methods = new Map<string, StructuralMember>()
     for (const symbol of this.checker.getPropertiesOfType(instanceType)) {
       const method = symbol.declarations?.find(ts.isMethodSignature)
-      if (!method || shape.members.some((member) => member.key.kind === 'string' && member.key.value === symbol.getName())) continue
+      if (!method) continue
       const type = this.table.get(this.typeOf(this.checker.getTypeOfSymbolAtLocation(symbol, method))).shape
       if (type.kind !== 'signature' || type.call.length === 0) continue
       // An overloaded method (`toLocaleDateString(): string` beside
@@ -5527,7 +5524,7 @@ class StructuralView extends StructuralViewInputs {
       // frame; the copy states its widest overload, which every narrower
       // call fits through its optionals.
       const widest = type.call.reduce((best, signature) => (signature.parameters.length > best.parameters.length ? signature : best))
-      methods.push({
+      methods.set(symbol.getName(), {
         key: { kind: 'string', value: symbol.getName() },
         type: this.table.intern({ ...type, call: [{ ...widest, thisParameter: receiver }] }),
         optional: false,
@@ -5535,7 +5532,17 @@ class StructuralView extends StructuralViewInputs {
         accessor: null
       })
     }
-    return this.table.intern({ ...shape, members: [...shape.members, ...methods], membersDropped: false })
+    // A body that already lists a method (`Function`'s does) lists the
+    // instance's receiver-less view of it; the prototype's own copy replaces
+    // it in place, so a read through any rule states the same receiver.
+    const members = shape.members.map((member) => {
+      if (member.key.kind !== 'string') return member
+      const own = methods.get(member.key.value)
+      if (own === undefined) return member
+      methods.delete(member.key.value)
+      return own
+    })
+    return this.table.intern({ ...shape, members: [...members, ...methods.values()], membersDropped: false })
   }
 
   // A method read off the prototype object (`Date.prototype.getTime`, or
