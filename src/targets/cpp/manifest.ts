@@ -147,8 +147,9 @@ export const createCppTargetManifest = (
   // `intrinsicAccessorGetterValueText` renders; a claim is per carrier, like
   // the presence test above, so no other convention is ever claimed for it.
   for (const representation of plan.selected.values()) {
-    if (!intrinsicAccessorGetterIsSpellable(representation)) continue
-    for (const getter of intrinsicAccessorGetters) runtimeHelpers.add(intrinsicAccessorGetterCapability(getter, representation))
+    for (const getter of intrinsicAccessorGetters)
+      if (intrinsicAccessorGetterIsSpellable(getter, representation))
+        runtimeHelpers.add(intrinsicAccessorGetterCapability(getter, representation))
   }
 
   for (const native of hostInstanceTests.keys()) {

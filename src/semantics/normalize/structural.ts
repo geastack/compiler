@@ -1008,19 +1008,22 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
     }
   },
   {
+    // Ahead of `prototype-object-local`: a local holding
+    // `Function.prototype.toString` is the receiver-taking builtin, not the
+    // receiver-less `Function` interface member that rule would read.
+    name: 'intrinsic-accessor-getter',
+    forms: [ts.SyntaxKind.PropertyAccessExpression, ts.SyntaxKind.VariableDeclaration, ts.SyntaxKind.Identifier],
+    resolve(node) {
+      return this.intrinsicAccessorGetterTypeAt(node)
+    }
+  },
+  {
     name: 'prototype-object-local',
     forms: [ts.SyntaxKind.VariableDeclaration, ts.SyntaxKind.Identifier],
     resolve(node) {
       const prototypeLocal = this.prototypeObjectLocalTypeAt(node)
       if (prototypeLocal) return prototypeLocal
       return null
-    }
-  },
-  {
-    name: 'intrinsic-accessor-getter',
-    forms: [ts.SyntaxKind.PropertyAccessExpression, ts.SyntaxKind.VariableDeclaration, ts.SyntaxKind.Identifier],
-    resolve(node) {
-      return this.intrinsicAccessorGetterTypeAt(node)
     }
   },
   {
@@ -5604,18 +5607,18 @@ class StructuralView extends StructuralViewInputs {
       if (writes === null || writes.some((write) => write.slot === 'whole' && write.value !== initializer)) return null
       root = unwrapErasedExpression(initializer)
     }
-    if (intrinsicAccessorGetterChainOf(this.checker, root) === null) return null
+    const chain = intrinsicAccessorGetterChainOf(this.checker, root)
+    if (chain === null) return null
     const receiver = this.table.intern({ kind: 'primitive', primitive: 'any' })
-    const tag = this.table.intern({
-      kind: 'union',
-      members: [
-        this.table.intern({ kind: 'primitive', primitive: 'string' }),
-        this.table.intern({ kind: 'primitive', primitive: 'undefined' })
-      ]
-    })
+    const text = this.table.intern({ kind: 'primitive', primitive: 'string' })
+    // `Function.prototype.toString` always answers a string (or throws).
+    const result =
+      chain.getter === 'Function.prototype.toString'
+        ? text
+        : this.table.intern({ kind: 'union', members: [text, this.table.intern({ kind: 'primitive', primitive: 'undefined' })] })
     return this.table.intern({
       kind: 'signature',
-      call: [{ parameters: [], minimumArity: 0, thisParameter: receiver, result: tag }],
+      call: [{ parameters: [], minimumArity: 0, thisParameter: receiver, result }],
       construct: []
     })
   }

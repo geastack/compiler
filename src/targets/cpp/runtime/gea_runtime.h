@@ -44512,6 +44512,18 @@ inline bool isArrayBufferView(const gea::Value& value) {
   return typedArrayToStringTag(value).has_value() || value.payloadType() == gea::detail::payloadTypeTagFor<gea::Ref<gea::DataView>>();
 }
 
+/**
+ * ECMA-262 20.2.3.5 `Function.prototype.toString`, called with `value` as its
+ * receiver: a callable's source text through the fact its erased call table
+ * retained (`Value::functionSourceText`), and the TypeError of step 5 for
+ * anything that is not callable.
+ */
+inline std::string functionPrototypeToString(const gea::Value& value) {
+  if (value.tag() != gea::Value::Tag::Function)
+    throwRuntimeError("TypeError", "Function.prototype.toString requires that 'this' be a Function");
+  return value.functionSourceText();
+}
+
 inline bool instanceOfMap(const gea::Value& value) {
   return value.tag() == gea::Value::Tag::Object && value.isMapPayload();
 }

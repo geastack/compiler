@@ -488,6 +488,7 @@ function-generator-overload-result.ts.cpp 8700641d23e9
 function-identity-does-not-retain-source.runtime.ts.cpp 8256f867f196
 function-metadata-does-not-retain-source.runtime.js.cpp 3c3a53032d2f
 function-name-length-descriptor.runtime.js.cpp 162d6bad838a
+function-prototype-tostring-read-as-a-value.runtime.js.cpp 0a22f90e9612
 function-value-bind-current-facts.ts.cpp 153a4aa9fa6d
 function-value-bind.ts.cpp 4f50c9efc18c
 function-value-computed-symbol.ts.cpp 719c6b70c795

@@ -1,5 +1,5 @@
 import ts from '#typescript'
-import { unwrapErased } from './producers/erasure.js'
+import { enclosingCallIfCallee, unwrapErased } from './producers/erasure.js'
 import { isGlobalObjectConstructor, isStandardGlobalValue } from './derived-expression-type.js'
 import { intrinsicStaticMemberIsIntact } from './intrinsic-static-member.js'
 import { intactIntrinsicPrototypeKeysType } from './intrinsic-prototype.js'
@@ -49,14 +49,16 @@ export interface IntrinsicAccessorGetterChain {
   readonly getter: IntrinsicAccessorGetter
   /** Every link below the root, each of which the root's operation consumes. */
   readonly parts: readonly ts.Node[]
-  /** The typed-array constructor whose prototype the chain climbs from. */
+  /** The intrinsic constructor whose prototype the chain reads `prototypeKey` from. */
   readonly constructorName: string
+  readonly prototypeKey: string
+  /** Each static member the chain reads, as its owner and member name. */
   readonly links: {
-    readonly objectOwners: readonly ts.Expression[]
-    readonly objectMembers: readonly ts.MemberName[]
-    readonly symbolOwner: ts.Expression
-    readonly symbolMember: ts.MemberName
+    readonly owners: readonly ts.Expression[]
+    readonly members: readonly ts.MemberName[]
   }
+  /** Prototype member names the chain reads, whose declarations must not have been replaced. */
+  readonly prototypeMembers: readonly ts.MemberName[]
 }
 
 const isDefaultLibDeclaration = (declaration: ts.Declaration): boolean => declaration.getSourceFile().hasNoDefaultLib
@@ -79,7 +81,10 @@ const objectStaticCallOf = (checker: ts.TypeChecker, node: ts.Node, member: stri
  * (`authenticatedIntrinsicAccessorGetterOf`); a chain that fails only that
  * half keeps its ordinary lowering, which refuses the abstract prototype.
  */
-export const intrinsicAccessorGetterChainOf = (checker: ts.TypeChecker, node: ts.Node): IntrinsicAccessorGetterChain | null => {
+export const intrinsicAccessorGetterChainOf = (checker: ts.TypeChecker, node: ts.Node): IntrinsicAccessorGetterChain | null =>
+  typedArrayToStringTagGetterChainOf(checker, node) ?? functionToStringChainOf(checker, node)
+
+const typedArrayToStringTagGetterChainOf = (checker: ts.TypeChecker, node: ts.Node): IntrinsicAccessorGetterChain | null => {
   if (!ts.isPropertyAccessExpression(node) || node.questionDotToken || node.name.text !== 'get') return null
   const descriptorCall = unwrapErased(node.expression)
   const describe = objectStaticCallOf(checker, descriptorCall, 'getOwnPropertyDescriptor', 2)
@@ -108,12 +113,39 @@ export const intrinsicAccessorGetterChainOf = (checker: ts.TypeChecker, node: ts
     getter: 'TypedArray.prototype[@@toStringTag]',
     parts: [descriptorCall, describe, prototypeCall, climb, prototypeRead, key],
     constructorName: constructor.text,
-    links: {
-      objectOwners: [describe.expression, climb.expression],
-      objectMembers: [describe.name, climb.name],
-      symbolOwner: key.expression,
-      symbolMember: key.name
-    }
+    prototypeKey: '@@toStringTag',
+    links: { owners: [describe.expression, climb.expression, key.expression], members: [describe.name, climb.name, key.name] },
+    prototypeMembers: []
+  }
+}
+
+/**
+ * `Function.prototype.toString` read as a value (20.2.3.5): Zag's
+ * `isPlainObject` keeps it in a module constant and later calls it on a
+ * constructor. The links are the global `Function` and its `prototype`, and
+ * the root consumes both: this backend has no object for either
+ * (`FunctionConstructor@1` and `Function.prototype@1` are unclaimed, and a
+ * guarded `bind` relies on the second staying so), but the function the chain
+ * denotes is one it can build. A callee root is not a value read -- its call
+ * would need `Function.prototype` as its receiver -- so it is not this.
+ */
+const functionToStringChainOf = (checker: ts.TypeChecker, node: ts.Node): IntrinsicAccessorGetterChain | null => {
+  if (!ts.isPropertyAccessExpression(node) || node.questionDotToken || node.name.text !== 'toString') return null
+  if (enclosingCallIfCallee(node) !== null) return null
+  const prototypeRead = unwrapErased(node.expression)
+  if (!ts.isPropertyAccessExpression(prototypeRead) || prototypeRead.questionDotToken || prototypeRead.name.text !== 'prototype')
+    return null
+  const constructor = unwrapErased(prototypeRead.expression)
+  if (!ts.isIdentifier(constructor) || !isStandardGlobalValue(checker, constructor, 'Function')) return null
+  const constructorSymbol = checker.getSymbolAtLocation(constructor)
+  if (!constructorSymbol?.valueDeclaration || !isDefaultLibDeclaration(constructorSymbol.valueDeclaration)) return null
+  return {
+    getter: 'Function.prototype.toString',
+    parts: [prototypeRead, constructor],
+    constructorName: 'Function',
+    prototypeKey: 'toString',
+    links: { owners: [], members: [] },
+    prototypeMembers: [node.name]
   }
 }
 
@@ -133,32 +165,29 @@ export const authenticatedIntrinsicAccessorGetterOf = (
   const chain = intrinsicAccessorGetterChainOf(context.checker, node)
   if (chain === null || context.globalHostMutationTaint.has('*')) return null
   const { checker } = context
-  for (const [index, owner] of chain.links.objectOwners.entries()) {
-    const member = chain.links.objectMembers[index]
+  for (const [index, owner] of chain.links.owners.entries()) {
+    const member = chain.links.members[index]
     if (member === undefined) return null
     if (!intrinsicStaticMemberIsIntact(context, checker.getSymbolAtLocation(owner), checker.getSymbolAtLocation(member), owner)) return null
   }
-  const { symbolOwner, symbolMember } = chain.links
-  if (
-    !intrinsicStaticMemberIsIntact(
-      context,
-      checker.getSymbolAtLocation(symbolOwner),
-      checker.getSymbolAtLocation(symbolMember),
-      symbolOwner
-    )
-  )
-    return null
-  return intactIntrinsicPrototypeKeysType(context, chain.constructorName, { names: ['@@toStringTag'] }, node) === null ? null : chain
+  for (const member of chain.prototypeMembers) {
+    const symbol = checker.getSymbolAtLocation(member)
+    const declarations = symbol?.declarations ?? []
+    if (declarations.length === 0 || !declarations.every(isDefaultLibDeclaration)) return null
+    const identity = symbol ? context.identities.symbolDeclarationId(symbol) : null
+    if (identity === null || context.globalHostMutationTaint.has(identity)) return null
+  }
+  return intactIntrinsicPrototypeKeysType(context, chain.constructorName, { names: [chain.prototypeKey] }, node) === null ? null : chain
 }
 
 /** Whether `node` is a link some authenticated chain above it consumes. */
 export const isIntrinsicAccessorGetterPart = (context: AuthenticationContext, node: ts.Node): boolean => {
   let current: ts.Node = node
   // At most six links separate a part from its root; walk up through the
-  // erasures and the call/member structure until a `.get` read is reached.
+  // erasures and the call/member structure until a root read is reached.
   for (let depth = 0; depth < 12 && current.parent !== undefined; depth += 1) {
     current = current.parent
-    if (ts.isPropertyAccessExpression(current) && current.name.text === 'get') {
+    if (ts.isPropertyAccessExpression(current) && (current.name.text === 'get' || current.name.text === 'toString')) {
       const chain = authenticatedIntrinsicAccessorGetterOf(context, current)
       if (chain !== null) return chain.parts.includes(node)
     }

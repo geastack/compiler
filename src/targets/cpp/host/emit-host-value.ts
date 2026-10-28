@@ -351,32 +351,34 @@ const registeredBuiltinFunctionText = (signature: string, name: string, arity: n
  * 23.2.3.38. Its receiver is whatever a caller hands it -- the prototype-method
  * convention's `gea::Value` first formal, genuinely any value -- and the
  * runtime answers the typed array's name from the box's payload brand, or
- * `undefined` for everything else. `null` for a slot whose convention is not
- * exactly that (a receiver, no parameters, `string | undefined`), which the
- * manifest therefore does not claim.
+ * `undefined` for everything else. `Function.prototype.toString` (20.2.3.5)
+ * takes the same receiver and answers its source text, or throws. `null` for
+ * a slot whose convention is not exactly that (a receiver, no parameters, the
+ * getter's own result), which the manifest therefore does not claim.
  */
 export const intrinsicAccessorGetterValueText = (getter: IntrinsicAccessorGetter, representation: Representation): string | null => {
-  if (!intrinsicAccessorGetterIsSpellable(representation)) return null
+  if (!intrinsicAccessorGetterIsSpellable(getter, representation)) return null
   const signature = hostPrototypeMethodSignatureText(representation)
   if (signature === null) return null
   switch (getter) {
     case 'TypedArray.prototype[@@toStringTag]':
       return registeredBuiltinFunctionText(signature, 'get [Symbol.toStringTag]', 0, 'return gea::host::typedArrayToStringTag(__gea_a0);')
+    case 'Function.prototype.toString':
+      return registeredBuiltinFunctionText(signature, 'toString', 0, 'return gea::host::functionPrototypeToString(__gea_a0);')
   }
 }
 
-export const intrinsicAccessorGetterIsSpellable = (representation: Representation): boolean => {
+export const intrinsicAccessorGetterIsSpellable = (getter: IntrinsicAccessorGetter, representation: Representation): boolean => {
   if (representation.kind !== 'function-value-dispatch') return false
   const { abi } = representation
   const result = abi.result
-  return (
-    abi.receiver?.kind === 'dynamic' &&
-    abi.parameters.length === 0 &&
-    abi.restFrom === null &&
-    result.kind === 'optional' &&
-    result.absence === 'undefined' &&
-    result.payload.kind === 'string'
-  )
+  if (abi.receiver?.kind !== 'dynamic' || abi.parameters.length !== 0 || abi.restFrom !== null) return false
+  switch (getter) {
+    case 'TypedArray.prototype[@@toStringTag]':
+      return result.kind === 'optional' && result.absence === 'undefined' && result.payload.kind === 'string'
+    case 'Function.prototype.toString':
+      return result.kind === 'string'
+  }
 }
 
 /** A C++ parameter list split at its top-level commas -- a template argument list's commas stay inside their type. */

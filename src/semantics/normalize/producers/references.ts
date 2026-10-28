@@ -36,6 +36,7 @@ import { blocked, mintOperationId, mintResult, operand } from './mint.js'
 import { valueSymbolAt } from '../unresolvable-names.js'
 import type { UnresolvableNameCensus } from '../unresolvable-names.js'
 import { argumentsObjectValueAt } from './bindings.js'
+import { isIntrinsicAccessorGetterPart } from '../intrinsic-accessor-getter.js'
 import { calleeAwareTypeAt, dynamicSpreadSourceTypeOf, isAssignmentOperatorKind } from './shared.js'
 import { enumMemberReference } from './enums.js'
 
@@ -1177,6 +1178,9 @@ export const createReferenceProducer = (context: ProducerContext): FamilyProduce
     if (node.kind === ts.SyntaxKind.ThisKeyword) return buildThisReference(candidate, node, context)
     if (node.kind === ts.SyntaxKind.SuperKeyword) return buildSuperReference(candidate, node, context)
     if (ts.isIdentifier(node)) {
+      // `Function` in an authenticated `Function.prototype.toString` read: the
+      // chain's root publishes the function (`intrinsic-accessor-getter.ts`).
+      if (isIntrinsicAccessorGetterPart(context, node)) return { kind: 'operations', operations: [], edges: [] }
       // Ahead of `classifyIdentifier`, which reads only syntax and would call
       // this an ordinary name resolution -- the one thing `arguments` is not.
       const phantomOrdinal = context.argumentsObjects.phantomOrdinalOf(node)
