@@ -8,7 +8,6 @@ import { normalCompletion, throwingCompletion } from '../../model/operands.js'
 import type { CensusCandidate } from '../census.js'
 import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { ProducerContext } from '../producer-context.js'
-import type { SpecializationCensus } from '../specialization.js'
 import { mintOperationId, mintResult, operand } from './mint.js'
 import { asBlocked, resultEdge } from './shared.js'
 import { citeExpressionResult } from './references.js'
@@ -80,9 +79,15 @@ const denotesValue = (checker: ts.TypeChecker, symbol: ts.Symbol): boolean => {
  * and instantiates it dozens of times, and every one of those imports
  * was minting a binding carried by the open `T`: about a hundred mandatory
  * obligations, all of them at an `ImportSpecifier`.
+ *
+ * Asked of the node that writes the type parameters (`genericSubjectOf`), the
+ * same node `census.ts` keys its elision on. `export const f = <T>(...) => ...`
+ * names a VariableDeclaration with no type parameters of its own, so asking
+ * about it directly answered "not generic", and an `export *` over that module
+ * minted a binding carried by the arrow's open type parameters.
  */
-const namesUninstantiatedGeneric = (specializations: SpecializationCensus, declaration: ts.Declaration | null): boolean =>
-  declaration !== null && specializations.isGeneric(declaration)
+const namesUninstantiatedGeneric = (context: ProducerContext, declaration: ts.Declaration | null): boolean =>
+  declaration !== null && context.specializations.isGeneric(context.identities.genericSubjectOf(declaration))
 
 export const createDeclarationLifecycleProducer = (context: ProducerContext): FamilyProducer => {
   const voidType = context.table.intern({ kind: 'primitive', primitive: 'void' })
@@ -174,7 +179,7 @@ export const createDeclarationLifecycleProducer = (context: ProducerContext): Fa
     // and a direct reference resolve to the identical declaration.
     const targetSymbol = context.checker.getSymbolAtLocation(typeSite)
     const targetDeclaration = targetSymbol ? context.identities.declarationOfSymbol(targetSymbol) : null
-    if (namesUninstantiatedGeneric(context.specializations, targetDeclaration)) return { operations: [], edges: [] }
+    if (namesUninstantiatedGeneric(context, targetDeclaration)) return { operations: [], edges: [] }
     // A binding that names a pure type (`interface`, `type` alias) has no
     // runtime value to link or initialize either -- see `denotesValue`'s own
     // doc comment above. `getSymbolAtLocation` on such a name still resolves
@@ -331,7 +336,7 @@ export const createDeclarationLifecycleProducer = (context: ProducerContext): Fa
         if (!denotesValue(context.checker, exported)) continue
         const targetDeclaration = context.identities.declarationOfSymbol(exported)
         if (!targetDeclaration) continue
-        if (namesUninstantiatedGeneric(context.specializations, targetDeclaration)) continue
+        if (namesUninstantiatedGeneric(context, targetDeclaration)) continue
         const source = context.identities.nodeIdOf(node)
         const declaration = context.identities.declarationIdOf(targetDeclaration)
         // HOLDS, not stated: the re-exported binding's own value, read the
@@ -395,7 +400,7 @@ export const createDeclarationLifecycleProducer = (context: ProducerContext): Fa
         // wait on, so only the export-name binding link applies, not a pair.
         const localTargetSymbol = context.checker.getSymbolAtLocation(specifier.name)
         const localTargetDeclaration = localTargetSymbol ? context.identities.declarationOfSymbol(localTargetSymbol) : null
-        if (namesUninstantiatedGeneric(context.specializations, localTargetDeclaration)) continue
+        if (namesUninstantiatedGeneric(context, localTargetDeclaration)) continue
         const source = context.identities.nodeIdOf(specifier)
         const declaration = context.identities.declarationIdOf(specifier)
         const valueType = context.types.typeAt(specifier.name)
