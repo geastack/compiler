@@ -662,8 +662,8 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
     lines.push(`${defineValue(ctx, operation.result)} = ${cppUndefinedValue};`)
     return
   }
-  // The one other operand-free unary: an intrinsic accessor getter's value,
-  // which reads nothing -- the chain that reached it was consumed whole.
+  // The one other operand-free unary: a builtin read through an intrinsic
+  // chain, which reads nothing -- the chain that reached it was consumed whole.
   const intrinsicGetter = operation.form === 'unary' ? intrinsicAccessorGetterOfOperator(operation.operator) : null
   if (intrinsicGetter !== null) {
     const text = intrinsicAccessorGetterValueText(intrinsicGetter, operation.result.representation)

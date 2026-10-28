@@ -5593,13 +5593,15 @@ class StructuralView extends StructuralViewInputs {
     return this.prototypeObjectMemberTypeAt(initializer) ?? this.prototypeObjectTypeAt(initializer)
   }
 
-  // An authenticated intrinsic accessor getter (`intrinsic-accessor-getter.ts`)
+  // A builtin read through an intrinsic chain (`intrinsic-accessor-getter.ts`)
   // is the builtin function itself, not the ambient `PropertyDescriptor.get():
-  // any` the checker reports: a receiver-taking getter, `this: any` as every
-  // prototype method read as a value states it (`prototypeMethodBodyOf`),
-  // answering the tag or `undefined` (23.2.3.38). A local initialized to it
-  // and never re-bound holds that same function, so the cell, its reads and
-  // the initializer agree (`prototypeObjectLocalTypeAt`'s rule).
+  // any` the checker reports for the getter: receiver-taking, `this: any` as
+  // every prototype method read as a value states it (`prototypeMethodBodyOf`),
+  // answering the tag or `undefined` (23.2.3.38), or for
+  // `Function.prototype.toString` a string (20.2.3.5) -- the same type
+  // `prototypeMethodBodyOf` gives that method. A local initialized to it and
+  // never re-bound holds that same function, so the cell, its reads and the
+  // initializer agree (`prototypeObjectLocalTypeAt`'s rule).
   intrinsicAccessorGetterTypeAt(node: ts.Node): StructuralTypeId | null {
     const declaration = ts.isVariableDeclaration(node)
       ? node

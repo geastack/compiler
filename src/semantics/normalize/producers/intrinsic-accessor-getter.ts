@@ -9,14 +9,15 @@ import { intrinsicAccessorGetterOperator } from '../../model/intrinsic-accessor-
 import { mintOperationId, mintResult } from './mint.js'
 
 /**
- * The authenticated chain's one operation: the builtin getter function itself
+ * The authenticated chain's one operation: the builtin function itself
  * (`intrinsic-accessor-getter.ts` states why the links publish nothing).
  *
  * The identity stays the property candidate's, as `ObjectTag` keeps the
- * invocation's: whatever reads the `.get` value already cites that node.
- * Nothing in the chain can throw once authenticated -- every link is a
- * standard static on an intact intrinsic, and the descriptor is always
- * present -- and nothing it reads is program state.
+ * invocation's: whatever reads the root (`.get`, `.toString`) already cites
+ * that node. Nothing in the chain can throw once authenticated -- every link
+ * is a standard global or static on an intact intrinsic, and the descriptor
+ * the getter chain reads is always present -- and nothing it reads is
+ * program state.
  */
 export const contributeIntrinsicAccessorGetter = (
   context: ProducerContext,

@@ -23,7 +23,11 @@ const typedArrayConstructors: ReadonlySet<string> = new Set([
 ])
 
 /**
- * An intrinsic ACCESSOR's getter function, read as a value.
+ * A builtin function read as a value through a chain no carrier models. The
+ * family is named for its first member, an intrinsic ACCESSOR's getter; the
+ * name stays because its rule, operator and capability spellings are
+ * identifiers in reports. `Function.prototype.toString` is the other member
+ * (`functionToStringChainOf` below).
  *
  * ECMA-262 names some intrinsics no binding reaches: `%TypedArray%`, the
  * abstract constructor every typed-array prototype inherits from, is one. A
@@ -40,10 +44,11 @@ const typedArrayConstructors: ReadonlySet<string> = new Set([
  * authenticated here (standard-library identity, and no mutation of any key
  * the chain reads), and the links themselves publish nothing.
  *
- * The value is typed as the getter IS -- a receiver-taking function (`this:
+ * The value is typed as the function IS -- a receiver-taking function (`this:
  * any`, the prototype-method-value convention `structural.ts`'s
- * `prototypeMethodBodyOf` states) answering the tag or `undefined` -- rather
- * than as the ambient `PropertyDescriptor.get(): any` the checker reports.
+ * `prototypeMethodBodyOf` states) answering the tag or `undefined` for the
+ * getter, a string for `toString` -- rather than as the ambient
+ * `PropertyDescriptor.get(): any` the checker reports for the getter.
  */
 export interface IntrinsicAccessorGetterChain {
   readonly getter: IntrinsicAccessorGetter
@@ -161,9 +166,10 @@ type AuthenticationContext = Pick<ProducerContext, 'checker' | 'identities' | 'g
 /**
  * The chain, when nothing the program does can make it denote a different
  * function: neither `Object` static it calls nor `Symbol.toStringTag` was
- * replaced, and the typed-array prototype it climbs from neither had
- * `@@toStringTag` written anywhere the census could attribute to it nor its
- * `[[Prototype]]` replaced (`setPrototypeOf` records every key).
+ * replaced, the prototype it reads from neither had its key (`@@toStringTag`,
+ * `toString`) written anywhere the census could attribute to it nor its
+ * `[[Prototype]]` replaced (`setPrototypeOf` records every key), and the
+ * standard library alone declares each prototype member it names.
  */
 export const authenticatedIntrinsicAccessorGetterOf = (
   context: AuthenticationContext,
