@@ -61,6 +61,9 @@ export interface IntrinsicAccessorGetterChain {
   readonly prototypeMembers: readonly ts.MemberName[]
 }
 
+// The checker-only half runs inside `structural.ts`, which has no frontend
+// context and tests the standard library this way throughout; the
+// authenticated half asks the frontend's `isStandardLibraryDeclaration`.
 const isDefaultLibDeclaration = (declaration: ts.Declaration): boolean => declaration.getSourceFile().hasNoDefaultLib
 
 /** `Object.<member>(...)` on the standard global Object, as a plain, spread-free call. */
@@ -136,6 +139,10 @@ const functionToStringChainOf = (checker: ts.TypeChecker, node: ts.Node): Intrin
   if (!ts.isPropertyAccessExpression(prototypeRead) || prototypeRead.questionDotToken || prototypeRead.name.text !== 'prototype')
     return null
   const constructor = unwrapErased(prototypeRead.expression)
+  // Symbol identity, not `isGlobalFunctionConstructor`'s type identity: that
+  // one answers "may carry Function.prototype" for write tracking, and a
+  // program-declared global typed `FunctionConstructor` passes it while holding
+  // another object.
   if (!ts.isIdentifier(constructor) || !isStandardGlobalValue(checker, constructor, 'Function')) return null
   const constructorSymbol = checker.getSymbolAtLocation(constructor)
   if (!constructorSymbol?.valueDeclaration || !isDefaultLibDeclaration(constructorSymbol.valueDeclaration)) return null
@@ -173,7 +180,8 @@ export const authenticatedIntrinsicAccessorGetterOf = (
   for (const member of chain.prototypeMembers) {
     const symbol = checker.getSymbolAtLocation(member)
     const declarations = symbol?.declarations ?? []
-    if (declarations.length === 0 || !declarations.every(isDefaultLibDeclaration)) return null
+    if (declarations.length === 0 || !declarations.every((declaration) => context.isStandardLibraryDeclaration?.(declaration) === true))
+      return null
     const identity = symbol ? context.identities.symbolDeclarationId(symbol) : null
     if (identity === null || context.globalHostMutationTaint.has(identity)) return null
   }
