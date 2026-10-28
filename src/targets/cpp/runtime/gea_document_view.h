@@ -200,6 +200,7 @@ bool nativeDocumentRead(const Ref<T>& source, const PropertyKey& key, Value& out
     return true;
   }
   if (elements != nullptr) {
+    refuseReassignedPrototype(sidecar, key);
     out = dynamicArrayPrototypeGet(key);
     return out.tag() != Value::Tag::Undefined;
   }
@@ -680,6 +681,7 @@ inline void noteArrayExpandoKeyCreated(const Ref<void>& source, const PropertyKe
     out = sidecar->getWithNativeReceiver(key, bridge.receiver(payload));
     return true;
   }
+  refuseReassignedPrototype(sidecar, key);
   out = dynamicArrayPrototypeGet(key);
   return out.tag() != Value::Tag::Undefined;
 }
@@ -1028,6 +1030,7 @@ struct NativeRecordDocumentBridge {
     return true;
   }
   if (elements != nullptr) {
+    refuseReassignedPrototype(sidecar, key);
     out = dynamicArrayPrototypeGet(key);
     return out.tag() != Value::Tag::Undefined;
   }

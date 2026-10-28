@@ -2884,6 +2884,10 @@ struct RefOperations {
   const RefOperations* payloadIdentity = nullptr;
   const void* (*nativeViewOriginSlot)(const void* object) = nullptr;
   const void* (*nativeIdentity)(const void* object) = nullptr;
+  // The allocation was an object literal the IR certified as inheriting
+  // %Object.prototype% (`makeOrdinaryObjectRef`). A fact of the allocation,
+  // not of `T`: `Object.create(null)` value-initializes the same record struct.
+  bool ordinaryObjectPrototype = false;
 };
 
 /**
@@ -5893,8 +5897,12 @@ inline auto tabulate(Count length, const Body& body) {
  * count above one, so nothing here is ever destroyed or collected.
  */
 template <typename T>
+Ref<T> makeOrdinaryObjectRef();
+
+/** `Ordinary`: the sharing literals are object literals certified to inherit %Object.prototype% (`makeOrdinaryObjectRef`). */
+template <typename T, bool Ordinary = false>
 inline Ref<T> sharedEmptyRef() {
-  static const Ref<T>* const instance = new Ref<T>(makeRef<T>());
+  static const Ref<T>* const instance = new Ref<T>(Ordinary ? makeOrdinaryObjectRef<T>() : makeRef<T>());
   return *instance;
 }
 
@@ -5932,6 +5940,40 @@ struct PlainObjectRefTarget<Ref<T>> {
   using type = T;
 };
 }  // namespace detail
+
+namespace detail {
+/**
+ * `T`'s own table, marked as an ordinary object's allocation. `payloadIdentity`
+ * keeps every nominal test (`refPayloadIdentity`) answering `T`, so only the
+ * prototype question can tell the two allocations apart.
+ */
+template <typename T>
+struct OrdinaryObjectOperationsFor {
+  // Mutable for the reason `RefOperationsFor<T>::table` is.
+  static inline constinit RefOperations table{&RefOperationsFor<T>::destroy, &RefOperationsFor<T>::release, &RefOperationsFor<T>::drop,
+                                         TraceEdges<T>::supported ? &RefOperationsFor<T>::trace : nullptr,
+                                         cycleGenerational && TraceEdges<T>::supported ? &RefOperationsFor<T>::holdsTracedEdge : nullptr,
+                                         RefOperationsFor<T>::classBase(), inlineKeyOrderOffsetOf<T>(), inlineKeyOrderLayoutOf<T>()
+#if defined(GEA_PROFILE_ALLOCATIONS)
+                                         , &allocationTypeProfile<T>
+#endif
+                                         , &RefOperationsFor<T>::table, nullptr, RefOperationsFor<T>::nativeIdentity(), true
+  };
+};
+}  // namespace detail
+
+/**
+ * An object literal's record, allocated with the certified fact that it
+ * inherits %Object.prototype% (`AllocateRecordOperation.ordinaryObjectPrototype`).
+ * A standalone type has no header to carry it and stays unmarked, which only
+ * makes a later `constructor` read refuse.
+ */
+template <typename T>
+inline Ref<T> makeOrdinaryObjectRef() {
+  Ref<T> made = makeRef<T>();
+  if constexpr (!detail::refStandalone<T>) detail::refHeaderOf(made.get())->operations = &detail::OrdinaryObjectOperationsFor<T>::table;
+  return made;
+}
 
 /** Allocates `T`'s layout as an ordinary object -- see `detail::PlainObjectOperationsFor`. `Handle` is the carrier's `gea::Ref<T>`. */
 template <typename Handle>
@@ -23602,6 +23644,39 @@ inline Value literalPropertyGet(const Value& receiver) {
 }
 
 namespace detail {
+inline bool isConstructorKey(const PropertyKey& key) { return !key.isSymbol() && key.text() == "constructor"; }
+
+template <LiteralText Name>
+Value intrinsicConstructorInvoke(void*, Value, gea::Ref<ArrayObject<Value>>) {
+  std::fprintf(stderr, "gea: %%%s%% was read as a `constructor` value; this runtime reflects it but does not call or construct it\n", Name.text);
+  gea::detail::abortAfterFlush();
+}
+
+/** `constructor` off a boxed object whose `[[Prototype]]` this runtime cannot name; answering `undefined` would be a guess. */
+[[noreturn]] inline void refuseUnnamedPrototype(const char* receiver) {
+  std::fprintf(stderr, "gea: `constructor` read off %s; this runtime does not know its prototype\n", receiver);
+  gea::detail::abortAfterFlush();
+}
+}  // namespace detail
+
+/**
+ * %Array%, %Object%, %String%, %Number% or %Boolean% as the `constructor` its
+ * prototype holds. Reflection only: `name`, `length` and the source text are
+ * the builtin's, and its function object is the one `X.prototype.constructor`
+ * reads share (`builtinFunctionIdentity`), so every array's `constructor` is
+ * the same object. A call or `new` through it aborts by name.
+ */
+template <detail::LiteralText Name>
+inline Value intrinsicConstructorValue() {
+  using Method = CallableObject<Value(Value, gea::Ref<ArrayObject<Value>>)>;
+  static const std::string source = "function " + std::string(Name.view()) + "() { [native code] }";
+  static const std::string site = std::string(Name.view()) + ".prototype.constructor";
+  Method callable(Method::template entryWithFacts<&detail::intrinsicConstructorInvoke<Name>>(Name.view(), 1, source), nullptr);
+  callable.shareFunctionObject(builtinFunctionIdentity(site, Name.view(), 1));
+  return Value::boxMethod<1>(std::move(callable));
+}
+
+namespace detail {
 
 /** A class extending a native collection was constructed from an iterable its inherited constructor frame admits and this backend walks no protocol for; the reason names which. */
 [[noreturn]] inline void refuseUnloweredCollectionSeed(const char* reason) {
@@ -33288,6 +33363,41 @@ inline void typedArraySetFromValue(TypedArray<T>& target, const Value& source, d
   for (std::size_t index = 0; index < count; ++index) target.setElementAtIndex(static_cast<long long>(start + index), snapshot[index]);
 }
 
+namespace detail {
+/**
+ * A `__proto__` write through a box is stored as own data (no native payload
+ * has a `[[Prototype]]` slot to change), so an own `__proto__` means the
+ * program tried to replace the prototype an intrinsic answer would assume.
+ */
+inline void refuseReassignedPrototype(const gea::Ref<DynamicObject>& expando, const PropertyKey& key) {
+  if (expando && isConstructorKey(key) && expando->hasProperty(PropertyKey::string("__proto__")))
+    refuseUnnamedPrototype("an object whose `__proto__` was assigned as data");
+}
+
+/**
+ * `[[Get]]` of a key a native struct's own fields, index slots, expando and
+ * prototype hook all missed. Every such key reads `undefined` except
+ * `constructor`, which the allocation's prototype holds: %Object% for an
+ * object literal the IR certified as ordinary (`makeOrdinaryObjectRef`), and
+ * no answer for any other allocation of the struct -- a class instance, or
+ * `Object.create(null)`, which value-initializes the same record struct.
+ */
+inline Value nativeObjectInheritedGet(const Value& box, const gea::Ref<DynamicObject>& expando, const PropertyKey& key) {
+  if (!isConstructorKey(key)) return Value();
+  refuseReassignedPrototype(expando, key);
+  const gea::Ref<void>& held = box.classObject();
+  if (held && refHeaderOf(static_cast<void*>(held.get()))->operations->ordinaryObjectPrototype) return intrinsicConstructorValue<"Object">();
+  refuseUnnamedPrototype("a native object whose allocation recorded no prototype");
+}
+
+/** A boxed Dictionary's own entry. It may stand for `Object.create(null)` as well as a literal, so `constructor` has no inherited answer. */
+inline Value dictionaryOwnGet(const gea::Ref<gea::Dictionary<gea::Value>>& dictionary, const PropertyKey& key) {
+  if (!dictionary) return Value();
+  if (isConstructorKey(key) && !dictionary->has(key.text())) refuseUnnamedPrototype("a dictionary, which may stand for an object with a null prototype");
+  return dictionary->read(key.text());
+}
+}  // namespace detail
+
 inline Value Value::getProperty(const PropertyKey& key) const {
   return getProperty(key, *this);
 }
@@ -33310,7 +33420,7 @@ inline Value Value::getProperty(const PropertyKey& key, const Value& receiver) c
       const auto overlay = detail::expandoFor(Ref<void>(dictionary), false);
       return overlay && overlay->hasProperty(key) ? overlay->getWithNativeReceiver(key, NativeCallReceiver::object(dictionary)) : Value();
     }
-    return dictionary ? dictionary->read(key.text()) : Value();
+    return detail::dictionaryOwnGet(dictionary, key);
   }
   if (tag_ == Tag::String) {
     // The own properties `stringOwnDescriptor` states, read without building
@@ -33342,9 +33452,12 @@ inline Value Value::getProperty(const PropertyKey& key, const Value& receiver) c
     if (metadata_->fields->matchesIndex(payload(), key)) return Value();
     const gea::Ref<DynamicObject> expando = detail::expandoFor(expandoAnchor(), false);
     if (expando && expando->hasProperty(key)) return expando->get(key, receiver);
-    if (tuple) return dynamicArrayPrototypeGet(key);
+    if (tuple) {
+      detail::refuseReassignedPrototype(expando, key);
+      return dynamicArrayPrototypeGet(key);
+    }
     if (metadata_->prototype != nullptr && metadata_->prototype->read(payload(), key, answer)) return answer;
-    return Value();
+    return detail::nativeObjectInheritedGet(*this, expando, key);
   }
   if (metadata_->elements != nullptr) {
     if (!key.isNumericSource() && !key.isSymbol() && key.text() == "length") {
@@ -33358,6 +33471,7 @@ inline Value Value::getProperty(const PropertyKey& key, const Value& receiver) c
     }
     const auto expando = detail::expandoFor(expandoAnchor(), false);
     if (expando && expando->hasProperty(key)) return expando->get(key, receiver);
+    detail::refuseReassignedPrototype(expando, key);
     return dynamicArrayPrototypeGet(key);
   }
   if (tag_ == Tag::Function) {
@@ -33440,8 +33554,7 @@ inline Value Value::getLiteralProperty(const PropertyKey& key, detail::LiteralRe
     if (metadata_->payloadType == detail::payloadTypeTagFor<gea::Ref<gea::Dictionary<gea::Value>>>()) {
       if (const gea::Value* viewed = gea::dictionary::viewedObjectOf(*this)) return viewed->getLiteralProperty(key, cache);
       if (key.isSymbol()) return Value();
-      const gea::Ref<gea::Dictionary<gea::Value>>& dictionary = as<gea::Ref<gea::Dictionary<gea::Value>>>();
-      return dictionary ? dictionary->read(key.text()) : Value();
+      return detail::dictionaryOwnGet(as<gea::Ref<gea::Dictionary<gea::Value>>>(), key);
     }
     if (metadata_->fields == nullptr && metadata_->elements != nullptr) {
       std::int8_t absent = cache.arrayAbsent.load(relaxed);
@@ -33502,7 +33615,7 @@ inline Value Value::getLiteralProperty(const PropertyKey& key, detail::LiteralRe
           // instance for a hook method and a type-tag key on every value it visits.
           Value found;
           if (metadata_->prototype != nullptr && metadata_->prototype->read(payload(), key, found)) return found;
-          return Value();
+          return detail::nativeObjectInheritedGet(*this, gea::Ref<DynamicObject>(), key);
         }
         break;
       }

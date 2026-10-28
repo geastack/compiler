@@ -303,7 +303,14 @@ export const emitAllocateRecord = (ctx: EmitContext, lines: string[], operation:
       lines.push(`${name} = ${cppTypeOf(representation)}{};`)
       break
     case 'shared-refcount':
-      lines.push(`${name} = gea::${operation.sharedEmpty === true ? 'sharedEmptyRef' : 'makeRef'}<${structName}>();`)
+      // The allocation, not the struct, knows its prototype: `Object.create(null)`
+      // value-initializes this same struct. The header carries the certified
+      // fact for the runtime's `constructor` read (`makeOrdinaryObjectRef`).
+      if (operation.ordinaryObjectPrototype === true)
+        lines.push(
+          `${name} = gea::${operation.sharedEmpty === true ? `sharedEmptyRef<${structName}, true>` : `makeOrdinaryObjectRef<${structName}>`}();`
+        )
+      else lines.push(`${name} = gea::${operation.sharedEmpty === true ? 'sharedEmptyRef' : 'makeRef'}<${structName}>();`)
       break
     case 'borrowed':
       // A borrow is a reference to an object something else owns, and an

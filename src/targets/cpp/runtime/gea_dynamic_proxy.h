@@ -275,6 +275,7 @@ inline bool dynamicArrayPrototypeHas(const PropertyKey& key) {
 
 inline Value dynamicArrayPrototypeGet(const PropertyKey& key, const Value& receiver) {
   if (key.isSymbol()) return Value();
+  if (detail::isConstructorKey(key)) return intrinsicConstructorValue<"Array">();
   std::size_t index = 0;
   if (detail::arrayIndexOfKey(key, index)) {
     const auto prototype = arrayPrototypeObject();
@@ -407,6 +408,7 @@ inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
  */
 inline Value dynamicStringPrototypeGet(const PropertyKey& key) {
   if (key.isSymbol()) return Value();
+  if (detail::isConstructorKey(key)) return intrinsicConstructorValue<"String">();
   using Args = gea::Ref<ArrayObject<Value>>;
   using Method = CallableObject<Value(Value, Args)>;
   static const std::map<std::string, Value> methods = [] {
@@ -476,6 +478,7 @@ inline Value dynamicStringPrototypeGet(const PropertyKey& key) {
  */
 inline Value dynamicNumberPrototypeGet(const PropertyKey& key) {
   if (key.isSymbol()) return Value();
+  if (detail::isConstructorKey(key)) return intrinsicConstructorValue<"Number">();
   using Args = gea::Ref<ArrayObject<Value>>;
   using Method = CallableObject<Value(Value, Args)>;
   static const std::map<std::string, Value> methods = [] {
@@ -513,6 +516,7 @@ inline Value dynamicNumberPrototypeGet(const PropertyKey& key) {
 /** `Boolean.prototype`'s two methods read off a boolean held as a dynamic value. */
 inline Value dynamicBooleanPrototypeGet(const PropertyKey& key) {
   if (key.isSymbol()) return Value();
+  if (detail::isConstructorKey(key)) return intrinsicConstructorValue<"Boolean">();
   using Args = gea::Ref<ArrayObject<Value>>;
   using Method = CallableObject<Value(Value, Args)>;
   static const std::map<std::string, Value> methods = [] {
