@@ -22658,14 +22658,16 @@ inline void installCallableOwnFacts(const Ref<FunctionObjectIdentity>& functionO
 inline Ref<DynamicObject> Value::createFunctionProperties() { return makeRef<DynamicObject>(); }
 
 /**
- * The function object of a BUILTIN this backend renders for reflection only.
+ * The function object of a BUILTIN, one per spec path.
  *
- * `Array.from` is four overloads that disagree at parameter 0, so no single
- * calling convention names it and `representation/derive.ts` carries the read
- * as its identity half. That half is not a placeholder: ECMA-262 10.2.4/10.2.9
- * give the function object its own `name` and `length`, and those are exactly
- * what a reflecting program reads. A CALL through this value is refused at
- * emission, so nothing here has to invent a frame.
+ * Two kinds of read share it. `Array.from` is four overloads that disagree at
+ * parameter 0, so no single calling convention names it and
+ * `representation/derive.ts` carries the read as its identity half; a CALL
+ * through that value is refused at emission, so nothing here has to invent a
+ * frame. A builtin the emitter renders WITH an invoke
+ * (`registeredBuiltinFunctionText`, emit-host-value.ts) takes its identity from
+ * here too. Either way ECMA-262 10.2.4/10.2.9 give the function object its own
+ * `name` and `length`, installed here when the object first exists.
  *
  * One table, keyed by the builtin's own spec path, because the identity is the
  * builtin's and not the read's: `Array.from === Array.from` is true however

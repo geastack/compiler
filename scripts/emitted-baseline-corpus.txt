@@ -54,7 +54,7 @@ function-typed-value.ts.cpp 98a0ec93058a
 function-value-dispatch-get-repro.ts.cpp 0b7426b2b77c
 generator-method-receiver.ts.cpp 7e4dbc6d7cc4
 generic-arrow-declaration.ts.cpp 01b2332733bd
-generic-call-census.ts.cpp f82d7bbe9a5e
+generic-call-census.ts.cpp dedd1195b8cf
 generic-forwards-to-generic.ts.cpp 88dc26f39f5f
 generic-function-in-binding.ts.cpp 43c01e8663d9
 generic-overload-implementation.ts.cpp 3995c74d46b7

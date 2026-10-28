@@ -306,9 +306,9 @@ export const hostClassValueText = (representation: Representation, className: st
  * the TypeError the clause specifies. A member this backend has no runtime
  * spelling for, and every non-Date prototype, keeps a throwing invoke, so a
  * call reaching it is an honest refusal at run time rather than a wrong
- * answer. Facts are published in the entry's record so
- * `Value::box(Tag::Function, ...)` installs the own `name`/`length` the same
- * way it does for a program's own function. `signature` is the `R(A...)`
+ * answer. The source text is published in the entry's record, and the own
+ * `name`/`length` arrive with the shared builtin identity
+ * (`registeredBuiltinFunctionText`). `signature` is the `R(A...)`
  * spelling of the read's own ABI when the read is typed, `void()` when the
  * value is only ever reflected over.
  */
@@ -323,15 +323,19 @@ export const hostPrototypeMethodValueText = (signature: string, protocol: string
   const body =
     prototypeMethodDispatchText(protocol, member, result, types) ??
     `gea::host::throwRuntimeError("TypeError", ${cppStringLiteral(message)});`
-  return registeredBuiltinFunctionText(signature, name, arity, body)
+  return registeredBuiltinFunctionText(`${protocol}.${member}`, signature, name, arity, body)
 }
 
 /**
  * A builtin function object over one `R(A...)` signature whose invoke is
  * `body`, over formals `__gea_a0...`, with its `name`/`length`/source text
  * published in the entry's record so every copy reflects as the builtin.
+ *
+ * Its identity is the builtin's, keyed by `path` (`gea::builtinFunctionIdentity`),
+ * not the evaluation's: a capture-free callable mints a fresh identity per
+ * box, so two reads of `Function.prototype.toString` compared unequal.
  */
-const registeredBuiltinFunctionText = (signature: string, name: string, arity: number, body: string): string => {
+const registeredBuiltinFunctionText = (path: string, signature: string, name: string, arity: number, body: string): string => {
   const parameters = signature.slice(signature.indexOf('(') + 1, -1)
   const result = signature.slice(0, signature.indexOf('('))
   const types = splitTopLevelCommas(parameters)
@@ -340,8 +344,10 @@ const registeredBuiltinFunctionText = (signature: string, name: string, arity: n
   const text = `function ${name}() { [native code] }`
   return (
     `([&]() { static constexpr ${result} (*__gea_invoke)(void*${signatureFormals}) = +[](void*${formals}) -> ${result} { ${body} }; ` +
-    `return gea::CallableObject<${signature}>(gea::CallableObject<${signature}>::entryWithFacts<__gea_invoke>(` +
-    `${cppStringLiteral(name)}, ${String(arity)}, ${cppStringLiteral(text)}), nullptr); })()`
+    `gea::CallableObject<${signature}> __gea_builtin(gea::CallableObject<${signature}>::entryWithFacts<__gea_invoke>(` +
+    `${cppStringLiteral(name)}, ${String(arity)}, ${cppStringLiteral(text)}), nullptr); ` +
+    `__gea_builtin.shareFunctionObject(gea::builtinFunctionIdentity(${cppStringLiteral(path)}, ${cppStringLiteral(name)}, ` +
+    `static_cast<double>(${String(arity)}))); return __gea_builtin; })()`
   )
 }
 
@@ -362,9 +368,15 @@ export const intrinsicAccessorGetterValueText = (getter: IntrinsicAccessorGetter
   if (signature === null) return null
   switch (getter) {
     case 'TypedArray.prototype[@@toStringTag]':
-      return registeredBuiltinFunctionText(signature, 'get [Symbol.toStringTag]', 0, 'return gea::host::typedArrayToStringTag(__gea_a0);')
+      return registeredBuiltinFunctionText(
+        getter,
+        signature,
+        'get [Symbol.toStringTag]',
+        0,
+        'return gea::host::typedArrayToStringTag(__gea_a0);'
+      )
     case 'Function.prototype.toString':
-      return registeredBuiltinFunctionText(signature, 'toString', 0, 'return gea::host::functionPrototypeToString(__gea_a0);')
+      return registeredBuiltinFunctionText(getter, signature, 'toString', 0, 'return gea::host::functionPrototypeToString(__gea_a0);')
   }
 }
 
