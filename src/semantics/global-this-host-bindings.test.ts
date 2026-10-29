@@ -913,6 +913,129 @@ test('an unconstrained generic union member still fails to publish and remains a
   assert.ok(audit.taint.has('*'), [...audit.taint].join(','))
 })
 
+// A DOM library's `getWindow(el)`: the global object is RETURNED to callers
+// that only read members off it, and one caller hands it to a helper whose
+// parameter does the same. Every position the value reaches is one the escape
+// walk follows, so an unplaced value elsewhere -- `text.normalize('NFC').trim()`
+// on a string fed from `any` -- has nothing global to have come from. Each
+// retained variant is the same program with ONE hop the walk cannot follow,
+// and keeps the wildcard.
+const windowReturnedToReaders = (retained: string): string => `
+  export {}
+  interface Process {}
+  declare var hostProcess: Process
+  declare var window: typeof globalThis
+  declare function opaque(): any
+  function getWindow(el: { nodeType?: number } | null) {
+    if (el && el.nodeType === 9) return opaque() ?? window
+    return window
+  }
+  const observe = (win: typeof globalThis): number => (win.hostProcess ? 1 : 0)
+  const win = getWindow(opaque())
+  observe(win)
+  const text: string = opaque()
+  text.normalize('NFC').trim()
+  ${retained}
+`
+
+test('the global object returned only to callers that read its members never enters data', () => {
+  const audit = globalHostMutationAuditOf(windowReturnedToReaders(''), ['hostProcess', 'window'])
+  assert.equal(audit.taint.has('*'), false, [...audit.taint].join(','))
+})
+
+for (const [name, retained] of [
+  ['a caller that stores the result', 'const held = [getWindow(null)]; void held'],
+  ['a reference that is not a call', 'const alias = getWindow; void alias'],
+  ['a callee with a rest parameter', 'const rest = (...wins: (typeof globalThis)[]): number => wins.length; rest(getWindow(null))'],
+  [
+    'a caller that spreads into the callee',
+    'const second = (first: number, win: typeof globalThis): number => (win.hostProcess ? 1 : 0); const spread: [number] = [0]; second(...spread, getWindow(null))'
+  ],
+  [
+    'a callee that stores its parameter',
+    'const holder: { win?: unknown } = {}; const keep = (win: typeof globalThis): void => { holder.win = win }; keep(getWindow(null))'
+  ],
+  [
+    'a callee that reads its arguments object',
+    'const peek = (win: typeof globalThis): unknown => arguments[0] ?? win.hostProcess; peek(getWindow(null))'
+  ],
+  ['a callee that is not program text', 'declare function sink(value: unknown): void; sink(getWindow(null))']
+] as const) {
+  test(`the global object returned to ${name} still escapes into data`, () => {
+    const audit = globalHostMutationAuditOf(windowReturnedToReaders(retained), ['hostProcess', 'window'])
+    assert.ok(audit.taint.has('*'), `${name}: ${[...audit.taint].join(',')}`)
+  })
+}
+
+// The same library shape across modules: the helper is exported by one module
+// module and imported by the entry. Inside a stated module set every importer
+// is enumerable, so the walk follows the returned value into the importing
+// module's call; with the set unstated, a reader outside the program could
+// hold it, and the wildcard stands.
+const windowReturnedAcrossModules = (statedModules: boolean): GlobalHostMutationAudit =>
+  globalHostMutationAuditOf(
+    `import { getGlobal } from './global-host-import-source.js'
+    interface Process {}
+    declare var hostProcess: Process
+    declare function opaque(): any
+    const observe = (win: typeof globalThis): number => (win.hostProcess ? 1 : 0)
+    const win = getGlobal(opaque())
+    observe(win)
+    const text: string = opaque()
+    text.normalize('NFC').trim()`,
+    ['hostProcess'],
+    [],
+    undefined,
+    false,
+    new Map([
+      [
+        resolve('test/fixtures/global-host-import-source.ts'),
+        `export function getGlobal(el: { nodeType?: number } | null) {
+          if (el && el.nodeType === 9) return opaque() ?? globalThis
+          return globalThis
+        }
+        declare function opaque(): any`
+      ]
+    ]),
+    false,
+    statedModules
+  )
+
+test('the global object returned by an imported helper only to callers that read its members never enters data', () => {
+  const audit = windowReturnedAcrossModules(true)
+  assert.equal(audit.taint.has('*'), false, [...audit.taint].join(','))
+})
+
+test('the global object returned by an imported helper still escapes while the module set is unstated', () => {
+  const audit = windowReturnedAcrossModules(false)
+  assert.ok(audit.taint.has('*'), [...audit.taint].join(','))
+})
+
+// The operand positions the walk above clears are the ones the alias graph
+// follows: a write through a holder of `a ?? globalThis` or of a returned
+// `a || globalThis` is still a write through the global object.
+for (const [name, source] of [
+  [
+    'a nullish-coalesced global held by a const',
+    'const other: any = null; const g = other ?? globalThis; (g as any).hostProcess = otherProcess'
+  ],
+  [
+    'a logical-or global returned to a function that writes through its parameter',
+    'const fallback: any = undefined; function getGlobal() { return fallback || globalThis } function patch(g: any): void { g.hostProcess = otherProcess } patch(getGlobal())'
+  ]
+] as const) {
+  test(`${name} still taints the host binding it writes`, () => {
+    const audit = globalHostMutationAuditOf(`
+      export {}
+      interface Process {}
+      declare var hostProcess: Process
+      declare var otherProcess: Process
+      ${source}
+    `)
+    assert.ok(audit.taint.has('*') || audit.taint.has(audit.bindings.get('hostProcess')!), `${name}: ${[...audit.taint].join(',')}`)
+  })
+}
+
 test('a numeric typed-array index write does not invalidate its intrinsic methods', () => {
   const audit = globalHostMutationAuditOf(
     `

@@ -10,7 +10,14 @@ import { scriptGlobalValueRedefinitionOf } from './script-global-redefinition.js
 import type { ExplicitThisCallFrame, ReceiverReference, ValueFlowIndex, ValueWrite } from './flow/model.js'
 import { reflectiveDefinitionMayInstallGetterOf, sourceClassDataMemberPlanOf } from './flow/source-class-data.js'
 import { sourceRecordSlotValuesOf } from './flow/source-record-data.js'
-import { isRealCallableDeclaration, runtimeParametersOf } from './flow/targets.js'
+import {
+  exportIsUnimported,
+  isModuleExportedDeclaration,
+  isRealCallableDeclaration,
+  isTypePositionReference,
+  runtimeParametersOf
+} from './flow/targets.js'
+import { inProgramImportReferencesOf } from './flow/export-importers.js'
 import { isVacuousOrigin, seededOriginSolver, type SeededOriginNode } from './flow/seeded-origins.js'
 import {
   closedCallableAuthorityOf,
@@ -1463,8 +1470,7 @@ export const censusGlobalHostMutations = (
     }
   }
 
-  const immutableAliasInitializer = (expression: ts.Identifier): ts.Expression | null => {
-    const declaration = bindingOf(expression)
+  const immutableBindingInitializer = (declaration: ts.Node | null): ts.Expression | null => {
     if (!declaration || !ts.isVariableDeclaration(declaration) || !declaration.initializer) return null
     if (trustSeed.rejectedCallableProofs.has(declaration)) return null
     const proof = invocationLedger.capture(() => sourceBindingValuesOf(checker, flow, declaration))
@@ -1472,6 +1478,7 @@ export const censusGlobalHostMutations = (
     retainRequirements(declaration, proof.requirements)
     return declaration.initializer
   }
+  const immutableAliasInitializer = (expression: ts.Identifier): ts.Expression | null => immutableBindingInitializer(bindingOf(expression))
   const standardPrototypeMethodIsDistinct = (expression: ts.Expression): boolean => {
     const current = unwrapErasedExpression(expression)
     if (allIntrinsicTrustInvalidated || trustSeed.rejectedCallableProofs.has(current)) return false
@@ -4150,6 +4157,20 @@ export const censusGlobalHostMutations = (
       link(valueNodeOf(current.whenFalse), node)
       return
     }
+    // `a ?? b` and `a || b` evaluate to one of their operands, exactly as a
+    // conditional evaluates to one of its arms, and `freshProgramObjectOrigin`
+    // below already reads them so. Without this edge `const g = other ??
+    // globalThis` held no term at all, and a write through `g` was caught only
+    // by the escape precondition -- which `benignGlobalPosition` now clears
+    // for exactly this operand position, on the strength of this edge.
+    if (
+      ts.isBinaryExpression(current) &&
+      (current.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken || current.operatorToken.kind === ts.SyntaxKind.BarBarToken)
+    ) {
+      link(valueNodeOf(current.left), node)
+      link(valueNodeOf(current.right), node)
+      return
+    }
     if (ts.isBinaryExpression(current) && current.operatorToken.kind === ts.SyntaxKind.CommaToken) {
       link(valueNodeOf(current.right), node)
       return
@@ -5007,7 +5028,147 @@ export const censusGlobalHostMutations = (
     if (ts.isCallExpression(parent) && parent.arguments[0] === node && directMutator(parent.expression) !== null) {
       return benignGlobalPosition(parent, seen)
     }
+    // `a ?? window` and `a || window` evaluate to ONE of their operands, so
+    // the global object is wherever the whole expression is -- the reading
+    // `candidatePublicationOf` already gives a conditional's arms.
+    if (
+      ts.isBinaryExpression(parent) &&
+      (parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken || parent.operatorToken.kind === ts.SyntaxKind.BarBarToken)
+    )
+      return benignGlobalPosition(parent, seen)
+    // A `return` hands the value to the function's callers; an argument hands
+    // it to the callee's parameter. Neither is a container: the value is held
+    // only by the cells the two walks below enumerate, and each mention of
+    // those cells is answered by this same position test. A DOM library's
+    // `getWindow(el)` is exactly this shape -- `return el.defaultView ??
+    // window` -- and reading it as an escape made every unplaced value in the
+    // program a possible global object.
+    if (ts.isReturnStatement(parent)) return callableResultKeepsGlobalOutOfData(ts.findAncestor(parent, ts.isFunctionLike), seen)
+    if (ts.isArrowFunction(parent) && parent.body === node) return callableResultKeepsGlobalOutOfData(parent, seen)
+    if (ts.isCallExpression(parent) && (parent.arguments as readonly ts.Node[]).includes(node))
+      return parameterKeepsGlobalOutOfData(parent, (parent.arguments as readonly ts.Node[]).indexOf(node), seen)
     return false
+  }
+  /**
+   * Every in-program mention of a callable's binding, or null when some
+   * reader is outside the program: `member-call-forwarding.ts`'s own
+   * `inProgramMentionsOf`, asked for a `const` arrow as well as a declaration.
+   */
+  const callableMentionsOf = (declaration: ts.FunctionDeclaration | ts.VariableDeclaration): readonly ts.Expression[] | null => {
+    const own = flow
+      .referencesToDeclaration(declaration)
+      .filter(
+        (reference) => reference !== declaration.name && !isTypePositionReference(reference) && !ts.isExportSpecifier(reference.parent)
+      )
+    if (!isModuleExportedDeclaration(checker, declaration, null) || exportIsUnimported(checker, flow, declaration)) return own
+    const importers = inProgramImportReferencesOf(checker, flow, declaration)
+    return importers === null ? null : [...own, ...importers]
+  }
+  /** The same test `selectionIsIntact` applies: a whole-cell write with anything but the declaration itself. */
+  const callableBindingIsReplaced = (declaration: ts.FunctionDeclaration): boolean =>
+    flow
+      .writesToDeclaration(declaration)
+      .some(
+        (write) =>
+          write.edge !== 'return' &&
+          write.edge !== 'yield' &&
+          write.slot === 'whole' &&
+          (write.value === null || (unwrapErasedExpression(write.value) as ts.Node) !== declaration)
+      )
+  /**
+   * Whether a function's binding is only ever CALLED, each call in a position
+   * this walk follows. Its returned value then reaches exactly those call
+   * expressions -- the same completions the alias graph follows
+   * (`observableCompletionValuesOf`), so a write through one is censused
+   * where it is spelled. A generator or async body wraps its value in an
+   * iterator or promise, a container this walk does not open; a function
+   * referenced as a value, or read by a module outside the program, is held
+   * by something this walk cannot see. A classic script's top-level function
+   * is a property of the global object, read by name from any script and as
+   * `globalThis.f` from this one -- mentions no declaration reference lists.
+   */
+  const callableResultKeepsGlobalOutOfData = (callable: ts.Node | undefined, seen: Set<ts.Symbol>): boolean => {
+    if (!callable || !ts.isFunctionLike(callable) || !ts.isExternalModule(callable.getSourceFile())) return false
+    if (
+      (callable as ts.FunctionLikeDeclaration).asteriskToken !== undefined ||
+      (ts.getCombinedModifierFlags(callable) & ts.ModifierFlags.Async) !== 0
+    )
+      return false
+    let declaration: ts.FunctionDeclaration | ts.VariableDeclaration
+    let name: ts.Identifier
+    if (ts.isFunctionDeclaration(callable)) {
+      if (!callable.name || callableBindingIsReplaced(callable)) return false
+      declaration = callable
+      name = callable.name
+    } else if (
+      (ts.isArrowFunction(callable) || ts.isFunctionExpression(callable)) &&
+      ts.isVariableDeclaration(callable.parent) &&
+      ts.isIdentifier(callable.parent.name) &&
+      immutableBindingInitializer(callable.parent) === callable
+    ) {
+      declaration = callable.parent
+      name = callable.parent.name
+    } else return false
+    const symbol = checker.getSymbolAtLocation(name)
+    if (!symbol) return false
+    if (seen.has(symbol)) return true
+    seen.add(symbol)
+    const mentions = callableMentionsOf(declaration)
+    return (
+      mentions !== null &&
+      mentions.every(
+        (mention) =>
+          ts.isCallExpression(mention.parent) && mention.parent.expression === mention && benignGlobalPosition(mention.parent, seen)
+      )
+    )
+  }
+  const readsArgumentsObject = (body: ts.Node): boolean => {
+    let reads = false
+    const visit = (node: ts.Node): void => {
+      if (reads) return
+      if (ts.isIdentifier(node) && node.text === 'arguments') reads = true
+      else ts.forEachChild(node, visit)
+    }
+    visit(body)
+    return reads
+  }
+  /**
+   * Whether the argument at `index` of a direct call to one program body is
+   * held only by that body's parameter, whose every mention this walk
+   * follows. Fail-closed on everything that makes the parameter not the whole
+   * story: a callee that is not exactly one compiled, unreplaced body the
+   * checker selected, a spread, a rest parameter, an `arguments` read. An
+   * argument past the last parameter is dropped. A binding pattern extracts
+   * members into fresh bindings, and the object itself is never named.
+   */
+  const parameterKeepsGlobalOutOfData = (call: ts.CallExpression, index: number, seen: Set<ts.Symbol>): boolean => {
+    if (call.arguments.some(ts.isSpreadElement)) return false
+    const callee = unwrapErasedExpression(call.expression)
+    if (!ts.isIdentifier(callee)) return false
+    const bound = bindingOf(callee)
+    const initializer = bound && ts.isVariableDeclaration(bound) ? immutableBindingInitializer(bound) : null
+    const value = initializer === null ? null : unwrapErasedExpression(initializer)
+    const body =
+      bound && ts.isFunctionDeclaration(bound) && !callableBindingIsReplaced(bound)
+        ? bound
+        : value && (ts.isArrowFunction(value) || ts.isFunctionExpression(value))
+          ? value
+          : null
+    if (!body || !body.body || !ts.isExternalModule(body.getSourceFile()) || !flow.callableBodyIsIndexed(body)) return false
+    if (checker.getResolvedSignature(call)?.declaration !== body) return false
+    if (readsArgumentsObject(body)) return false
+    const parameters = runtimeParametersOf(body)
+    const parameter = parameters[index]
+    if (parameter === undefined) return parameters.at(-1)?.dotDotDotToken === undefined
+    if (parameter.dotDotDotToken !== undefined) return false
+    if (!ts.isIdentifier(parameter.name)) return true
+    const symbol = checker.getSymbolAtLocation(parameter.name)
+    if (!symbol) return false
+    if (seen.has(symbol)) return true
+    seen.add(symbol)
+    return flow
+      .referencesToDeclaration(parameter)
+      .every((reference) => reference === parameter.name || isTypePositionReference(reference) || benignGlobalPosition(reference, seen))
   }
   const bindingKeepsGlobalOutOfData = (declaration: ts.VariableDeclaration, seen: Set<ts.Symbol>): boolean => {
     // A binding PATTERN extracts members into fresh bindings; the object
