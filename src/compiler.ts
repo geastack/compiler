@@ -378,7 +378,7 @@ const declarerReaderFor = (plugins: readonly PluginInstance[]): DeclarerReader =
   }
 }
 
-export const sourceTransformsFor = (plugins: readonly PluginInstance[]): readonly SourceTransform[] => [
+export const sourceTransformsFor = (plugins: readonly PluginInstance[], rootFileNames: readonly string[]): readonly SourceTransform[] => [
   // A pre-class constructor function and its `F.prototype.m = function` methods
   // become the class they are, before anything below reads either as a class.
   constructorFunctionClassSourceTransform,
@@ -429,8 +429,9 @@ export const sourceTransformsFor = (plugins: readonly PluginInstance[]): readonl
   // left exactly as written -- so it speaks only where the program was silent.
   declarationOverlayTransform,
   // The subclass overlay runs on the overlay's output and before the ambient
-  // realization, so a member it declares is respelled too.
-  createSubclassMemberOverlayTransform(declarerReaderFor(plugins)),
+  // realization, so a member it declares is respelled too. It is given the
+  // program's roots so what it reads is this program's own module graph.
+  createSubclassMemberOverlayTransform(declarerReaderFor(plugins), rootFileNames),
   // The alias-this field declaration runs after the subclass overlay so its
   // "already declared" check sees any member the overlay just added, and
   // never fights it over the same name. It states no type -- only that a
@@ -596,7 +597,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     // offered to two plugins is offered to the second the way the first left
     // it. Only a plugin that installs one appears here, so a compilation whose
     // plugins state only data parses each file once past this first pass.
-    sourceTransforms: sourceTransformsFor(plugins)
+    sourceTransforms: sourceTransformsFor(plugins, request.rootFileNames)
   })
   // The frontend's host-protocol census reaches the deriver as a policy rather
   // than as a table the deriver reads: `derive.ts` may not know what a JSX

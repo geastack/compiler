@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import ts from 'typescript'
 import { createSubclassMemberOverlayTransform } from './subclass-member-overlay-transform.js'
 import { createProgram, defaultCompilerOptions } from './program.js'
@@ -60,3 +61,36 @@ for (const inlineDefault of [false, true]) {
     assert.equal(recordType.getProperty('hidden'), undefined)
   })
 }
+
+test('a program in a skipped directory is overlaid from its own module graph, not its neighbours', () => {
+  // two independent programs side by side under `test/`, each with its own `Settings`: indexed together the name
+  // is a duplicate and drops out, so the first program's overlay would depend on the second program existing
+  const root = mkdtempSync(join(tmpdir(), 'subclass-overlay-'))
+  try {
+    writeFileSync(join(root, 'package.json'), '{}')
+    mkdirSync(join(root, 'test'))
+    const program = join(root, 'test', 'loud.js')
+    const text = [
+      'class Settings {}',
+      'class LoudSettings extends Settings {',
+      '  constructor() {',
+      '    super()',
+      '    this.isLoud = true',
+      '  }',
+      '}',
+      '/** @param {Settings} settings */',
+      'export const loud = (settings) => settings.isLoud',
+      ''
+    ].join('\n')
+    writeFileSync(program, text)
+    writeFileSync(join(root, 'test', 'quiet.js'), 'class Settings {}\nexport class QuietSettings extends Settings {}\n')
+    const read = (file: string): string => readFileSync(file, 'utf8')
+    for (const transform of [createSubclassMemberOverlayTransform(read), createSubclassMemberOverlayTransform(read, [program])]) {
+      const overlaid = transform({ fileName: program, text })
+      assert.ok(overlaid, 'the base the program reads through gains its subclass member')
+      assert.match(overlaid, /@type \{boolean \| undefined\}[\s\S]*@geaSubclassMemberOverlay \*\/\n\tisLoud;/)
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})

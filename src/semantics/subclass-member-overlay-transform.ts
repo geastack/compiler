@@ -259,7 +259,16 @@ const packageRootFor = (filePath: string): string | null => {
  * file ADDED to the package after the first -- which `compile()` , a one-shot
  * batch entry point, has no way to be in the middle of.
  */
-const sourceFilesByRoot = new Map<string, readonly string[]>()
+const sourceFilesByRoot = new Map<string, PackageFiles>()
+
+/**
+ * A package's source files: `files` the walk finds on its own, `confined`
+ * those it reaches only through a skipped directory `ancestryBetween` lets in.
+ */
+interface PackageFiles {
+  readonly files: readonly string[]
+  readonly confined: readonly string[]
+}
 
 /**
  * Every ancestor directory from `filePath`'s own directory up to (and
@@ -276,6 +285,15 @@ const sourceFilesByRoot = new Map<string, readonly string[]>()
  * became a no-op for them. The fix is not to stop skipping `test` -- that
  * would re-admit a real package's own test fixtures into its class index --
  * it is to never skip an ancestor of the file actually being compiled.
+ *
+ * What such a directory is let in for is that program, not everything beside
+ * it: `test/runtime` holds some 1,600 independent programs, and indexing all
+ * of them as one package let a neighbour's class of the same name (dropped as
+ * a duplicate) or a neighbour's subclass (widening the union) change the
+ * overlay -- and the text, and every identity after it -- of a program that
+ * never mentions the neighbour. So the files found only through this override
+ * are `confined` (see `collectSourceFiles`) and indexed only when they belong
+ * to the compilation's own module graph (`programGraph`).
  */
 const ancestryBetween = (root: string, filePath: string): ReadonlySet<string> => {
   const stop = resolve(root)
@@ -306,13 +324,18 @@ const indexKey = (root: string, neverSkip: ReadonlySet<string>): string =>
  * comment), so a `neverSkip` override must be part of the key -- keying on
  * `root` alone would let the FIRST program compiled from a directory decide,
  * for every later one, whether `test/runtime` exists.
+ *
+ * A file below a directory descended into only because of `neverSkip` is
+ * returned in `confined`, not `files`: whether it is indexed depends on the
+ * program being compiled (`buildPackageIndex`), not on the package.
  */
-const collectSourceFiles = (root: string, neverSkip: ReadonlySet<string>): readonly string[] => {
+const collectSourceFiles = (root: string, neverSkip: ReadonlySet<string>): PackageFiles => {
   const key = indexKey(root, neverSkip)
   const known = sourceFilesByRoot.get(key)
   if (known) return known
-  const out: string[] = []
-  const walk = (dir: string): void => {
+  const files: string[] = []
+  const confined: string[] = []
+  const walk = (dir: string, admitted: boolean): void => {
     let entries: Dirent<string>[]
     try {
       entries = readdirSync(dir, { withFileTypes: true, encoding: 'utf8' })
@@ -323,16 +346,18 @@ const collectSourceFiles = (root: string, neverSkip: ReadonlySet<string>): reado
       if (entry.name.startsWith('.')) continue
       if (entry.isDirectory()) {
         const childPath = join(dir, entry.name)
-        if (SKIP_DIRS.has(entry.name) && !neverSkip.has(childPath)) continue
-        walk(childPath)
+        const skipped = SKIP_DIRS.has(entry.name)
+        if (skipped && !neverSkip.has(childPath)) continue
+        walk(childPath, admitted || skipped)
       } else if (/\.m?js$/.test(entry.name)) {
-        out.push(join(dir, entry.name))
+        ;(admitted ? confined : files).push(join(dir, entry.name))
       }
     }
   }
-  walk(root)
-  sourceFilesByRoot.set(key, out)
-  return out
+  walk(root, false)
+  const found: PackageFiles = { files, confined }
+  sourceFilesByRoot.set(key, found)
+  return found
 }
 
 interface ClassInfo {
@@ -343,6 +368,8 @@ interface ClassInfo {
   readonly baseName: string | null
   /** Every identifier-named member syntactically declared by this class, including methods and accessors. */
   readonly declaredNames: ReadonlySet<string>
+  /** Of those, the methods and accessors: a subclass may not redeclare one of them as a field. */
+  readonly callableNames: ReadonlySet<string>
   /** Member name -> the distinct type-text candidates this class's own assignments state, read as TEXT (see this file's header). */
   readonly ownMembers: ReadonlyMap<string, readonly string[]>
   /**
@@ -491,6 +518,8 @@ const literalShapeText = (expr: ts.Expression): string | null => {
 interface MemberEvidence {
   /** Every identifier-named property, method, getter, or setter declared in the class body. */
   readonly declaredNames: ReadonlySet<string>
+  /** The methods, getters and setters among them. */
+  readonly callableNames: ReadonlySet<string>
   /** Member name -> the distinct scalar/reference type-text candidates this class's own assignments state. */
   readonly text: ReadonlyMap<string, readonly string[]>
   /** Member name -> the object-literal shape this class's own assignment states (see `ClassInfo.ownObjectShapes`). */
@@ -679,7 +708,7 @@ const memberTypeTextsOf = (klass: ts.ClassLikeDeclaration, file: ts.SourceFile):
     if (entry.kind === 'text') text.set(name, entry.texts)
     else if (entry.kind === 'object') objectShape.set(name, entry.shape)
   }
-  return { declaredNames, text, objectShape }
+  return { declaredNames, callableNames: methodNames, text, objectShape }
 }
 
 interface PackageIndex {
@@ -895,6 +924,7 @@ const scanPackageFile = (filePath: string, text: string): PackageFileScan => {
       exportName: classExportName(file, statement),
       baseName,
       declaredNames: evidence.declaredNames,
+      callableNames: evidence.callableNames,
       ownMembers: evidence.text,
       ownObjectShapes: evidence.objectShape
     })
@@ -967,8 +997,16 @@ const compactScan = (scan: PackageFileScan): PackageFileScan => {
   return { ...scan, externallyReadNames: [...new Set(scan.externallyReadNames)].map(sharedName) }
 }
 
-const buildPackageIndex = (root: string, read: DeclarerReader, neverSkip: ReadonlySet<string>): PackageIndex => {
-  const key = indexKey(root, neverSkip)
+const buildPackageIndex = (
+  root: string,
+  read: DeclarerReader,
+  neverSkip: ReadonlySet<string>,
+  graph: ReadonlySet<string>
+): PackageIndex => {
+  const found = collectSourceFiles(root, neverSkip)
+  // a confined file is the program's own or not indexed at all (see `ancestryBetween`)
+  const confined = found.confined.filter((filePath) => graph.has(resolve(filePath)))
+  const key = confined.length === 0 ? indexKey(root, neverSkip) : `${indexKey(root, neverSkip)}\n${confined.join('\n')}`
   const cached = cachesFor(read).index.get(key)
   if (cached) return cached
 
@@ -980,7 +1018,7 @@ const buildPackageIndex = (root: string, read: DeclarerReader, neverSkip: Readon
   const constantDomainsByName = new Map<string, string>()
   const duplicateConstants = new Set<string>()
 
-  for (const filePath of collectSourceFiles(root, neverSkip)) {
+  for (const filePath of [...found.files, ...confined]) {
     let text: string
     try {
       text = read(filePath)
@@ -1297,13 +1335,36 @@ const joinedObjectRecordText = (
 }
 
 /**
+ * The compilation's own module graph: its root files and every module they
+ * import at runtime, as absolute paths. The files a skipped directory is let
+ * in for (`ancestryBetween`) are indexed only from here, so what a program's
+ * overlay reads depends on that program alone, whatever else shares its
+ * directory.
+ */
+const programGraph = (roots: readonly string[], read: DeclarerReader): ReadonlySet<string> => {
+  const graph = new Set<string>()
+  for (const rootFile of roots) {
+    const start = resolve(rootFile)
+    graph.add(start)
+    for (const reached of modulesReachableFrom(start, read)) graph.add(reached)
+  }
+  return graph
+}
+
+/**
  * The overlay, reading declarers through `read` -- see `DeclarerReader`.
  * `compiler.ts` builds one per compilation with that compilation's plugin
- * transforms; a caller with no plugins may pass `readFileSync` itself.
+ * transforms and root files; a caller with no plugins may pass `readFileSync`
+ * itself. Without `roots`, the file being transformed stands for the program.
  */
-export const createSubclassMemberOverlayTransform =
-  (read: DeclarerReader) =>
-  (input: { readonly fileName: string; readonly text: string }): string | null => {
+export const createSubclassMemberOverlayTransform = (read: DeclarerReader, roots: readonly string[] = []) => {
+  let rootsGraph: ReadonlySet<string> | null = null
+  const graphFor = (fileName: string): ReadonlySet<string> => {
+    if (roots.length === 0) return programGraph([fileName], read)
+    if (rootsGraph === null) rootsGraph = programGraph(roots, read)
+    return rootsGraph
+  }
+  return (input: { readonly fileName: string; readonly text: string }): string | null => {
     if (!/\.m?js$/.test(input.fileName)) return null
     const root = packageRootFor(input.fileName)
     if (!root) return null
@@ -1313,7 +1374,7 @@ export const createSubclassMemberOverlayTransform =
     // read nowhere else. Building it reads and transforms every source file of
     // the package, so a file declaring no class does not pay for it.
     if (!file.statements.some((statement) => ts.isClassDeclaration(statement) && statement.name !== undefined)) return null
-    const index = buildPackageIndex(root, read, ancestryBetween(root, input.fileName))
+    const index = buildPackageIndex(root, read, ancestryBetween(root, input.fileName), graphFor(input.fileName))
 
     const boundHere = new Set<string>()
     let leadingImportEnd = 0
@@ -1362,21 +1423,52 @@ export const createSubclassMemberOverlayTransform =
      * what its own reads then see. Only a member with ONE unambiguous text and
      * no unresolvable or not-yet-imported name in it -- this adds no `@import`
      * of its own, so a name must already be in scope in the declarer's file.
+     *
+     * Only a field can be redeclared that way. A member an ancestor declares as
+     * an accessor or a method stays the ancestor's: `this.texture = ...` in a
+     * subclass of a class with `get texture()`/`set texture()` assigns through
+     * the setter, and a restated `texture;` field is a checker error (an
+     * accessor overridden as an instance property) that leaves the program
+     * uncertified.
      */
     const restatementsFor = (statement: ts.ClassDeclaration, info: ClassInfo): readonly string[] => {
       if (process.env['GEA_NO_RESTATE']) return []
       if (!info.baseName || !index.classesByName.has(info.baseName)) return []
       if (index.untrustedClassNames.has(info.name)) return []
       const declaredHere = new Set(statement.members.map((member) => (member.name && ts.isIdentifier(member.name) ? member.name.text : '')))
+      const inheritedCallables = new Set<string>()
+      // a heritage cycle (two classes naming each other) ends the walk rather than looping
+      const walked = new Set<string>([info.name])
+      for (let ancestorName: string | null = info.baseName; ancestorName !== null && !walked.has(ancestorName);) {
+        walked.add(ancestorName)
+        const ancestor = index.classesByName.get(ancestorName)
+        if (!ancestor) break
+        for (const name of ancestor.callableNames) inheritedCallables.add(name)
+        ancestorName = ancestor.baseName
+      }
       const out: string[] = []
       for (const name of [...info.ownMembers.keys()].sort()) {
         if (!index.externallyReadNames.has(name)) continue
-        if (declaredHere.has(name)) continue
+        if (declaredHere.has(name) || inheritedCallables.has(name)) continue
         const texts = info.ownMembers.get(name)
         if (!texts || texts.length !== 1) continue
         const text = texts[0] as string
         if (text.length === 0 || text.includes('*/')) continue
         const foreign = foreignNamesIn(text)
+        if (!foreign.every((foreignName) => index.classesByName.has(foreignName) && boundHere.has(foreignName))) continue
+        out.push(`\t/** @type {${text}} */\n\t${name};\n`)
+      }
+      // An object literal the class assigns (`this.parameters = { width: width }`) is its own record just the same:
+      // restated in the literal's own property order, so the record keeps the layout the literal gives it.
+      for (const name of [...info.ownObjectShapes.keys()].sort()) {
+        if (!index.externallyReadNames.has(name)) continue
+        if (declaredHere.has(name) || inheritedCallables.has(name)) continue
+        const shape = info.ownObjectShapes.get(name)
+        if (!shape || shape.size === 0) continue
+        const properties = [...shape].map(([property, text]) => `${property}: ${text}`)
+        const text = `{${properties.join('; ')}}`
+        if (text.includes('*/')) continue
+        const foreign = foreignNamesIn([...shape.values()].join(' '))
         if (!foreign.every((foreignName) => index.classesByName.has(foreignName) && boundHere.has(foreignName))) continue
         out.push(`\t/** @type {${text}} */\n\t${name};\n`)
       }
@@ -1618,3 +1710,4 @@ export const createSubclassMemberOverlayTransform =
     for (const edit of edits) text = text.slice(0, edit.at) + edit.text + text.slice(edit.at)
     return text
   }
+}
