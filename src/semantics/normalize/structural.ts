@@ -2146,6 +2146,167 @@ class StructuralView extends StructuralViewInputs {
     return indexedAccessMemberTypes(this.checker, bound, indexType)
   }
 
+  /**
+   * A deferred conditional's bound as the checker states it, for the
+   * conditional that no image of this copy closes -- the same statement
+   * `memberTypesThroughBound` reads for `T[K]`, asked of the conditional
+   * itself, and taken only where every branch is shown to fit in it.
+   *
+   * A state-machine library's `ensure<T>(value: T | null | undefined)` called
+   * inside `index<T extends Schema>` with `state.initial`, typed
+   * `ChildStateKey<T['state'], string>`, is the case. The checker infers the
+   * callee's `T` as that conditional, which mentions the CALLER's `T` only
+   * through an indexed access, so the callee's one copy is filled with a type
+   * no copy's substitution ever closes. Inside the caller's own copy the
+   * conditional's image would close it, but the public checker cannot
+   * instantiate one (`structural-instantiated-member.ts`), and no
+   * instantiated type the program builds holds that member. The callee's
+   * parameter, the caller's reads of the field and the narrowed reads after
+   * the assertion all refused.
+   *
+   * The bound is `getBaseConstraintOfType`, because it is the type the checker
+   * itself reasons with: it narrows the value against that constraint. It is
+   * NOT always an upper bound. For a distributive conditional the checker
+   * instantiates it at the check type's constraint and keeps the true branch
+   * only when part of the extends type is assignable to that constraint, so
+   * `S extends { b: number } ? number : string` over `S extends { a: string }`
+   * reports `string` while the copy for `{ a: string; b: number }` holds a
+   * number. Laid out as `string`, that
+   * aborted, the value's arm missing from the slot it was read into; laid
+   * out as `number | string`, the checker's own narrowing of `typeof value
+   * === 'number'` to `never` printed `NaN`. A conditional the checker
+   * misdescribes this way has no carrier the rest of the program agrees
+   * with, so it keeps its refusal. The constraint is taken only when every
+   * branch has a closed bound (`branchBounds`) that is assignable to it: then
+   * every value of every instantiation is one of its values, which is exactly
+   * what a storage carrier has to admit (`string` for that key: `Child | Rest
+   * | never`, two `infer` parameters a template literal constrains to
+   * `string`).
+   *
+   * When any part of the bound states nothing it is no answer and the
+   * refusal stays (`boundStatesNothing`): `any`/`unknown` and the global
+   * `Object` interface would box, a type parameter or a still-deferred form
+   * names no structure, and `object` or the empty object type `{}` is
+   * TypeScript's fallback for a conditional it could not evaluate, not the
+   * author's claim (the case `memberTypesThroughBound` sets apart).
+   */
+  conditionalBound(type: ts.Type): ts.Type | null {
+    const bound = this.checker.getBaseConstraintOfType(type)
+    if (!bound || bound === type || this.carriesDeferredForm(bound) || this.boundStatesNothing(bound)) return null
+    const branches = this.branchBounds(type, 0)
+    return branches !== null && branches.every((branch) => this.checker.isTypeAssignableTo(branch, bound)) ? bound : null
+  }
+
+  /**
+   * The types a conditional's value can be drawn from, each an upper bound of
+   * one branch, or `null` when a branch has none.
+   *
+   * The branches are read off the conditional's own declaration, in terms of
+   * its declared parameters, so the checker's constraint of a conditional is
+   * never asked again here. A parameter stands for its declared constraint,
+   * which every instantiation satisfies; an `infer` parameter stands for the
+   * constraint its position implies. A nested conditional is its branches
+   * again, and a template literal is a string, as `primitiveFor` says.
+   *
+   * Any other form is returned as it is only when it is CLOSED: no type
+   * parameter and no deferred form anywhere inside it. The assignability test
+   * is exact only between closed types. A branch such as `{ v: Pick2<S> }`
+   * holds a conditional the checker relates through that conditional's own
+   * constraint, the same one that can drop a branch, so `{ v: Pick2<S> }` is
+   * assignable to `{ v: string }` while the copy for `{ a: string; b: number
+   * }` holds `{ v: 42 }`. A generic reference such as `Box<S>` hides the
+   * same in a member the walk does not read, so its type parameter alone
+   * makes it open.
+   */
+  branchBounds(type: ts.Type, depth: number): ts.Type[] | null {
+    if (depth > 6) return null
+    const each = (types: readonly ts.Type[]): ts.Type[] | null => {
+      const bounds: ts.Type[] = []
+      for (const one of types) {
+        const bound = this.branchBounds(one, depth + 1)
+        if (bound === null) return null
+        bounds.push(...bound)
+      }
+      return bounds
+    }
+    if (type.flags & ts.TypeFlags.Conditional) {
+      const declared = (type as ts.ConditionalType).root.node
+      return each([this.checker.getTypeFromTypeNode(declared.trueType), this.checker.getTypeFromTypeNode(declared.falseType)])
+    }
+    if (type.isUnion()) return each(type.types)
+    if (type.flags & ts.TypeFlags.TypeParameter) {
+      const constraint = type.getConstraint()
+      return constraint ? each([constraint]) : null
+    }
+    if (type.flags & ts.TypeFlags.Substitution) return each([(type as ts.SubstitutionType).baseType])
+    if (type.flags & (ts.TypeFlags.TemplateLiteral | ts.TypeFlags.StringMapping)) return [this.checker.getStringType()]
+    const open =
+      ts.TypeFlags.TypeParameter |
+      ts.TypeFlags.IndexedAccess |
+      ts.TypeFlags.Conditional |
+      ts.TypeFlags.Substitution |
+      ts.TypeFlags.Index |
+      ts.TypeFlags.TemplateLiteral |
+      ts.TypeFlags.StringMapping
+    const isOpen = (part: ts.Type): boolean =>
+      (part.flags & open) !== 0 ||
+      ((part.flags & ts.TypeFlags.Object) !== 0 && ((part as ts.ObjectType).objectFlags & ts.ObjectFlags.Mapped) !== 0)
+    return this.someTypePart(type, isOpen) ? null : [type]
+  }
+
+  /**
+   * Whether `test` holds for any part of a type, down through union arms,
+   * type arguments and the members of an anonymous type. A declared
+   * interface or class is not walked into -- its members are what the
+   * program states about it wherever it is used -- and a walk deeper than
+   * the cap counts as a hit rather than as clean.
+   */
+  someTypePart(part: ts.Type, test: (part: ts.Type) => boolean, depth = 0, seen = new Set<ts.Type>()): boolean {
+    if (depth > 6) return true
+    if (seen.has(part)) return false
+    seen.add(part)
+    if (test(part)) return true
+    const deeper = (inner: ts.Type): boolean => this.someTypePart(inner, test, depth + 1, seen)
+    if (part.isUnionOrIntersection()) return part.types.some(deeper)
+    if ((part.flags & ts.TypeFlags.Object) === 0) return false
+    const reference = part as ts.TypeReference
+    // A class or interface reference ends its arguments with the polymorphic
+    // `this`, which is no argument the program wrote.
+    const declared = reference.target?.typeParameters?.length ?? 0
+    const written =
+      (reference.objectFlags & ts.ObjectFlags.Reference) !== 0 ? this.checker.getTypeArguments(reference).slice(0, declared) : []
+    if ([...written, ...(part.aliasTypeArguments ?? [])].some(deeper)) return true
+    if (((part as ts.ObjectType).objectFlags & ts.ObjectFlags.Anonymous) === 0) return false
+    return (
+      part.getProperties().some((property) => deeper(this.checker.getTypeOfSymbol(property))) ||
+      this.checker.getIndexInfosOfType(part).some((index) => deeper(index.type)) ||
+      [...part.getCallSignatures(), ...part.getConstructSignatures()].some(
+        (signature) =>
+          deeper(signature.getReturnType()) || signature.parameters.some((parameter) => deeper(this.checker.getTypeOfSymbol(parameter)))
+      )
+    )
+  }
+
+  /**
+   * Whether any part of a conditional's bound states nothing.
+   *
+   * The top level alone is not enough. `Parameters<F>`'s bound is `any[]`,
+   * from the lib's own `(...args: any) => any` constraint: an array whose
+   * every element would box, admitted because the array itself states a
+   * layout.
+   */
+  boundStatesNothing(bound: ts.Type): boolean {
+    const vacuous = ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.TypeParameter | ts.TypeFlags.Index | ts.TypeFlags.NonPrimitive
+    return this.someTypePart(bound, (part) => {
+      if ((part.flags & vacuous) !== 0) return true
+      if ((part.flags & ts.TypeFlags.Object) === 0) return false
+      const anchor = part.getSymbol()?.declarations?.[0]
+      if (anchor && isGlobalObjectInterface(this.checker, anchor, part)) return true
+      const signatures = part.getCallSignatures().length + part.getConstructSignatures().length
+      return part.getProperties().length === 0 && this.checker.getIndexInfosOfType(part).length === 0 && signatures === 0
+    })
+  }
+
   // `getMinArgumentCount` is checker-internal. The public answer is the count of
   // leading parameters the call site must supply: everything before the first
   // optional, defaulted, or rest parameter.
@@ -3692,9 +3853,14 @@ class StructuralView extends StructuralViewInputs {
     const parameterList = this.parametersOperatorShape(type)
     if (parameterList !== null) return this.remember(type, parameterList)
     // A conditional that still exists after this copy's instantiated-member
-    // image was asked for, and that neither operator above could reduce, is
+    // image was asked for, and that neither operator above could reduce, has
+    // no image this layer can spell. The checker's bound for it, once every
+    // branch is shown to fit in that bound, is still a statement about every
+    // value it can hold (`conditionalBound`); any other conditional is
     // unresolved.
-    if (type.flags & ts.TypeFlags.Conditional)
+    if (type.flags & ts.TypeFlags.Conditional) {
+      const bound = this.conditionalBound(type)
+      if (bound) return this.remember(type, this.typeOf(bound))
       return this.remember(
         type,
         this.unresolved(
@@ -3702,6 +3868,7 @@ class StructuralView extends StructuralViewInputs {
           'erased-type-expression'
         )
       )
+    }
     const primitive = primitiveFor(type)
     if (primitive) return this.remember(type, this.table.intern(primitive))
     const literal = literalFor(this.checker, type)
