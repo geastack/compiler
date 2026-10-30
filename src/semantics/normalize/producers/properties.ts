@@ -1245,6 +1245,20 @@ const scriptGlobalMemberDeclarationOf = (
   return context.identities.symbolValueDeclarationId(member, node)
 }
 
+/**
+ * Whether this access reads a global the host states absent (the census
+ * answers it `undefined`, `absent-globals.ts`) while the program writes that
+ * global. The read then has a writer the host's statement never saw;
+ * `references.ts` refuses the bare read by the same rule.
+ */
+const absentGlobalMemberIsWritten = (node: AccessNode, context: ProducerContext): boolean => {
+  if (!ts.isPropertyAccessExpression(node) || context.absentGlobals.typeAt(node) === null) return false
+  if (context.globalHostMutationTaint.has('*')) return true
+  const member = context.checker.getSymbolAtLocation(node.name)
+  const declaration = member ? context.identities.symbolValueDeclarationId(member, node) : null
+  return declaration === null || context.globalHostMutationTaint.has(declaration)
+}
+
 /** Whether an expression is an authenticated host identity that cannot be nullish in this program. */
 export const isAlwaysPresentHostExpression = (expression: ts.Expression, context: ProducerContext): boolean => {
   const current = unwrapErasedExpression(expression)
@@ -1410,6 +1424,17 @@ const contributeAccess = (candidate: CensusCandidate, node: AccessNode, context:
         candidate.id,
         'property',
         "a script's global var is redefined through the global object (Object.defineProperty(globalThis, ...)), so a read of it through globalThis has two writers this backend does not reconcile",
+        'P0'
+      )
+    }
+  }
+  if (absentGlobalMemberIsWritten(node, context)) {
+    return {
+      kind: 'blocked',
+      blocker: blocked(
+        candidate.id,
+        'property',
+        'a global the host states absent is written by the program, so reading it through the global object as undefined would ignore that write',
         'P0'
       )
     }

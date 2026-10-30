@@ -684,7 +684,9 @@ const buildReference = (
   // because a `value` result still has to be published either way -- there is
   // no cell a `binding` read could ever be minted against -- and only the
   // COMPLETION (throw, or the constant `typeof` returns) differs.
-  const hasNoCell = symbol === undefined
+  // A host-absent global keeps its lib symbol but has no cell either; the
+  // census answers both, so this and `citeExpressionResult` read one fact.
+  const hasNoCell = symbol === undefined || (ts.isIdentifier(node) && context.unresolvableNames.hasNoCell(node))
   const unresolvableThrows = hasNoCell && !isTypeofOperand(node)
   // The one reached value of an unresolvable reference is `typeof`'s, and it
   // is `undefined` whatever the name was declared as: a module-local `declare
@@ -764,12 +766,33 @@ const buildReference = (
       )
     }
   }
+  // A host stated this global absent, so a read of it throws (or, under
+  // `typeof`, is `undefined`) -- a statement about the host, not about the
+  // program. A program that installs the name itself (a polyfill) is a writer
+  // that statement never saw, and answering as if absent then is the same
+  // stale read. `properties.ts` refuses the read through the global object by
+  // the same rule.
+  if (
+    declaration !== null &&
+    context.absentGlobals.typeAt(node) !== null &&
+    (context.globalHostMutationTaint.has('*') || context.globalHostMutationTaint.has(declaration))
+  ) {
+    return {
+      kind: 'blocked',
+      blocker: blocked(
+        candidate.id,
+        'reference',
+        'a global the host states absent is written by the program, so reading it as absent would ignore that write',
+        'P0'
+      )
+    }
+  }
   // A plain `=` target is resolved and written, never read: PutValue takes the
   // Reference, not a value. Reading it anyway would invent an access the
   // program does not perform -- and for a `const` or a `let` before its
   // initializer, that invented read is a temporal-dead-zone throw the source
   // never had. A compound target is excluded because it genuinely does read.
-  if (!declaration || isPlainAssignmentTarget(node)) return { kind: 'operations', operations: [operation], edges: [] }
+  if (!declaration || hasNoCell || isPlainAssignmentTarget(node)) return { kind: 'operations', operations: [operation], edges: [] }
 
   const { mutable, temporalDeadZone } = declarationNode ? bindingKindOf(declarationNode) : { mutable: true, temporalDeadZone: false }
   const readId = mintOperationId(context.ordinals, candidate.id, 'binding')

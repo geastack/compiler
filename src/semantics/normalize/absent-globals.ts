@@ -28,8 +28,12 @@ import { noHostProvidedNames, valueSymbolAt } from './unresolvable-names.js'
  * `undefined` is the language's OWN answer for a global that is not there, and
  * every stage downstream already handles it: `typeof` yields `'undefined'`, the
  * guard's other branch is dead, the binding is not external so no `extern` is
- * emitted, and a program that reads the value anyway is refused by the ordinary
- * rules for reading `undefined` rather than by a special case invented here.
+ * emitted, and a read through the global object (`globalThis.X`, or any value
+ * of `typeof globalThis`, whose member the checker types as the global's own
+ * symbol) is `undefined`. A bare read outside `typeof` is an unresolvable
+ * reference on this host and throws a ReferenceError, so the reference census
+ * gives such a name no cell (`unresolvable-names.ts`) rather than a cell that
+ * would hand the program a value the host never has.
  *
  * Refusing instead would reject a program that is correct precisely because it
  * checked, which is the opposite of what the guard is for.
@@ -267,6 +271,10 @@ export const censusAbsentGlobals = (
       undeclaredAbsentNames.add(name.text)
       return
     }
+    admitSymbol(symbol, node)
+  }
+
+  const admitSymbol = (symbol: ts.Symbol, node: ts.Node): void => {
     const declaration = ambientValueDeclarationOf(symbol, platform)
     if (!declaration) return
     declarations.add(declaration)
@@ -293,6 +301,15 @@ export const censusAbsentGlobals = (
         }
       } else if (ts.isIdentifier(node)) {
         admit(node, node)
+      } else if (ts.isPropertyAccessExpression(node) && absent.has(node.name.text)) {
+        // A global var is a property of the global object (ECMA-262 9.1.1.4),
+        // and the checker gives `typeof globalThis` that var's own symbol as
+        // its member: `win.MutationObserver` off a `Window & typeof
+        // globalThis` names the same global bare `MutationObserver` does, so
+        // it gets the same answer. A program object's same-named member has
+        // its own symbol and is untouched.
+        const symbol = checker.getSymbolAtLocation(node.name)
+        if (symbol) admitSymbol(symbol, node)
       }
       ts.forEachChild(node, visit)
     }

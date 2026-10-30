@@ -29,7 +29,7 @@ import { isUnresolvableModuleAmbient } from '../ambient.js'
  * this compiler drew from a missing declaration.
  */
 export interface UnresolvableNameCensus {
-  /** Whether a value-position name here resolves to no binding at all. */
+  /** Whether a value-position name here resolves to no binding at all, or names a global the installed host states absent. */
   readonly hasNoCell: (node: ts.Node) => boolean
   /** Whether this is TypeScript's declarationless intrinsic `globalThis` symbol. */
   readonly isIntrinsicGlobalThis: (node: ts.Node) => boolean
@@ -160,7 +160,8 @@ export const noHostProvidedNames: ReadonlySet<string> = new Set()
 export const censusUnresolvableNames = (
   checker: ts.TypeChecker,
   files: readonly ts.SourceFile[],
-  hostProvided: ReadonlySet<string> = noHostProvidedNames
+  hostProvided: ReadonlySet<string> = noHostProvidedNames,
+  isHostAbsent: (node: ts.Node) => boolean = () => false
 ): UnresolvableNameCensus => {
   const withoutCell = new Set<ts.Node>()
   const intrinsicGlobalThis = new Set<ts.Node>()
@@ -172,7 +173,12 @@ export const censusUnresolvableNames = (
     // reaches.
     if (ts.isIdentifier(node) && !ts.isTypeReferenceNode(node.parent)) {
       const symbol = valueSymbolAt(checker, node, hostProvided)
-      if (symbol === undefined) withoutCell.add(node)
+      // A global the installed host states absent has a lib declaration and
+      // no binding on this host: GetValue throws a ReferenceError and `typeof`
+      // answers "undefined" (13.5.1.2), the same two answers as an undeclared
+      // name. Reading it as a cell holding `undefined` printed a value where
+      // the host throws.
+      if (symbol === undefined || isHostAbsent(node)) withoutCell.add(node)
       // TypeScript creates `globalThis` as a synthetic value symbol whose own
       // declaration list is empty. It is neither an unresolvable name nor an
       // ambient cell a host can define. Record that checker fact once so the

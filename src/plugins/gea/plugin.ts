@@ -157,10 +157,12 @@ export const geaPlugin: CompilerPlugin = {
         // above: this host's ambient globals are declared once, in one place,
         // so there is no second file for a singleton name to disagree with.
         hostSingletonsByDeclaration: new Map(),
-        // gea's engine is the browser's stand-in, not a subset of it: the names
-        // it does not implement are simply not declared for a gea program, so
-        // there is no ambient contract here to contradict.
-        absentGlobals: new Set<string>(),
+        // gea's engine is the browser's stand-in, not a subset of it, so a name
+        // goes in only when no native host implements it at all. A gea app's
+        // tsconfig still names lib.dom, and DOM libraries feature-detect these
+        // two and fall back to a no-op (Zag's dom-query); believing lib.dom
+        // instead demands a constructor protocol no manifest can register.
+        absentGlobals: new Set<string>(['MutationObserver', 'ResizeObserver']),
         hostNamespaces: {
           roots: geaHostNamespaceRoots(),
           typeofs: new Map(),

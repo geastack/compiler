@@ -1476,7 +1476,12 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // producer publishes an unresolvable name's value and `citeExpressionResult`
   // predicts it, so both must read one census rather than ask the checker
   // twice. See `unresolvable-names.ts`.
-  const unresolvableNames = censusUnresolvableNames(compiled.checker, compiled.sourceFiles, hostProvidedNames)
+  const unresolvableNames = censusUnresolvableNames(
+    compiled.checker,
+    compiled.sourceFiles,
+    hostProvidedNames,
+    (node) => absent.typeAt(node) !== null
+  )
   const identities = createIdentityTable(compiled.program, compiled.checker, specializations)
   const prototypeReparentings = prototypeReparentingsOf(compiled.checker, identities, compiled.sourceFiles)
   // Beside `absent` and `identities`, the two facts this rests on: which host

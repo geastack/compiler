@@ -601,6 +601,7 @@ hoisted-function-declaration-dependencies.ts.cpp eaaece339ca2
 hoisted-function-declaration.ts.cpp 9060453da4ca
 hook-receives-arguments-its-declaration-omits.runtime.ts.cpp f4f8cecad8ce
 hook-replacements-narrower-than-the-call-receive-every-argument.runtime.ts.cpp 31463985812d
+host-absent-observers-read-undefined-bare-and-through-globalthis.runtime.ts.cpp 6b8b24417d3b
 host-accessor-call-through-module-helper.runtime.ts.cpp eb6f14421d10
 host-class-typeof-is-function.runtime.ts.cpp b2a6c72c6dca
 host-function-call-through-captured-binding.runtime.ts.cpp 23fbe989e42d
@@ -920,7 +921,7 @@ native-union-field-flow.ts.cpp cf98fce9a307
 native-union-inherited-method.ts.cpp 5dcb5da2a90c
 native-union-selection.ts.cpp b8c2918a04c3
 native-untyped-event-callback.runtime.ts.cpp ac700cd9a7f9
-native-webgl-type-realization.ts.cpp 7c96c0be4d93
+native-webgl-type-realization.ts.cpp ad166b12aee4
 negative-zero-storage.ts.cpp bd880d300166
 negative-zero.ts.cpp 9082a4874e1a
 nested-callback-field-initializer.runtime.ts.cpp acc0503cb4bd
@@ -1084,7 +1085,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp f2e081f73a0b
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 04fb3092c39d
-printer-drift.txt fd0fc8cb370d
+printer-drift.txt 0c1e1d173c6e
 private-names-are-not-own-properties.ts.cpp ab5689ed2f8f
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp 3a9f81f60107

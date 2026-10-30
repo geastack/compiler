@@ -421,10 +421,11 @@ export interface PluginCapabilities {
    * A native ANGLE context is exactly such a place. Stating the absence is what
    * lets that guard mean what it says.
    *
-   * A name here is `undefined` at every reference, which is the language's own
-   * answer for a global that is not there, so `typeof` yields `'undefined'` and
-   * the guarded branch is dead. It is NOT a refusal: refusing would reject a
-   * program that is correct precisely because it checked.
+   * A name here is a global that is not there: `typeof` yields `'undefined'`,
+   * a read through the global object is `undefined`, a bare read throws a
+   * ReferenceError, and the guarded branch is dead. It is NOT a refusal:
+   * refusing would reject a program that is correct precisely because it
+   * checked.
    *
    * A host that states nothing changes nothing -- every ambient name keeps the
    * treatment it has today.
