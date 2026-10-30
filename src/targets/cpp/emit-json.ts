@@ -69,8 +69,15 @@ import { armAt, armIs } from './emit-union-properties.js'
  * inside an array position `undefined` -- like a hole -- writes and reads as
  * `null`, which `gea_runtime.h`'s array template owns, not this file.
  *
+ * A dynamic value's `.toJSON()` -- a Date's included -- is called by the
+ * runtime (`gea::json::toJSONReplaced`) wherever a dynamic value is written,
+ * with its key. A typed overload never meets one: a record field holding a
+ * function has no overload, and a class answering `toJSON` is rendered only
+ * at the top level (`classToJsonOf`) and refused elsewhere; a Document asks
+ * its own (`writeDocumentJSONOverride`).
+ *
  * Not implemented, disclosed rather than silently wrong (this port's
- * risks.md): a `.toJSON()` override, `replacer`/`space`/`reviver`, and cycle
+ * risks.md): `replacer`/`space`/`reviver` over typed values, and cycle
  * detection -- a self-referential *value* recurses until the stack overflows,
  * where node raises a `TypeError`.
  */
@@ -370,6 +377,10 @@ const renderJsonMemberWriter = (
       lines.push('    return true;', '  }')
       continue
     }
+    if (field.value.kind === 'dynamic') {
+      lines.push(`    gea::json::writeMember(out, ${cppStringLiteral(field.key)}, ${member}, first);`, '    return true;', '  }')
+      continue
+    }
     const arms = nullableUnionArmsOf(field.value)
     if (field.value.kind === 'optional' && field.value.absence === 'undefined') lines.push(`    if (!${member}.has_value()) return true;`)
     if (arms !== null && arms.undefinedIndex !== -1) lines.push(`    if (${member}.is<${arms.undefinedIndex}>()) return true;`)
@@ -402,6 +413,10 @@ const renderJsonClassOverload = (entry: JsonClassEntry): string => {
     if (neverSerialized(member.value)) continue
     const field = tailAwareFieldReadText(entry.members, member.key, 'value.')
     const owned = `value.${cppRecordFieldPresenceName(member.key)} && value.${cppRecordFieldAttributesName(member.key)}.enumerable`
+    if (member.value.kind === 'dynamic') {
+      lines.push(`  if (${owned}) gea::json::writeMember(out, ${cppStringLiteral(member.key)}, ${field}, gea_json_first);`)
+      continue
+    }
     const keyLiteral = jsonKeyLiteral(member.key)
     const arms = nullableUnionArmsOf(member.value)
     const guard =
@@ -748,6 +763,8 @@ const renderJsonTupleOverloads = (entry: JsonStructEntry): string => {
       writeLines.push(`  if (${member}.is<${unionArms.undefinedIndex}>()) out += "null"; else gea_json_write(out, ${member});`)
     } else if (field.value.kind === 'optional' && (field.value.absence === 'undefined' || field.value.absence === 'null')) {
       writeLines.push(`  if (${member}.has_value()) gea_json_write(out, *${member}); else out += "null";`)
+    } else if (field.value.kind === 'dynamic') {
+      writeLines.push(`  gea::json::writeElement(out, ${index}, ${member});`)
     } else {
       writeLines.push(`  gea_json_write(out, ${member});`)
     }
@@ -789,8 +806,10 @@ const renderJsonRecordOverloads = (entry: JsonStructEntry): string => {
   // until a field that ECMA-262 25.5.2.2 may omit is reached -- and for a record
   // with no such field (every record in the corpus) the whole `gea_json_first`
   // bookkeeping disappears and each separator is folded into the key literal.
+  // A dynamic field may hold `undefined` or a function, or answer either from
+  // its `toJSON`: `gea::json::writeMember` decides at run time.
   const omittable = (field: JsonStructEntry['fields'][number]): boolean => {
-    if (!field.required) return true
+    if (!field.required || field.value.kind === 'dynamic') return true
     const arms = nullableUnionArmsOf(field.value)
     if (arms !== null && arms.undefinedIndex !== -1) return true
     return field.value.kind === 'optional' && field.value.absence === 'undefined'
@@ -882,16 +901,7 @@ const renderJsonRecordOverloads = (entry: JsonStructEntry): string => {
         `    if (!value.gea_readOwnField(gea::PropertyKey::string(${cppStringLiteral(accessor.key)}), gea_json_member)) ` +
           `gea::host::throwRuntimeError("TypeError", "JSON.stringify could not read the accessor ${accessor.key}");`
       )
-      writeLines.push(
-        `    const auto gea_json_member_tag = gea_json_member.tag();`,
-        `    if (gea_json_member_tag != gea::Value::Tag::Undefined && gea_json_member_tag != gea::Value::Tag::Function && gea_json_member_tag != gea::Value::Tag::Symbol) {`,
-        `      if (!gea_json_first) out += ',';`,
-        `      out += ${jsonKeyLiteral(accessor.key)};`,
-        `      gea_json_write(out, gea_json_member);`,
-        `      gea_json_first = false;`,
-        `    }`,
-        `  }`
-      )
+      writeLines.push(`    gea::json::writeMember(out, ${cppStringLiteral(accessor.key)}, gea_json_member, gea_json_first);`, `  }`)
     }
   }
   for (const [index, field] of entry.fields.entries()) {
@@ -933,7 +943,9 @@ const renderJsonRecordOverloads = (entry: JsonStructEntry): string => {
     if (alwaysWritten && staticFirst !== null) staticFirst = false
     else if (alwaysWritten) writeLines.push(`  if (!gea_json_first) out += ',';`)
     if (!field.required) writeLines.push(`  if (value.${cppRecordFieldPresenceName(field.key)}) {`)
-    if (undefinedArmIndex !== null) {
+    if (field.value.kind === 'dynamic') {
+      writeLines.push(`  gea::json::writeMember(out, ${cppStringLiteral(field.key)}, ${member}, gea_json_first);`)
+    } else if (undefinedArmIndex !== null) {
       writeLines.push(`  if (!${member}.is<${undefinedArmIndex}>()) {`)
       writeLines.push(`    if (!gea_json_first) out += ',';`)
       writeLines.push(`    out += ${keyLiteral};`)
@@ -1252,6 +1264,17 @@ const refuseBoxingProvenDataTree = (ctx: EmitContext, operation: CallOperation, 
 }
 
 /**
+ * Writes `JSON.stringify`'s own argument into `out`. A dynamic value -- `any`,
+ * or a value boxed above -- may answer `toJSON`, which SerializeJSONProperty
+ * (ECMA-262 25.5.2.2 step 2) calls with the key "" before anything is written,
+ * so it enters through `gea::json::writeRoot`. A typed carrier's overload asks
+ * any `toJSON` it can hold itself (a Document's, `writeDocumentJSONOverride`);
+ * a record or class with one has no typed overload.
+ */
+export const jsonRootWriteText = (out: string, value: string, dynamic: boolean): string =>
+  dynamic ? `gea::json::writeRoot(${out}, ${value})` : `gea_json_write(${out}, ${value})`
+
+/**
  * `JSON.stringify` whose result the program holds as `string | undefined`
  * (`structural.ts`'s `json-stringify-may-be-undefined`): a top-level value
  * with no JSON form -- `undefined`, a function, a symbol -- produces
@@ -1275,11 +1298,12 @@ const absentWhenUnserializableText = (ctx: EmitContext, operation: CallOperation
   if (unsupported !== null) refuseBoxingProvenDataTree(ctx, operation, unsupported)
   const dynamicText =
     representation.kind === 'dynamic' ? operandText(ctx, argument) : unsupported !== null ? boxedJsonArgumentText(ctx, argument) : null
+  // The tag is tested after `toJSON` replaced the value: one answering
+  // `undefined` makes the whole call `undefined`, too.
   if (dynamicText !== null) {
     return (
-      `[&]() -> ${resultType} { const gea::Value& gea_json_value = ${dynamicText}; const auto gea_json_tag = gea_json_value.tag(); ` +
-      `if (gea_json_tag == gea::Value::Tag::Undefined || gea_json_tag == gea::Value::Tag::Function || gea_json_tag == gea::Value::Tag::Symbol) ` +
-      `return ${resultType}(); ${writeText('gea_json_value')} }()`
+      `[&]() -> ${resultType} { const gea::Value gea_json_value = gea::json::toJSONReplaced(${dynamicText}, std::string()); ` +
+      `if (gea::json::hasNoJsonText(gea_json_value)) return ${resultType}(); ${writeText('gea_json_value')} }()`
     )
   }
   if (representation.kind === 'optional' && representation.absence === 'undefined') {
@@ -1316,13 +1340,15 @@ export const jsonCallText = (ctx: EmitContext, member: 'stringify' | 'parse', op
     if (reason !== null) {
       refuseBoxingProvenDataTree(ctx, operation, reason)
       const boxed = operation.arguments.length === 1 ? boxedJsonArgumentText(ctx, argument) : null
-      if (boxed !== null) return `[&]() { std::string gea_json_out; gea_json_write(gea_json_out, ${boxed}); return gea_json_out; }()`
+      if (boxed !== null)
+        return `[&]() { std::string gea_json_out; ${jsonRootWriteText('gea_json_out', boxed, true)}; return gea_json_out; }()`
       throw createCppEmitBlockedError(
         'host-member-call:JSON.stringify',
         `JSON.stringify cannot serialize this argument natively: ${reason}`
       )
     }
     const valueText = operandText(ctx, argument)
+    const dynamic = argument.representation.kind === 'dynamic'
     if (operation.arguments.length > 1) {
       if (argument.representation.kind !== 'string' && argument.representation.kind !== 'dynamic') {
         throw createCppEmitBlockedError(
@@ -1359,7 +1385,7 @@ export const jsonCallText = (ctx: EmitContext, member: 'stringify' | 'parse', op
         )
       }
       if (callable.length === 0) {
-        return `[&]() { std::string gea_json_out; gea_json_write(gea_json_out, ${valueText}); return gea_json_out; }()`
+        return `[&]() { std::string gea_json_out; ${jsonRootWriteText('gea_json_out', valueText, dynamic)}; return gea_json_out; }()`
       }
       const space = operation.arguments[2]
       const gapText = (representation: Representation, text: string): string => {
@@ -1406,10 +1432,10 @@ export const jsonCallText = (ctx: EmitContext, member: 'stringify' | 'parse', op
         `return gea::json::stringifyWithReplacer(${root}, ` +
         `[&](const gea::Value& __gea_holder, const std::string& __gea_key, const gea::Value& __gea_member) { ` +
         `return ${invoke}; }, __gea_gap); } ` +
-        `std::string gea_json_out; gea_json_write(gea_json_out, __gea_value); return gea_json_out; })()`
+        `std::string gea_json_out; ${jsonRootWriteText('gea_json_out', '__gea_value', dynamic)}; return gea_json_out; })()`
       )
     }
-    return `[&]() { std::string gea_json_out; gea_json_write(gea_json_out, ${valueText}); return gea_json_out; }()`
+    return `[&]() { std::string gea_json_out; ${jsonRootWriteText('gea_json_out', valueText, dynamic)}; return gea_json_out; }()`
   }
   if (operation.arguments.length === 2) return jsonParseWithReviverText(ctx, operation)
   if (operation.arguments.length !== 1) {
@@ -1622,7 +1648,7 @@ export const jsonStringifyFillLines = (ctx: EmitContext, operation: CallOperatio
     ctx.declaredBindings.add(declaration)
   }
   lines.push(`${target}.clear();`)
-  lines.push(`gea_json_write(${target}, ${valueText});`)
+  lines.push(`${jsonRootWriteText(target, valueText, argument.representation.kind === 'dynamic')};`)
   // The result IS the cell now, so the write that follows recognizes its own
   // storage on both sides and renders nothing (`emit-bindings.ts`).
   defineValueAlias(ctx, operation.result, target)

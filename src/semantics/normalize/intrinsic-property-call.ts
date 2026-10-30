@@ -1,6 +1,7 @@
 import ts from '#typescript'
 import { intrinsicStaticMemberIsIntact } from './intrinsic-static-member.js'
 import { intrinsicObjectKeysIntact } from './host-mutation-keys.js'
+import { intactIntrinsicPrototypeKeysType } from './intrinsic-prototype.js'
 import type { ProducerContext } from './producer-context.js'
 import type { InvocationOperation } from '../model/operations.js'
 import { isGlobalArrayConstructor, isGlobalObjectConstructor, isStandardGlobalValue } from './derived-expression-type.js'
@@ -46,6 +47,45 @@ export const intrinsicJsonStringifyQueryOf = (checker: ts.TypeChecker, callee: t
     member.declarations.length > 0 &&
     [owner.valueDeclaration, ...member.declarations].every((declaration) => declaration.getSourceFile().hasNoDefaultLib) &&
     isStandardGlobalValue(checker, callee.expression, 'JSON')
+  )
+}
+
+const dateJsonKeys = ['toJSON', '@@toPrimitive', 'valueOf', 'toString', 'toISOString']
+
+/**
+ * Why a read of the standard `JSON.stringify` is refused, or `null`: the read
+ * is `key` off a value of `receiverType` while a `Date.prototype` key that
+ * 25.5.2.2 and 21.4.4.37 read may not be the intrinsic. Every JSON writer
+ * answers a Date as those steps do -- the typed Date writer and the runtime's
+ * `gea::json::dateToJSON` -- taking each key from the Date's own properties
+ * and otherwise from `Date.prototype`, which holds only while those keys are
+ * untouched: `toJSON`, then ToPrimitive with hint number (`@@toPrimitive`,
+ * `valueOf`, `toString`), then `toISOString`. No write records a symbol key by
+ * name, so `@@toPrimitive` is touched by any write whose key the census cannot
+ * name. Reading the function is where every route to those writers starts, a
+ * call or a value, so the read is refused; whether one call's argument can
+ * hold a Date is not asked. `key` is `null` for a computed key, which may be
+ * `stringify`.
+ * @semanticCategory generic-primitive
+ */
+export const jsonStringifyReadRefusalOf = (
+  context: IntrinsicPropertyCallContext,
+  receiverType: ts.Type,
+  key: string | null,
+  at: ts.Node
+): string | null => {
+  if (key !== null && key !== 'stringify') return null
+  // The global scope's JSON, not whatever `JSON` names at `at`: a local of
+  // that name does not hide `globalThis.JSON`.
+  const global = context.checker.resolveName('JSON', undefined, ts.SymbolFlags.Value, false)
+  if (!global?.valueDeclaration || context.isStandardLibraryDeclaration?.(global.valueDeclaration) !== true) return null
+  const standard = context.checker.getTypeOfSymbol(global).getProperty('stringify')
+  if (standard === undefined || receiverType.getProperty('stringify') !== standard) return null
+  if (intactIntrinsicPrototypeKeysType(context, 'Date', { names: dateJsonKeys }, at) !== null) return null
+  return (
+    'JSON.stringify writes a Date as Date.prototype.toJSON answers it (ECMA-262 21.4.4.37), and this program may replace, ' +
+    `redefine or delete a Date.prototype key that answer reads (${dateJsonKeys.join(', ')}), so the answer every JSON writer ` +
+    'spells is not proven'
   )
 }
 

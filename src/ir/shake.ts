@@ -1421,10 +1421,16 @@ export const shakeProgram = (input: IrShakeInput): IrShakeResult => {
         liveKeys.add(key)
         freshKeys = true
       }
-      for (const scope of [
-        ...slice.fieldHazardScopes,
-        ...jsonSerializedClassScopes(slice.jsonSerialized, input.classes, structuralViewScopes)
-      ]) {
+      const jsonScopes = jsonSerializedClassScopes(slice.jsonSerialized, input.classes, structuralViewScopes)
+      // SerializeJSONProperty (25.5.2.2 step 2) asks every value the walk
+      // reaches for `toJSON`, not only the argument: a class instance in a
+      // field of a record written from its box answers it too.
+      for (const scope of jsonScopes) {
+        if (liveKeys.has(`${scope}#toJSON`)) continue
+        liveKeys.add(`${scope}#toJSON`)
+        freshKeys = true
+      }
+      for (const scope of [...slice.fieldHazardScopes, ...jsonScopes]) {
         if (fieldHazards.has(scope)) continue
         fieldHazards.add(scope)
         freshKeys = true

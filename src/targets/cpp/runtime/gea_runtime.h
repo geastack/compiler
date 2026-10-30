@@ -41817,6 +41817,14 @@ inline double parse(const std::string &source) {
 }  // namespace gea::runtime::date
 
 namespace gea::runtime {
+struct Date;
+}  // namespace gea::runtime
+
+namespace gea::json {
+inline void writeDateWithOwnProperties(std::string& out, const gea::Ref<gea::runtime::Date>& date);
+}  // namespace gea::json
+
+namespace gea::runtime {
 
 /**
  * ECMAScript `Date` as a NATIVE typed object -- v1's own `gea::runtime::Date`
@@ -42173,6 +42181,14 @@ inline void gea_json_write(std::string& out, const Date& value) {
 inline void gea_json_write(std::string& out, const gea::Ref<Date>& value) {
   if (!value) {
     out += "null";
+    return;
+  }
+  // A key written onto this Date through `any` lives in its allocation's
+  // expando table, and an own `toJSON`, `toISOString`, `valueOf` or
+  // `@@toPrimitive` there changes the answer, so a Date with one is written by
+  // the dynamic writer instead.
+  if (gea::detail::expandoFor(gea::Ref<void>(value), false)) {
+    gea::json::writeDateWithOwnProperties(out, value);
     return;
   }
   gea_json_write(out, *value);
@@ -50485,7 +50501,155 @@ inline void gea_json_write(std::string& out, const std::string& value) {
 /** String literals decay to `const char*`; keep overload resolution from selecting the Boolean writer. */
 inline void gea_json_write(std::string& out, const char* value) { gea_json_write(out, std::string(value)); }
 
-/** JSON over a value whose source type is genuinely dynamic (`any`, `unknown`, or unasserted JSON.parse). */
+inline void gea_json_write(std::string& out, const gea::Value& value);
+
+namespace gea::json {
+
+/**
+ * `Date.prototype.toJSON` (ECMA-262 21.4.4.37) called on a boxed Date. Each key
+ * it reads -- `@@toPrimitive`, `valueOf` and `toString` for ToPrimitive with
+ * hint number (7.1.1, 7.1.1.1), then `toISOString` -- is the Date's own
+ * property when it has one, called on the Date as `ordinaryToPrimitive` calls
+ * one, and otherwise the intrinsic's: the time value, a String, the ISO
+ * string. That the `Date.prototype` keys are the intrinsics is certified: a
+ * program that may write one is refused where it reads `JSON.stringify`
+ * (`jsonStringifyReadRefusalOf`, over the host-mutation census).
+ */
+inline gea::Value dateToJSON(const gea::Value& date) {
+  using gea::Value;
+  const double time = date.as<gea::Ref<gea::runtime::Date>>()->getTime();
+  gea::PropertyDescriptor own;
+  Value member;
+  const auto ownMember = [&](const gea::PropertyKey& key) {
+    if (!date.ownDescriptor(key, own)) return false;
+    member = date.getProperty(key);
+    return true;
+  };
+  const auto isObject = [](const Value& value) { return value.tag() == Value::Tag::Object || value.tag() == Value::Tag::Function; };
+  // Step 2 only asks whether tv is a non-finite Number, so that is all kept of it.
+  bool primitive = false;
+  bool nonFinite = false;
+  const auto answered = [&](const Value& result) {
+    primitive = true;
+    nonFinite = result.tag() == Value::Tag::Number && !std::isfinite(result.as<double>());
+  };
+  // GetMethod: an own `@@toPrimitive` that is undefined or null is absent, and
+  // the intrinsic one with hint number is OrdinaryToPrimitive -- the loop below.
+  if (ownMember(gea::PropertyKey::symbol(gea::wellKnownSymbol(gea::detail::WellKnownSymbol::ToPrimitive))) &&
+      member.tag() != Value::Tag::Undefined && member.tag() != Value::Tag::Null) {
+    if (member.tag() != Value::Tag::Function) gea::host::throwRuntimeError("TypeError", "@@toPrimitive is not callable");
+    const Value result = member.callWithReceiver(date, {Value::box(Value::Tag::String, std::string("number"))});
+    if (isObject(result)) gea::host::throwRuntimeError("TypeError", "@@toPrimitive must return a primitive value");
+    answered(result);
+  }
+  for (const char* name : {"valueOf", "toString"}) {
+    if (primitive) break;
+    if (!ownMember(gea::PropertyKey::string(name))) {
+      answered(name[0] == 'v' ? Value::box(Value::Tag::Number, time) : Value::box(Value::Tag::String, std::string()));
+      break;
+    }
+    if (member.tag() != Value::Tag::Function) continue;
+    const Value result = member.callWithReceiver(date, {});
+    if (!isObject(result)) answered(result);
+  }
+  if (!primitive) gea::host::throwRuntimeError("TypeError", "Cannot convert object to primitive value");
+  if (nonFinite) return Value::box(Value::Tag::Null, nullptr);
+  if (ownMember(gea::PropertyKey::string("toISOString"))) {
+    if (member.tag() != Value::Tag::Function) gea::host::throwRuntimeError("TypeError", "toISOString is not a function");
+    return member.callWithReceiver(date, {});
+  }
+  return Value::box(Value::Tag::String, gea::runtime::date::toIsoString(time));
+}
+
+/**
+ * SerializeJSONProperty (ECMA-262 25.5.2.2) step 2 over a dynamic value: an
+ * object whose `toJSON` is callable is replaced by `toJSON(key)`, called on
+ * that object, before anything writes or omits it. `key` is the property
+ * name, the index as a string, or "" for `JSON.stringify`'s own argument.
+ * What `toJSON` answers is written as it is, never asked again.
+ *
+ * A boxed Date reads no `Date.prototype` member through `getProperty`, so a
+ * Date without an own `toJSON` is answered by `dateToJSON`. A box whose
+ * properties this runtime cannot read refuses here as `getProperty` refuses
+ * it everywhere: whether it answers `toJSON` decides the text.
+ */
+inline gea::Value toJSONReplaced(const gea::Value& value, const std::string& key) {
+  if (value.tag() != gea::Value::Tag::Object && value.tag() != gea::Value::Tag::Function) return value;
+  const gea::PropertyKey name = gea::PropertyKey::string("toJSON");
+  gea::PropertyDescriptor own;
+  if (gea::host::instanceOfDate(value) && !value.ownDescriptor(name, own)) return dateToJSON(value);
+  const gea::Value method = value.getProperty(name);
+  if (method.tag() != gea::Value::Tag::Function) return value;
+  return method.callWithReceiver(value, std::vector<gea::Value>{gea::Value::box(gea::Value::Tag::String, key)});
+}
+
+/** A value past step 2 that SerializeJSONProperty answers `undefined` for (25.5.2.2 step 12). */
+inline bool hasNoJsonText(const gea::Value& value) {
+  const auto tag = value.tag();
+  return tag == gea::Value::Tag::Undefined || tag == gea::Value::Tag::Function || tag == gea::Value::Tag::Symbol;
+}
+
+/**
+ * One own property of an object (SerializeJSONObject, 25.5.2.5): replaced by
+ * its `toJSON` under its own key first, so a `toJSON` answering `undefined`
+ * omits the property. `first` is whether nothing is written inside the braces yet.
+ */
+inline void writeMember(std::string& out, const std::string& key, const gea::Value& value, bool& first) {
+  const gea::Value member = toJSONReplaced(value, key);
+  if (hasNoJsonText(member)) return;
+  if (!first) out += ',';
+  ::gea_json_write(out, key);
+  out += ':';
+  ::gea_json_write(out, member);
+  first = false;
+}
+
+/** One array position (SerializeJSONArray, 25.5.2.6): its key is the index; a value with no JSON text is written `null`. */
+inline void writeElement(std::string& out, std::size_t index, const gea::Value& value) {
+  ::gea_json_write(out, toJSONReplaced(value, std::to_string(index)));
+}
+
+/**
+ * `JSON.stringify(value)` over a dynamic value, for a call whose result is a
+ * string. With no JSON text left after step 2 the call answers `undefined`,
+ * which that result cannot hold, so this stops rather than write the `null`
+ * only an array position gets. A call whose result may be `undefined` applies
+ * `toJSONReplaced` itself and tests the answer (`emit-json.ts`).
+ */
+inline void writeRoot(std::string& out, const gea::Value& value) {
+  const gea::Value root = toJSONReplaced(value, std::string());
+  if (hasNoJsonText(root)) {
+    std::fprintf(stderr, "gea: JSON.stringify's value has no JSON text, so the call answers undefined, which its string result cannot hold\n");
+    gea::detail::abortAfterFlush();
+  }
+  ::gea_json_write(out, root);
+}
+
+/**
+ * The typed Date writer for a Date given own properties through `any`
+ * (`(d as any).toISOString = f`): they live in its allocation's expando table,
+ * which the box of the same allocation reads, so `dateToJSON` runs on that
+ * box. That writer is given no key and cannot omit what it writes, so an own
+ * `toJSON`, called with the key, and an answer with no JSON text stop here.
+ */
+inline void writeDateWithOwnProperties(std::string& out, const gea::Ref<gea::runtime::Date>& date) {
+  const gea::Value box = gea::Value::box(gea::Value::Tag::Object, date);
+  gea::PropertyDescriptor own;
+  if (box.ownDescriptor(gea::PropertyKey::string("toJSON"), own)) {
+    std::fprintf(stderr, "gea: JSON.stringify of a typed Date with an own toJSON; the typed Date writer is not given the key toJSON is called with\n");
+    gea::detail::abortAfterFlush();
+  }
+  const gea::Value answer = dateToJSON(box);
+  if (hasNoJsonText(answer)) {
+    std::fprintf(stderr, "gea: a typed Date's toJSON answered a value with no JSON text, which the typed Date writer cannot omit\n");
+    gea::detail::abortAfterFlush();
+  }
+  ::gea_json_write(out, answer);
+}
+
+}  // namespace gea::json
+
+/** JSON over a value whose source type is genuinely dynamic (`any`, `unknown`, or unasserted JSON.parse), already past `toJSON`. */
 inline void gea_json_write(std::string& out, const gea::Value& value) {
   switch (value.tag()) {
     case gea::Value::Tag::Null:
@@ -50516,24 +50680,15 @@ inline void gea_json_write(std::string& out, const gea::Value& value) {
     out += '[';
     for (std::size_t index = 0; index < count; ++index) {
       if (index != 0) out += ',';
-      const gea::Value element = value.getProperty(gea::PropertyKey::string(std::to_string(index)));
-      gea_json_write(out, element);
+      gea::json::writeElement(out, index, value.getProperty(gea::PropertyKey::string(std::to_string(index))));
     }
     out += ']';
     return;
   }
   out += '{';
   bool first = true;
-  for (const std::string& key : value.ownEnumerableStringKeys()) {
-    const gea::Value member = value.getProperty(gea::PropertyKey::string(key));
-    if (member.tag() == gea::Value::Tag::Undefined || member.tag() == gea::Value::Tag::Function ||
-        member.tag() == gea::Value::Tag::Symbol) continue;
-    if (!first) out += ',';
-    gea_json_write(out, key);
-    out += ':';
-    gea_json_write(out, member);
-    first = false;
-  }
+  for (const std::string& key : value.ownEnumerableStringKeys())
+    gea::json::writeMember(out, key, value.getProperty(gea::PropertyKey::string(key)), first);
   out += '}';
 }
 
@@ -50569,14 +50724,7 @@ inline void writeNativeExpandoMembers(std::string& out, const void* address, boo
       gea::host::throwRuntimeError("TypeError", "JSON.stringify of a native record whose dynamic properties include an array index is not supported");
     if (descriptor->isAccessor())
       gea::host::throwRuntimeError("TypeError", "JSON.stringify of a native record whose dynamic properties include an accessor is not supported");
-    const gea::Value member = descriptor->dataValue();
-    if (member.tag() == gea::Value::Tag::Undefined || member.tag() == gea::Value::Tag::Function ||
-        member.tag() == gea::Value::Tag::Symbol) continue;
-    if (!first) out += ',';
-    ::gea_json_write(out, key.text());
-    out += ':';
-    ::gea_json_write(out, member);
-    first = false;
+    writeMember(out, key.text(), descriptor->dataValue(), first);
   }
 }
 
@@ -50594,16 +50742,7 @@ inline void gea_json_write(std::string& out, const gea::Dictionary<gea::Value>& 
   // 7.3.23, not 10.1.11: `SerializeJSONObject` (25.5.2.5) reads
   // `EnumerableOwnPropertyNames`, so a non-enumerable property is absent from
   // the text exactly as an undefined-valued one is.
-  for (const std::string& key : table.enumerableKeys()) {
-    const gea::Value member = table.read(key);
-    if (member.tag() == gea::Value::Tag::Undefined || member.tag() == gea::Value::Tag::Function ||
-        member.tag() == gea::Value::Tag::Symbol) continue;
-    if (!first) out += ',';
-    gea_json_write(out, key);
-    out += ':';
-    gea_json_write(out, member);
-    first = false;
-  }
+  for (const std::string& key : table.enumerableKeys()) gea::json::writeMember(out, key, table.read(key), first);
   out += '}';
 }
 
@@ -50685,7 +50824,7 @@ bool writeJsonReplaced(
     const Replacer& replacer,
     const std::string& gap,
     std::size_t depth) {
-  gea::Value value = replacer(holder, key, holder.getProperty(gea::PropertyKey::string(key)));
+  gea::Value value = replacer(holder, key, toJSONReplaced(holder.getProperty(gea::PropertyKey::string(key)), key));
   switch (value.tag()) {
     case gea::Value::Tag::Undefined:
     case gea::Value::Tag::Function:
@@ -50838,8 +50977,15 @@ inline void gea_json_write(std::string& out, const gea::Ref<gea::ArrayObject<Ele
   for (std::size_t index = 0; index < count; ++index) {
     if (!first) out += ',';
     if ((dense || array->present(index)) && (defined || !array->elementIsUndefined(index))) {
-      if (ordinary) gea_json_write(out, cells[index].value);
-      else array->withElement(index, [&out](const Element& value) { gea_json_write(out, value); });
+      // A typed element answers no `toJSON` of its own; a dynamic one is asked under its index.
+      if constexpr (std::is_same_v<Element, gea::Value>) {
+        if (ordinary) gea::json::writeElement(out, index, cells[index].value);
+        else array->withElement(index, [&out, index](const Element& value) { gea::json::writeElement(out, index, value); });
+      } else if (ordinary) {
+        gea_json_write(out, cells[index].value);
+      } else {
+        array->withElement(index, [&out](const Element& value) { gea_json_write(out, value); });
+      }
     } else {
       out += "null";
     }
@@ -50872,12 +51018,7 @@ inline void gea_json_write(std::string& out, const gea::Ref<Pointee>& pointee) {
       if (key.isSymbol() || !document->document->enumerable(document->held, key)) continue;
       gea::Value member;
       document->document->read(document->held, key, member);
-      if (member.tag() == gea::Value::Tag::Undefined || member.tag() == gea::Value::Tag::Function || member.tag() == gea::Value::Tag::Symbol) continue;
-      if (!first) out += ',';
-      gea_json_write(out, key.text());
-      out += ':';
-      gea_json_write(out, member);
-      first = false;
+      gea::json::writeMember(out, key.text(), member, first);
     }
     out += '}';
     return;
@@ -50929,12 +51070,7 @@ inline void gea_json_write(std::string& out, const gea::Ref<Pointee>& pointee) {
             gea::host::throwRuntimeError("TypeError", "JSON.stringify of a native record whose dynamic properties include an accessor is not supported");
           else member = descriptor->dataValue();
         }
-        if (member.tag() == gea::Value::Tag::Undefined || member.tag() == gea::Value::Tag::Function || member.tag() == gea::Value::Tag::Symbol) continue;
-        if (!first) out += ',';
-        gea_json_write(out, key.text());
-        out += ':';
-        gea_json_write(out, member);
-        first = false;
+        gea::json::writeMember(out, key.text(), member, first);
       }
       out += '}';
       return;

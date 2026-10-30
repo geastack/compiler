@@ -8,6 +8,7 @@ import { hostArgumentText } from './emit-host-arity.js'
 import type { HostCallSpelling, HostMember } from './host-members.js'
 import { fillHostTemplate } from './host-members.js'
 import { dateGetters, dateSetters, dateStringForms } from '../prototype/emit-prototype-date.js'
+import { jsonRootWriteText } from '../emit-json.js'
 
 /**
  * A host function READ as a value: the function object the language says it is.
@@ -220,7 +221,7 @@ export const hostJsonMemberValueText = (member: string, representation: Represen
     }
     const argument = abi.parameters[0]
     if (argument === undefined || !jsonRuntimeDeclaredCarrier(argument.value)) return null
-    return `[&]() { std::string gea_json_out; gea_json_write(gea_json_out, ${only}); return gea_json_out; }()`
+    return `[&]() { std::string gea_json_out; ${jsonRootWriteText('gea_json_out', only, argument.value.kind === 'dynamic')}; return gea_json_out; }()`
   })
 }
 

@@ -2641,8 +2641,11 @@ export const reflectionExposureOf = (
       // A native fixed frame cannot inspect trailing arguments it does not
       // receive. Their evaluation is already represented by preceding IR;
       // retaining its effects does not publish the resulting values here.
+      // An argument that is a live view is inspected through its original,
+      // exactly as a receiver is: JSON.stringify's boxed walk of a
+      // `Partial<W>` view reads W's own fields.
       for (const value of [operation.callee, operation.receiver, ...receivedCallArguments(operation)])
-        if (value) promoteFull(value.representation, 'unknown-call-boundary')
+        if (value) promoteLogicalReceiver(value.representation, 'unknown-call-boundary')
       if (operation.result) promoteFull(operation.result.representation, 'unknown-call-result')
       continue
     }

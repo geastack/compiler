@@ -1,6 +1,7 @@
 import { isObjectTagCalleePart } from './object-tag.js'
 import { contributeIntrinsicAccessorGetter } from './intrinsic-accessor-getter.js'
 import { isIntrinsicAccessorGetterPart } from '../intrinsic-accessor-getter.js'
+import { jsonStringifyReadRefusalOf } from '../intrinsic-property-call.js'
 import ts from '#typescript'
 import { operationId, semanticResultId, type DeclarationId, type StructuralTypeId } from '../../../identity/ids.js'
 import type { PrimitiveFamily } from '../../model/coverage.js'
@@ -1439,6 +1440,13 @@ const contributeAccess = (candidate: CensusCandidate, node: AccessNode, context:
       )
     }
   }
+  const literalKey = ts.isPropertyAccessExpression(node)
+    ? node.name.text
+    : ts.isStringLiteralLike(node.argumentExpression) || ts.isNumericLiteral(node.argumentExpression)
+      ? node.argumentExpression.text
+      : null
+  const jsonRefusal = jsonStringifyReadRefusalOf(context, context.checker.getTypeAtLocation(node.expression), literalKey, node)
+  if (jsonRefusal !== null) return { kind: 'blocked', blocker: blocked(candidate.id, 'property', jsonRefusal, 'P0') }
 
   const receiver = citeExpressionResult(
     node.expression,

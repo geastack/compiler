@@ -36,6 +36,7 @@ import { bindingKindOf } from './binding-kind.js'
 import { iteratorYieldStructuralType, iteratorYieldTypesOf } from './iteration-yield.js'
 import { isDynamicIterationSource, mintIteratorSteps } from './protocol.js'
 import { ordinaryObjectDataWriteIsAbsent } from '../callable-data-write.js'
+import { jsonStringifyReadRefusalOf } from '../intrinsic-property-call.js'
 
 /**
  * The result carrying the value a binding element finally receives.
@@ -398,6 +399,13 @@ export const createDestructuringProducer = (context: ProducerContext): FamilyPro
         // names but not others with no signal that the set is incomplete.
         return asBlocked(candidate.id, 'destructuring', `object binding pattern key ${key.blocked}`, 'P1')
       }
+      const jsonRefusal = jsonStringifyReadRefusalOf(
+        context,
+        context.checker.getTypeAtLocation(node),
+        key.source.kind === 'constant' ? key.source.text : null,
+        element
+      )
+      if (jsonRefusal !== null) return asBlocked(candidate.id, 'destructuring', jsonRefusal, 'P0')
       excludedKeys.push(operand('excluded-key', excludedKeys.length, key.source, key.type))
 
       const { operands: baseOperands, edge: baseEdge } = sourceOperand('base', known, baseType)
