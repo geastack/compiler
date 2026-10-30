@@ -896,6 +896,10 @@ export type Representation =
    * fabrication. A CALL through it has no convention to use and is refused --
    * loudly, at emission, which is the correct answer for a program that calls
    * a value whose own type says it takes no arguments.
+   *
+   * A constructor whose construct overloads join into no frame is carried the
+   * same way (`derive.ts`'s `deriveSignature`). A `new` through it is refused
+   * at certification (`call-abi:no-construct-path:callable-identity`).
    */
   | { readonly kind: 'callable-identity' }
   /**

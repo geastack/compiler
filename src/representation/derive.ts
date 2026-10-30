@@ -2477,7 +2477,16 @@ export const createRepresentationDeriver = (
       // callable and constructable keeps both conventions, because `Number(x)`
       // and `new Number(x)` do genuinely different things.
       const shared = sharedAbiOf(shape.construct, 'construct')
-      if (typeof shared === 'string') return unresolved(shared)
+      // Construct overloads that join into no frame leave the value its
+      // identity half, for the reason an unjoinable call set does below: only
+      // a construction asks for the frame, and certification refuses a `new`
+      // through the identity by name (`call-abi:no-construct-path`). lib.es5
+      // and lib.es2020.intl each declare a `new` for `Intl.Collator`, one
+      // taking `string | string[]` and one `LocalesArgument`, and an
+      // unresolved field here refused every program that reads `Intl` at all.
+      // Not boxed under dynamic fallback, unlike the call set: the box would
+      // construct through a frame no declaration states.
+      if (typeof shared === 'string') return { kind: 'callable-identity' }
       // `[[Construct]]` MANUFACTURES its receiver -- ECMA-262 10.2.2 creates
       // the object from the constructor's `prototype` and only then enters the
       // body with it -- so a construct convention never has one to declare,

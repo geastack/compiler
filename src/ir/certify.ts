@@ -967,6 +967,21 @@ const ownDemandsOf = (operation: IrOperation, ctx: CertifyContext): CapabilityDe
       }
       const callee = operation.callee.representation
       if (callee.kind === 'dynamic') demands.push({ key: 'call-abi:dynamic' })
+      // `callable-identity` states that the value has no frame (model.ts), so
+      // no target can construct through it, alone or as one arm of a
+      // constructor union. Refused here so the program is refused at
+      // certification, not by the printer's `no-construct-path` guard.
+      if (
+        operation.kind === 'construct' &&
+        (callee.kind === 'callable-identity' ||
+          (callee.kind === 'tagged-union' && callee.arms.some((arm) => arm.value.kind === 'callable-identity')))
+      ) {
+        demands.push({
+          key: 'call-abi:no-construct-path:callable-identity',
+          verdict: 'unsupported',
+          detail: 'a value known only by its identity has no construct frame, so nothing can construct through it'
+        })
+      }
       // A plugin host's own spelling table is consulted only for a host
       // carrier; core constructors keep `native: null` and render from the
       // target's own table, so asking the plugin set about them would refuse

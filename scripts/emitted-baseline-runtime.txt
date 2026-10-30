@@ -287,6 +287,7 @@ console-warn-member.ts.cpp aa49143ed32c
 constant-key-table-reads-follow-every-table.runtime.ts.cpp d8cd7bb8bcab
 constant-table-repeated-negative.ts.cpp 4293743457c8
 constant-table.ts.cpp 01c9fca7da61
+construct-overloads-with-no-shared-frame-still-type-a-slot.runtime.ts.cpp 56164ec45ff2
 construction-only-field-alias.runtime.ts.cpp a44222a268e6
 constructor-alias-installed-members-class.runtime.js.cpp 6d4f5ac6aef6
 constructor-alias-installed-members.runtime.js.cpp 1b26d832b5ba
@@ -1376,7 +1377,7 @@ unbound-native-method-absence-transport.runtime.ts.cpp e39d8d4e0e45
 unbound-native-method-receiver-observations.runtime.ts.cpp 1be7fc4b1e59
 unbox-nullable-union.ts.cpp 28f62c3d4062
 uncallable-member-slot-call.runtime.js.cpp 17003891e1f7
-uncertified.txt 8c4f76c000d4
+uncertified.txt 0ff4c6be1a45
 undeclared-key-read-off-a-record-a-boxed-frame-views.runtime.js.cpp dd8e1fcfae0b
 uniform-table-to-json-calls-method-on-stored-value.runtime.js.cpp abd18ef7ee4d
 uniform-tuple-boxed-into-any-is-an-array.runtime.ts.cpp 2102566ee2ec
