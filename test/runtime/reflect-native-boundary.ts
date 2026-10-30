@@ -7,8 +7,10 @@ console.log(Reflect.set(record, 'value', 43))
 //! expect: true
 console.log(Reflect.get(record, 'value'))
 //! expect: 43
-console.log(Reflect.deleteProperty(record, 'value'))
+// A required field's deletion is refused (reflect-delete-of-a-required-record-field-is-refused.runtime.ts).
+const noted: { note?: string } = { note: 'kept' }
+console.log(Reflect.deleteProperty(noted, 'note'))
 //! expect: true
-console.log(Reflect.has(record, 'value'))
+console.log(Reflect.has(noted, 'note'))
 //! expect: false
 //! emitted-lacks: gea::Value::box

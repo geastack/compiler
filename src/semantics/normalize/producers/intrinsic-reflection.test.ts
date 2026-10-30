@@ -8,9 +8,11 @@ const compileText = (text: string) => {
   return compile({ rootFileNames: [file], projectFileName: null, sourceOverlay: new Map([[file, text]]), includeIr: true })
 }
 test('Reflect field effects survive their exact native ABI', () => {
-  const result = compileText(`const record = { value: 42 };
+  // The delete names an optional field: a required one is refused, because no
+  // typed read consults its presence (record:delete:false).
+  const result = compileText(`const record: { value: number; note?: string } = { value: 42, note: 'kept' };
     console.log(Reflect.has(record, 'value'), Reflect.get(record, 'value'),
-      Reflect.set(record, 'value', 43), Reflect.deleteProperty(record, 'value'))`)
+      Reflect.set(record, 'value', 43), Reflect.deleteProperty(record, 'note'))`)
   assert.ok(result.certificate, JSON.stringify(result.refusals))
   assert.deepEqual(result.emissionRefusals, [])
   const operations = [...result.graph.operations.values()].filter((operation) => operation.family === 'invocation')

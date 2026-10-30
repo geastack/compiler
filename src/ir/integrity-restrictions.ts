@@ -1,6 +1,7 @@
 import type { IrValueId } from '../identity/ids.js'
-import type { CallOperation, IrBody, IrOperand } from './model.js'
+import { allOperationsOf, type CallOperation, type IrBody, type IrOperand } from './model.js'
 import type { Representation } from '../representation/model.js'
+import { forEachEmbeddedRepresentation } from '../representation/embedded-carriers.js'
 import { observesNativeCarrierOnly, operandsOfIrOperation } from './queries.js'
 import { symbolPropertyKeyDeclarationOf } from '../semantics/model/structural-types.js'
 import { booleanConstantsOf, stringConstantsOf } from './dead-values.js'
@@ -439,4 +440,47 @@ export const fixedFieldDeletionsOf = (bodies: readonly IrBody[]): boolean => {
     }
   }
   return false
+}
+
+/**
+ * The record shapes typed code may read a field of: every record carrier an
+ * operand embeds, layouts named only by shape included, except at two uses
+ * that read no field of the record itself -- the receiver of a store, and the
+ * source of a box (a `convert` into `dynamic`), whose field table consults
+ * presence. A typed read of a required field does not consult presence, so a
+ * delete that reaches one of these shapes through a box or a looser view is
+ * refused at run time (`nativeDeleteOwnField`). A record only ever boxed
+ * (`const doc: any = { ... }`) stays out: its delete is honoured, and nothing
+ * typed can read the stale member.
+ */
+export const typedRecordShapesOf = (
+  bodies: readonly IrBody[],
+  layoutOf: (shapeId: string) => Representation | null
+): ReadonlySet<string> => {
+  const typed = new Set<string>()
+  const opened = new Set<string>()
+  const markRecord = (carrier: Representation): void => {
+    if (carrier.kind !== 'record' && carrier.kind !== 'record-with-index' && carrier.kind !== 'native-record-ref') return
+    typed.add(carrier.shapeId)
+    if (carrier.kind !== 'native-record-ref' || opened.has(carrier.shapeId)) return
+    opened.add(carrier.shapeId)
+    const layout = layoutOf(carrier.shapeId)
+    if (layout !== null) mark(layout)
+  }
+  const mark = (root: Representation): void => {
+    markRecord(root)
+    forEachEmbeddedRepresentation(root, markRecord)
+  }
+  for (const body of bodies) {
+    for (const block of body.blocks.values()) {
+      for (const operation of allOperationsOf(block)) {
+        for (const operand of operandsOfIrOperation(operation)) {
+          if ((operation.kind === 'set' || operation.kind === 'define-own-property') && operand === operation.receiver) continue
+          if (operation.kind === 'convert' && operand === operation.source && operation.result.representation.kind === 'dynamic') continue
+          mark(operand.representation)
+        }
+      }
+    }
+  }
+  return typed
 }

@@ -134,7 +134,11 @@ test('compatible string+number indexes canonicalize while symbols retain identit
     undefined,
     undefined,
     undefined,
-    () => null
+    () => null,
+    undefined,
+    // Rendered outside a program, so no typed code reads this record: its
+    // required `fixed` stays deletable through the protocol checked below.
+    () => false
   )
   assert.deepEqual(rendered.refused, [])
   const declarations = rendered.declarations.join('\n')

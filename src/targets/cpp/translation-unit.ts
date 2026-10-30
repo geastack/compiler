@@ -2064,6 +2064,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     callableIdentityDemand,
     nativeIntegrityRestricted,
     fixedFieldStateConstant,
+    requiredDeleteGuardedShapes,
     singleEvaluationClasses,
     definitionCells
   } = programFactsOf(input.bodies, directCallables, input.placements, {
@@ -2434,7 +2435,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     (declaration, key) => constructionOnlyFields.holdsOlder(declaration, key),
     new Set(nativeViewTargets.map(cppRecordStructName)),
     (callable) => abiByBody.get(String(callable)) ?? null,
-    programSite
+    programSite,
+    (shapeId) => requiredDeleteGuardedShapes.has(shapeId)
   )
   const recursiveContainers = cppRecursiveContainerDeclarations(input.plan, emissionRepresentations)
 

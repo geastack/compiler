@@ -3627,7 +3627,9 @@ const renderStructDefinition = (
   indexProtocol = true,
   dynamicFieldLoad?: DynamicFieldLoad,
   /** See `renderFieldDispatcher`'s parameter of the same name. */
-  shadowedKeys: readonly string[] = []
+  shadowedKeys: readonly string[] = [],
+  /** Whether typed code may read this struct while something can delete its fields (`typedRecordShapesOf`). */
+  guardRequiredDeletes = true
 ): string | CppRecordRefusal => {
   const isNarrowed = (field: FieldLike): boolean => narrowedSlots.has(integerStorageSlot(structName, field.key))
   // A class keeps every field inline. Its fields are stored by the
@@ -3880,6 +3882,19 @@ const renderStructDefinition = (
       structName,
       reason: `the program reaches ${unaddressableDemands.join(', ')} dynamically, and no checked conversion boxes or unboxes that field's carrier`
     }
+  // A plain record's required field has no presence its typed reads consult,
+  // so certification refuses deleting it (`record:delete:false`). A box
+  // erases the type certification decides on, so the runtime's
+  // `nativeDeleteOwnField`, where a delete through a box ends, refuses the
+  // name by this list. Stated only for a struct typed code
+  // may read while something can delete a field, and never for a class,
+  // whose field deletion the manifest claims (`class-ref:delete:false`).
+  const requiredKeys =
+    classDispatch || !guardRequiredDeletes ? [] : layout.fields.filter((field) => field.required && !cppRecordFieldKeyIsSymbol(field.key))
+  if (requiredKeys.length > 0)
+    lines.push(
+      `  static constexpr bool gea_requiredOwnField(std::string_view gea_name) { return ${requiredKeys.map((field) => `gea_name == ${cppStringLiteral(field.key)}`).join(' || ')}; }`
+    )
   // `gea::makeRef<T>()` with no arguments value-initializes, and for an
   // aggregate that is a memset of the whole object before any member's own
   // constructor runs -- kilobytes per record for a 100+-field options family
@@ -4018,7 +4033,9 @@ export const cppRecordDeclarations = (
   /** Getter/setter body ABIs authenticate erased native descriptor leaves. Required: no frame is not an answer. */
   accessorAbiOf: (body: FunctionId) => CallableAbi | null,
   /** Generated dynamic writes consume the selected artifact's certified pair. */
-  conversionSite?: ConversionSite
+  conversionSite?: ConversionSite,
+  /** `program-facts.ts`'s `requiredDeleteGuardedShapes` -- see `renderStructDefinition`'s `guardRequiredDeletes`. */
+  requiredDeleteGuarded: (shapeId: string) => boolean = () => true
 ): {
   readonly declarations: readonly string[]
   readonly fieldDefinitionsByStruct: ReadonlyMap<string, readonly string[]>
@@ -4309,7 +4326,8 @@ export const cppRecordDeclarations = (
       immortalStateRoots.has(structName),
       declaration === undefined ? layout.indexes.length > 0 : classIndexProtocols.get(declaration) !== false,
       dynamicFieldLoad,
-      declaration === undefined ? [] : classAccessorShadowedFieldKeysOf(classes, declaration)
+      declaration === undefined ? [] : classAccessorShadowedFieldKeysOf(classes, declaration),
+      [...(shapesByStruct.get(structName) ?? [])].some(requiredDeleteGuarded)
     )
   })
   const refused = rendered.filter((entry): entry is CppRecordRefusal => typeof entry !== 'string')

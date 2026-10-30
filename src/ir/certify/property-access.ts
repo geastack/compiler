@@ -487,6 +487,42 @@ const reprototypeDemandOf = (operation: CallOperation, ctx: CertifyContext): rea
   return [verdict.kind === 'plan' ? { key, verdict: 'installed' } : { key, verdict: 'unsupported', detail: verdict.reason }]
 }
 
+/**
+ * `Reflect.deleteProperty(o, k)` runs the same [[Delete]] as `delete o[k]`, and
+ * on a carrier with declared fields its renderer (`emit-host-reflect.ts`)
+ * reaches the same field table through `nativeDynamicDelete`, which clears a
+ * REQUIRED field's presence bit as readily as an optional one's. No typed read
+ * consults that bit: a direct read still found the old value, and a live view
+ * of the record threw. So the call answers to the operator's own row, from the
+ * same ladder: a constant key naming a required field, or any computed key,
+ * stays unclaimed. Identified by its host-table key in the census entry the
+ * renderer dispatches on.
+ */
+const reflectDeleteDemandOf = (operation: CallOperation, ctx: CertifyContext): readonly CapabilityDemand[] => {
+  if (ctx.authenticatedHosts?.functionReads.get(operation.callee.value)?.path !== 'Reflect.deleteProperty') return []
+  const [target, key] = operation.arguments
+  if (!target || generatedFieldsOf(target.representation, ctx.deriver) === null) return []
+  if (!key || operation.argumentsAreSpread)
+    return [
+      {
+        key: 'host-member-call:Reflect.deleteProperty',
+        verdict: 'unsupported',
+        detail: 'a spread or missing key on a target with declared fields names no key the delete rows can check'
+      }
+    ]
+  const computed = isComputedKey(ctx, key)
+  const access: Access = { receiver: target.representation.kind, method: 'delete', computed }
+  const receiverKey = receiverKeyOf(
+    ctx,
+    access,
+    target.representation,
+    key,
+    constantKeyTextOf(ctx, key),
+    ctx.semanticOperationOf(operation.lineage)
+  )
+  return [{ key: `property-access:${receiverKey}:delete:${computed}` }]
+}
+
 // ---------------------------------------------------------------------------
 // `has-property` (`k in o`) -- `preflight/has-property-key.ts`'s
 // `hasPropertyHelperKey`, restated against the IR's own key/receiver
@@ -723,7 +759,12 @@ export const propertyAccessKeysOf = (operation: IrOperation, ctx: CertifyContext
     case 'compute':
       return operation.form === 'instanceof' ? [{ key: `runtime-helper:${instanceofRuntimeHelperKey(operation.operands, ctx)}` }] : []
     case 'call':
-      return [...atomicsDemandOf(operation, ctx), ...hostArgumentDemandOf(operation, ctx), ...reprototypeDemandOf(operation, ctx)]
+      return [
+        ...atomicsDemandOf(operation, ctx),
+        ...hostArgumentDemandOf(operation, ctx),
+        ...reprototypeDemandOf(operation, ctx),
+        ...reflectDeleteDemandOf(operation, ctx)
+      ]
     default:
       return []
   }

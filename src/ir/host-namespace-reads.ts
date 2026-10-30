@@ -5,6 +5,14 @@ import type { BindingPlacement } from '../projection/bindings.js'
 import { isHostNamespacePath, type HostCallSpelling, type HostSpellings } from '../targets/cpp/host/host-members.js'
 
 /**
+ * A host row the census selected, with the row's protocol identity: the
+ * host-table key (`Reflect.deleteProperty`) a namespace method was found by.
+ * Certification decides on that key; the printer spells the row. A host
+ * free function bound by its declaration has no namespace key.
+ */
+export type HostFunctionRead = HostCallSpelling & { readonly path?: string }
+
+/**
  * Resolve physical host bindings and namespace paths before certification.
  * A get can extend another get's path, while a convert or an absent phi arm
  * preserves it, so these mutually dependent channels share one fixed point.
@@ -18,7 +26,7 @@ export interface HostNamespaceCensus {
   /** See `EmitContext.hostNamespaceValues`. */
   readonly values: ReadonlyMap<IrValueId, string>
   /** See `EmitContext.hostFunctionReads`. */
-  readonly functionReads: ReadonlyMap<IrValueId, HostCallSpelling>
+  readonly functionReads: ReadonlyMap<IrValueId, HostFunctionRead>
   /** Installed paths guaranteed present on every normal incoming value; path identity alone does not prove presence. */
   readonly definitelyPresent: ReadonlySet<IrValueId>
 }
@@ -41,6 +49,7 @@ export const hostNamespaceCensusMatches = (expected: HostNamespaceCensus, actual
         (left.kind === 'path'
           ? right.kind === 'path' && left.text === right.text
           : right.kind === 'template' && left.emit === right.emit) &&
+        left.path === right.path &&
         left.arguments === right.arguments &&
         left.arrayArguments === right.arrayArguments &&
         left.result === right.result
@@ -57,7 +66,7 @@ export const hostNamespaceReadsOf = (
 ): HostNamespaceCensus => {
   const reads = new Map<IrValueId, string>()
   const values = new Map<IrValueId, string>()
-  const functionReads = new Map<IrValueId, HostCallSpelling>()
+  const functionReads = new Map<IrValueId, HostFunctionRead>()
   const definitelyPresent = new Set<IrValueId>()
   // The arm a host-guard ternary rules out, as the IR spells it -- see this
   // function's own doc. Local to this walk: nothing outside a `phi` merge
@@ -155,7 +164,7 @@ export const hostNamespaceReadsOf = (
       const key = `${path}.${member}`
       const method = hosts.namespaces.methods.get(key)
       if (method !== undefined) {
-        functionReads.set(get.result.id, method)
+        functionReads.set(get.result.id, { ...method, path: key })
         changed = true
         continue
       }

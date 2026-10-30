@@ -3,7 +3,12 @@ import type { BindingPlacement } from '../projection/bindings.js'
 import { representationKey } from '../representation/model.js'
 import { borrowEffectsOf, type PlainFieldRead } from './borrow-effects.js'
 import { callableIdentityDemandOf, type CallableIdentityDemand } from './callable-identity-demand.js'
-import { fixedFieldDeletionsOf, integrityRestrictionsOf, type IntegrityRestrictions } from './integrity-restrictions.js'
+import {
+  fixedFieldDeletionsOf,
+  integrityRestrictionsOf,
+  typedRecordShapesOf,
+  type IntegrityRestrictions
+} from './integrity-restrictions.js'
 import { singleEvaluationClassesOf } from './class-evaluation.js'
 import { callableMemberCandidatesOf } from './callable-member-candidates.js'
 import { callableFlowCandidatesOf, type CallableFlowCandidate } from './callable-flow-candidates.js'
@@ -83,6 +88,12 @@ export interface ProgramFacts {
    * the presence byte it would otherwise re-set.
    */
   readonly fixedFieldStateConstant: boolean
+  /**
+   * The record shapes whose required fields `records.ts` lists for the
+   * runtime's delete refusal: those typed code may read
+   * (`typedRecordShapesOf`), and none when nothing can delete a field.
+   */
+  readonly requiredDeleteGuardedShapes: ReadonlySet<string>
   /** The classes evaluated exactly once, whose method state a struct may hold statically -- see `ir/class-evaluation.ts`. */
   readonly singleEvaluationClasses: ReadonlySet<DeclarationId>
   /** Cells the whole program writes once, with a function or class it allocates there -- see `definitionCellsOf`. */
@@ -480,7 +491,11 @@ export const programFactsOf = (
     }
   })
   const nativeIntegrityRestricted = integrity
-  const fixedFieldStateConstant = !nativeIntegrityRestricted.any && !fixedFieldDeletionsOf(bodies)
+  const fieldDeletions = fixedFieldDeletionsOf(bodies)
+  const fixedFieldStateConstant = !nativeIntegrityRestricted.any && !fieldDeletions
+  const requiredDeleteGuardedShapes = fieldDeletions
+    ? typedRecordShapesOf(bodies, (shapeId) => policy.shapeLayoutOf(shapeId, false))
+    : new Set<string>()
   const singleEvaluationClasses = singleEvaluationClassesOf(bodies)
   const definitionCells = definitionCellsOf(bodies)
 
@@ -494,6 +509,7 @@ export const programFactsOf = (
     callableIdentityDemand,
     nativeIntegrityRestricted,
     fixedFieldStateConstant,
+    requiredDeleteGuardedShapes,
     singleEvaluationClasses,
     definitionCells
   }

@@ -26171,6 +26171,19 @@ bool nativeOwnFieldMatches(const Self& self, std::string_view name) {
 /** OrdinaryDelete for one declared key: empty when the struct does not declare it, else whether the delete succeeded. */
 template <typename Self>
 std::optional<bool> nativeDeleteOwnField(Self& self, std::string_view name) {
+  // A generated record's required field has no presence its typed reads
+  // consult, so a delete would leave them answering the old value.
+  // Certification refuses that delete where the receiver's type is known
+  // (`record:delete:false`); a box erases the type, and a delete through a box
+  // ends here, so the record's own list of required names (`records.ts`)
+  // refuses it here.
+  if constexpr (requires { Self::gea_requiredOwnField(name); }) {
+    if (Self::gea_requiredOwnField(name)) {
+      std::fprintf(stderr, "gea: a delete of the required field \"%.*s\"; its typed reads cannot observe the deletion\n",
+                   static_cast<int>(name.size()), name.data());
+      gea::detail::abortAfterFlush();
+    }
+  }
   std::optional<bool> deleted;
   Self::gea_eachOwnField(self, [&](std::string_view key, bool& present, NativeIndexAttributes& attributes) {
     if (name != key) return false;
