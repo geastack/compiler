@@ -2230,6 +2230,17 @@ class StructuralView extends StructuralViewInputs {
    * check type is the same as distributing. An `infer` clause, a
    * non-distributive check type, an `any` or `never` arm and every other
    * branch form keep the refusal.
+   *
+   * Agreeing copies are not enough on their own. Inside the template the
+   * checker reasons about the conditional through its base constraint (the
+   * bound `conditionalBound` describes): it narrows a reference against it and
+   * relates the conditional through it. For a distributive conditional that
+   * bound can drop the branch the copies select, as `S extends { b: number } ?
+   * number : string` over `S extends { a: string }` does, so a single
+   * `{ a: string; b: number }` copy holds a number where the checker narrowed
+   * `typeof r === 'number'` to `never`, and the read printed `NaN`. So each
+   * copy's branch must also be assignable to that bound; a conditional without
+   * one, or whose branch falls outside it, keeps the refusal.
    */
   selectedBranch(type: ts.ConditionalType): ts.Type | null {
     const root = type.root
@@ -2250,6 +2261,12 @@ class StructuralView extends StructuralViewInputs {
     }
     if (selected === null) return null
     const branch = this.checker.getTypeFromTypeNode(selected ? root.node.trueType : root.node.falseType)
+    const bound = this.checker.getBaseConstraintOfType(type)
+    if (!bound || bound === type) return null
+    for (const image of images) {
+      const held = this.branchAt(branch, parameter, image)
+      if (!held || !this.checker.isTypeAssignableTo(held, bound)) return null
+    }
     return this.branchAt(branch, parameter, own ?? type.checkType)
   }
 
