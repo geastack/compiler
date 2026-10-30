@@ -2,6 +2,7 @@ import ts from '#typescript'
 import { staticRequireOutcomeOf } from '../commonjs-require.js'
 import { isNullBlindParameter } from '../null-blind-parameter.js'
 import { intrinsicPropertyCallOf } from '../intrinsic-property-call.js'
+import { builtinKeyQueryOf, globalObjectKeyQueryRefusalOf } from '../global-object-key-queries.js'
 import { intrinsicObjectReturnIdentityOf } from '../intrinsic-return-identity.js'
 import { nativeOwnAssignmentOf } from './native-own-assignment.js'
 import { freshOrdinaryObjectOf } from '../fresh-ordinary-object.js'
@@ -2323,6 +2324,17 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     const nativeOwnAssignment =
       intrinsicMutation === 'object-assign' && ts.isCallExpression(node) ? nativeOwnAssignmentOf(context, node, operands) : null
     const intrinsicPropertyCall = intrinsicPropertyCallOf(context, node, calleeUnwrapped)
+    const keyQuery = ts.isCallExpression(node) ? builtinKeyQueryOf(context, node) : null
+    const queriedKey = operands.find((value) => value.role === 'argument' && value.ordinal === keyQuery?.keyArgument)
+    const globalObjectRefusal =
+      keyQuery === null
+        ? null
+        : globalObjectKeyQueryRefusalOf(
+            context,
+            keyQuery.object,
+            queriedKey?.source.kind === 'constant' && queriedKey.source.literal === 'string' ? queriedKey.source.text : null
+          )
+    if (globalObjectRefusal !== null) return { kind: 'blocked', blocker: blocked(candidate.id, 'invocation', globalObjectRefusal, 'P1') }
     const descriptorProtocol =
       intrinsicMutation === 'object-define-property' && ts.isCallExpression(node) ? context.descriptorOwnProtocolAt?.(node) : null
     const descriptorArgument = operands.find((value) => value.role === 'argument' && value.ordinal === 2)

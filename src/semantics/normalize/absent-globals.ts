@@ -97,6 +97,13 @@ export interface AbsentGlobalCensus {
    * simply itself.
    */
   readonly substituteAbsentType: (type: ts.Type) => ts.Type
+  /**
+   * Whether this global's own symbol is one a host declared absent, asked of
+   * the symbol rather than of a reference: a key query (`'MutationObserver' in
+   * globalThis`) names the global by a string, so no reference to it may exist
+   * for `typeAt` to have answered. The same test a property access gets.
+   */
+  readonly isAbsentSymbol: (symbol: ts.Symbol) => boolean
   /** Declared or undeclared host-absent globals answered, for measurement. */
   readonly absentCount: number
   /**
@@ -116,6 +123,7 @@ export interface AbsentGlobalCensus {
 export const emptyAbsentGlobalCensus: AbsentGlobalCensus = {
   typeAt: () => null,
   substituteAbsentType: (type) => type,
+  isAbsentSymbol: () => false,
   absentCount: 0,
   declarations: new Set()
 }
@@ -326,6 +334,7 @@ export const censusAbsentGlobals = (
   return {
     typeAt: (node: ts.Node): ts.Type | null => (answered.has(node) ? undefinedType : null),
     substituteAbsentType,
+    isAbsentSymbol: (symbol) => absent.has(symbol.getName()) && ambientValueDeclarationOf(symbol, platform) !== null,
     absentCount: declarations.size + undeclaredAbsentNames.size,
     declarations
   }

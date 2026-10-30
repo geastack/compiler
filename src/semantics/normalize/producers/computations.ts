@@ -29,6 +29,7 @@ import type { BindingOperation, ComputationOperation } from '../../model/operati
 import { citedValueTypeAt } from './cited-value-type.js'
 import { constantConditionalGuardId, constantConditionalGuardResult } from './conditional-guard.js'
 import { ordinaryObjectDataWriteIsAbsent } from '../callable-data-write.js'
+import { globalObjectKeyQueryRefusalOf } from '../global-object-key-queries.js'
 
 type ComputationNode =
   | ts.BinaryExpression
@@ -714,6 +715,11 @@ const contributeBinary = (context: ProducerContext, candidate: CensusCandidate, 
     return finishComputation(context, candidate, node, 'instanceof', tokenText(kind), [left, right], throwingCompletion, coercingEffects)
   }
   if (kind === ts.SyntaxKind.InKeyword) {
+    const globalObjectRefusal =
+      inSymbolKey !== null || ts.isPrivateIdentifier(node.left)
+        ? null
+        : globalObjectKeyQueryRefusalOf(context, node.right, left.source.kind === 'constant' ? left.source.text : null)
+    if (globalObjectRefusal !== null) return { kind: 'blocked', blocker: blocked(candidate.id, 'computation', globalObjectRefusal, 'P1') }
     // Throws if the right-hand side is not an object; a Proxy `has` trap can
     // run arbitrary code.
     const contribution = finishComputation(

@@ -585,6 +585,7 @@ generic-split-copy-into-its-any-copy.runtime.ts.cpp a3e1402d96f5
 generic-state-function-array.ts.cpp 6a72290695b7
 generic-subclass-constructor-is-not-implicit.ts.cpp b34dd09f62ec
 generic-three-level-chain-this-call-reaches-own-base-copy.runtime.ts.cpp 5f249293a8ad
+global-object-in-answers-absent-and-installed-keys.runtime.ts.cpp bc1e73e6f67c
 global-var-constructor-reassigned.ts.cpp 5e2fc5f4fa96
 global-var-constructor-redefined-through-global-object.ts.cpp de1c3aa046dc
 globalthis-as-optional-record.ts.cpp 638f3223434b
@@ -1379,7 +1380,7 @@ unbound-native-method-absence-transport.runtime.ts.cpp e39d8d4e0e45
 unbound-native-method-receiver-observations.runtime.ts.cpp 1be7fc4b1e59
 unbox-nullable-union.ts.cpp 28f62c3d4062
 uncallable-member-slot-call.runtime.js.cpp 17003891e1f7
-uncertified.txt 0ff4c6be1a45
+uncertified.txt da57d32b0984
 undeclared-key-read-off-a-record-a-boxed-frame-views.runtime.js.cpp dd8e1fcfae0b
 uniform-table-to-json-calls-method-on-stored-value.runtime.js.cpp abd18ef7ee4d
 uniform-tuple-boxed-into-any-is-an-array.runtime.ts.cpp 2102566ee2ec
