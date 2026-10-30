@@ -59,9 +59,15 @@ import type { SpecializationCensus } from './specialization.js'
 export interface InstantiatedMembers {
   /** The instantiated image of an open type under the copies this view is inside, or `null` when none is known. */
   readonly through: (type: ts.Type) => ts.Type | null
+  /**
+   * The instantiated image of a type open in `owner`'s parameters in each copy of `owner` the
+   * program makes, or `null` when it makes none or one of them has no image. Asked from a view
+   * that is not inside `owner`: what is true of every copy is true wherever the type can occur.
+   */
+  readonly throughEveryCopy: (owner: ts.Declaration, type: ts.Type) => readonly ts.Type[] | null
 }
 
-export const emptyInstantiatedMembers: InstantiatedMembers = { through: () => null }
+export const emptyInstantiatedMembers: InstantiatedMembers = { through: () => null, throughEveryCopy: () => null }
 
 /** How deep the pairing walk goes before it stops. A member type nested past this is not worth a table entry. */
 const pairingDepth = 6
@@ -638,13 +644,27 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     return built
   }
 
+  const throughEveryCopy = (owner: ts.Declaration, type: ts.Type): readonly ts.Type[] | null => {
+    const copies = specializations.specializationsOf(owner)
+    if (copies.length === 0) return null
+    const images: ts.Type[] = []
+    for (let ordinal = 0; ordinal < copies.length; ordinal += 1) {
+      const table = tableFor(owner, ordinal)
+      const image = table && answerIn(table, type)
+      if (!image) return null
+      images.push(image)
+    }
+    return images
+  }
+
   /**
    * Innermost copy first, for the reason `createPathBinding` searches that way:
    * the nearest enclosing instantiation is the one in scope.
    */
   return (path: SpecializationPath): InstantiatedMembers => {
-    if (path.length === 0) return emptyInstantiatedMembers
+    if (path.length === 0) return { through: () => null, throughEveryCopy }
     return {
+      throughEveryCopy,
       through: (type) => {
         for (let index = path.length - 1; index >= 0; index -= 1) {
           const step = path[index]

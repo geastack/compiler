@@ -528,6 +528,8 @@ generic-base-any-default-receiver-upcast.runtime.ts.cpp 1d536226e0ae
 generic-base-copy-minted-by-a-derived-class-keeps-its-own-this.runtime.ts.cpp 9b88581fd8cc
 generic-base-default-method-overridden-in-every-copy.runtime.ts.cpp 083cf6c7ad80
 generic-base-method-overridden-per-class-copy.runtime.ts.cpp f0c0f83e53ae
+generic-call-with-conditional-rest-and-result-over-the-enclosing-class-copy.runtime.ts.cpp 870470f601bd
+generic-call-with-conditional-rest-over-two-enclosing-class-copies.runtime.ts.cpp 3db344fe9a72
 generic-callable-type-parameter.ts.cpp 26dd1e985f75
 generic-circular-list-node-aliases-share-layout.runtime.ts.cpp 1b818386144c
 generic-class-alias-never-instantiated.runtime.ts.cpp b0e46853b5d2

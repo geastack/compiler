@@ -2198,6 +2198,155 @@ class StructuralView extends StructuralViewInputs {
   }
 
   /**
+   * A deferred conditional as the one branch its check type selects in every
+   * instantiation the program makes, or `null` when the instantiations do not
+   * agree or the branch is not a form this layer can spell.
+   *
+   * A state-machine library's `runIfFn<T>(v: T | undefined, ...a: T extends
+   * Fn ? Parameters<T> : never)`, called inside a generic class with
+   * `Partial<S['props']> | (() => Partial<S['props']>)`, is the case. The
+   * checker distributes over the union and evaluates the function arm, but it
+   * defers the `Partial<S['props']>` arm, because that arm names the CALLER's
+   * `S`. The callee's copy is filled with the caller's open type (the census
+   * does not see a parameter inside an indexed access), so no image of that
+   * copy closes the arm, and the rest parameter and the result refused. Each
+   * copy of the class does close it: its instantiated members hold
+   * `Partial<{ id: string }>`, which no function type admits.
+   *
+   * This is the rule `reducedOperator` describes as missing for want of
+   * branches. The branches are read off the conditional's declaration, as
+   * `branchBounds` reads them, and the branch is picked by the checker's own
+   * relation, the one it uses itself once a check type is closed, asked only
+   * of closed types, where it is exact. The check type is closed by this copy
+   * (its image, or the bare parameter's binding on the path), or else by every
+   * copy of the one generic that owns its parameters: the copy that holds the
+   * conditional serves all of them, so all of them must pick the same branch.
+   *
+   * The branch is then instantiated at the conditional's own check type. That
+   * is the part the public checker cannot do in general, so only the forms it
+   * can are taken: a closed type, the check parameter itself, and
+   * `NonNullable` or `Awaited` of one, which the checker reduces with its own
+   * operators. Each distributes over a union, so instantiating at a union
+   * check type is the same as distributing. An `infer` clause, a
+   * non-distributive check type, an `any` or `never` arm and every other
+   * branch form keep the refusal.
+   */
+  selectedBranch(type: ts.ConditionalType): ts.Type | null {
+    const root = type.root
+    const parameter = root.checkType
+    if (root.inferTypeParameters || !root.isDistributive || (parameter.flags & ts.TypeFlags.TypeParameter) === 0) return null
+    if (this.isOpenForm(type.extendsType)) return null
+    const own = this.pathImageOf(type.checkType)
+    const images = own ? [own] : this.everyCopyImageOf(type.checkType)
+    if (images === null) return null
+    let selected: boolean | null = null
+    for (const image of images) {
+      for (const arm of image.isUnion() ? image.types : [image]) {
+        if (arm.flags & (ts.TypeFlags.Any | ts.TypeFlags.Never)) return null
+        const fits = this.checker.isTypeAssignableTo(arm, type.extendsType)
+        if (selected !== null && selected !== fits) return null
+        selected = fits
+      }
+    }
+    if (selected === null) return null
+    const branch = this.checker.getTypeFromTypeNode(selected ? root.node.trueType : root.node.falseType)
+    return this.branchAt(branch, parameter, own ?? type.checkType)
+  }
+
+  /**
+   * A check type closed by the copies this view is inside: their instantiated
+   * image of it, or the path's binding of a bare parameter. Not `closedForm`,
+   * whose substitution falls back to the program-wide census, and that can
+   * answer a parameter's constraint, which is not its instantiation.
+   */
+  pathImageOf(type: ts.Type): ts.Type | null {
+    let image = this.instantiatedMembers.through(type)
+    if (!image && type.flags & ts.TypeFlags.TypeParameter) {
+      const declaration = type.getSymbol()?.declarations?.[0]
+      image = declaration && ts.isTypeParameterDeclaration(declaration) ? this.boundByPath(declaration) : null
+    }
+    return image && !this.isOpenForm(image) ? image : null
+  }
+
+  /** A type's closed image in every copy of the one generic that writes its parameters, or `null`. */
+  everyCopyImageOf(type: ts.Type): readonly ts.Type[] | null {
+    const owners = new Set<ts.Node>()
+    const collect = (part: ts.Type, depth: number): boolean => {
+      if (depth > 6) return false
+      if (part.flags & ts.TypeFlags.TypeParameter) {
+        const declaration = part.getSymbol()?.declarations?.[0]
+        // The polymorphic `this` is declared by the class itself, and no copy fills it.
+        if (!declaration || !ts.isTypeParameterDeclaration(declaration)) return false
+        owners.add(declaration.parent)
+        return true
+      }
+      if (part.isUnionOrIntersection()) return part.types.every((one) => collect(one, depth + 1))
+      if (part.flags & ts.TypeFlags.IndexedAccess) {
+        const access = part as ts.IndexedAccessType
+        return collect(access.objectType, depth + 1) && collect(access.indexType, depth + 1)
+      }
+      if (part.flags & ts.TypeFlags.Index) return collect((part as ts.IndexType).type, depth + 1)
+      if (part.flags & ts.TypeFlags.Instantiable) return false
+      const reference = part as ts.TypeReference
+      const written = (reference.objectFlags & ts.ObjectFlags.Reference) !== 0 ? this.checker.getTypeArguments(reference) : []
+      return [...written, ...(part.aliasTypeArguments ?? [])].every((one) => collect(one, depth + 1))
+    }
+    if (!collect(type, 0) || owners.size !== 1) return null
+    const [owner] = owners
+    // A parameter's parent is the generic that declares it, or an `infer`
+    // clause, which no copy is keyed by and so answers no copies.
+    const images = owner ? this.instantiatedMembers.throughEveryCopy(owner as ts.Declaration, type) : null
+    return images && images.every((image) => !this.isOpenForm(image)) ? images : null
+  }
+
+  /**
+   * A conditional's branch, read off its declaration, instantiated with the
+   * check parameter replaced by `filling`, or `null` for a form the public
+   * checker cannot instantiate.
+   */
+  branchAt(branch: ts.Type, parameter: ts.Type, filling: ts.Type): ts.Type | null {
+    if (branch === parameter) return filling
+    const nullable = this.operatorArgument(branch, 'NonNullable')
+    const awaited = nullable ? null : this.operatorArgument(branch, 'Awaited')
+    const argument = nullable ?? awaited
+    if (argument) {
+      const inner = this.branchAt(argument, parameter, filling)
+      if (!inner) return null
+      const reduced = nullable ? this.checker.getNonNullableType(inner) : this.checker.getAwaitedType(inner)
+      return reduced && (reduced.flags & ts.TypeFlags.Conditional) === 0 ? reduced : null
+    }
+    return this.isOpenForm(branch) ? null : branch
+  }
+
+  /**
+   * Whether a type still has a parameter or a deferred form anywhere the walk
+   * reads. A mapped type is closed only through its alias arguments and its
+   * resolved members: its own constraint and template are not otherwise
+   * reachable, and a mapped alias declared inside a generic can capture a
+   * parameter its arguments do not name.
+   */
+  isOpenForm(type: ts.Type, depth = 0): boolean {
+    if (depth > 6) return true
+    const open =
+      ts.TypeFlags.TypeParameter |
+      ts.TypeFlags.IndexedAccess |
+      ts.TypeFlags.Conditional |
+      ts.TypeFlags.Substitution |
+      ts.TypeFlags.Index |
+      ts.TypeFlags.TemplateLiteral |
+      ts.TypeFlags.StringMapping
+    return this.someTypePart(type, (part) => {
+      if ((part.flags & open) !== 0) return true
+      if ((part.flags & ts.TypeFlags.Object) === 0 || ((part as ts.ObjectType).objectFlags & ts.ObjectFlags.Mapped) === 0) return false
+      if (part.aliasTypeArguments === undefined) return true
+      return (
+        part.getProperties().some((property) => this.isOpenForm(this.checker.getTypeOfSymbol(property), depth + 1)) ||
+        this.checker.getIndexInfosOfType(part).some((index) => this.isOpenForm(index.type, depth + 1))
+      )
+    })
+  }
+
+  /**
    * The types a conditional's value can be drawn from, each an upper bound of
    * one branch, or `null` when a branch has none.
    *
@@ -3705,13 +3854,15 @@ class StructuralView extends StructuralViewInputs {
    * argument is still open, and an answer that comes back conditional again is
    * discarded: both leave the shape exactly as it was.
    *
-   * These are the ONLY two this layer reduces, and the reason is the same for
-   * both: the checker exposes the operator. `resolvedTrueType`/
+   * These are the ONLY two operators this layer reduces, and the reason is the
+   * same for both: the checker exposes the operator. `resolvedTrueType`/
    * `resolvedFalseType` on a deferred `ts.ConditionalType` are lazily populated
-   * and read `undefined` from outside the checker, so a general "pick the
-   * branch the closed check type satisfies" rule has no branches to pick --
-   * measured, not assumed. `T[number]` is refused here for the mirror-image
-   * reason: `getIndexedAccessType` is not on the public checker at all.
+   * and read `undefined` from outside the checker -- measured, not assumed --
+   * so the general "pick the branch the closed check type satisfies" rule
+   * (`selectedBranch`) reads the branches off the declaration instead, and
+   * instantiates only what these two operators can. `T[number]` is refused here
+   * for the mirror-image reason: `getIndexedAccessType` is not on the public
+   * checker at all.
    *
    * `NonNullable` is NOT gated on `TypeFlags.Conditional`, and that is not an
    * oversight: since TypeScript 4.8 it is spelled `T & {}`, so a deferred one
@@ -3854,11 +4005,15 @@ class StructuralView extends StructuralViewInputs {
     if (parameterList !== null) return this.remember(type, parameterList)
     // A conditional that still exists after this copy's instantiated-member
     // image was asked for, and that neither operator above could reduce, has
-    // no image this layer can spell. The checker's bound for it, once every
+    // no image this layer can spell. It is still the one branch every
+    // instantiation the program makes selects, when they all agree
+    // (`selectedBranch`). Failing that, the checker's bound for it, once every
     // branch is shown to fit in that bound, is still a statement about every
     // value it can hold (`conditionalBound`); any other conditional is
     // unresolved.
     if (type.flags & ts.TypeFlags.Conditional) {
+      const branch = this.selectedBranch(type as ts.ConditionalType)
+      if (branch) return this.remember(type, this.typeOf(branch))
       const bound = this.conditionalBound(type)
       if (bound) return this.remember(type, this.typeOf(bound))
       return this.remember(
@@ -4164,6 +4319,17 @@ class StructuralView extends StructuralViewInputs {
     }
 
     if (type.isUnion()) {
+      // A deferred conditional arm this copy settles (`selectedBranch`) is
+      // that branch, and the checker's own union of the settled arms has no
+      // `never` arm and no duplicate: `[] | (P extends Fn ? Parameters<...> :
+      // never)` is the empty tuple, not a sum with a `never` arm that no
+      // spread or tuple read admits.
+      const settled = type.types.map((arm) =>
+        arm.flags & ts.TypeFlags.Conditional ? (this.selectedBranch(arm as ts.ConditionalType) ?? arm) : arm
+      )
+      const remaining = [...new Set(settled.filter((arm) => (arm.flags & ts.TypeFlags.Never) === 0))]
+      const settledSole = remaining.length === 1 ? remaining[0] : undefined
+      if (settledSole && settled.some((arm, index) => arm !== type.types[index])) return this.remember(type, this.typeOf(settledSole))
       // A member whose bound type substitutes to `unknown`/`any` in this
       // copy absorbs the whole union -- `Component<RootElement = unknown>`'s
       // own `readonly el: RootElement | null` must collapse to bare
@@ -4708,8 +4874,8 @@ class StructuralView extends StructuralViewInputs {
     // `resolvedFalseType` on a deferred conditional read `undefined` from
     // outside the checker, and `reducedOperator` above can only answer for the
     // two operators the checker exposes -- so the only routes out are the
-    // instantiated image `translate` already consults first, or closing the
-    // check type upstream. "checker type with flags 16777216" sent a reader
+    // instantiated image `translate` already consults first, the branch every
+    // copy selects (`selectedBranch`), or closing the check type upstream. "checker type with flags 16777216" sent a reader
     // looking for a missing type FORM; the form is modelled, the reduction is
     // not.
     return this.remember(type, this.unresolved(`checker type with flags ${type.flags} is not modelled`))
