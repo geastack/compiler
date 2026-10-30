@@ -1,0 +1,6 @@
+{
+  "modules": [
+    { "file": "entry.ts", "isEntry": true, "imports": [{ "specifier": "./lib", "resolvedId": "lib.ts" }] },
+    { "file": "lib.ts", "imports": [], "definedSource": "sources/lib.defined.ts" }
+  ]
+}

@@ -42,6 +42,8 @@ interface GraphModule {
   readonly isEntry?: boolean
   readonly originalSource?: string | null
   readonly transformedSource?: string | null
+  /** The disk text with the build's `define` applied, stated only where the define changed it. */
+  readonly definedSource?: string | null
 }
 
 interface GraphManifest {
@@ -138,6 +140,15 @@ export const readModuleGraph = (manifestPath: string, stage: string, statedEntry
     // empty module rather than skipped. That is what it contributes: nothing.
     if (!isScriptModule(file)) {
       overlay.set(file, 'export {}\n')
+      continue
+    }
+    // The one lowering of the disk text this compiler does not perform: a
+    // bundler's `define` (`process.env.NODE_ENV` to a literal). Which reads it
+    // replaces is the build's decision, made on text, so the build states the
+    // result and this reads it as it reads `resolvedId`. It is the disk text
+    // plus that alone, so nothing above about lowered JSX applies to it.
+    if (module.definedSource) {
+      overlay.set(file, readFileSync(resolve(manifestDir, module.definedSource), 'utf8'))
       continue
     }
     if (existsSync(file)) continue
