@@ -55,10 +55,10 @@ export const toStringText = (
   nullishJoinsEmpty = false,
   /** See `toStringTextOver`'s `symbolThrows`. */
   symbolThrows = false,
-  /** See `toStringTextOver`'s `inspectsNumbers`. */
-  inspectsNumbers = false
+  /** See `toStringTextOver`'s `inspects`. */
+  inspects = false
 ): string | null =>
-  toStringTextOver(text, carrier, recordShapeLayoutsOf(deriver, classes), explicit, nullishJoinsEmpty, symbolThrows, inspectsNumbers)
+  toStringTextOver(text, carrier, recordShapeLayoutsOf(deriver, classes), explicit, nullishJoinsEmpty, symbolThrows, inspects)
 
 /**
  * The `[[Call]]` convention a stored member holds, for the four carriers whose
@@ -171,21 +171,33 @@ export const toStringTextOver = (
    */
   symbolThrows = false,
   /**
-   * Whether a Number is being formatted for `console.log` rather than
-   * converted. Node's console does not ToString its arguments, it inspects
-   * them, and `util.inspect(-0)` is `-0` where ECMA-262 6.1.6.1.20
-   * Number::toString answers `0`. Every other Number prints identically, so
-   * this changes only which runtime function renders a number-domain scalar.
+   * Whether the value is formatted for `console.log` rather than converted.
+   * Node's console does not ToString its arguments, it inspects them. For a
+   * Number the two differ only at negative zero: `util.inspect(-0)` is `-0`
+   * where ECMA-262 6.1.6.1.20 Number::toString answers `0`, so a number-domain
+   * scalar renders through `console::inspect`. For an object they always
+   * differ, and the object test below decides what is spelled instead.
    */
-  inspectsNumbers = false
+  inspects = false
 ): string | null => {
   if (carriesNativeUndefined(carrier) && text !== nullableClassReceiver) {
-    const present = toStringTextOver(nullableClassReceiver, carrier, layouts, explicit, nullishJoinsEmpty, symbolThrows, inspectsNumbers)
+    const present = toStringTextOver(nullableClassReceiver, carrier, layouts, explicit, nullishJoinsEmpty, symbolThrows, inspects)
     if (present === null) return null
     const absent = nullishJoinsEmpty
       ? cppConstantLiteral('', 'string', { kind: 'string' })
       : `${nullableClassReceiver}.isUndefined() ? gea::host::detail::toStringUndefined() : gea::host::detail::toStringNull()`
     return `([&]() -> std::string { const auto& ${nullableClassReceiver} = ${text}; return static_cast<bool>(${nullableClassReceiver}) ? std::string(${present}) : std::string(${absent}); })()`
+  }
+  // Node prints an object argument as `util.inspect` text (`{ state: 'on' }`,
+  // `[ 1, 2 ]`, `Foo { a: 1 }`), which no runtime function here renders, and its
+  // ToString (`[object Object]`, `1,2`) is a different text. So the console
+  // spells a named abort where this table would convert the object, and keeps
+  // the refusal where it would not. A statically refused console call would
+  // instead reject every program that logs an object on a path that never runs.
+  if (inspects && !consoleTextIsNotAnObject(carrier)) {
+    return toStringTextOver(text, carrier, layouts, explicit, nullishJoinsEmpty, symbolThrows) === null
+      ? null
+      : 'gea::host::console::uninspectable()'
   }
   if (carrier.kind === 'string') return text
   if (carrier.kind === 'symbol')
@@ -237,7 +249,7 @@ export const toStringTextOver = (
     if (carrier.domain === 'boolean') return `gea::host::detail::toString(static_cast<bool>(${text}))`
     if (carrier.domain === 'bigint') return `(${text}).toString()`
     // An int32/uint32 can never hold -0, so only the domains that can take the inspect spelling.
-    if (inspectsNumbers && (carrier.domain === 'number' || carrier.domain === 'float64'))
+    if (inspects && (carrier.domain === 'number' || carrier.domain === 'float64'))
       return `gea::host::console::inspect(static_cast<double>(${text}))`
     return `gea::host::detail::toString(static_cast<double>(${text}))`
   }
@@ -247,7 +259,7 @@ export const toStringTextOver = (
   // legitimate dynamic boundaries, not a value this emitter boxed on its own
   // initiative. `gea::host::detail::toString(const gea::Value&)`
   // tag-switches, mirroring `toBoolean(const gea::Value&)`.
-  if (carrier.kind === 'dynamic') return inspectsNumbers ? `gea::host::console::inspect(${text})` : `gea::host::detail::toString(${text})`
+  if (carrier.kind === 'dynamic') return inspects ? `gea::host::console::inspect(${text})` : `gea::host::detail::toString(${text})`
   // An optional DOES know which absence it holds. `Representation`'s own
   // `optional` variant carries `absence: 'null' | 'undefined'` -- it has to,
   // because `x === null` and `x === undefined` are different questions over
@@ -261,7 +273,7 @@ export const toStringTextOver = (
   // `vN`), never an expression with an effect, so naming it twice in one
   // conditional reads one local twice rather than running anything twice.
   if (carrier.kind === 'optional') {
-    const present = toStringTextOver(`(*${text})`, carrier.payload, layouts, explicit, nullishJoinsEmpty, symbolThrows, inspectsNumbers)
+    const present = toStringTextOver(`(*${text})`, carrier.payload, layouts, explicit, nullishJoinsEmpty, symbolThrows, inspects)
     if (present === null) return null
     const absent = nullishJoinsEmpty
       ? cppConstantLiteral('', 'string', { kind: 'string' })
@@ -283,15 +295,7 @@ export const toStringTextOver = (
   if (carrier.kind === 'tagged-union') {
     const arms: string[] = []
     for (const [index, arm] of carrier.arms.entries()) {
-      const converted = toStringTextOver(
-        `${text}.get<${index}>()`,
-        arm.value,
-        layouts,
-        explicit,
-        nullishJoinsEmpty,
-        symbolThrows,
-        inspectsNumbers
-      )
+      const converted = toStringTextOver(`${text}.get<${index}>()`, arm.value, layouts, explicit, nullishJoinsEmpty, symbolThrows, inspects)
       if (converted === null) return null
       arms.push(`std::string(${converted})`)
     }
@@ -453,6 +457,21 @@ export const toStringTextOver = (
   if (carrier.kind === 'promise') return cppConstantLiteral('[object Promise]', 'string', { kind: 'string' })
   return null
 }
+
+/**
+ * The carriers that are not an object for the console: the primitives, the box
+ * (whose tag `console::inspect` reads at run time), and the optional and union
+ * wrappers, whose payload and arms are tested on their own.
+ */
+const consoleTextIsNotAnObject = (carrier: Representation): boolean =>
+  carrier.kind === 'string' ||
+  carrier.kind === 'symbol' ||
+  carrier.kind === 'null' ||
+  carrier.kind === 'undefined' ||
+  carrier.kind === 'scalar' ||
+  carrier.kind === 'dynamic' ||
+  carrier.kind === 'optional' ||
+  carrier.kind === 'tagged-union'
 
 /** Whether a value of `carrier` can be a callable with a typed ABI -- one this leaf cannot call with a dynamic receiver. */
 const holdsTypedCallable = (carrier: Representation): boolean => {

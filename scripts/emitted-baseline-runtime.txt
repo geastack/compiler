@@ -243,7 +243,7 @@ clone-idiom-family-dispatch.runtime.js.cpp 94702b9a5c2b
 clone-idiom-override-narrows-copy-source.runtime.js.cpp f145deba5d48
 clone-idiom-unallocated-base-override-narrows-copy-source.runtime.js.cpp bd5913dce4a1
 clone-through-each-subclass-copy-override.runtime.js.cpp 3bcf2c51a66e
-closed-key-write-of-member-value-union.runtime.js.cpp 5a308b574c85
+closed-key-write-of-member-value-union.runtime.js.cpp e04fe0e21c51
 closed-literal-absent-key-push.runtime.js.cpp 26cb270747d2
 closed-object-method-forwarding.runtime.ts.cpp 065a9c3755d0
 closed-object-parameter-in-record.runtime.ts.cpp 8934244a8c7e
@@ -263,7 +263,7 @@ codec-table-static-method-dispatch.runtime.ts.cpp 99d9f3d27de5
 collection-get-native-union.ts.cpp d652be5063db
 composed-field-descriptor.runtime.js.cpp 2e74bcd65640
 computed-class-prototype-method.ts.cpp d68731c3ae0a
-computed-get-over-literal-key-union.ts.cpp d496050b3a06
+computed-get-over-literal-key-union.ts.cpp ee1f771c8add
 computed-key-bag-passed-as-union-argument.runtime.js.cpp 70ca1901e4e3
 computed-key-before-declared-field-key-order.runtime.ts.cpp 1ca90d622f9f
 computed-key-own-assignment-into-dictionary-field.runtime.js.cpp cb7eafa925e8
@@ -282,7 +282,9 @@ conditional-any-arm-returned-as-optional.ts.cpp ce9517746901
 conditional-empty-array-arm-takes-the-populated-arm.runtime.ts.cpp f1b6cbb723fb
 conditional-subclass-constructor-into-base-constructor-field.runtime.ts.cpp fac1f4cc75d0
 console-info-member.ts.cpp 5a795014a790
+console-log-held-as-a-value-aborts-on-an-object.runtime.ts.cpp 1fe58e399283
 console-log-inspects-negative-zero.runtime.ts.cpp bfcde023c08d
+console-log-of-a-boxed-object-aborts.runtime.ts.cpp b32a72efc79e
 console-warn-member.ts.cpp aa49143ed32c
 constant-key-table-reads-follow-every-table.runtime.ts.cpp d8cd7bb8bcab
 constant-table-repeated-negative.ts.cpp 4293743457c8
@@ -298,11 +300,11 @@ constructor-family-into-narrower-constructor-type.runtime.ts.cpp ec19ded7a958
 constructor-family-into-open-constructor-type.runtime.ts.cpp 25565aa8c500
 constructor-function-absent-option-or-default-field.runtime.js.cpp dad4db47ed11
 constructor-function-array-field-of-pushed-records.runtime.js.cpp b6d57f91d004
-constructor-function-instance-into-inline-record-param-keeps-identity.runtime.js.cpp 8d9f5ee02e65
+constructor-function-instance-into-inline-record-param-keeps-identity.runtime.js.cpp 8593ceaa7ba7
 constructor-function-method-field-calls-sibling-through-this.runtime.js.cpp 13d07a0e97b5
-constructor-function-omitted-option-dead-byte-guards.runtime.js.cpp a50c01b1f1d3
-constructor-function-omitted-option-dead-guards.runtime.js.cpp 111cc92efe94
-constructor-function-untyped-buffer-field-stays-native.runtime.js.cpp 20266eb45624
+constructor-function-omitted-option-dead-byte-guards.runtime.js.cpp 98569ebb5bc7
+constructor-function-omitted-option-dead-guards.runtime.js.cpp 0f6149c0710a
+constructor-function-untyped-buffer-field-stays-native.runtime.js.cpp 67e74dce6c99
 constructor-null-default-array-parameter.runtime.js.cpp 1660d7f20312
 constructor-read-off-instance-into-family.ts.cpp 3f0007046058
 constructor-store-sink-refused-for-accessor-families.runtime.ts.cpp 44d2367121a6
@@ -326,7 +328,7 @@ decode-uri-component-malformed-throws-uri-error.runtime.ts.cpp 8b62a2d3e2db
 decorate-decrypted-document-symbol-keys.runtime.ts.cpp a128c2700a73
 defaulted-empty-literal-parameter-reads-caller-keys.runtime.js.cpp 9acf19374479
 define-aspects-over-constructor-family-union.runtime.ts.cpp a69f70ccd106
-define-property-accessor-on-object-and-class-instance.runtime.ts.cpp 6046420409ac
+define-property-accessor-on-object-and-class-instance.runtime.ts.cpp b86b98f719e2
 define-property-of-an-undeclared-key-keeps-the-class-native.runtime.js.cpp e241b1392c12
 define-property-on-class-constructor-read-through-this-constructor.runtime.ts.cpp 5ea84fa91ef7
 definition-cell-alias.runtime.ts.cpp a557270676b1
@@ -484,7 +486,7 @@ fresh-array-map-result-into-union-element-parameter.runtime.ts.cpp 7f1dfc41bc86
 fresh-literal-widened-into-union-cell-moves.runtime.ts.cpp 8aca5742e684
 fresh-local-table-stored-as-last-use-into-wider-entries.ts.cpp da622b7bd5f2
 fresh-object-store-skips-integrity-guard.runtime.ts.cpp a1788c7456c1
-fresh-table-arrow-return-preserves-alias-writes.runtime.ts.cpp a5a6930170bc
+fresh-table-arrow-return-preserves-alias-writes.runtime.ts.cpp dd11ff4c3da5
 from-char-code-spread-local-buffer.ts.cpp d5c4b87cabbb
 function-and-constructor-own-properties.ts.cpp 2c649b84501b
 function-arm-union-slot-default.ts.cpp 528865985eec
@@ -535,7 +537,7 @@ generic-circular-list-node-aliases-share-layout.runtime.ts.cpp 1b818386144c
 generic-class-alias-never-instantiated.runtime.ts.cpp b0e46853b5d2
 generic-class-annotated-const-alias-defaults-chunk-type.runtime.ts.cpp c1e2363fab37
 generic-class-at-a-top-type-and-a-concrete-type.ts.cpp 8e89db75ebf7
-generic-class-conditional-id-type.runtime.ts.cpp 15c7b6e7c865
+generic-class-conditional-id-type.runtime.ts.cpp 79d93d7ad4e8
 generic-class-const-alias-at-two-instantiations.runtime.ts.cpp d6343991ee71
 generic-class-default-type-parameter-method-value.ts.cpp f1ddd9a93ae7
 generic-class-reinterpreted-at-another-instantiation.runtime.ts.cpp f44549abc308
@@ -665,7 +667,7 @@ instance-reparented-onto-mixin-subclass.ts.cpp b318cc8a1eae
 instanceof-a-generic-class.ts.cpp 3e0cd644c93b
 instanceof-arm-of-unconstructed-class-into-interface-view.runtime.ts.cpp 2429db34bc6a
 instanceof-chain-tests-the-unnarrowed-value.runtime.ts.cpp 36e3bdfd4afb
-instanceof-class-record-string-union.ts.cpp 72c0db3a17a1
+instanceof-class-record-string-union.ts.cpp 0ede971449de
 instanceof-class-union-through-nested-record-views.runtime.ts.cpp ab69b3bc0a90
 instanceof-date-over-a-union-of-native-carriers.runtime.ts.cpp cc0ae2fcf6a6
 instanceof-derived-class.ts.cpp faac20f3a75e
@@ -693,7 +695,7 @@ integrity-dynamic-define-property-restricts-every-carrier.runtime.ts.cpp 51c9969
 integrity-dynamic-symbol-define-leaves-string-fields-plain.runtime.ts.cpp 27e953014cb1
 integrity-restriction-per-carrier.runtime.ts.cpp 32df60a96ad3
 interface-distinct-class-implementations.runtime.ts.cpp ed8f36f06d52
-interface-extends-readonly-array.ts.cpp 4fbaf70b029d
+interface-extends-readonly-array.ts.cpp 9025fa8f7fc5
 interface-family-absorbs-optional-intersection-partner.runtime.ts.cpp b43d8d9eb2d7
 interface-family-adopts-literals-flowing-into-its-views.runtime.ts.cpp a1d944c875df
 interface-family-copies-keep-undeclared-keys.runtime.ts.cpp b68e9a6aaddf
@@ -1067,7 +1069,7 @@ overloaded-callable-fields.ts.cpp d27cbaed4f70
 overloaded-class-method-into-indexed-method-record.runtime.ts.cpp d305a142ed5f
 overloaded-field-written-in-constructor-call.ts.cpp 87746c9b92d3
 overloaded-generic-callable-field-call.ts.cpp 41263c90f61c
-overloaded-generic-callback-parameter.ts.cpp 20d30999a53b
+overloaded-generic-callback-parameter.ts.cpp 269006f33b03
 overloaded-generic-field-generic-arrow-call.ts.cpp 600f1447b817
 overloaded-source-function-value.ts.cpp fdccffbc0d10
 overloaded-source-return-narrowing.ts.cpp 07c8ca6a3458
@@ -1245,7 +1247,7 @@ spread-narrowed-unknown-into-literal-in-option-table.runtime.ts.cpp 1abfea13feaa
 spread-narrowed-unknown-record-cast-any-into-options.runtime.ts.cpp f4c4fe023b79
 spread-of-null-class-reference-copies-nothing.runtime.ts.cpp b80c0ea0cace
 spread-of-unreflected-record-keeps-creation-order.runtime.ts.cpp fcac33fe35f7
-spread-open-document-into-closed-options.ts.cpp ab6e57584d30
+spread-open-document-into-closed-options.ts.cpp 0fb45c80143a
 spread-open-headers-returned-in-literal.ts.cpp 0eafb2463350
 spread-pended-source-ranks-and-prefix-dedupe.runtime.ts.cpp 9e5337f379ef
 spread-read-only-copy-elided-semantics.runtime.ts.cpp 61016ef653ba
@@ -1400,7 +1402,7 @@ union-array-arm-own-property.runtime.ts.cpp 620a9341b0fa
 union-key-borrowed-name-scan.runtime.ts.cpp 011726b71e82
 union-member-absent-on-promise-arm.ts.cpp 2a37c5dd7a7a
 union-method-absent-on-one-arm-discarded.ts.cpp ee6f350afe47
-union-of-dictionaries-filled-by-a-flag.runtime.ts.cpp 6c8546aa3a79
+union-of-dictionaries-filled-by-a-flag.runtime.ts.cpp df5f2dcf0f95
 union-of-tuples-array-pattern.ts.cpp c6c7182af3fe
 union-of-tuples-indexed-past-the-shorter-tuple.runtime.ts.cpp b3fdaec05eeb
 union-of-tuples-nested-array-pattern.ts.cpp dcf92cde12af

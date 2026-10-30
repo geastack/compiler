@@ -45398,16 +45398,31 @@ namespace console {
  * One console argument's text. Node formats console arguments with
  * `util.inspect`, not ToString, and for a Number the two differ in exactly one
  * value: inspect prints negative zero as `-0`, where ECMA-262 Number::toString
- * answers `0` (`console.log(-0)` vs `console.log(String(-0))`). Every other
- * tag keeps the ToString it had, so this widens nothing else.
+ * answers `0` (`console.log(-0)` vs `console.log(String(-0))`). A primitive
+ * tag keeps the ToString it had; an object stops at `uninspectable` below.
  */
 inline std::string inspect(double value) {
   if (value == 0 && std::signbit(value)) return "-0";
   return detail::toString(value);
 }
 
+/**
+ * A console argument that is an object. Node prints it as `util.inspect` text
+ * (`{ state: 'on' }`, `[ 1, 2 ]`, `[Function: f]`, an Error's stack), which this
+ * runtime does not render, and its ToString (`[object Object]`, `1,2`) is a
+ * different text. So the call stops by name rather than print a wrong line.
+ * `emit-tostring.ts` spells this for a typed object argument; `inspect` below
+ * reaches it for a boxed one.
+ */
+[[noreturn]] inline std::string uninspectable() {
+  std::fputs("gea: console cannot print an object argument: Node prints it with util.inspect, which this runtime does not implement\n",
+             stderr);
+  gea::detail::abortAfterFlush();
+}
+
 inline std::string inspect(const gea::Value& value) {
   if (value.tag() == gea::Value::Tag::Number) return inspect(value.as<double>());
+  if (value.tag() == gea::Value::Tag::Object || value.tag() == gea::Value::Tag::Function) uninspectable();
   return detail::toString(value);
 }
 
