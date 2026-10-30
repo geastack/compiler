@@ -6,7 +6,7 @@ import type { DiagnosticLocation } from '../../diagnostics/model.js'
 import type { IrValueId, SemanticResultId } from '../../identity/ids.js'
 import { publishRealmStorage } from './realm-storage.js'
 import { nativeSelectionHelpers } from './native-selection-helpers.js'
-import { nativeViewTargetsOf } from './native-view-targets.js'
+import { nativeViewSourcesOf, nativeViewTargetsOf } from './native-view-targets.js'
 import { asyncPromiseViewOf, isAsyncCoroutineBody } from './coroutine-bodies.js'
 import { createCppEmitBlockedError } from './emit-context.js'
 import { instanceReparentTargetsOf } from '../../ir/instance-reparenting.js'
@@ -2138,12 +2138,12 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // thunks, field initializers, virtual dispatch adapters. Same census, same
   // drift list, one owner name.
   const certifiedConversions = new Set(input.certificate.conversionNodeIds)
-  const nativeViewTargets = nativeViewTargetsOf(
-    input.certificate.conversionNodeIds.flatMap((id) => {
-      const node = input.conversions.nodeById(id)
-      return node === null ? [] : [node]
-    })
-  )
+  const certifiedNodes = input.certificate.conversionNodeIds.flatMap((id) => {
+    const node = input.conversions.nodeById(id)
+    return node === null ? [] : [node]
+  })
+  const nativeViewTargets = nativeViewTargetsOf(certifiedNodes)
+  const nativeViewSources = nativeViewSourcesOf(certifiedNodes)
   const { facts: preserveFunctionFacts, sources: preserveFunctionSources } = functionReflectionDemandOf(input.bodies)
   // The facts every mint site of a function registers (`cppThunkEntryText`),
   // spelled once per body here rather than looked up through the thunk. Empty
@@ -2226,7 +2226,14 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // of the type the element declares. Each of those decides the member's type
   // for itself, and a census that narrowed one anyway would produce two
   // spellings of one storage.
-  const jsonStructs = renderJsonStructDeclarations(input.bodies, deriver, programSite.layouts, input.classes, input.hosts.reactive)
+  const jsonStructs = renderJsonStructDeclarations(
+    input.bodies,
+    deriver,
+    programSite.layouts,
+    input.classes,
+    input.hosts.reactive,
+    nativeViewSources
+  )
   // A reactive class is NOT among them. `records.ts`'s `fieldStorageType`
   // spells a celled member from this same answer -- `Signal<long long>` where
   // the slot narrowed, `Signal<double>` where it did not -- so the cell and the
@@ -2893,7 +2900,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
         asyncResults.taskResults,
         programSite.conversionIsCertified,
         input.programConversionRecipes,
-        structs.classIndexProtocols
+        structs.classIndexProtocols,
+        nativeViewSources
       )
       const commonJsScope = [
         ...coroutineEnvironmentPrologueOf(promiseView ?? body, captures),

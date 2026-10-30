@@ -731,6 +731,7 @@ json-parse-reviver.runtime.ts.cpp beacaf1ee80b
 json-reader-dispatch.ts.cpp ed866c82311f
 json-stringify-class-own-fields.ts.cpp e6bf20aea852
 json-stringify-class-with-to-json.ts.cpp 5227eb700fa7
+json-stringify-of-a-record-view-writes-its-original.runtime.ts.cpp ff343a0e64e6
 json-stringify-of-undefined-is-undefined.runtime.ts.cpp 8593405c4851
 json-stringify-record-with-dynamic-dictionary-field.runtime.ts.cpp f1480c70834b
 json-stringify-replacer.ts.cpp f720dd410cb8
@@ -1375,7 +1376,7 @@ unbound-native-method-absence-transport.runtime.ts.cpp e39d8d4e0e45
 unbound-native-method-receiver-observations.runtime.ts.cpp 1be7fc4b1e59
 unbox-nullable-union.ts.cpp 28f62c3d4062
 uncallable-member-slot-call.runtime.js.cpp 17003891e1f7
-uncertified.txt 50938b41a582
+uncertified.txt 8c4f76c000d4
 undeclared-key-read-off-a-record-a-boxed-frame-views.runtime.js.cpp dd8e1fcfae0b
 uniform-table-to-json-calls-method-on-stored-value.runtime.js.cpp abd18ef7ee4d
 uniform-tuple-boxed-into-any-is-an-array.runtime.ts.cpp 2102566ee2ec

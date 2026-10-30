@@ -2985,7 +2985,8 @@ export const emitBody = (
   taskResults: ReadonlySet<IrValueId> = new Set(),
   conversionIsCertified?: (id: string) => boolean,
   programConversionRecipes?: readonly ProgramConversionRecipe[],
-  physicalIndexProtocols?: ReadonlyMap<DeclarationId, boolean>
+  physicalIndexProtocols?: ReadonlyMap<DeclarationId, boolean>,
+  nativeViewSources?: ReadonlyMap<string, readonly Representation[]>
 ): readonly CppArtifact[] => {
   // Every fact this body settles before a single line renders, computed here
   // -- from `body` and the plain, already-available inputs above -- and
@@ -3190,7 +3191,8 @@ export const emitBody = (
     keyOrderUnobserved,
     conversionIsCertified,
     programConversionRecipes,
-    physicalIndexProtocols
+    physicalIndexProtocols,
+    nativeViewSources
   )
   const ctx: EmitContext = debugSource === undefined ? baseCtx : { ...baseCtx, debugSource }
   // `ownedValues` stays a genuine render-time OUTPUT buffer (`EmitContext`'s

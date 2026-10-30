@@ -125,10 +125,23 @@ interface JsonCollected {
   readonly structs: Map<string, JsonStructEntry>
   readonly classes: Map<string, JsonClassEntry>
   readonly nullableUnions: Map<string, JsonNullableUnionEntry>
+  /**
+   * The structs walked for a write. A struct a parse collected first is walked
+   * again for a write: only a write reaches the views its fields may hold.
+   */
+  readonly written: Set<string>
+  /** The view target shapes whose originals this walk has entered. */
+  readonly viewed: Set<string>
 }
 
 /** A fresh, empty collector for one walk. */
-const emptyJsonCollected = (): JsonCollected => ({ structs: new Map(), classes: new Map(), nullableUnions: new Map() })
+const emptyJsonCollected = (): JsonCollected => ({
+  structs: new Map(),
+  classes: new Map(),
+  nullableUnions: new Map(),
+  written: new Set(),
+  viewed: new Set()
+})
 
 /**
  * What the JSON walk may consult beyond a representation itself.
@@ -144,13 +157,42 @@ interface JsonWorld {
   readonly classes: ReadonlyMap<DeclarationId, ClassLayout> | null
   /** The class fields a reactive plugin stores as cells -- `null` when this build spells no cell at all. */
   readonly reactiveFields: ReadonlyMap<DeclarationId, ReadonlySet<string>> | null
+  /** The originals each certified view target can retain, by target shape -- `null` when no certificate named them. */
+  readonly viewSources: ReadonlyMap<string, readonly Representation[]> | null
 }
 
 const jsonWorldOf = (ctx: EmitContext): JsonWorld => ({
   deriver: ctx.deriver,
   classes: ctx.classes,
-  reactiveFields: ctx.hosts.reactive.cell === null ? null : ctx.hosts.reactive.fields
+  reactiveFields: ctx.hosts.reactive.cell === null ? null : ctx.hosts.reactive.fields,
+  viewSources: ctx.nativeViewSources ?? null
 })
+
+/**
+ * A shared record a certified view targets may hold that view, and the runtime
+ * writes a view as its original (`NativeViewOrigin::writeJSON`): the original's
+ * own properties, not the view's declared ones. So the write needs a writer for
+ * each original, through views of views. An original with none refuses the
+ * call here: at run time the view has nothing else it may write.
+ */
+const viewOriginalsUnsupportedReason = (
+  world: JsonWorld,
+  representation: Extract<Representation, { readonly kind: 'record' | 'native-record-ref' }>,
+  collected: JsonCollected,
+  visiting: ReadonlySet<string>
+): string | null => {
+  if (representation.ownership !== 'shared-refcount' || collected.viewed.has(representation.shapeId)) return null
+  if (world.viewSources === null)
+    return 'no certified view origins reach this JSON walk, so the original a view of this record holds is unknown'
+  collected.viewed.add(representation.shapeId)
+  for (const original of world.viewSources.get(representation.shapeId) ?? []) {
+    const reason = jsonUnsupportedReason(world, original, collected, visiting, 'write')
+    if (reason === null) continue
+    collected.viewed.delete(representation.shapeId)
+    return `a view of "${representationKey(original)}" it may hold writes that original: ${reason}`
+  }
+  return null
+}
 
 /** One own data property a class writer serializes: its key, the struct member holding it, and that member's carrier. */
 interface JsonClassMember {
@@ -518,7 +560,9 @@ const jsonUnsupportedReason = (
       // discloses for every other self-referential value, and what node
       // answers instead is a `TypeError` this backend does not raise.
       if (visiting.has(structName)) return null
-      if (collected.structs.has(structName)) return null
+      const written = direction === 'write'
+      if (collected.structs.has(structName) && (!written || collected.written.has(structName)))
+        return written ? viewOriginalsUnsupportedReason(world, representation, collected, visiting) : null
       const fields = recordFieldsOfShape(deriver, representation.shapeId)
       if (fields === null) return `no record layout could be derived for shape ${representation.shapeId}`
       const stillVisiting = new Set(visiting)
@@ -543,7 +587,9 @@ const jsonUnsupportedReason = (
       const accessors = layout.kind === 'record' ? layout.accessors.filter((accessor) => !cppRecordFieldKeyIsSymbol(accessor.key)) : []
       const tuple = deriver.isTupleShape(representation.shapeId as StructuralTypeId)
       collected.structs.set(structName, { structName, fields, accessors, tuple })
-      return null
+      if (!written) return null
+      collected.written.add(structName)
+      return viewOriginalsUnsupportedReason(world, representation, collected, visiting)
     }
     case 'tagged-union': {
       const arms = nullableUnionArmsOf(representation)
@@ -1067,7 +1113,8 @@ export const renderJsonStructDeclarations = (
   deriver: RepresentationDeriver,
   layouts: RecordLayoutPolicy | undefined,
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
-  reactive: { readonly cell: string | null; readonly fields: ReadonlyMap<DeclarationId, ReadonlySet<string>> }
+  reactive: { readonly cell: string | null; readonly fields: ReadonlyMap<DeclarationId, ReadonlySet<string>> },
+  viewSources: ReadonlyMap<string, readonly Representation[]>
 ): {
   readonly declarations: readonly string[]
   /**
@@ -1081,7 +1128,7 @@ export const renderJsonStructDeclarations = (
   readonly structNames: ReadonlySet<string>
 } => {
   const collected = emptyJsonCollected()
-  const world: JsonWorld = { deriver, classes, reactiveFields: reactive.cell === null ? null : reactive.fields }
+  const world: JsonWorld = { deriver, classes, reactiveFields: reactive.cell === null ? null : reactive.fields, viewSources }
   for (const site of jsonRootsOf(bodies, layouts)) {
     jsonUnsupportedReason(world, site.representation, collected, new Set(), site.member === 'stringify' ? 'write' : 'read')
   }

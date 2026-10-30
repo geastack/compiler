@@ -802,7 +802,16 @@ const jsonSerializedClassScopes = (
         return visit(representation.value)
       case 'record':
       case 'record-with-index':
-        for (const field of representation.fields) visit(field.value)
+      case 'native-record-ref':
+        // A record carrier can hold a structural view of a class instance, and
+        // the writer serializes the instance it views, so those classes are
+        // walked as the other enumerations' `receiverClassScopes` walk them.
+        scopes.push(...receiverClassScopes(representation, structuralViewScopes))
+        for (const scope of structuralViewScopes.get(representation.shapeId) ?? []) {
+          const instance = classes.get(scope as DeclarationId)?.instance
+          if (instance) visit(instance)
+        }
+        if (representation.kind !== 'native-record-ref') for (const field of representation.fields) visit(field.value)
         return
       default:
         return

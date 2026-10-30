@@ -953,6 +953,12 @@ export interface EmitContext {
   readonly conversions: ConversionCensus
   readonly conversionIsCertified?: (id: string) => boolean
   readonly programConversionRecipes?: readonly ProgramConversionRecipe[]
+  /**
+   * The originals each certified view target can retain, by target shape
+   * (`native-view-targets.ts`, over the certificate's conversion nodes).
+   * Absent where no certificate was minted.
+   */
+  readonly nativeViewSources?: ReadonlyMap<string, readonly Representation[]>
   readonly nativeSelectionHelpers?: ReadonlyMap<string, NativeSelectionHelper>
   /** Where each binding cell lives, projected once for the whole program. */
   readonly placements: ReadonlyMap<DeclarationId, BindingPlacement>
@@ -2107,7 +2113,8 @@ export const createEmitContext = (
   keyOrderUnobserved: ReadonlySet<string> = new Set(),
   conversionIsCertified?: (id: string) => boolean,
   programConversionRecipes?: readonly ProgramConversionRecipe[],
-  physicalIndexProtocols?: ReadonlyMap<DeclarationId, boolean>
+  physicalIndexProtocols?: ReadonlyMap<DeclarationId, boolean>,
+  nativeViewSources?: ReadonlyMap<string, readonly Representation[]>
 ): { readonly ctx: EmitContext; readonly prepass: EmitBodyPrepassFacts } => {
   const admission = captures.of(owner)
   const layouts = recordLayoutPolicyOf(deriver, classes, wellKnownSymbols, abiOfCallable)
@@ -2181,6 +2188,7 @@ export const createEmitContext = (
     conversions: conversions ?? createConversionNodes({ registry: createCppConversionRegistry(layouts), nodes: new Map() }),
     ...(conversionIsCertified ? { conversionIsCertified } : {}),
     ...(programConversionRecipes ? { programConversionRecipes } : {}),
+    ...(nativeViewSources ? { nativeViewSources } : {}),
     valueNames: new Map(),
     ownedValues: new Set(),
     deliveredReturnValues: new Set(),
