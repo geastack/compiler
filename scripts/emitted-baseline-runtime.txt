@@ -804,6 +804,7 @@ map-subclass-seeded-from-union-tuples.runtime.ts.cpp 1ed08c8b613f
 map-subclass-super-set-returns-any-copy-union.runtime.ts.cpp d7a0d45e4b4c
 mapped-constraint-callee-copy.ts.cpp ac2b3d3443e4
 mapped-mixin-base-naming-its-subclass.runtime.ts.cpp 25bc1192b6c1
+mapped-type-read-at-an-open-key-in-a-generic-copy.runtime.ts.cpp 20a859c0296e
 math-abs-and-clz32-stay-integer.runtime.ts.cpp 28375eebeb25
 math-direct-rest.ts.cpp 41f17ed153a3
 math-hypot-matches-v8.ts.cpp eb5c96ba7b05
@@ -1097,7 +1098,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp f2e081f73a0b
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 04fb3092c39d
-printer-drift.txt 0c1e1d173c6e
+printer-drift.txt ac2eb3e4034b
 private-names-are-not-own-properties.ts.cpp ab5689ed2f8f
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp 3a9f81f60107

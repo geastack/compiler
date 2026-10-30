@@ -2147,6 +2147,75 @@ class StructuralView extends StructuralViewInputs {
   }
 
   /**
+   * `{ [P in C]: X }[I]` as `X`, for a mapped object this copy did not close
+   * and whose template `X` does not depend on the key.
+   *
+   * A state-machine runner's `this.machine.implementations?.actions?.[s]`,
+   * with `actions?: { [K in T['action']]: (params: Params<T>) => void }` and
+   * `s: T['action']`, is the case. The checker defers the access while `T` is
+   * open, and the mapped object has no member set to read: the checker
+   * resolves a mapped type's members only from a closed key set, and the copy
+   * has no instantiated image of this one. So `indexedAccessMemberTypes` reads
+   * no member at all (an index the copy left as written), or reads every key
+   * as absent (a bare key parameter the copy substituted) -- and that absence
+   * is not the language's: every key of the key set holds `X`.
+   *
+   * The answer is the checker's own simplification of the access, which is
+   * what `getBaseConstraintOfType` returns for it: `X` with the key replaced
+   * by the index, through the mapper of this instance, so in terms of the
+   * parameters this copy binds. It is the value at every key only when every
+   * key is present and holds the same type, so the declaration is checked:
+   *
+   * - No `?` of either sign, and no `keyof` constraint (directly or as the
+   *   bound of the key parameter), from which the checker copies each key's
+   *   optionality. Without those every key of the key set is a required
+   *   property. With them a key may be absent, and this object has no member
+   *   to say which: the copy lays it out with no fields, and a read of an
+   *   absent key through that layout throws (measured).
+   * - No part of the template is the key parameter. Otherwise each key holds
+   *   its own instantiation, and one carrier for the whole index set is a
+   *   claim about layouts that may differ per key.
+   * - No arm of the template is a deferred form. A base constraint of a type
+   *   parameter or a conditional is a bound, and the bound of a conditional
+   *   can drop a branch (`conditionalBound`). An object, function or primitive
+   *   template is its own constraint, so the checker evaluates nothing.
+   *
+   * A remapped key (`as`) changes which key holds which value, and the checker
+   * does not simplify it, so it keeps the refusal.
+   */
+  uniformMappedTemplateOf(access: ts.IndexedAccessType): readonly ts.Type[] | null {
+    const object = access.objectType
+    if ((object.flags & ts.TypeFlags.Object) === 0 || ((object as ts.ObjectType).objectFlags & ts.ObjectFlags.Mapped) === 0) return null
+    const declaration = object.getSymbol()?.declarations?.find(ts.isMappedTypeNode)
+    if (!declaration?.type || declaration.nameType || declaration.questionToken) return null
+    const keySymbol = this.checker.getSymbolAtLocation(declaration.typeParameter.name)
+    const keys = this.declaredConstraintOf(declaration.typeParameter)
+    if (!keySymbol || !keys) return null
+    // Only the declared bound, as the checker reads it: `getConstraint()` is the
+    // BASE constraint, which resolves `keyof T` to the keys it names.
+    const keySource = keys.flags & ts.TypeFlags.TypeParameter ? this.declaredConstraintOf(keys.getSymbol()?.declarations?.[0]) : keys
+    if (!keySource || keySource.flags & ts.TypeFlags.Index) return null
+    const key = this.checker.getDeclaredTypeOfSymbol(keySymbol)
+    const template = this.checker.getTypeFromTypeNode(declaration.type)
+    const arms = template.isUnionOrIntersection() ? template.types : [template]
+    if (arms.some((arm) => (arm.flags & ts.TypeFlags.Instantiable) !== 0)) return null
+    // A form `someTypePart` does not walk into could hide the key, so it counts as naming it.
+    const hidesKey = (part: ts.Type): boolean =>
+      part === key ||
+      (part.flags & ts.TypeFlags.Instantiable & ~ts.TypeFlags.TypeParameter) !== 0 ||
+      ((part.flags & ts.TypeFlags.Object) !== 0 && ((part as ts.ObjectType).objectFlags & ts.ObjectFlags.Mapped) !== 0)
+    if (this.someTypePart(template, hidesKey)) return null
+    const simplified = this.checker.getBaseConstraintOfType(access)
+    return simplified && simplified !== access && !this.carriesDeferredForm(simplified) ? [simplified] : null
+  }
+
+  declaredConstraintOf(declaration: ts.Declaration | undefined): ts.Type | null {
+    return declaration && ts.isTypeParameterDeclaration(declaration) && declaration.constraint
+      ? this.checker.getTypeFromTypeNode(declaration.constraint)
+      : null
+  }
+
+  /**
    * A deferred conditional's bound as the checker states it, for the
    * conditional that no image of this copy closes -- the same statement
    * `memberTypesThroughBound` reads for `T[K]`, asked of the conditional
@@ -4322,6 +4391,7 @@ class StructuralView extends StructuralViewInputs {
         (statesOnlyAbsence ? null : substituted) ??
         this.memberTypesThroughBound(access.objectType, indexType) ??
         this.memberTypesThroughBound(objectType, indexType) ??
+        (objectType === access.objectType ? this.uniformMappedTemplateOf(access) : null) ??
         substituted
       const only = members?.length === 1 ? members[0] : undefined
       if (only) return this.remember(type, this.typeOf(only))
