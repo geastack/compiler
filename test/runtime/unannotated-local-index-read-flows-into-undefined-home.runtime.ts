@@ -10,6 +10,13 @@
 //! expect: symbol key compared missing true
 //! expect: symbol key unknown parameter present present y
 //! expect: untyped let guard no node
+//! expect: untyped let logged undefined
+//! expect: untyped let unknown parameter missing undefined
+//! expect: chained local unknown parameter missing undefined
+//! expect: chained local unknown parameter present present x
+//! expect: symbol union key local missing undefined
+//! expect: symbol union key direct missing undefined
+//! expect: symbol union key direct present present y
 // With `noUncheckedIndexedAccess` off the checker types a missing key's read
 // as `string`. An unannotated local holding that read is widened to
 // `string | undefined` only where a use observes the absence. A use whose
@@ -70,3 +77,23 @@ console.log('symbol key unknown parameter present', consume(presentByMark))
 let node
 node = words['h']
 console.log('untyped let guard', node ? 'node' : 'no node')
+let assignedLogged
+assignedLogged = words['i']
+console.log('untyped let logged', assignedLogged)
+let passed
+passed = words['j']
+console.log('untyped let unknown parameter missing', consume(passed))
+const first = words['k']
+const second = first
+console.log('chained local unknown parameter missing', consume(second))
+const firstPresent = words['a']
+const secondPresent = firstPresent
+console.log('chained local unknown parameter present', consume(secondPresent))
+function pickMark(present: boolean): typeof presentMark | typeof absentMark {
+  return present ? presentMark : absentMark
+}
+const absentPick = pickMark(false)
+const pickedMark = marks[absentPick]
+console.log('symbol union key local missing', consume(pickedMark))
+console.log('symbol union key direct missing', consume(marks[absentPick]))
+console.log('symbol union key direct present', consume(marks[pickMark(true)]))
