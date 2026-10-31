@@ -18,7 +18,7 @@ import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { CensusCandidate } from '../census.js'
 import { blocked, mintOperationId, mintResult, operand } from './mint.js'
 import { optionalChainGuardOf, publishesShortCircuit } from './optional-chain.js'
-import { excludesNullish, holdsUndefined, includesUndefined, testsItsOperand } from './nullish.js'
+import { excludesNullish, flowsIntoUndefinedHome, includesUndefined, isSymbolKey, testsItsOperand } from './nullish.js'
 import { guardedReceiverTypeOf } from './logical-merge-type.js'
 import { calleeAwareTypeAt, isStrictContext, logicalAssignmentOperators, sourceForValue, symbolMemberKeyOf } from './shared.js'
 import type { ProducerContext } from '../producer-context.js'
@@ -610,34 +610,6 @@ const isIndexedObjectFor = (
  * A TUPLE is excluded: its element types are positional facts, and the checker
  * states out-of-range for one as an error rather than a silent `T`.
  */
-/**
- * Whether `node` is the value assigned to a local declared without a type:
- * `let node; ... node = this.#children[key]`. The checker reports such a
- * local's declared type as `any` -- the auto type it then narrows by
- * assignment -- so that contextual `any` is no home for `undefined`. The
- * local's cell takes the read's own carrier, and an absence published at the
- * read is dereferenced on the way into it: Hono's RegExpRouter `Node.insert`
- * aborted on every route at its first missing child.
- */
-const assignsAnUntypedLocal = (context: ProducerContext, node: AccessNode): boolean => {
-  let inner: ts.Node = node
-  let parent = inner.parent
-  while (parent && ts.isParenthesizedExpression(parent)) {
-    inner = parent
-    parent = parent.parent
-  }
-  if (!parent || !ts.isBinaryExpression(parent) || parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken || parent.right !== inner)
-    return false
-  if (!ts.isIdentifier(parent.left)) return false
-  const declaration = context.checker.getSymbolAtLocation(parent.left)?.valueDeclaration
-  return (
-    declaration !== undefined &&
-    ts.isVariableDeclaration(declaration) &&
-    declaration.type === undefined &&
-    ts.getJSDocType(declaration) === undefined
-  )
-}
-
 const observablyAbsentElementTypeOf = (context: ProducerContext, node: AccessNode, valueType: StructuralTypeId): StructuralTypeId => {
   // The local-binding census connects `const value = array[index]` to a later
   // direct `value === undefined` observation. Structural array reads normally
@@ -649,7 +621,7 @@ const observablyAbsentElementTypeOf = (context: ProducerContext, node: AccessNod
   if (observedAbsence && includesUndefined(observedAbsence)) return context.types.typeOf(observedAbsence)
   const key = ts.isElementAccessExpression(node) ? context.types.rawTypeAt(node.argumentExpression) : null
   const numeric = key !== null && (key.flags & ts.TypeFlags.NumberLike) !== 0
-  const symbol = key !== null && (key.flags & (ts.TypeFlags.ESSymbol | ts.TypeFlags.UniqueESSymbol)) !== 0
+  const symbol = key !== null && isSymbolKey(key)
   if (ts.isPropertyAccessExpression(node) && context.checker.getPropertyOfType(context.types.rawTypeAt(node.expression), node.name.text))
     return valueType
 
@@ -660,14 +632,10 @@ const observablyAbsentElementTypeOf = (context: ProducerContext, node: AccessNod
   // that absence at the read itself. The C++ dictionary emitter can then use
   // `has(key)` and leave the optional empty; waiting until the return/store
   // conversion would wrap the already-defaulted payload as PRESENT.
-  const contextual = context.checker.getContextualType(node)
   const receiverType = context.types.typeAt(node.expression)
   const indexedObject = isIndexedObjectFor(context, receiverType, symbol ? 'symbol' : numeric ? 'number' : 'string')
   if (
-    ((contextual !== undefined &&
-      (includesUndefined(contextual) || (holdsUndefined(contextual) && !assignsAnUntypedLocal(context, node)))) ||
-      comparesWithUndefined(context, node) ||
-      directlyTestsItsOperand(node)) &&
+    (flowsIntoUndefinedHome(context.checker, node) || comparesWithUndefined(context, node) || directlyTestsItsOperand(node)) &&
     indexedObject &&
     excludesNullish(context.types.rawTypeAt(node))
   ) {
