@@ -484,6 +484,7 @@ for-of-over-string-or-class-array-sum.runtime.ts.cpp cebdf39ba71d
 for-of-union-of-distinct-arrays-refused.ts.cpp c63817e6d7cc
 for-of-union-of-node-arrays.ts.cpp bd8a706f1bb2
 format-sort-spec-through-type-guards.runtime.ts.cpp e18c088dc8e4
+forwarded-key-created-on-a-plain-allocation-without-its-slot.runtime.ts.cpp b06f9d77afb1
 fresh-array-map-result-into-union-element-parameter.runtime.ts.cpp 7f1dfc41bc86
 fresh-literal-widened-into-union-cell-moves.runtime.ts.cpp 8aca5742e684
 fresh-local-table-stored-as-last-use-into-wider-entries.ts.cpp da622b7bd5f2

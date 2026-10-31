@@ -298,12 +298,15 @@ export const nativeFieldViewWriteText = (
     withFieldReceiver(operation.receiver.representation, 'gea_field_input', (carrier) => {
       // A forwarded key no source behind a view declares is created on that
       // source: the write names its carrier, as an open key's does. A plain
-      // allocation keeps it in its own slot.
+      // allocation keeps it in its own slot, or in its own expando where the
+      // receipt says its record declares none (`plainExpandoKeys`).
       if (receipt.open !== undefined && receipt.forwardedKeys?.includes(key))
         return (
           `return gea::record::writeLiveOpenField<${nativeFieldPolicyType(receipt.open.carrier)}>(gea_field_receiver, ${viewKeyText(key)}, ` +
           `gea_field_value, ${adapter}, ${openMaterializer(receipt.open)}, [&](const gea::NativeFieldWrite& gea_open_write) -> bool { ` +
-          `return gea_field_receiver->gea_writeOwnFieldNative(${viewKeyText(key)}, gea_open_write, gea::nativeIsExtensible(gea_field_receiver)); });`
+          (receipt.plainExpandoKeys?.includes(key)
+            ? `return gea::nativeObjectDataExtend(gea_field_receiver, ${viewKeyText(key)}, gea_open_write); });`
+            : `return gea_field_receiver->gea_writeOwnFieldNative(${viewKeyText(key)}, gea_open_write, gea::nativeIsExtensible(gea_field_receiver)); });`)
         )
       if (receipt.keyDomain === undefined && memberStore(carrier, key))
         return (

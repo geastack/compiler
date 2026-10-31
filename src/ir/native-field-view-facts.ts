@@ -63,6 +63,14 @@ export interface NativeFieldViewWrite {
    * the source's expando keeps it, exactly as for an unnamed key.
    */
   readonly forwardedKeys?: readonly string[]
+  /**
+   * The forwarded keys the receiver's own record declares no slot or accessor
+   * for. A plain allocation of that record has nowhere else to keep them:
+   * JavaScript creates the property on it, so its own expando keeps it as the
+   * `open` carrier, exactly as a view's source does. The receiver is the
+   * first home `nativeFieldViewOpenWriteHomesOf` names.
+   */
+  readonly plainExpandoKeys?: readonly string[]
 }
 
 type FieldFlow = Pick<NativeCallableFlow, 'nativeFieldStorageValues' | 'nativeAccessorStorageValues' | 'nativeFieldMethodValues'> &
@@ -473,19 +481,21 @@ export const nativeFieldViewWriteOf = (
   // refuse with: its store creates the key on that source.
   const forwarded = !data && !accessor && descriptors?.some((entry) => entry.sourceAbsent === true) === true
   let open: NativeFieldViewWrite['open']
+  let plainExpando = false
   if (forwarded) {
     if (flow.nativeFieldViewForwardedWrites?.has(nativeFieldViewForwardedWriteKey(operation.receiver.value, key)) !== true) return null
     const extension = nativeFieldViewExtensionOf(operation, conversions)
     if (extension === null) return null
     open = extension.open
     for (const target of extension.targets) targets.set(representationKey(target.target!), target)
-    // A plain allocation of the receiver's own record keeps the key in its slot.
+    // A plain allocation of the receiver's own record keeps the key in its
+    // slot, or in its expando when that record declares none.
     const own = ownRecordFieldOf(operation.receiver.representation, key)
     if (own !== null) {
       const node = conversions.nodeFor(operation.value.representation, own)
       if (!recipeIsMaterializableWithoutPriorSourceGuard(node, conversions.nodeById)) return null
       targets.set(representationKey(own), { target: own, conversion: node.id })
-    }
+    } else plainExpando = recordDeclaresNoMember(operation.receiver.representation, key)
   }
   for (const target of data ?? accessor?.map((entry) => entry.write) ?? descriptors!.map((entry) => entry.write)) {
     if (target === null) {
@@ -509,8 +519,20 @@ export const nativeFieldViewWriteOf = (
     value: operation.value.value,
     source: representationKey(operation.value.representation),
     targets: [...targets.values()],
-    ...(open === undefined ? {} : { open, forwardedKeys: [key] })
+    ...(open === undefined ? {} : { open, forwardedKeys: [key] }),
+    ...(plainExpando ? { plainExpandoKeys: [key] } : {})
   }
+}
+
+/** A plain record (no index, no native class) with neither a slot nor an accessor named `key`. */
+const recordDeclaresNoMember = (receiver: Representation, key: string): boolean => {
+  if (receiver.kind === 'optional' || receiver.kind === 'borrowed-ref')
+    return recordDeclaresNoMember(receiver.kind === 'optional' ? receiver.payload : receiver.referent, key)
+  return (
+    receiver.kind === 'record' &&
+    !receiver.fields.some((field) => field.key === key) &&
+    !receiver.accessors.some((accessor) => accessor.key === key)
+  )
 }
 
 const ownRecordFieldOf = (receiver: Representation, key: string): Representation | null => {
@@ -534,13 +556,15 @@ export const nativeFieldViewWriteSelectionOf = (
   for (const write of writes)
     for (const target of write!.targets) targets.set(target.target === null ? 'no-setter' : representationKey(target.target), target)
   const forwardedKeys = writes.flatMap((write) => write!.forwardedKeys ?? [])
+  const plainExpandoKeys = writes.flatMap((write) => write!.plainExpandoKeys ?? [])
   const open = writes.find((write) => write!.open !== undefined)?.open
-  const { open: _open, forwardedKeys: _forwarded, ...first } = writes[0]!
+  const { open: _open, forwardedKeys: _forwarded, plainExpandoKeys: _expando, ...first } = writes[0]!
   return {
     ...first,
     keyDomain,
     targets: [...targets.values()],
-    ...(open === undefined ? {} : { open, forwardedKeys })
+    ...(open === undefined ? {} : { open, forwardedKeys }),
+    ...(plainExpandoKeys.length === 0 ? {} : { plainExpandoKeys })
   }
 }
 
@@ -618,7 +642,8 @@ export const nativeFieldViewOpenWriteOf = (
     targets: [...targets.values()],
     openKeys: true,
     open: extension.open,
-    ...(fixed?.forwardedKeys === undefined ? {} : { forwardedKeys: fixed.forwardedKeys })
+    ...(fixed?.forwardedKeys === undefined ? {} : { forwardedKeys: fixed.forwardedKeys }),
+    ...(fixed?.plainExpandoKeys === undefined ? {} : { plainExpandoKeys: fixed.plainExpandoKeys })
   }
 }
 
@@ -652,6 +677,7 @@ export const nativeFieldViewReceiptMatches = (
       expected.source === actual.source &&
       expected.openKeys === actual.openKeys &&
       JSON.stringify(expected.forwardedKeys ?? []) === JSON.stringify(actual.forwardedKeys ?? []) &&
+      JSON.stringify(expected.plainExpandoKeys ?? []) === JSON.stringify(actual.plainExpandoKeys ?? []) &&
       (expected.open === undefined
         ? actual.open === undefined
         : actual.open !== undefined &&
