@@ -6,6 +6,7 @@ import type { ValueFlowIndex, ValueWrite } from './flow/model.js'
 import { closedArrayStoredValuesOf } from './flow/callable-reach.js'
 import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
+import { outermostErasureOf, unwrapErasedExpression } from './producers/erasure.js'
 
 /**
  * The type arguments a bare `new Map()`/`new Set()`/`new WeakMap()`/`new
@@ -36,6 +37,9 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
  *   argument: the moment either is present, the program has stated its own
  *   answer and this module has nothing to add -- overriding a stated type
  *   would not be inference, it would be a second, disagreeing opinion.
+ *   One statement is not an answer: a `Map`/`WeakMap` value stated as an
+ *   erased instantiation of what the program stores (`erasesInstantiationOf`)
+ *   says no more about the storage than `any` would.
  * - `X` resolved by SYMBOL, never by spelling (`checker.resolveName`, the
  *   same mechanism `host-protocols.ts`'s `keyedCollectionDeclarationsOf` and
  *   `promiseDeclarationOf` already use to name `Map`/`Set`/`WeakMap`/
@@ -144,6 +148,13 @@ export interface CollectionTypeArguments {
    * about one storage, and no later layer makes it agree.
    */
   readonly valueEvidence: readonly ts.Expression[]
+  /**
+   * The cell that owns the storage. `key` and `value` are spelled in its
+   * scope: a module-scope cache filled inside a generic body holds that
+   * body's `T` in every copy at once (`structural.ts`'s
+   * `collectionStorageTypeOf`).
+   */
+  readonly holder?: ts.Node
 }
 
 export interface CollectionBindingCensus {
@@ -303,6 +314,40 @@ const CONSTRUCTOR_NAMES: ReadonlyMap<string, CollectionFamily> = new Map([
 ])
 
 const isUnusableEvidence = (type: ts.Type): boolean => (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0
+
+const isTopType = (type: ts.Type): boolean => (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0
+
+const referenceTargetOf = (type: ts.Type): ts.Type | null =>
+  (type.flags & ts.TypeFlags.Object) !== 0 && ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) !== 0
+    ? (type as ts.TypeReference).target
+    : null
+
+/** `stored` itself, or `stored` with type arguments replaced by `any`/`unknown` at any depth. */
+const coversInstantiation = (checker: ts.TypeChecker, stated: ts.Type, stored: ts.Type): boolean => {
+  if (stated === stored || isTopType(stated)) return true
+  const target = referenceTargetOf(stated)
+  if (target === null || target !== referenceTargetOf(stored)) return false
+  const statedArguments = checker.getTypeArguments(stated as ts.TypeReference)
+  const storedArguments = checker.getTypeArguments(stored as ts.TypeReference)
+  return (
+    statedArguments.length === storedArguments.length &&
+    statedArguments.every((argument, index) => coversInstantiation(checker, argument, storedArguments[index]!))
+  )
+}
+
+/**
+ * Whether `stated` names the generic `stored` instantiates with some of its
+ * type arguments erased to a top type -- `Map<string, MachineState<any>>`
+ * over a stored `Map<string, MachineState<T>>` -- and states nothing else.
+ *
+ * A module-scope cache of a generic function is written this way because
+ * module scope cannot name the function's `T`. The erased arguments say only
+ * that some instantiation is held, the way `any` alone would; they are no
+ * second storage for the value. A bare top type is not an erasure: a program
+ * that writes `any` itself declares a dynamic slot.
+ */
+const erasesInstantiationOf = (checker: ts.TypeChecker, stated: ts.Type, stored: ts.Type): boolean =>
+  stated !== stored && !isTopType(stated) && coversInstantiation(checker, stated, stored)
 
 interface CollectionEntry {
   readonly family: CollectionFamily
@@ -525,6 +570,9 @@ export const censusCollectionBindings = (
   const byOwner = new Map<ts.Node, CollectionEntry>()
   const nodeOwner = new Map<ts.NewExpression, ts.Node>()
   const nodeRefusal = new Map<ts.NewExpression, string>()
+  /** `new Map<K, V>()`/`new WeakMap<K, V>()` with no constructor argument, by owner: bound only when V erases what is stored. */
+  const statedMaps = new Map<ts.Node, ts.NewExpression[]>()
+  const erasedOwners: ts.Node[] = []
 
   const collectConstructions = (node: ts.Node): void => {
     // Mirrors `value-flow.ts`'s own `visit` guard exactly (same `reachable`,
@@ -572,6 +620,9 @@ export const censusCollectionBindings = (
             )
           } else existing.nodes.push(node)
         }
+      } else if ((family === 'map' || family === 'weak-map') && node.typeArguments?.length === 2 && !node.arguments?.length) {
+        const owner = ownerDeclOf(node)
+        if (owner) statedMaps.set(owner, [...(statedMaps.get(owner) ?? []), node])
       }
     }
     ts.forEachChild(node, collectConstructions)
@@ -862,6 +913,55 @@ export const censusCollectionBindings = (
       continue
     }
     boundValue.set(owner, value)
+  }
+
+  // A stated value that only erases an instantiation of what the program
+  // stores is not a storage of its own (`erasesInstantiationOf`): the map
+  // holds the stored values' own type, as it would had the program stated
+  // nothing. A stored value is read through its assertions, which restate a
+  // type and allocate nothing. Any value outside one erased instantiation
+  // leaves the statement standing.
+  for (const [owner, nodes] of statedMaps) {
+    if (byOwner.has(owner)) continue
+    const stated = checker.getTypeAtLocation(nodes[0]!)
+    if (nodes.some((node) => checker.getTypeAtLocation(node) !== stated)) continue
+    const [statedKey, statedValue] = checker.getTypeArguments(stated as ts.TypeReference)
+    if (!statedKey || !statedValue) continue
+    const stored = [...aliasClosureOf(owner)].flatMap((decl) =>
+      flow
+        .writesToDeclaration(decl)
+        .flatMap((write) => (write.edge === 'collection-value' && write.value ? [argumentType(unwrapErasedExpression(write.value))] : []))
+    )
+    const value = stored.length > 0 && stored.every((type) => type !== null) ? widestOf(checker, stored as ts.Type[]) : null
+    if (!value || !erasesInstantiationOf(checker, statedValue, value)) continue
+    for (const node of nodes) nodeOwner.set(node, owner)
+    boundKey.set(owner, statedKey)
+    boundValue.set(owner, value)
+    erasedOwners.push(owner)
+  }
+  // `const cached = cache.get(key)` is typed from the same erased statement,
+  // so when the stored value is itself a Map or Set the cell names that
+  // collection through the same erasure, and holds its own type arguments.
+  for (const owner of erasedOwners) {
+    const stored = boundValue.get(owner)!
+    if (!isStandardInterfaceType(checker, owner, 'Map', stored) && !isStandardInterfaceType(checker, owner, 'Set', stored)) continue
+    const [heldKey, heldValue] = checker.getTypeArguments(stored as ts.TypeReference)
+    if (!heldKey) continue
+    for (const decl of aliasClosureOf(owner))
+      for (const write of flow.writesToDeclaration(decl)) {
+        const call = write.site
+        if (write.edge !== 'collection-key' || !ts.isCallExpression(call) || !ts.isPropertyAccessExpression(call.expression)) continue
+        // The lib's own `get`, as `flow/collection-value-continuation.ts` reads it.
+        const member = checker.getSymbolAtLocation(call.expression.name)
+        if (call.expression.name.text !== 'get' || !member?.declarations?.every((one) => one.getSourceFile().isDeclarationFile)) continue
+        const read = outermostErasureOf(call)
+        const cell = read.parent
+        if (!ts.isVariableDeclaration(cell) || cell.initializer !== read || cell.type || !ts.isIdentifier(cell.name)) continue
+        if ((cell.parent.flags & ts.NodeFlags.Const) === 0) continue
+        if (!erasesInstantiationOf(checker, checker.getNonNullableType(checker.getTypeAtLocation(cell)), stored)) continue
+        boundKey.set(cell, heldKey)
+        if (heldValue) boundValue.set(cell, heldValue)
+      }
   }
 
   // --- Array element census -------------------------------------------
@@ -1264,7 +1364,7 @@ export const censusCollectionBindings = (
     const value = boundValue.get(owner) ?? null
     const valueEvidence = unresolvedValueArgs.get(owner) ?? []
     if (key === null && value === null && valueEvidence.length === 0) return null
-    return { key, value, valueEvidence }
+    return { key, value, valueEvidence, holder: owner }
   }
 
   return {

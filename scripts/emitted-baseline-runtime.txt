@@ -424,6 +424,7 @@ empty-loop-body-reruns-its-test.runtime.ts.cpp 843cecccc682
 empty-pattern-coercible-and-nullish-typeerror.runtime.js.cpp 476634dd18ff
 engine-passed-to-callbacks-an-empty-array-never-holds-is-not-reflected.runtime.js.cpp 4c244ba20d27
 enum-native-object.runtime.ts.cpp 1232ed85a0f1
+erased-instantiation-cache-holds-the-map-it-stores.runtime.ts.cpp 5d67ea6474b2
 error-description-document-holds-record-class-or-error.runtime.ts.cpp e99524aa3c77
 error-interface-carries-the-error.runtime.ts.cpp 7bb2f956def5
 error-interface-into-nullable-error-callback.runtime.ts.cpp dd24d6d63eb7

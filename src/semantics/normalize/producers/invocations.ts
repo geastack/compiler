@@ -1408,7 +1408,8 @@ const collectionConstructResultOverride = (context: ProducerContext, node: ts.Ne
  * Like `collectionConstructResultOverride`, this is only the GATE, never a
  * second derivation: it asks the census the same question `typeAt` asked, and
  * returns `typeAt`'s own answer unchanged. The census admits only a bare `new
- * Map()`/`new WeakMap()` -- no type arguments, no constructor argument -- and
+ * Map()`/`new WeakMap()` -- no type arguments (or a value that only erases the
+ * instantiation stored), no constructor argument -- and
  * only answers a receiver resolving to one it bound a value for (or left
  * `value-unresolved` with evidence a later layer can lift), so a `.get` on
  * anything else records no divergence at all.

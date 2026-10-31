@@ -692,6 +692,7 @@ export const inferredCollectionTypeArgumentsAt = (
   collections: CollectionBindingCensus,
   table: StructuralTypeTable,
   typeOf: (type: ts.Type) => StructuralTypeId,
+  storageTypeOf: (type: ts.Type, holder: ts.Node) => StructuralTypeId,
   bags: ObjectBagCensus,
   own: ts.Type,
   node: ts.Node
@@ -706,12 +707,13 @@ export const inferredCollectionTypeArgumentsAt = (
           ? collections.typeArgumentsForRead(node.expression)
           : null
   if (!bound) return null
+  const boundTypeOf = boundTypeMapper(bound, typeOf, storageTypeOf)
   const generic = table.get(typeOf(own)).shape
   // A cell's own type need not be the collection at all -- an `object:
   // Record | Map` parameter holds a map in one arm and a dictionary in the
   // other -- so only
   // a collection is overridden, never the declaration beside it.
-  const direct = isLibKeyedCollection(own) ? overriddenCollectionShape(table, typeOf, bags, bound, generic) : null
+  const direct = isLibKeyedCollection(own) ? overriddenCollectionShape(table, boundTypeOf, bags, bound, generic) : null
   if (direct !== null) return direct
   // A cell the program lets go ABSENT holds the collection inside a union,
   // and refusing there put the census's answer on the reads and the
@@ -746,7 +748,7 @@ export const inferredCollectionTypeArgumentsAt = (
   const collectionsIn = payloads.filter((member) => collectionIds.has(member.id))
   const payload = payloads.length === 1 ? payloads[0]! : collectionsIn.length === 1 ? collectionsIn[0]! : null
   if (payload === null) return null
-  const overridden = overriddenCollectionShape(table, typeOf, bags, bound, payload.shape)
+  const overridden = overriddenCollectionShape(table, boundTypeOf, bags, bound, payload.shape)
   if (overridden === null) return null
   return table.intern({
     kind: 'union',
@@ -755,6 +757,16 @@ export const inferredCollectionTypeArgumentsAt = (
 }
 
 const isAbsenceKeyword = (primitive: string): boolean => primitive === 'undefined' || primitive === 'null'
+
+/** How `bound`'s own types map: in the scope of the storage that holds them, when the census names it. */
+const boundTypeMapper =
+  (
+    bound: CollectionTypeArguments,
+    typeOf: (type: ts.Type) => StructuralTypeId,
+    storageTypeOf: (type: ts.Type, holder: ts.Node) => StructuralTypeId
+  ): ((type: ts.Type) => StructuralTypeId) =>
+  (type) =>
+    bound.holder === undefined ? typeOf(type) : storageTypeOf(type, bound.holder)
 
 /** One of lib's own four keyed collections -- by its declarations living in a default-lib file, so a program's own `Map` is never one. */
 const isLibKeyedCollection = (type: ts.Type): boolean => {
@@ -888,7 +900,8 @@ const boundValueTypeId = (
  * value (`CollectionTypeArguments`'s own doc), and a `Map` the program only
  * ever reads leaves `value` null rather than inventing one -- both keep the
  * checker's answer, unchanged. The census itself admits only a bare `new
- * Map()` with no type arguments and no constructor argument, so an annotated
+ * Map()` with no type arguments and no constructor argument, or one whose
+ * stated value only erases the instantiation it stores, so an annotated
  * `Map<string, Foo | null>` never reaches here and the author's own statement
  * stays authoritative.
  */
@@ -896,6 +909,7 @@ export const collectionMemberResultTypeAt = (
   collections: CollectionBindingCensus,
   table: StructuralTypeTable,
   typeOf: (type: ts.Type) => StructuralTypeId,
+  storageTypeOf: (type: ts.Type, holder: ts.Node) => StructuralTypeId,
   bags: ObjectBagCensus,
   layoutTypeAt: (node: ts.Node) => ts.Type,
   node: ts.Node
@@ -921,8 +935,9 @@ export const collectionMemberResultTypeAt = (
   // emitted `Ref<Map<Value, Value>> = Ref<Map<string, Ref<Slot>>>` and clang
   // rejected it outright -- the receiver had the census's answer and the call
   // that returns that same receiver had the checker's.
-  if (member !== 'get') return inferredCollectionTypeArgumentsAt(collections, table, typeOf, bags, layoutTypeAt(receiver), receiver)
-  const value = boundValueTypeId(table, typeOf, bags, bound)
+  if (member !== 'get')
+    return inferredCollectionTypeArgumentsAt(collections, table, typeOf, storageTypeOf, bags, layoutTypeAt(receiver), receiver)
+  const value = boundValueTypeId(table, boundTypeMapper(bound, typeOf, storageTypeOf), bags, bound)
   if (value === null) return null
   return table.intern({ kind: 'union', members: [value, table.intern({ kind: 'primitive', primitive: 'undefined' })] })
 }

@@ -1593,6 +1593,7 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
         this.collections,
         this.table,
         (a0) => this.typeOf(a0),
+        (a0, holder) => this.collectionStorageTypeOf(a0, holder),
         this.bags,
         this.layoutTypeAt(node),
         node
@@ -1646,6 +1647,7 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
         this.collections,
         this.table,
         (a0) => this.typeOf(a0),
+        (a0, holder) => this.collectionStorageTypeOf(a0, holder),
         this.bags,
         this.layoutTypeAt,
         node
@@ -1806,7 +1808,15 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
       // A map arm the collection census bound for this cell is that map, not
       // the checker's `Map<any, any>` (`inferredCollectionTypeArgumentsAt`).
       const armType = (arm: ts.Type): StructuralTypeId =>
-        inferredCollectionTypeArgumentsAt(this.collections, this.table, (a0) => this.typeOf(a0), this.bags, arm, node) ?? this.typeOf(arm)
+        inferredCollectionTypeArgumentsAt(
+          this.collections,
+          this.table,
+          (a0) => this.typeOf(a0),
+          (a0, holder) => this.collectionStorageTypeOf(a0, holder),
+          this.bags,
+          arm,
+          node
+        ) ?? this.typeOf(arm)
       // One arm is a read the checker's flow narrowed to that arm of the
       // cell (`parameter-bindings.ts`'s `flowArmOf`): the arm, not a union.
       if (unionArms && unionArms.length === 1) return armType(unionArms[0]!)
@@ -2355,8 +2365,12 @@ class StructuralView extends StructuralViewInputs {
     return image && !this.isOpenForm(image) ? image : null
   }
 
-  /** A type's closed image in every copy of the one generic that writes its parameters, or `null`. */
-  everyCopyImageOf(type: ts.Type): readonly ts.Type[] | null {
+  /**
+   * The one generic whose type parameters `type` names, or `null` when it
+   * names none, several generics' parameters, or a form this walk does not
+   * read.
+   */
+  parameterOwnerOf(type: ts.Type): ts.Node | null {
     const owners = new Set<ts.Node>()
     const collect = (part: ts.Type, depth: number): boolean => {
       if (depth > 6) return false
@@ -2380,10 +2394,44 @@ class StructuralView extends StructuralViewInputs {
     }
     if (!collect(type, 0) || owners.size !== 1) return null
     const [owner] = owners
+    return owner ?? null
+  }
+
+  /** A type's closed image in every copy of the one generic that writes its parameters, or `null`. */
+  everyCopyImageOf(type: ts.Type): readonly ts.Type[] | null {
+    const owner = this.parameterOwnerOf(type)
     // A parameter's parent is the generic that declares it, or an `infer`
     // clause, which no copy is keyed by and so answers no copies.
     const images = owner ? this.instantiatedMembers.throughEveryCopy(owner as ts.Declaration, type) : null
     return images && images.every((image) => !this.isOpenForm(image)) ? images : null
+  }
+
+  /**
+   * A collection's census-bound key or value, in the storage `holder` owns.
+   *
+   * A module-scope cache filled inside a generic body is one storage for
+   * every copy of that body, but its bound value is spelled with the body's
+   * `T`. Mapped by whichever view asked, the cache's declaration closed `T`
+   * one way and each copy's references closed it their own way: two carriers
+   * for one cache, and a conversion between them at every reference. The
+   * storage holds what every copy stores, so each view reads the type through
+   * every copy's own mapper, as the reinterpreted-class fold reads a layout
+   * through its copy. A holder inside the generic has one storage per copy
+   * and keeps its ordinary mapping, and so does a generic nested in another
+   * one: its copy path needs the enclosing copy, which one storage has none
+   * of.
+   */
+  collectionStorageTypeOf(type: ts.Type, holder: ts.Node): StructuralTypeId {
+    const owner = this.parameterOwnerOf(type)
+    if (owner === null || !ts.isFunctionLike(owner)) return this.typeOf(type)
+    for (let node: ts.Node | undefined = holder; node; node = node.parent) if (node === owner) return this.typeOf(type)
+    for (let node: ts.Node | undefined = owner.parent; node; node = node.parent)
+      if ((ts.isFunctionLike(node) || ts.isClassLike(node)) && ts.getEffectiveTypeParameterDeclarations(node).length > 0)
+        return this.typeOf(type)
+    const copies = this.specializations.specializationsOf(owner)
+    if (copies.length === 0) return this.typeOf(type)
+    const members = [...new Set(copies.map((_, ordinal) => this.mapperFor([{ owner, ordinal }]).typeOf(type)))]
+    return members.length === 1 ? members[0]! : this.table.intern({ kind: 'union', members })
   }
 
   /**
@@ -2662,6 +2710,7 @@ class StructuralView extends StructuralViewInputs {
     // closes for every other node shape naming the same cell -- see
     // `StructuralPartsInput.collections`'s own doc.
     collections: this.collections,
+    collectionStorageTypeOf: (type, holder) => this.collectionStorageTypeOf(type, holder),
     table: this.table,
     // The bag census the collection value slot needs -- see
     // `StructuralPartsInput.bags`.

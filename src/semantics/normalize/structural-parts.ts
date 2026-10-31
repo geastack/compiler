@@ -126,6 +126,8 @@ export interface StructuralPartsInput {
    * gave it.
    */
   readonly collections?: CollectionBindingCensus
+  /** A bound collection argument in its storage's own scope -- `structural.ts`'s `collectionStorageTypeOf`. */
+  readonly collectionStorageTypeOf?: (type: ts.Type, holder: ts.Node) => StructuralTypeId
   /**
    * The table `inferredCollectionTypeArgumentsAt` interns the narrowed
    * keyed-collection shape into -- see that function's own header
@@ -221,6 +223,7 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
   const declaredMembers = input.declaredMembers ?? emptyDeclaredMemberCensus
   const parameters = input.parameters ?? emptyParameterBindingCensus
   const collections = input.collections ?? emptyCollectionBindingCensus
+  const storageTypeOf = input.collectionStorageTypeOf ?? ((type: ts.Type) => typeOf(type))
   const table = input.table ?? null
   const bags = input.bags ?? emptyObjectBagCensus
 
@@ -413,8 +416,9 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
                 // through is that map (`collection-bindings.ts`'s parameter
                 // publication), exactly as the body's own cell reads it.
                 (arm) =>
-                  (table && declaration ? inferredCollectionTypeArgumentsAt(collections, table, typeOf, bags, arm, declaration) : null) ??
-                  typeOf(arm)
+                  (table && declaration
+                    ? inferredCollectionTypeArgumentsAt(collections, table, typeOf, storageTypeOf, bags, arm, declaration)
+                    : null) ?? typeOf(arm)
               )
             )
           : censusRestElement !== null
@@ -588,6 +592,7 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
           collections,
           table,
           typeOf,
+          storageTypeOf,
           bags,
           checker.getTypeAtLocation(expression),
           expression
@@ -846,7 +851,9 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // (`structural-array-element.ts`) for why the checker's answer needs a
     // second opinion here at all.
     const inferredCollection =
-      table && declaration ? inferredCollectionTypeArgumentsAt(collections, table, typeOf, bags, declared, declaration) : null
+      table && declaration
+        ? inferredCollectionTypeArgumentsAt(collections, table, typeOf, storageTypeOf, bags, declared, declaration)
+        : null
     const arrayElement = censusNode
       ? inferredArrayElementAt(checker, collections, (node) => checker.getTypeAtLocation(node), censusNode)
       : null
