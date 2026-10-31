@@ -358,6 +358,7 @@ dictionary-or-any-union-computed-read.runtime.ts.cpp 31094505b636
 direct-interface-method-receiver.ts.cpp 14b713845f5f
 dispatch-event-target-created-on-viewed-literal.runtime.ts.cpp 1bd9f2ed481f
 dispatched-getter-read-enters-optional-chain-result.runtime.ts.cpp 3c3cee2b2d7c
+document-alias-of-a-live-view-reads-its-originals-fields.runtime.ts.cpp 894d46997c9b
 document-literal-define-and-spread-copy-keep-order.runtime.ts.cpp d8fb9cadc3e1
 document-narrowed-to-bytes-by-guard.runtime.ts.cpp d18942e06597
 document-or-array-isarray-for-of.runtime.ts.cpp 4a6dd078421d

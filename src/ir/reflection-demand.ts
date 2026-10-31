@@ -2694,6 +2694,11 @@ export const reflectionExposureOf = (
       }
       for (const value of converting) nativeFieldInits.delete(value)
     }
+    // A conversion with no closed proof may observe its source through the
+    // source's dynamic protocol, and a live view answers that protocol from
+    // its original (`aliasOf` of a view is the original's Document), so the
+    // original is published too, as an unknown call's argument is.
+    const promoteOperand = operation.kind === 'convert' ? promoteLogicalReceiver : promoteFull
     for (const operand of operandsOfIrOperation(operation))
       if (nativeFieldInits.has(operand.value)) continue
       else if (
@@ -2701,7 +2706,7 @@ export const reflectionExposureOf = (
         carriesCallable(operand.representation) ||
         isDeferredCarrier(operand.representation)
       )
-        promoteFull(
+        promoteOperand(
           operand.representation,
           `unknown-operation-boundary:${operation.kind}${operation.kind === 'compute' ? `:${operation.form}:${operation.operator}` : ''}${
             operation.kind === 'convert' && promotionWatch !== undefined ? `:${convertCauseOf(operation)}` : ''
