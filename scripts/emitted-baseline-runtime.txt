@@ -1343,6 +1343,7 @@ tuple-rest-abi.ts.cpp f097c84fc997
 tuple-typed-rest-spread.runtime.js.cpp d409283d51e5
 tuple-view-over-json-array-stores-native-entry-in-its-lane.runtime.ts.cpp 0014c1f9b0dc
 type-guard-intersection-of-family-member.ts.cpp c22c00511488
+type-guard-narrows-to-the-check-parameter-of-a-deferred-conditional.runtime.ts.cpp 6465145b4dea
 type-only-class-reflection.runtime.js.cpp 10dc55b7e209
 type-only-specifier-import-does-not-evaluate.runtime.ts.cpp abf3f82ec297
 type-predicate-batch-operations-keep-their-storage.runtime.ts.cpp dac2b1212c82

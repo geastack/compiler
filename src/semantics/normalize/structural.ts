@@ -2293,7 +2293,8 @@ class StructuralView extends StructuralViewInputs {
    *
    * The branch is then instantiated at the conditional's own check type. That
    * is the part the public checker cannot do in general, so only the forms it
-   * can are taken: a closed type, the check parameter itself, and
+   * can are taken: a closed type, the check parameter itself (bare, or as the
+   * substitution the checker writes for it in its own true branch), and
    * `NonNullable` or `Awaited` of one, which the checker reduces with its own
    * operators. Each distributes over a union, so instantiating at a union
    * check type is the same as distributing. An `infer` clause, a
@@ -2392,6 +2393,18 @@ class StructuralView extends StructuralViewInputs {
    */
   branchAt(branch: ts.Type, parameter: ts.Type, filling: ts.Type): ts.Type | null {
     if (branch === parameter) return filling
+    // Inside its own true branch the checker spells the check parameter as a
+    // substitution: the parameter, known to satisfy the extends type
+    // (`obj is T extends object ? T : never`). The checker instantiates it to
+    // the filling when the filling satisfies that constraint, and to an
+    // intersection nothing here can spell otherwise. Each closed image is
+    // asked; the open check type the every-copy route returns last is the
+    // parameter, as above, once every image has passed.
+    const substitution = branch.flags & ts.TypeFlags.Substitution ? (branch as ts.SubstitutionType) : null
+    if (substitution?.baseType === parameter) {
+      if (this.isOpenForm(substitution.constraint)) return null
+      return this.isOpenForm(filling) || this.checker.isTypeAssignableTo(filling, substitution.constraint) ? filling : null
+    }
     const nullable = this.operatorArgument(branch, 'NonNullable')
     const awaited = nullable ? null : this.operatorArgument(branch, 'Awaited')
     const argument = nullable ?? awaited
