@@ -1137,6 +1137,7 @@ export const censusReturnBindings = (
       const signature = signatures[0] as ts.Signature
       const unwrapped = ts.isCallExpression(node) ? unwrapExplicitThisCall(checker, node) : null
       const returned = explicitThisCallReturnType(signature, unwrapped ? knownOrResolve(unwrapped.callee, owner) : null)
+      if (!returned) return attribute(owner, 'return-depends-on-open-generic-call')
       if ((returned.flags & (ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0) return attribute(owner, 'return-depends-on-void-call')
       if (!isAnyType(returned)) return returned
       const declared = signature.declaration

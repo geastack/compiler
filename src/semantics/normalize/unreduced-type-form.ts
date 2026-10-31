@@ -32,7 +32,9 @@ import ts from '#typescript'
  * argument away from the census, which then bound `map: object` to the vacuous
  * empty record while the copy's ABI declared the instantiated `Opts`. Measured
  * as a lowering refusal on `assign-for-in-generic.ts`. Substitution finishes a
- * type parameter; it does not finish a conditional.
+ * type parameter; it does not finish a conditional. The one bare parameter no
+ * copy finishes is the CALLEE's own, read off its declared return at a call:
+ * see `explicitThisCallReturnType`.
  *
  * Refusing, never reducing: reducing is what the checker already did at the
  * call site, and its answer is what these resolvers fall back to the moment a

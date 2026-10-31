@@ -1643,12 +1643,48 @@ export const singleConventionAt = (checker: ts.TypeChecker, resolved: ts.Type, n
   return single.getCallSignatures().length === 1 ? single : null
 }
 
-/** The result of an authenticated `.call`/`.apply`, read from its already-resolved underlying callable. */
-export const explicitThisCallReturnType = (fallback: ts.Signature, underlying: ts.Type | null): ts.Type => {
-  if (!underlying) return fallback.getReturnType()
+/**
+ * A signature's declared return, or `null` when it names a type parameter the
+ * signature itself declares: `T` off `compact<T extends Record<string,
+ * unknown> | undefined>(obj: T): T`.
+ *
+ * No copy substitutes that `T` at the call. The call's instantiation is the
+ * checker's, and a census reads the declared return only where the checker's
+ * answer was unusable -- for `compact(raw)` with `raw: any`, `T = any`.
+ * Outside the callee's body the open `T` reaches the structural mapper as a
+ * callable used as a value and closes over its constraint, a dictionary the
+ * `any` copy's string is not; inside it (a recursive call) the enclosing
+ * copy's filling stands in for an instantiation the call never made. Refused
+ * for the reason `isUnreducedTypeForm` gives: the checker's answer stands.
+ */
+const declaredReturnType = (signature: ts.Signature): ts.Type | null => {
+  const returned = signature.getReturnType()
+  const own = signature.getTypeParameters() ?? []
+  if (own.length === 0) return returned
+  const seen = new Set<ts.Type>()
+  const namesOwn = (type: ts.Type): boolean => {
+    if (seen.has(type)) return false
+    seen.add(type)
+    if (own.includes(type)) return true
+    if (type.isUnionOrIntersection()) return type.types.some(namesOwn)
+    const reference = type as ts.TypeReference
+    const args = (type.flags & ts.TypeFlags.Object) !== 0 ? (reference.typeArguments ?? []) : []
+    return [...args, ...(type.aliasTypeArguments ?? [])].some(namesOwn)
+  }
+  return namesOwn(returned) ? null : returned
+}
+
+/**
+ * The result of a call as its callee declares it -- for an authenticated
+ * `.call`/`.apply`, read from its already-resolved underlying callable. `null`
+ * where the declared return is the callee's own open instantiation
+ * (`declaredReturnType`).
+ */
+export const explicitThisCallReturnType = (fallback: ts.Signature, underlying: ts.Type | null): ts.Type | null => {
+  if (!underlying) return declaredReturnType(fallback)
   const signatures = underlying.getCallSignatures()
   const signature = signatures[0]
-  if (signatures.length !== 1 || !signature || signature.typeParameters?.length) return fallback.getReturnType()
+  if (signatures.length !== 1 || !signature || signature.typeParameters?.length) return declaredReturnType(fallback)
   return signature.getReturnType()
 }
 

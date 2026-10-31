@@ -82,7 +82,12 @@ import type { IdentityTable } from './identities.js'
 import { createMemberRules, type MemberMode } from './structural-members.js'
 import { emptyAbsentGlobalCensus, type AbsentGlobalCensus } from './absent-globals.js'
 import { createLayoutTypeResolver } from './structural-layout-type.js'
-import { emptyParameterBindingCensus, parameterCensusForCopy, type ParameterBindingCensus } from './parameter-bindings.js'
+import {
+  constraintErasedParameterAt,
+  emptyParameterBindingCensus,
+  parameterCensusForCopy,
+  type ParameterBindingCensus
+} from './parameter-bindings.js'
 import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
 import { bagShapeOfType, bagShapeTypeAt, emptyObjectBagCensus, type ObjectBagCensus } from './object-bag-bindings.js'
 import { indexedAccessMemberTypes } from './structural-indexed-access.js'
@@ -332,41 +337,6 @@ export interface StructuralMapper {
    * relevant fillings; see `SpecializationCensus.copiesMayDifferInLayout`.
    */
   readonly classCopies: () => ReadonlyMap<DeclarationId, readonly ClassCopyKey[]>
-}
-
-/**
- * The TYPE PARAMETER a reference actually holds, where the checker answered
- * with its base constraint instead.
- *
- * `getTypeAtLocation` on a reference to a `T`-typed binding does not answer
- * `T`. TypeScript computes an APPARENT type for the reference so member
- * lookups and narrowing have a concrete shape to work against, and for an
- * unnarrowed generic that apparent type is the parameter's base constraint --
- * `object` inside a `json = <T extends JSONValue | {} | InvalidJSONValue>
- * (object: T) => ... JSON.stringify(object)` reads back as the whole
- * constraint union.
- *
- * That is an ERASURE of the monomorphization, and it disagrees with the cell:
- * the parameter's own declaration is typed `T`, which this copy substitutes to
- * what the call bound, so the binding held `{ hello: string }` while every
- * read of it published the constraint. A `binding-read-conversion` from a
- * record to a ten-armed union is not a conversion any backend should install
- * -- the two carriers describe one value, and only one of them is the value's
- * type.
- *
- * Answered only when the checker's type IS the constraint, object-identical.
- * A reference the flow analysis genuinely narrowed (`typeof object ===
- * 'string'`) reaches a different type, and that narrowing is real.
- */
-const constraintErasedParameterAt = (checker: ts.TypeChecker, node: ts.Node): ts.Type | null => {
-  if (!ts.isIdentifier(node)) return null
-  const declaration = checker.getSymbolAtLocation(node)?.valueDeclaration
-  if (!declaration) return null
-  if (!ts.isParameter(declaration) && !ts.isVariableDeclaration(declaration)) return null
-  if (declaration.name === node) return null
-  const declared = checker.getTypeAtLocation(declaration)
-  if ((declared.flags & ts.TypeFlags.TypeParameter) === 0) return null
-  return checker.getBaseConstraintOfType(declared) === checker.getTypeAtLocation(node) ? declared : null
 }
 
 /** The standard keyed collections a class can extend natively; their instances are the runtime's own collection objects. */

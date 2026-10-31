@@ -1450,7 +1450,7 @@ export const censusFieldBindings = (
       const signature = signatures[0] as ts.Signature
       const unwrapped = ts.isCallExpression(node) ? unwrapExplicitThisCall(checker, node) : null
       const returned = explicitThisCallReturnType(signature, unwrapped ? knownOrResolve(unwrapped.callee) : null)
-      if ((returned.flags & (ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0) return null
+      if (!returned || (returned.flags & (ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0) return null
       return isAnyType(returned) ? null : returned
     }
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) return knownOrResolve(node.right)

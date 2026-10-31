@@ -550,6 +550,46 @@ export const carriesUnsubstitutedGeneric = (checker: ts.TypeChecker, type: ts.Ty
   return checker.getTypeArguments(reference).some((part) => carriesUnsubstitutedGeneric(checker, part, depth + 1))
 }
 
+/**
+ * The TYPE PARAMETER a reference actually holds, where the checker answered
+ * with its base constraint instead.
+ *
+ * `getTypeAtLocation` on a reference to a `T`-typed binding does not answer
+ * `T`. TypeScript computes an APPARENT type for the reference so member
+ * lookups and narrowing have a concrete shape to work against, and for an
+ * unnarrowed generic that apparent type is the parameter's base constraint --
+ * `object` inside a `json = <T extends JSONValue | {} | InvalidJSONValue>
+ * (object: T) => ... JSON.stringify(object)` reads back as the whole
+ * constraint union.
+ *
+ * That is an ERASURE of the monomorphization, and it disagrees with the cell:
+ * the parameter's own declaration is typed `T`, which this copy substitutes to
+ * what the call bound, so the binding held `{ hello: string }` while every
+ * read of it published the constraint. A `binding-read-conversion` from a
+ * record to a ten-armed union is not a conversion any backend should install
+ * -- the two carriers describe one value, and only one of them is the value's
+ * type.
+ *
+ * Answered only when the checker's type IS the constraint, object-identical.
+ * A reference the flow analysis genuinely narrowed (`typeof object ===
+ * 'string'`) reaches a different type, and that narrowing is real.
+ *
+ * The structural mapper reads it per copy, and this census reads it at a call
+ * argument: the constraint is no bound on a copy filled with `any`, whose
+ * argument may hold any value at all, so the argument is evidence of `T` --
+ * open, exactly as the checker answers it under a non-union constraint.
+ */
+export const constraintErasedParameterAt = (checker: ts.TypeChecker, node: ts.Node): ts.Type | null => {
+  if (!ts.isIdentifier(node)) return null
+  const declaration = checker.getSymbolAtLocation(node)?.valueDeclaration
+  if (!declaration) return null
+  if (!ts.isParameter(declaration) && !ts.isVariableDeclaration(declaration)) return null
+  if (declaration.name === node) return null
+  const declared = checker.getTypeAtLocation(declaration)
+  if ((declared.flags & ts.TypeFlags.TypeParameter) === 0) return null
+  return checker.getBaseConstraintOfType(declared) === checker.getTypeAtLocation(node) ? declared : null
+}
+
 /** Whether every value of `type` is an object -- so ToBoolean answers `true` for it. */
 const isAlwaysTruthyType = (type: ts.Type): boolean =>
   type.isUnion()
@@ -2412,7 +2452,7 @@ export const censusParameterBindings = (
         // `void` and `never` are refused here for the reason `isUnusableEvidence`
         // states, and `any` falls through to the return-expression walk below
         // rather than being refused -- the three answers are not one answer.
-        if ((returned.flags & (ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0) return null
+        if (!returned || (returned.flags & (ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0) return null
         // A GENERIC signature's declared return is an OPEN FORM, and reading it
         // off the signature publishes the type expression rather than the type.
         // `Reflect.get(pattern, 'route')` is the case: one call signature,
@@ -2480,6 +2520,10 @@ export const censusParameterBindings = (
   // One pair of key functions per index: the member-closure memo keys on
   // their identity, and a closure minted per proof launch defeats it.
   const propagatingTypeAt = (expression: ts.Expression): ts.Type | null => propagating.known(expression) ?? propagating.resolve(expression)
+  // A `T` read inside a generic body is passed by every copy, an `any` copy
+  // included; the checker's constraint erasure is not its type.
+  const passedTypeAt = (argument: ts.Expression): ts.Type | null =>
+    constraintErasedParameterAt(checker, argument) ?? propagatingTypeAt(argument)
   const implicitArgumentsUsesAt = (owner: ts.SignatureDeclaration): readonly ts.Identifier[] | undefined =>
     index.implicitArgumentsUses.get(owner)
   // `hasClosedMemberCallableUses`'s memo is keyed in part on THIS function's
@@ -2706,7 +2750,7 @@ export const censusParameterBindings = (
       if (isBackEdge) sawBackEdge = true
       if (isDerivedBackEdge) deferredRecursiveArguments.push(argument)
       if (excludeBackEdges && isBackEdge) continue
-      const resolved = propagating.known(argument) ?? propagating.resolve(argument)
+      const resolved = passedTypeAt(argument)
       if (!resolved || isUnusableEvidence(resolved)) {
         // A default is not an annotation. If this read still has the checker's
         // dynamic type, it is a possible supplied value, not an omitted call.
@@ -3382,7 +3426,7 @@ export const censusParameterBindings = (
     propagating.reset()
     try {
       for (const argument of argumentsToValidate) {
-        const resolved = propagating.known(argument) ?? propagating.resolve(argument)
+        const resolved = passedTypeAt(argument)
         if (!resolved) return 'recursive-derived-argument-unresolved'
         if (isUnusableEvidence(resolved)) return 'recursive-derived-argument-states-no-storage'
         const passed = resolved.isLiteral() ? checker.getBaseTypeOfLiteralType(resolved) : resolved
@@ -3614,7 +3658,7 @@ export const censusParameterBindings = (
         if (!incoming.every(admits)) reason = 'call-sites-disagree'
         else {
           for (const argument of answer.deferredRecursiveArguments) {
-            const resolved = propagating.known(argument) ?? propagating.resolve(argument)
+            const resolved = passedTypeAt(argument)
             if (!resolved || isUnusableEvidence(resolved) || !admits(resolved)) {
               reason = 'recursive-derived-argument-disagrees'
               break
@@ -4270,7 +4314,7 @@ export const censusParameterBindings = (
           refused = true
           break
         }
-        const resolved = propagating.known(argument) ?? propagating.resolve(argument)
+        const resolved = passedTypeAt(argument)
         if (!resolved || isUnusableEvidence(resolved)) {
           refused = true
           break

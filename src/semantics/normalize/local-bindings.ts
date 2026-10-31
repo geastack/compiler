@@ -1742,7 +1742,7 @@ export const censusLocalBindings = (
       const signature = signatures[0] as ts.Signature
       const unwrapped = ts.isCallExpression(node) ? unwrapExplicitThisCall(checker, node) : null
       const returned = explicitThisCallReturnType(signature, unwrapped ? knownOrResolve(unwrapped.callee) : null)
-      if ((returned.flags & (ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0) return null
+      if (!returned || (returned.flags & (ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0) return null
       // `any` is not the only way a callee can state nothing about what it
       // returns, and a structurally EMPTY object type is the other way --
       // which is the answer the checker gives for a factory that builds a bag
