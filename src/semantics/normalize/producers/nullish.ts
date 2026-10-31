@@ -1,4 +1,5 @@
 import ts from '#typescript'
+import type { ValueFlowIndex } from '../flow/model.js'
 
 /**
  * Whether a type can never be `null` or `undefined`.
@@ -38,32 +39,84 @@ export const includesUndefined = (type: ts.Type): boolean => {
 export const holdsUndefined = (type: ts.Type): boolean =>
   (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 || includesUndefined(type)
 
-/**
- * Whether `node` is the value assigned to a local declared without a type:
- * `let node; ... node = this.#children[key]`. The checker reports such a
- * local's declared type as `any` -- the auto type it then narrows by
- * assignment -- so that contextual `any` is no home for `undefined`. The
- * local's cell takes the read's own carrier, and an absence published at the
- * read is dereferenced on the way into it: Hono's RegExpRouter `Node.insert`
- * aborted on every route at its first missing child.
- */
-const assignsAnUntypedLocal = (checker: ts.TypeChecker, node: ts.Expression): boolean => {
-  let inner: ts.Node = node
+export const withoutParentheses = (expression: ts.Expression): ts.Expression =>
+  ts.isParenthesizedExpression(expression) ? withoutParentheses(expression.expression) : expression
+
+const untypedLocalNamed = (checker: ts.TypeChecker, name: ts.Node): ts.VariableDeclaration | null => {
+  if (!ts.isIdentifier(name)) return null
+  const declaration = checker.getSymbolAtLocation(name)?.valueDeclaration
+  return declaration !== undefined &&
+    ts.isVariableDeclaration(declaration) &&
+    declaration.type === undefined &&
+    ts.getJSDocType(declaration) === undefined
+    ? declaration
+    : null
+}
+
+export const untypedLocalWrittenBy = (checker: ts.TypeChecker, value: ts.Expression): ts.VariableDeclaration | null => {
+  let inner: ts.Node = value
   let parent = inner.parent
   while (parent && ts.isParenthesizedExpression(parent)) {
     inner = parent
     parent = parent.parent
   }
-  if (!parent || !ts.isBinaryExpression(parent) || parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken || parent.right !== inner)
-    return false
-  if (!ts.isIdentifier(parent.left)) return false
-  const declaration = checker.getSymbolAtLocation(parent.left)?.valueDeclaration
-  return (
-    declaration !== undefined &&
-    ts.isVariableDeclaration(declaration) &&
-    declaration.type === undefined &&
-    ts.getJSDocType(declaration) === undefined
-  )
+  if (parent && ts.isVariableDeclaration(parent) && parent.initializer === inner) return untypedLocalNamed(checker, parent.name)
+  if (parent && ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.right === inner)
+    return untypedLocalNamed(checker, parent.left)
+  return null
+}
+
+export const soleWriteOf = (flow: ValueFlowIndex, local: ts.VariableDeclaration): ts.Expression | null => {
+  const writes = flow.writesToDeclaration(local).filter((write) => write.slot === 'whole')
+  const write = writes[0]
+  if (writes.length !== 1 || write === undefined) return null
+  return write.edge === 'declaration-initializer' || write.edge === 'identifier-assignment' ? write.value : null
+}
+
+export const isSymbolKey = (key: ts.Type): boolean =>
+  (key.isUnion() ? key.types : [key]).every((part) => (part.flags & ts.TypeFlags.ESSymbolLike) !== 0)
+
+const hasIndexSignatureFor = (checker: ts.TypeChecker, receiver: ts.Type, key: ts.Type | null): boolean => {
+  if (key !== null && isSymbolKey(key)) return checker.getIndexInfosOfType(receiver).some((info) => isSymbolKey(info.keyType))
+  const kind = key !== null && (key.flags & ts.TypeFlags.NumberLike) !== 0 ? ts.IndexKind.Number : ts.IndexKind.String
+  return checker.getIndexTypeOfType(receiver, kind) !== undefined
+}
+
+export const isDictionaryRead = (
+  checker: ts.TypeChecker,
+  read: ts.Expression
+): read is ts.ElementAccessExpression | ts.PropertyAccessExpression => {
+  if (!ts.isElementAccessExpression(read) && !ts.isPropertyAccessExpression(read)) return false
+  const key = ts.isElementAccessExpression(read) ? checker.getTypeAtLocation(read.argumentExpression) : null
+  const name = ts.isPropertyAccessExpression(read)
+    ? read.name.text
+    : ts.isStringLiteralLike(read.argumentExpression) || ts.isNumericLiteral(read.argumentExpression)
+      ? read.argumentExpression.text
+      : null
+  const receiver = checker.getTypeAtLocation(read.expression)
+  return (receiver.isUnion() ? receiver.types : [receiver]).every((part) => {
+    const member = checker.getNonNullableType(part)
+    return (
+      !checker.isArrayType(member) &&
+      !checker.isTupleType(member) &&
+      hasIndexSignatureFor(checker, member, key) &&
+      (name === null || checker.getPropertyOfType(member, name) === undefined)
+    )
+  })
+}
+
+export const dictionaryReadHeldBy = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  expression: ts.Expression,
+  visited: ReadonlySet<ts.VariableDeclaration> = new Set()
+): ts.ElementAccessExpression | ts.PropertyAccessExpression | null => {
+  const inner = withoutParentheses(expression)
+  if (isDictionaryRead(checker, inner)) return inner
+  const local = untypedLocalNamed(checker, inner)
+  if (local === null || visited.has(local)) return null
+  const value = soleWriteOf(flow, local)
+  return value === null ? null : dictionaryReadHeldBy(checker, flow, value, new Set([...visited, local]))
 }
 
 /**
@@ -83,7 +136,7 @@ const assignsAnUntypedLocal = (checker: ts.TypeChecker, node: ts.Expression): bo
 export const flowsIntoUndefinedHome = (checker: ts.TypeChecker, node: ts.Expression): boolean => {
   const contextual = checker.getContextualType(node)
   if (contextual === undefined) return false
-  return includesUndefined(contextual) || (holdsUndefined(contextual) && !assignsAnUntypedLocal(checker, node))
+  return includesUndefined(contextual) || (holdsUndefined(contextual) && untypedLocalWrittenBy(checker, node) === null)
 }
 
 /** Whether `typeof` takes this expression as its operand: it answers `"undefined"` for an absent read without consuming the value (ECMA-262 13.5.3). */

@@ -31,7 +31,7 @@ import {
   impliedPatternPositionPresentEverywhere
 } from './parameter-slot.js'
 import { iteratorYieldTypesOf } from './producers/iteration-yield.js'
-import { flowsIntoUndefinedHome, holdsUndefined } from './producers/nullish.js'
+import { dictionaryReadHeldBy, flowsIntoUndefinedHome, holdsUndefined } from './producers/nullish.js'
 import {
   type AliasEvidence,
   annotationStatesNothing,
@@ -2602,51 +2602,14 @@ export const censusParameterBindings = (
     return false
   }
   /**
-   * `argument` without its parentheses -- or, when it names a local declared
-   * without a type from an index read (`const value = dict[key]; f(value)`),
-   * that read. The local-binding census widens such a local for this very use
-   * (`registerObservedIndexedAbsence`), so the argument carries the read's
-   * absence just as `f(dict[key])` does.
-   */
-  const indexReadBehind = (argument: ts.Expression): ts.Expression => {
-    let expression: ts.Expression = argument
-    while (ts.isParenthesizedExpression(expression)) expression = expression.expression
-    if (!ts.isIdentifier(expression)) return expression
-    const declaration = checker.getSymbolAtLocation(expression)?.valueDeclaration
-    if (
-      declaration === undefined ||
-      !ts.isVariableDeclaration(declaration) ||
-      declaration.type !== undefined ||
-      ts.getJSDocType(declaration) !== undefined ||
-      declaration.initializer === undefined
-    )
-      return expression
-    let initializer: ts.Expression = declaration.initializer
-    while (ts.isParenthesizedExpression(initializer)) initializer = initializer.expression
-    return initializer
-  }
-  /**
    * An index-signature read handed to a parameter whose contextual type has a
    * home for `undefined` (`unknown`, `any`, or an explicit `undefined`). The
    * read's producer publishes it as `T | undefined` there
    * (`properties.ts`'s `observablyAbsentElementTypeOf`), because a missing key
    * is `undefined`, not `T`; the parameter must hold that absence too.
    */
-  const passesAbsentIndexRead = (argument: ts.Expression, resolved: ts.Type): boolean => {
-    const read = indexReadBehind(argument)
-    if (!ts.isElementAccessExpression(read) && !ts.isPropertyAccessExpression(read)) return false
-    if (holdsUndefined(resolved)) return false
-    if (!flowsIntoUndefinedHome(checker, argument)) return false
-    const receiver = checker.getTypeAtLocation(read.expression)
-    if (checker.isArrayType(receiver) || checker.isTupleType(receiver)) return false
-    if (checker.getIndexInfosOfType(receiver).length === 0) return false
-    const key = ts.isPropertyAccessExpression(read)
-      ? read.name.text
-      : ts.isStringLiteralLike(read.argumentExpression) || ts.isNumericLiteral(read.argumentExpression)
-        ? read.argumentExpression.text
-        : null
-    return key === null || checker.getPropertyOfType(receiver, key) === undefined
-  }
+  const passesAbsentIndexRead = (argument: ts.Expression, resolved: ts.Type): boolean =>
+    !holdsUndefined(resolved) && flowsIntoUndefinedHome(checker, argument) && dictionaryReadHeldBy(checker, valueFlow, argument) !== null
 
   const collectPassedArguments = (
     calls: readonly (ts.CallExpression | ts.NewExpression)[],

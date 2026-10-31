@@ -18,7 +18,7 @@ import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { CensusCandidate } from '../census.js'
 import { blocked, mintOperationId, mintResult, operand } from './mint.js'
 import { optionalChainGuardOf, publishesShortCircuit } from './optional-chain.js'
-import { excludesNullish, flowsIntoUndefinedHome, includesUndefined, testsItsOperand } from './nullish.js'
+import { excludesNullish, flowsIntoUndefinedHome, includesUndefined, isSymbolKey, testsItsOperand } from './nullish.js'
 import { guardedReceiverTypeOf } from './logical-merge-type.js'
 import { calleeAwareTypeAt, isStrictContext, logicalAssignmentOperators, sourceForValue, symbolMemberKeyOf } from './shared.js'
 import type { ProducerContext } from '../producer-context.js'
@@ -621,7 +621,7 @@ const observablyAbsentElementTypeOf = (context: ProducerContext, node: AccessNod
   if (observedAbsence && includesUndefined(observedAbsence)) return context.types.typeOf(observedAbsence)
   const key = ts.isElementAccessExpression(node) ? context.types.rawTypeAt(node.argumentExpression) : null
   const numeric = key !== null && (key.flags & ts.TypeFlags.NumberLike) !== 0
-  const symbol = key !== null && (key.flags & (ts.TypeFlags.ESSymbol | ts.TypeFlags.UniqueESSymbol)) !== 0
+  const symbol = key !== null && isSymbolKey(key)
   if (ts.isPropertyAccessExpression(node) && context.checker.getPropertyOfType(context.types.rawTypeAt(node.expression), node.name.text))
     return valueType
 

@@ -746,7 +746,7 @@ jump-threading.ts.cpp e91fd0d24489
 key-order-cases.ts.cpp 961f34c2a391
 key-order-unobserved-record-copies-values-and-observed-chain-keeps-order.runtime.ts.cpp 9a7938d50764
 keyed-collection-seeded-from-map-and-iterator.ts.cpp ec45bf09f48d
-keyed-table-and-union-array-reads-answer-once.runtime.ts.cpp 4da37034429c
+keyed-table-and-union-array-reads-answer-once.runtime.ts.cpp e8b063b0f32a
 last-transferring-use-moves-after-in-place-reads.runtime.ts.cpp 5e98207562a2
 layout-copied-spread-of-a-live-view-copies-its-originals-fields.runtime.js.cpp 36c1b565436d
 lazy-map-in-logical-or-assignment.ts.cpp 4c3cb932cc75
@@ -1174,7 +1174,7 @@ repeated-union-selection-reuses-the-dominating-one.runtime.ts.cpp a5e5d879a11b
 rest-array-of-any-spread-into-a-null-absent-parameter.runtime.ts.cpp 4ca441c332a3
 rest-forwarding-spread-argument.ts.cpp 17dfc09c6a23
 rest-parameter-rebase.ts.cpp 749eb8d7d071
-rest-parameter-union-of-tuples-mixed.ts.cpp f213c18b2ff1
+rest-parameter-union-of-tuples-mixed.ts.cpp 64ee2f9267fd
 rest-parameter-union-of-tuples.ts.cpp 311f88b55805
 rest-tuple-element-union-keeps-every-member.ts.cpp dc31120d68c7
 rest-tuple-spread.ts.cpp 5a759a51e29e
@@ -1362,7 +1362,8 @@ typed-shared-view-preserves-numeric-field-writes.runtime.ts.cpp 8cf83a8d7336
 typed-shared-view-preserves-primitive-sidecar-aliases.runtime.ts.cpp d08063850b01
 typeof-runtime-string.ts.cpp a1cd939b5d70
 typeof-then-discriminates-a-union.ts.cpp 95b96f1f5dc0
-unannotated-local-index-read-flows-into-undefined-home.runtime.ts.cpp 0cfe87374489
+unannotated-local-index-read-flows-into-undefined-home.runtime.ts.cpp ce3738ff9a40
+unannotated-local-index-read-keeps-bare-carrier.runtime.ts.cpp aaf741e40caa
 unbound-native-method-absence-transport.runtime.ts.cpp e39d8d4e0e45
 unbound-native-method-receiver-observations.runtime.ts.cpp 1be7fc4b1e59
 unbox-nullable-union.ts.cpp 28f62c3d4062

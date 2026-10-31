@@ -25,7 +25,15 @@ import { emptyParameterBindingCensus, type ParameterBindingCensus } from './para
 import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
 import { emptyObjectBagCensus, type ObjectBagCensus } from './object-bag-bindings.js'
 import { iteratorYieldTypesOf } from './producers/iteration-yield.js'
-import { flowsIntoUndefinedHome, testsItsOperand } from './producers/nullish.js'
+import {
+  dictionaryReadHeldBy,
+  flowsIntoUndefinedHome,
+  isDictionaryRead,
+  soleWriteOf,
+  testsItsOperand,
+  untypedLocalWrittenBy,
+  withoutParentheses
+} from './producers/nullish.js'
 import {
   arrayAssignmentPatternSourceExpression,
   arrayAssignmentTargetOf,
@@ -877,12 +885,13 @@ export const censusLocalBindings = (
    * `undefined`. The property producer already knows how to emit both optional
    * reads; this map supplies the missing fact across the local binding.
    *
-   * Only the declaration, initializer and observing references are widened:
-   * a direct comparison or test, or -- for a dictionary read -- a use whose
-   * destination has a home for `undefined` (`flowsIntoUndefinedHome`), as
-   * `console.log(value)` or `f(value)` into an `unknown` parameter has. Reads
-   * after the fallback assignment keep the checker's narrowed element type,
-   * as do indexed reads whose absence is not observed.
+   * Only the declaration, its writes and observing references are widened:
+   * a direct comparison or test of the initializer's read, or -- for a local
+   * whose only write holds a dictionary read (`dictionaryReadHeldBy`) -- a use
+   * whose destination has a home for `undefined` (`flowsIntoUndefinedHome`),
+   * as `console.log(value)` or `f(value)` into an `unknown` parameter has.
+   * Reads after the fallback assignment keep the checker's narrowed element
+   * type, as do indexed reads whose absence is not observed.
    */
   const observedIndexedAbsence = new Map<ts.Node, ts.Type>()
   /**
@@ -915,54 +924,51 @@ export const censusLocalBindings = (
     return other !== null && (checker.getTypeAtLocation(other).flags & ts.TypeFlags.Undefined) !== 0
   }
 
+  const isArrayRead = (read: ts.Expression): boolean => {
+    if (!ts.isElementAccessExpression(read) || (checker.getTypeAtLocation(read.argumentExpression).flags & ts.TypeFlags.NumberLike) === 0)
+      return false
+    const receiver = checker.getTypeAtLocation(read.expression)
+    return (receiver.isUnion() ? receiver.types : [receiver]).every((member) => checker.isArrayType(member) && !checker.isTupleType(member))
+  }
+
+  // The same gap for a named read through an `as` whose value's real arms
+  // may lack the member (`asserted-arm-absence.ts`): the checker types the
+  // cell as the asserted arm's member, and JavaScript reads `undefined`.
+  const isAssertedRead = (read: ts.Expression): boolean =>
+    ts.isPropertyAccessExpression(read) &&
+    assertedReceiverArmMayLackMember(checker, read, (receiver) => checker.getTypeAtLocation(receiver))
+
+  const reachesUndefinedHome = (reference: ts.Expression, visited: ReadonlySet<ts.VariableDeclaration>): boolean => {
+    if (flowsIntoUndefinedHome(checker, reference)) return true
+    const local = untypedLocalWrittenBy(checker, reference)
+    if (local === null || visited.has(local) || soleWriteOf(flow, local) === null) return false
+    const symbol = checker.getSymbolAtLocation(local.name)
+    const next = new Set([...visited, local])
+    return symbol !== undefined && flow.referencesToSymbol(symbol).some((use) => reachesUndefinedHome(use, next))
+  }
+
   const registerObservedIndexedAbsence = (declaration: ts.VariableDeclaration): void => {
-    if (declaration.type || ts.getJSDocType(declaration) || !ts.isIdentifier(declaration.name) || !declaration.initializer) return
-    let initializer: ts.Expression = declaration.initializer
-    while (ts.isParenthesizedExpression(initializer)) initializer = initializer.expression
-    if (!ts.isElementAccessExpression(initializer) && !ts.isPropertyAccessExpression(initializer)) return
-    const key = ts.isElementAccessExpression(initializer) ? checker.getTypeAtLocation(initializer.argumentExpression) : null
-    const receiver = checker.getTypeAtLocation(initializer.expression)
-    const constituents = receiver.isUnion() ? receiver.types : [receiver]
-    const arrayRead =
-      key !== null &&
-      (key.flags & ts.TypeFlags.NumberLike) !== 0 &&
-      constituents.every((member) => checker.isArrayType(member) && !checker.isTupleType(member))
-    const symbolKey = key !== null && (key.flags & (ts.TypeFlags.ESSymbol | ts.TypeFlags.UniqueESSymbol)) !== 0
-    const indexKind = key !== null && (key.flags & ts.TypeFlags.NumberLike) !== 0 ? ts.IndexKind.Number : ts.IndexKind.String
-    // `IndexKind` names only string and number; a `[key: symbol]` signature is
-    // found among the index infos by its key type.
-    const hasIndexForKey = (member: ts.Type): boolean =>
-      symbolKey
-        ? checker
-            .getIndexInfosOfType(member)
-            .some((info) => (info.keyType.flags & (ts.TypeFlags.ESSymbol | ts.TypeFlags.UniqueESSymbol)) !== 0)
-        : checker.getIndexTypeOfType(member, indexKind) !== undefined
-    const dictionaryRead = constituents.every(
-      (member) =>
-        hasIndexForKey(checker.getNonNullableType(member)) &&
-        // A declared field has its own presence contract. Only a name resolved
-        // through the index signature shares a computed lookup's missing key.
-        (!ts.isPropertyAccessExpression(initializer) || checker.getPropertyOfType(member, initializer.name.text) === undefined)
-    )
-    // The same gap for a named read through an `as` whose value's real arms
-    // may lack the member (`asserted-arm-absence.ts`): the checker types the
-    // cell as the asserted arm's member, and JavaScript reads `undefined`.
-    const assertedRead =
-      ts.isPropertyAccessExpression(initializer) &&
-      assertedReceiverArmMayLackMember(checker, initializer, (receiver) => checker.getTypeAtLocation(receiver))
-    if (!arrayRead && !dictionaryRead && !assertedRead) return
-    const value = checker.getTypeAtLocation(initializer)
-    const untyped = isAnyType(value)
-    if (!untyped && (isUnusableEvidence(value) || (value.flags & ts.TypeFlags.Unknown) !== 0)) return
+    if (declaration.type || ts.getJSDocType(declaration) || !ts.isIdentifier(declaration.name)) return
     const symbol = checker.getSymbolAtLocation(declaration.name)
     if (!symbol) return
+    const initializer = declaration.initializer && withoutParentheses(declaration.initializer)
+    const testedRead =
+      initializer !== undefined && (isArrayRead(initializer) || isDictionaryRead(checker, initializer) || isAssertedRead(initializer))
+        ? initializer
+        : null
+    const soleWrite = soleWriteOf(flow, declaration)
+    const heldRead = soleWrite === null ? null : dictionaryReadHeldBy(checker, flow, soleWrite)
+    const read = testedRead ?? heldRead
+    if (read === null) return
+    const value = checker.getTypeAtLocation(read)
+    const untyped = isAnyType(value)
+    if (!untyped && (isUnusableEvidence(value) || (value.flags & ts.TypeFlags.Unknown) !== 0)) return
     const observing = flow
       .referencesToSymbol(symbol)
       .filter(
         (reference) =>
-          directUndefinedComparison(reference) ||
-          testsItsOperand(reference) ||
-          (dictionaryRead && flowsIntoUndefinedHome(checker, reference))
+          (testedRead !== null && (directUndefinedComparison(reference) || testsItsOperand(reference))) ||
+          (heldRead !== null && reachesUndefinedHome(reference, new Set([declaration])))
       )
     if (observing.length === 0) return
     if (untyped) {
@@ -970,11 +976,8 @@ export const censusLocalBindings = (
       return
     }
     const optional = checker.getNullableType(value, ts.TypeFlags.Undefined)
-    observedIndexedAbsence.set(declaration, optional)
-    observedIndexedAbsence.set(declaration.name, optional)
-    observedIndexedAbsence.set(declaration.initializer, optional)
-    observedIndexedAbsence.set(initializer, optional)
-    for (const reference of observing) observedIndexedAbsence.set(reference, optional)
+    const writes = [declaration.initializer, soleWrite].flatMap((write) => (write ? [write, withoutParentheses(write)] : []))
+    for (const node of [declaration, declaration.name, ...writes, ...observing]) observedIndexedAbsence.set(node, optional)
   }
 
   /** The identical lookup as `declarationOf`, for an identifier whose sole declaration is a binding-pattern LEAF rather than a plain `VariableDeclaration`. */
