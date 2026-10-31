@@ -277,22 +277,6 @@ export const buildArgumentOperands = (
   selected: SelectedSignature | null,
   shortCircuits: boolean
 ): ArgumentListBuild => {
-  const spreads = args.filter(ts.isSpreadElement)
-  if (spreads.length > 0 && shortCircuits) {
-    // An optional call evaluates its arguments only on the branch where the
-    // guard is present, and `normalize/gating.ts` places that gated region by
-    // walking the ARGUMENT SYNTAX. Both admitted shapes here publish something
-    // that walk cannot see -- a tuple expansion mints `[[Get]]`s against this
-    // CALL's candidate, and a rest range copy changes which operand holds the
-    // tail -- so the placement would be made on a claim this producer cannot
-    // support. Gating a minted operation is a real capability, not a detail to
-    // assume.
-    return {
-      kind: 'refused',
-      reason: 'a spread argument in an optional call needs the gated placement of a minted read, which is not installed'
-    }
-  }
-
   const restFrom = restFormalIndexOf(selected)
   // Which positions each written argument will occupy, walked once up front so
   // a spread's own admissibility can be decided against the position it lands
@@ -543,5 +527,18 @@ export const buildArgumentOperands = (
     )
     position += 1
   }
-  return { kind: 'operands', operands, operations, edges }
+  // An optional call evaluates its arguments only where the guard is present.
+  // `normalize/gating.ts` places the argument SUBTREE there by walking its
+  // syntax, but every operation minted here -- a tuple position's `[[Get]]`,
+  // the read and the array an `arguments` spread builds -- is keyed on this
+  // CALL, which that walk gates with the chain outside the guard. Left there,
+  // a read sits outside the guard's arm while its receiver and the call sit
+  // inside it, and the lowering refuses the split arm. Each is placed the way
+  // the call itself is (`invocations.ts`'s `shortCircuitEdges`): an edge
+  // places an operation, a gate places a subtree.
+  const gates: readonly SemanticEdge[] =
+    evaluation.kind === 'conditional'
+      ? operations.map((minted) => ({ kind: 'conditional', guard: evaluation.guard, to: minted.id, takenWhen: evaluation.takenWhen }))
+      : []
+  return { kind: 'operands', operands, operations, edges: [...edges, ...gates] }
 }

@@ -1042,6 +1042,7 @@ option-transform-annotated-tags-union-arrays.runtime.ts.cpp 9bd620f3c797
 optional-array-spread-absent.ts.cpp dbe20e5a61f7
 optional-array-spread.ts.cpp 4dce3de8b393
 optional-boolean-param-strict-equals-true.runtime.js.cpp a50cac2dcb4f
+optional-call-with-a-spread-argument.ts.cpp 4cfb7715f0c1
 optional-chain-array-find.ts.cpp 55495be27ea0
 optional-chain-method-through-abstract-middle-copy.runtime.ts.cpp 589b5a549a5e
 optional-chain-on-function-narrowed-prototype-field.runtime.ts.cpp ec3bee52772e
