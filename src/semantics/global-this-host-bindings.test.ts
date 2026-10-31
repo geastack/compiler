@@ -41,7 +41,8 @@ const globalHostMutationAuditOf = (
     target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.NodeNext,
     moduleResolution: ts.ModuleResolutionKind.NodeNext,
-    moduleDetection: ts.ModuleDetectionKind.Legacy
+    moduleDetection: ts.ModuleDetectionKind.Legacy,
+    strict: true
   }
   const host = ts.createCompilerHost(options, true)
   const originalSourceFile = host.getSourceFile.bind(host)
@@ -3170,25 +3171,117 @@ test('a host member declared as a bare string dictionary is carried as the dicti
   assert.match(source, /gea::dictionary::readHinted\(\(\*\(test::process_env\(\)\)\), \("PORT"\)/)
 })
 
+const hostHooksTaint = (declaration: string, use: string, modules: ReadonlyMap<string, string> = new Map()): string[] =>
+  [
+    ...globalHostMutationAuditOf(
+      `/// <reference path="./global-host-hooks.d.ts" />
+      export {}
+      declare var hostProcess: object
+      const box = { key: 1 }
+      const handlers: Array<(value: object) => void> = []
+      handlers.push((value) => {})
+      for (const handler of handlers) handler(box)
+      ${use}`,
+      ['hostProcess'],
+      [],
+      undefined,
+      false,
+      new Map([[resolve('test/fixtures/global-host-hooks.d.ts'), declaration], ...modules])
+    ).taint
+  ].sort()
+
+test('a host callable member is judged alike through every spelling and receiver shape', () => {
+  const index = 'interface Hooks { [key: string]: (value?: object) => void }'
+  const receivers = [
+    'interface Hooks { readonly run: (value?: object) => void } declare var hooks: Hooks',
+    'declare var hooks: { run(value?: object): void }',
+    `${index} declare var hooks: Hooks`,
+    'interface Hooks<T> { [key: string]: T } declare var hooks: Hooks<(value?: object) => void>',
+    `${index} declare var hooks: Hooks & { readonly tag: string }`,
+    `${index} interface Other { [key: string]: (value?: object) => void } declare var hooks: Hooks | Other`
+  ]
+  const uses = [
+    'hooks.run(box)',
+    'console.log([hooks.run].length)',
+    "hooks['run'](box)",
+    "console.log([hooks['run']].length)",
+    'const { run } = hooks; run(box)',
+    'const { run } = hooks; console.log([run].length)'
+  ]
+  const declared = 'declare namespace hooks { function run(value?: object): void }'
+  for (const use of ['void 0', 'hooks.run()', "hooks['run']()", 'const { run } = hooks; run()']) {
+    assert.deepEqual(hostHooksTaint(declared, use), [], use)
+    for (const receiver of receivers) assert.deepEqual(hostHooksTaint(receiver, use), [], `${receiver} :: ${use}`)
+  }
+  for (const use of uses) {
+    const expected = hostHooksTaint(declared, use)
+    assert.notDeepEqual(expected, [], use)
+    for (const receiver of receivers) assert.deepEqual(hostHooksTaint(receiver, use), expected, `${receiver} :: ${use}`)
+  }
+  for (const receiver of receivers)
+    for (const [dot, bracket] of [
+      ['hooks.run = () => {}', "hooks['run'] = () => {}"],
+      ['delete hooks.run', "delete hooks['run']"]
+    ] as const)
+      assert.deepEqual(hostHooksTaint(receiver, bracket), hostHooksTaint(receiver, dot), `${receiver} :: ${bracket}`)
+})
+
+test('a host callable member is judged on every union arm a read may yield', () => {
+  const modules = new Map([[resolve('test/fixtures/program-run.ts'), 'export function programRun(value?: object): void {}']])
+  const arms =
+    "interface Program { readonly run: typeof import('./program-run.js').programRun } interface Host { readonly run: (value?: object) => void }"
+  for (const use of [
+    'hooks.run(box)',
+    'console.log([hooks.run].length)',
+    "hooks['run'](box)",
+    'const { run } = hooks; console.log([run].length)',
+    'let { run } = hooks'
+  ]) {
+    assert.deepEqual(hostHooksTaint(`${arms} declare var hooks: Program`, use, modules), [], use)
+    const expected = hostHooksTaint(`${arms} declare var hooks: Host`, use, modules)
+    assert.notDeepEqual(expected, [], use)
+    for (const union of ['Program | Host', 'Host | Program'])
+      assert.deepEqual(hostHooksTaint(`${arms} declare var hooks: ${union}`, use, modules), expected, `${union} :: ${use}`)
+  }
+})
+
+test('a callable property declared with undefined is judged as the bare property is', () => {
+  const programRun = new Map([[resolve('test/fixtures/program-run.ts'), 'export function programRun(value?: object): void {}']])
+  const callables = [
+    ['(value?: object) => void', new Map<string, string>(), true],
+    ["typeof import('./program-run.js').programRun", programRun, false]
+  ] as const
+  for (const [callable, modules, escapes] of callables)
+    for (const use of [
+      'console.log([hooks.run].length)',
+      "console.log([hooks['run']].length)",
+      'const { run } = hooks; console.log([run].length)'
+    ]) {
+      const expected = hostHooksTaint(`interface Hooks { readonly run: ${callable} } declare var hooks: Hooks`, use, modules)
+      assert.equal(expected.length > 0, escapes, `${callable} :: ${use}`)
+      assert.deepEqual(
+        hostHooksTaint(`interface Hooks { readonly run: (${callable}) | undefined } declare var hooks: Hooks`, use, modules),
+        expected,
+        `${callable} :: ${use}`
+      )
+    }
+})
+
+test('a standard library global read by reflection keeps every intrinsic trusted', () => {
+  for (const global of ['Math', 'JSON']) {
+    const result = compile({
+      rootFileNames: [entry],
+      projectFileName: null,
+      sourceOverlay: new Map([
+        [entry, `function f() { return 1 }\nconsole.log(Object.prototype.propertyIsEnumerable.call(${global}, 'SQRT2'), f())`]
+      ]),
+      closedScriptScope: true
+    })
+    assert.ok(result.certificate, JSON.stringify(result.diagnostics.diagnostics.map((diagnostic) => diagnostic.message)))
+  }
+})
+
 test('a dot read through an index signature is judged as the bracket read is', () => {
-  const taintWith = (declaration: string, use: string) =>
-    [
-      ...globalHostMutationAuditOf(
-        `/// <reference path="./global-host-hooks.d.ts" />
-        export {}
-        declare var hostProcess: object
-        const box = { key: 1 }
-        const handlers: Array<(value: object) => void> = []
-        handlers.push((value) => {})
-        for (const handler of handlers) handler(box)
-        ${use}`,
-        ['hostProcess'],
-        [],
-        undefined,
-        false,
-        new Map([[resolve('test/fixtures/global-host-hooks.d.ts'), declaration]])
-      ).taint
-    ].sort()
   const values = [
     ['interface Hooks { [key: string]: string | undefined } declare var hooks: Hooks', false],
     ['interface Hooks { [key: string]: (value?: object) => void } declare var hooks: Hooks', true],
@@ -3197,8 +3290,8 @@ test('a dot read through an index signature is judged as the bracket read is', (
     ['interface Hooks<T> { [key: string]: T | undefined } declare var hooks: Hooks<(value?: object) => void>', true]
   ] as const
   for (const [declaration, callable] of values) {
-    const bracket = taintWith(declaration, "console.log([hooks['run']].length)")
+    const bracket = hostHooksTaint(declaration, "console.log([hooks['run']].length)")
     assert.equal(bracket.length > 0, callable, declaration)
-    assert.deepEqual(taintWith(declaration, 'console.log([hooks.run].length)'), bracket, declaration)
+    assert.deepEqual(hostHooksTaint(declaration, 'console.log([hooks.run].length)'), bracket, declaration)
   }
 })
