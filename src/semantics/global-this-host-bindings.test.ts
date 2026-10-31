@@ -3110,3 +3110,95 @@ test('a proxy trap that can be handed another receiver stays fail-closed', () =>
     assert.ok(taint.has('*'), source)
   }
 })
+
+const envProcessPlugin: CompilerPlugin = {
+  name: 'global-this-env-process-binding-test',
+  instantiate: () => ({
+    producers: () => [],
+    lower: () => false,
+    capabilities: {
+      ...noPluginCapabilities,
+      nativeTypesByDeclaration: new Map([
+        ['Process', { declarationName: 'Process', declarationFileName: hostDeclaration, native: processCarrier }]
+      ]),
+      hostSingletonDeclarations: new Map([['process', { declarationName: 'process', declarationFileName: hostDeclaration }]]),
+      hostMembers: new Map([[`${processCarrier}.env`, { kind: 'property', emit: 'test::process_env()', store: null }]]),
+      nativeIncludes: new Map([[processCarrier, '#include "test_process.hpp"']])
+    }
+  })
+}
+
+test('a host member declared as a bare string dictionary is carried as the dictionary itself', () => {
+  const result = compile({
+    rootFileNames: [entry, hostDeclaration],
+    projectFileName: null,
+    sourceOverlay: new Map([
+      [
+        hostDeclaration,
+        'interface ProcessEnv { [key: string]: string | undefined } interface Process { readonly env: ProcessEnv } declare var process: Process'
+      ],
+      [
+        entry,
+        `
+        const port = Number(process.env.PORT ?? '3900')
+        type Handler = (payload: number[]) => void
+        class Bus {
+          private listeners_: Handler[] = []
+          on(handler: Handler): void { this.listeners_.push(handler) }
+          emit(payload: number[]): void { for (const handler of this.listeners_) handler(payload) }
+        }
+        let total = 0
+        const bus = new Bus()
+        bus.on((payload) => { for (const value of payload) total = total + value + port })
+        bus.emit([1, 2, 3])
+        const reader = (): number => total
+        Object.defineProperty(reader, 'name', { value: 'portReader' })
+        const routes: Record<string, number> = { '/a': 1, '/b': 2 }
+        let joined = ''
+        Object.keys(routes).forEach((path) => { joined = joined === '' ? path : joined + ',' + path })
+        console.log(reader(), joined)
+      `
+      ]
+    ]),
+    plugins: [envProcessPlugin]
+  })
+
+  assert.ok(result.certificate, JSON.stringify({ diagnostics: result.diagnostics.diagnostics, refusals: result.refusals }))
+  assert.deepEqual(result.loweringBlockers, [])
+  assert.deepEqual(result.emissionRefusals, [])
+  const source = result.source ?? ''
+  assert.match(source, /gea::dictionary::readHinted\(\(\*\(test::process_env\(\)\)\), \("PORT"\)/)
+})
+
+test('a dot read through an index signature is judged as the bracket read is', () => {
+  const taintWith = (declaration: string, use: string) =>
+    [
+      ...globalHostMutationAuditOf(
+        `/// <reference path="./global-host-hooks.d.ts" />
+        export {}
+        declare var hostProcess: object
+        const box = { key: 1 }
+        const handlers: Array<(value: object) => void> = []
+        handlers.push((value) => {})
+        for (const handler of handlers) handler(box)
+        ${use}`,
+        ['hostProcess'],
+        [],
+        undefined,
+        false,
+        new Map([[resolve('test/fixtures/global-host-hooks.d.ts'), declaration]])
+      ).taint
+    ].sort()
+  const values = [
+    ['interface Hooks { [key: string]: string | undefined } declare var hooks: Hooks', false],
+    ['interface Hooks { [key: string]: (value?: object) => void } declare var hooks: Hooks', true],
+    ['interface Hooks { [key: string]: ((value?: object) => void) | undefined } declare var hooks: Hooks', true],
+    ['interface Hooks<T> { [key: string]: T } declare var hooks: Hooks<(value?: object) => void>', true],
+    ['interface Hooks<T> { [key: string]: T | undefined } declare var hooks: Hooks<(value?: object) => void>', true]
+  ] as const
+  for (const [declaration, callable] of values) {
+    const bracket = taintWith(declaration, "console.log([hooks['run']].length)")
+    assert.equal(bracket.length > 0, callable, declaration)
+    assert.deepEqual(taintWith(declaration, 'console.log([hooks.run].length)'), bracket, declaration)
+  }
+})

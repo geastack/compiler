@@ -5858,6 +5858,14 @@ export const censusGlobalHostMutations = (
     const read = node.parent
     if (ts.isPropertyAccessExpression(read) && read.name === node && sourceOwnCallableReadIsClosed(read)) return null
     const symbol = actualSymbol(checker.getSymbolAtLocation(node))
+    const readsThroughIndex =
+      ts.isPropertyAccessExpression(read) &&
+      read.name === node &&
+      (symbol === null || symbol.declarations?.every(ts.isIndexSignatureDeclaration))
+    if (readsThroughIndex) {
+      const receiver = checker.getTypeAtLocation(read.expression)
+      return unresolvedKeyYieldsAmbientCallable(receiver) ? (receiver.getSymbol() ?? null) : null
+    }
     const element = constDestructuredElementOf(symbol)
     if (element !== null) return element.name === node ? null : destructuredCallableOf(element)
     return untaggedAmbientCallableSymbol(symbol, node)
