@@ -40978,6 +40978,53 @@ inline std::string toString(double value) {
     auto result = std::to_chars(buf, buf + sizeof(buf), static_cast<long long>(value));
     return std::string(buf, result.ptr);
   }
+  // Short decimals -- chart coordinates, prices, anything rounded to a few
+  // places -- without the general path, which on targets without
+  // `to_chars(double)` raises a `%.*g` precision until `strtod` round-trips:
+  // up to 17 snprintf/strtod pairs, in software double arithmetic on parts
+  // with no double FPU (ESP32), for every number in a template string.
+  //
+  // Exact, not approximate. For the smallest k at which some integer c has
+  // c / 10^k == value, the k-decimal spelling of c is the shortest
+  // round-trip string: c and 10^k are exact doubles and IEEE division
+  // rounds the exact quotient c/10^k just as strtod rounds that decimal, so
+  // it parses back to `value`; no spelling with fewer decimals does, or a
+  // smaller k would have matched. Any integer that round-trips at k lies
+  // within one of value * 10^k, so testing the rounded product and its two
+  // neighbours misses none; when two of them qualify, ECMAScript's "closest
+  // to the value" tie-break applies and the general path answers instead.
+  // |value| in [1e-6, 1e15) is where ToString spells these in fixed notation.
+  {
+    const double magnitude = std::fabs(value);
+    if (magnitude >= 1e-6 && magnitude < 1e15) {
+      double scale = 1;
+      for (int places = 1; places <= 9; ++places) {
+        scale *= 10;
+        const double scaled = value * scale;
+        if (std::fabs(scaled) >= 9007199254740992.0) break;
+        const double nearest = std::nearbyint(scaled);
+        int matches = 0;
+        double digits = 0;
+        for (const double candidate : {nearest - 1, nearest, nearest + 1}) {
+          if (candidate / scale == value) {
+            ++matches;
+            digits = candidate;
+          }
+        }
+        if (matches > 1) break;
+        if (matches == 1) {
+          char buf[32];
+          const auto end = std::to_chars(buf, buf + sizeof(buf), static_cast<long long>(std::fabs(digits))).ptr;
+          std::string integer(buf, end);
+          if (static_cast<int>(integer.size()) <= places)
+            integer.insert(0, static_cast<std::size_t>(places + 1 - static_cast<int>(integer.size())), '0');
+          integer.insert(integer.size() - static_cast<std::size_t>(places), 1, '.');
+          if (value < 0) integer.insert(integer.begin(), '-');
+          return integer;
+        }
+      }
+    }
+  }
   // v1 has a third fast path here -- `snprintf("%.0f")` for integer-valued
   // doubles below 1e21 -- and it is wrong in exactly the band it covers. Above
   // 2^53 (the branch above) a double no longer represents every integer, and
