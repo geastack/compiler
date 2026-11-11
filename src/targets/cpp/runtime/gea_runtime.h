@@ -43943,24 +43943,41 @@ inline double round_invoke(void*, double x) {
   // never rounds to a neighboring double.
   return std::floor(x + 0.5);
 }
-#if defined(GEA_RUNTIME_FLOAT_MATH) && GEA_RUNTIME_FLOAT_MATH
-// Opt-in for targets whose FPU is single precision only (ESP32-S31): double
-// transcendentals there are soft-float ROM routines, ~15% of a game frame.
-// The argument is reduced in double first, so time-driven angles keep their
-// phase; the result carries float precision, which a renderer cannot see.
+// Trigonometry on a single-precision-only FPU (ESP32-S3 Xtensa LX7, ESP32-P4
+// RISC-V with F but no D): double sin/cos/atan2 there are software routines
+// whose every multiply is itself emulated, so they run in float on the FPU.
+// Automatic for those cores; trig results are never exact in JS anyway, and a
+// renderer cannot see float precision. The argument is reduced in double
+// first, so time-driven angles keep their phase.
+#if !defined(GEA_RUNTIME_FLOAT_TRIG)
+#if (defined(GEA_RUNTIME_FLOAT_MATH) && GEA_RUNTIME_FLOAT_MATH) || \
+    (defined(__XTENSA__) && defined(__XCHAL_HAVE_DFP) && __XCHAL_HAVE_FP && !__XCHAL_HAVE_DFP) || \
+    (defined(__riscv_flen) && __riscv_flen == 32)
+#define GEA_RUNTIME_FLOAT_TRIG 1
+#else
+#define GEA_RUNTIME_FLOAT_TRIG 0
+#endif
+#endif
+#if GEA_RUNTIME_FLOAT_TRIG
 inline float floatMathTurn(double x) {
   constexpr double twoPi = 6.283185307179586;
   return static_cast<float>(x - std::nearbyint(x * (1.0 / twoPi)) * twoPi);
 }
 inline double sin_invoke(void*, double x) { return x != 0 && std::isfinite(x) ? static_cast<double>(sinf(floatMathTurn(x))) : std::sin(x); }
 inline double cos_invoke(void*, double x) { return std::isfinite(x) ? static_cast<double>(cosf(floatMathTurn(x))) : std::cos(x); }
+#else
+inline double sin_invoke(void*, double x) { return std::sin(x); }
+inline double cos_invoke(void*, double x) { return std::cos(x); }
+#endif
+// sqrt is correctly rounded and programs rely on it being exact (an integer
+// square root through Math.floor(Math.sqrt(n))), so its float path stays an
+// explicit opt-in.
+#if defined(GEA_RUNTIME_FLOAT_MATH) && GEA_RUNTIME_FLOAT_MATH
 inline double sqrt_invoke(void*, double x) {
   // Doubles beyond float range keep the exact path.
   return (x >= 0 && x < 3.0e38) ? static_cast<double>(sqrtf(static_cast<float>(x))) : std::sqrt(x);
 }
 #else
-inline double sin_invoke(void*, double x) { return std::sin(x); }
-inline double cos_invoke(void*, double x) { return std::cos(x); }
 inline double sqrt_invoke(void*, double x) { return std::sqrt(x); }
 #endif
 inline double abs_invoke(void*, double x) { return std::fabs(x); }
@@ -43970,7 +43987,7 @@ inline double abs_invoke(void*, double x) { return std::fabs(x); }
 // ceil(+/-Infinity) is +/-Infinity).
 inline double ceil_invoke(void*, double x) { return std::ceil(x); }
 inline double pow_invoke(void*, double base, double exponent) { return std::pow(base, exponent); }
-#if defined(GEA_RUNTIME_FLOAT_MATH) && GEA_RUNTIME_FLOAT_MATH
+#if GEA_RUNTIME_FLOAT_TRIG
 inline double atan2_invoke(void*, double y, double x) {
   const float fy = static_cast<float>(y), fx = static_cast<float>(x);
   return (std::isfinite(fy) && std::isfinite(fx)) ? static_cast<double>(atan2f(fy, fx)) : std::atan2(y, x);
