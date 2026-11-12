@@ -741,6 +741,7 @@ json-stringify-replacer.ts.cpp 6a8b31e677e1
 json-stringify-tuples-are-arrays.ts.cpp 59d135329def
 jsx-class-component-inherited-props-unread-template.tsx.cpp cd1611b52d70
 jsx-class-map.tsx.cpp 32c70926c421
+jsx-component-prop-record-field-tick.tsx.cpp 2b3da09e28fa
 jsx-component-timer-initialization.tsx.cpp 84df75903301
 jsx-conditional-reactive-class.tsx.cpp f5548faa2aa8
 jsx-derived-getter-local-binding.tsx.cpp 0dcaecdab259

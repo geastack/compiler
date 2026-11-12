@@ -4,6 +4,7 @@ import type { BindingPlacement } from '../../projection/bindings.js'
 import type { IrBody, IrOperand, IrOperation } from '../../ir/model.js'
 import { classMemberOf } from '../../projection/fields.js'
 import { operandsOfIrOperation } from '../../ir/queries.js'
+import { representationKey } from '../../representation/model.js'
 import { fieldDeclaringStructOf, structNameOfReceiver } from './class-layout.js'
 import type { ReactiveCellPlan } from './host/host-members.js'
 
@@ -581,7 +582,7 @@ export const reactiveRecordBindingsOfBodies = (bodies: readonly IrBody[]): React
     return false
   }
 
-  const noteRead = (operation: IrOperation, byResult: ReadonlyMap<IrValueId, IrOperation>): void => {
+  const noteRead = (operation: IrOperation, byResult: ReadonlyMap<IrValueId, IrOperation>, forced?: Map<string, Set<string>>): void => {
     if (operation.kind !== 'get') return
     // Only RECORD receivers. A class field is celled by the plugin's own
     // `ReactiveCellPlan.fields`, which states the component's reactive members
@@ -601,20 +602,20 @@ export const reactiveRecordBindingsOfBodies = (bodies: readonly IrBody[]): React
     // Indexed receivers are re-read by a slot subscribed to the owning array
     // revision, with or without an optional carrier. A row's record has its own
     // member subscription. A field can require both channels.
-    const channel = indexedReceiver(operation.receiver.value, byResult) ? revision : element
+    const channel = forced ?? (indexedReceiver(operation.receiver.value, byResult) ? revision : element)
     const subscribed = channel.get(struct) ?? new Set<string>()
     subscribed.add(keyOperation.text)
     channel.set(struct, subscribed)
   }
 
-  const noteThunk = (operation: IrOperation, byResult: ReadonlyMap<IrValueId, IrOperation>): void => {
+  const noteThunk = (operation: IrOperation, byResult: ReadonlyMap<IrValueId, IrOperation>, into = thunks): void => {
     if (operation.kind !== 'call') return
     const callee = byResult.get(operation.callee.value)
-    if (callee && callee.kind === 'allocate-callable') thunks.add(callee.functionId)
+    if (callee && callee.kind === 'allocate-callable') into.add(callee.functionId)
     // Slots also read through typed helpers. Their subscription census already
     // follows closed calls; the record-field census must follow the same edge
     // or it mistakes a subscribed field for an unrendered one at write time.
-    if (operation.closedCallee?.kind === 'exact') thunks.add(operation.closedCallee.functionId)
+    if (operation.closedCallee?.kind === 'exact') into.add(operation.closedCallee.functionId)
   }
 
   // Which values a `style={{...}}` record is built out of. The members of an
@@ -634,18 +635,16 @@ export const reactiveRecordBindingsOfBodies = (bodies: readonly IrBody[]): React
     return byReceiver
   }
 
-  // Pass one: what each body binds DIRECTLY into a JSX slot, and which thunks
-  // those slots call.
-  for (const body of bodies) {
-    const byResult = operationsByResult(body)
-    const stores = storedInto(body)
-    const queue: IrValueId[] = []
-    for (const block of body.blocks.values()) {
-      for (const operation of block.operations) {
-        if (operation.kind === 'element-prop') queue.push(operation.value.value)
-        else if (operation.kind === 'element-child') queue.push(operation.child.value)
-      }
-    }
+  // Walks back from slot operands to the record reads and thunk calls that
+  // produce them. `forced` names the channel for reads that only a whole
+  // invocation re-run can refresh (see pass three); `into` collects the thunks.
+  const trace = (
+    byResult: ReadonlyMap<IrValueId, IrOperation>,
+    stores: ReadonlyMap<IrValueId, readonly IrValueId[]>,
+    queue: IrValueId[],
+    into: Set<FunctionId | RegionId>,
+    forced?: Map<string, Set<string>>
+  ): void => {
     const seen = new Set<IrValueId>()
     while (queue.length > 0) {
       const value = queue.pop()
@@ -654,8 +653,8 @@ export const reactiveRecordBindingsOfBodies = (bodies: readonly IrBody[]): React
       for (const stored of stores.get(value) ?? []) queue.push(stored)
       const operation = byResult.get(value)
       if (!operation) continue
-      noteRead(operation, byResult)
-      noteThunk(operation, byResult)
+      noteRead(operation, byResult, forced)
+      noteThunk(operation, byResult, into)
       if (operation.kind === 'allocate-record') for (const field of operation.fields) queue.push(field.value.value)
       // A store THREADS its receiver: `style={{a, b}}` is
       // `allocate-record -> v29`, `set(v29,'a') -> v30`, `set(v30,'b') -> v31`,
@@ -678,26 +677,98 @@ export const reactiveRecordBindingsOfBodies = (bodies: readonly IrBody[]): React
     }
   }
 
+  // Pass one: what each body binds DIRECTLY into a JSX slot, and which thunks
+  // those slots call.
+  for (const body of bodies) {
+    const queue: IrValueId[] = []
+    for (const block of body.blocks.values()) {
+      for (const operation of block.operations) {
+        if (operation.kind === 'element-prop') queue.push(operation.value.value)
+        else if (operation.kind === 'element-child') queue.push(operation.child.value)
+      }
+    }
+    trace(operationsByResult(body), storedInto(body), queue, thunks)
+  }
+
   // Pass two: a thunk's whole body is its dependency set -- every field it
   // reads is one the slot re-reads when it re-runs -- so there is nothing to
   // trace inside it. Repeated to a fixpoint because a thunk can call another
   // (a style member's slot inside a row's slot), and a callee's body may sit
   // anywhere in `bodies` relative to its caller's.
-  const swept = new Set<FunctionId | RegionId>()
+  const sweep = (pending: Set<FunctionId | RegionId>, swept: Set<FunctionId | RegionId>, forced?: Map<string, Set<string>>): void => {
+    for (;;) {
+      let grew = false
+      for (const body of bodies) {
+        if (!pending.has(body.sourceOwner) || swept.has(body.sourceOwner)) continue
+        swept.add(body.sourceOwner)
+        grew = true
+        const byResult = operationsByResult(body)
+        for (const block of body.blocks.values()) {
+          for (const operation of block.operations) {
+            noteRead(operation, byResult, forced)
+            noteThunk(operation, byResult, pending)
+          }
+        }
+      }
+      if (!grew) break
+    }
+  }
+  sweep(thunks, new Set())
+
+  // Pass three: a COMPONENT element is a props record and a call
+  // (`plugins/gea/lower.ts`), not a JSX slot of this body. `<Row
+  // checked={notice.checked}/>` as a list row reads `notice.checked` ONCE into
+  // the record, and the row's own body binds `props.checked` -- a field of the
+  // PROPS struct, never of `Notice`. So a write to `notice.checked` looked
+  // unrendered and ticked nothing: the row kept the value it was built with.
+  //
+  // A props field the callee binds makes the value stored into it bound too.
+  // Only a re-run of the whole invocation can deliver a new value through the
+  // record, which for a list row is the list's revision -- hence `revision`,
+  // never `element`: celling the source field would notify a cell no slot
+  // subscribes to. Repeated to a fixpoint because the callee may hand its own
+  // prop to a further component.
+  const carriers = new Set<string>()
+  for (const body of bodies) {
+    for (const block of body.blocks.values()) {
+      for (const operation of block.operations) {
+        if (operation.kind === 'element') carriers.add(representationKey(operation.result.representation))
+      }
+    }
+  }
+  const propThunks = new Set<FunctionId | RegionId>()
+  const propSwept = new Set<FunctionId | RegionId>()
+  const traced = new Set<string>()
   for (;;) {
     let grew = false
     for (const body of bodies) {
-      if (!thunks.has(body.sourceOwner) || swept.has(body.sourceOwner)) continue
-      swept.add(body.sourceOwner)
-      grew = true
       const byResult = operationsByResult(body)
+      const queue: IrValueId[] = []
       for (const block of body.blocks.values()) {
         for (const operation of block.operations) {
-          noteRead(operation, byResult)
-          noteThunk(operation, byResult)
+          if (operation.kind !== 'call' || operation.result === null) continue
+          if (!carriers.has(representationKey(operation.result.representation))) continue
+          for (const argument of operation.arguments) {
+            let record = byResult.get(argument.value)
+            while (record?.kind === 'convert') record = byResult.get(record.source.value)
+            if (record?.kind !== 'allocate-record') continue
+            const struct = structNameOfReceiver(record.result.representation)
+            const rendered = struct === null ? undefined : bound.get(struct)
+            if (rendered === undefined) continue
+            for (const field of record.fields) {
+              const token = `${field.value.value}`
+              if (!rendered.has(field.key) || traced.has(token)) continue
+              traced.add(token)
+              queue.push(field.value.value)
+            }
+          }
         }
       }
+      if (queue.length === 0) continue
+      grew = true
+      trace(byResult, storedInto(body), queue, propThunks, revision)
     }
+    sweep(propThunks, propSwept, revision)
     if (!grew) break
   }
   return { bound, element, revision }
