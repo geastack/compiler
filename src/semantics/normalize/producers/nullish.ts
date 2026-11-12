@@ -76,9 +76,12 @@ export const soleWriteOf = (flow: ValueFlowIndex, local: ts.VariableDeclaration)
 export const isSymbolKey = (key: ts.Type): boolean =>
   (key.isUnion() ? key.types : [key]).every((part) => (part.flags & ts.TypeFlags.ESSymbolLike) !== 0)
 
+export const isNumberKey = (key: ts.Type): boolean =>
+  (key.isUnion() ? key.types : [key]).every((part) => (part.flags & ts.TypeFlags.NumberLike) !== 0)
+
 const hasIndexSignatureFor = (checker: ts.TypeChecker, receiver: ts.Type, key: ts.Type | null): boolean => {
   if (key !== null && isSymbolKey(key)) return checker.getIndexInfosOfType(receiver).some((info) => isSymbolKey(info.keyType))
-  const kind = key !== null && (key.flags & ts.TypeFlags.NumberLike) !== 0 ? ts.IndexKind.Number : ts.IndexKind.String
+  const kind = key !== null && isNumberKey(key) ? ts.IndexKind.Number : ts.IndexKind.String
   return checker.getIndexTypeOfType(receiver, kind) !== undefined
 }
 
