@@ -6932,6 +6932,17 @@ inline Environment* unpackEnvironment(void* packed, void* slot) {
   }
 }
 
+namespace detail {
+// The environment struct a closure's borrowed body takes as its leading
+// `Environment*` formal (`callKnownBorrowedEnvironment`).
+template <typename Function>
+struct BorrowedEnvironmentOf;
+template <typename Result, typename Environment, typename... Rest>
+struct BorrowedEnvironmentOf<Result (*)(Environment*, Rest...)> {
+  using type = Environment;
+};
+}  // namespace detail
+
 /**
  * `unpackEnvironment`'s counterpart for a `packTransientEnvironment`-packed
  * environment: the same two cases, plus the one `packTransientEnvironment`
@@ -8521,6 +8532,40 @@ struct CallableObject<Result(Arguments...)> {
     return invoke(environment, std::forward<Actual>(arguments)...);
   }
 
+  // `callKnownBorrowed` for a closure's borrowed body, which takes its
+  // environment first: the guard's hit unpacks the environment exactly as the
+  // closure's thunk does (into a stack slot, unretained) and enters the body
+  // with the arguments bound by reference, where `callKnown` copied each one
+  // into the thunk's by-value formals and released it on return.
+  template <auto Known, auto Borrowed, typename... Actual>
+  [[gnu::always_inline]] Result callKnownBorrowedEnvironment(Actual&&... arguments) const {
+    requireCallable();
+    const auto keepAlive = environmentOwner;
+    if constexpr (std::is_same_v<decltype(Known), Invoke>) {
+      if (invoke == Known) {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        using Environment = typename detail::BorrowedEnvironmentOf<decltype(Borrowed)>::type;
+        return Borrowed(unpackTransientEnvironment<Environment>(environment, slot), std::forward<Actual>(arguments)...);
+      }
+    }
+    return invoke(environment, std::forward<Actual>(arguments)...);
+  }
+
+  // The same for a callee `callStable` may take: the caller's own slot keeps
+  // the environment alive, so neither branch retains it.
+  template <auto Known, auto Borrowed, typename... Actual>
+  [[gnu::always_inline]] Result callStableKnownBorrowedEnvironment(Actual&&... arguments) const {
+    requireCallable();
+    if constexpr (std::is_same_v<decltype(Known), Invoke>) {
+      if (invoke == Known) {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        using Environment = typename detail::BorrowedEnvironmentOf<decltype(Borrowed)>::type;
+        return Borrowed(unpackTransientEnvironment<Environment>(environment, slot), std::forward<Actual>(arguments)...);
+      }
+    }
+    return invoke(environment, std::forward<Actual>(arguments)...);
+  }
+
   // Two candidates behind one slot (`callableMemberAlternateSlot`): at most
   // one guard matches, so each branch forwards the arguments once.
   template <auto Known, auto Borrowed, auto Known2, auto Borrowed2, typename... Actual>
@@ -8882,6 +8927,40 @@ struct CallableConstructorObject<Result(Arguments...), Constructed(ConstructArgu
     const auto keepAlive = environmentOwner;
     if constexpr (std::is_same_v<decltype(Known), Invoke>) {
       if (invoke == Known) return Borrowed(std::forward<Actual>(arguments)...);
+    }
+    return invoke(environment, std::forward<Actual>(arguments)...);
+  }
+
+  // `callKnownBorrowed` for a closure's borrowed body, which takes its
+  // environment first: the guard's hit unpacks the environment exactly as the
+  // closure's thunk does (into a stack slot, unretained) and enters the body
+  // with the arguments bound by reference, where `callKnown` copied each one
+  // into the thunk's by-value formals and released it on return.
+  template <auto Known, auto Borrowed, typename... Actual>
+  [[gnu::always_inline]] Result callKnownBorrowedEnvironment(Actual&&... arguments) const {
+    requireCallable();
+    const auto keepAlive = environmentOwner;
+    if constexpr (std::is_same_v<decltype(Known), Invoke>) {
+      if (invoke == Known) {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        using Environment = typename detail::BorrowedEnvironmentOf<decltype(Borrowed)>::type;
+        return Borrowed(unpackTransientEnvironment<Environment>(environment, slot), std::forward<Actual>(arguments)...);
+      }
+    }
+    return invoke(environment, std::forward<Actual>(arguments)...);
+  }
+
+  // The same for a callee `callStable` may take: the caller's own slot keeps
+  // the environment alive, so neither branch retains it.
+  template <auto Known, auto Borrowed, typename... Actual>
+  [[gnu::always_inline]] Result callStableKnownBorrowedEnvironment(Actual&&... arguments) const {
+    requireCallable();
+    if constexpr (std::is_same_v<decltype(Known), Invoke>) {
+      if (invoke == Known) {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        using Environment = typename detail::BorrowedEnvironmentOf<decltype(Borrowed)>::type;
+        return Borrowed(unpackTransientEnvironment<Environment>(environment, slot), std::forward<Actual>(arguments)...);
+      }
     }
     return invoke(environment, std::forward<Actual>(arguments)...);
   }

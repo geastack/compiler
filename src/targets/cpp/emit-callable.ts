@@ -370,6 +370,24 @@ export const staticPrefixCallableText = (ctx: EmitContext, source: IrOperand, sl
   return cppStaticPrefixCallableText(ctx, direct, slotType, sourceType)
 }
 
+/** An entry a call without the callee's environment may enter: every borrowed entry but a closure's. */
+const environmentFreeEntry = (entry: StableBorrowEntry | undefined): StableBorrowEntry | undefined =>
+  entry === undefined || entry.environment ? undefined : entry
+
+/**
+ * The borrowed entry of the closure a flow-known call reaches through the
+ * callable that holds it, when the callee is that closure's own carrier (no
+ * prefix adapter between the two ABIs): the callable has the environment the
+ * entry takes first (`CallableObject::callKnownBorrowedEnvironment`).
+ */
+const flowClosureEntryOf = (ctx: EmitContext, callee: IrOperand): StableBorrowEntry | undefined => {
+  const candidate = ctx.callableFlowCandidates.get(callee.value)
+  if (candidate === undefined || !isCallableObject(callee.representation)) return undefined
+  if (cppTypeOf(callee.representation) !== cppTypeOf(candidate.allocated)) return undefined
+  const entry = ctx.stableBorrowEntries.get(cppBodyName(candidate.functionId))
+  return entry?.environment && !entry.narrowedNumericAbi ? entry : undefined
+}
+
 /**
  * The entry a callable parameter, capture or field was seen to hold
  * (`callableFlowCandidatesOf`), for `callKnown`'s identity guard: the
@@ -722,7 +740,7 @@ const emitUnionMethodCall = (ctx: EmitContext, lines: string[], operation: CallO
     const padded = paddedArguments(abi, [...(receiver === null ? [] : [receiver]), ...supplied], 'union method call')
     // Each arm names its body, so it may enter that body's borrowed entry on the
     // same evidence a direct call does.
-    const entry = packed === null ? ctx.stableBorrowEntries.get(cppBodyName(arm.callable)) : undefined
+    const entry = packed === null ? environmentFreeEntry(ctx.stableBorrowEntries.get(cppBodyName(arm.callable))) : undefined
     const copies =
       entry === undefined
         ? null
@@ -1608,7 +1626,9 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   const candidate = memberSlot === undefined ? undefined : ctx.callableMemberCandidates.get(memberSlot)
   const alternate = memberSlot === undefined ? undefined : ctx.callableMemberCandidates.get(callableMemberAlternateSlot(memberSlot))
 
-  const stableCandidate = ctx.stableBorrowEntries.get(direct ?? (candidate === undefined ? '' : cppBodyName(candidate)))
+  const stableCandidate = environmentFreeEntry(
+    ctx.stableBorrowEntries.get(direct ?? (candidate === undefined ? '' : cppBodyName(candidate)))
+  )
   const { potentiallyMovingArguments, stableActuals } = borrowEvidenceOf(ctx, operation)
   // A narrowed integer formal is spelled alike by both entries only for a call
   // that names the body; a carrier adapter passes the unnarrowed ABI.
@@ -1621,7 +1641,7 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   // A candidate's borrowed entry for this call, when it has one: the stable
   // entry its arguments are accepted by, or its borrowable body.
   const borrowedEntryOf = (target: FunctionId): string | undefined => {
-    const stable = ctx.stableBorrowEntries.get(cppBodyName(target))
+    const stable = environmentFreeEntry(ctx.stableBorrowEntries.get(cppBodyName(target)))
     if (
       stable !== undefined &&
       !stable.narrowedNumericAbi &&
@@ -1649,6 +1669,11 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
     candidate === undefined && direct === undefined && dispatched === undefined && calleeOperand.value === operation.callee.value
       ? flowKnownText(ctx, operation.callee)
       : null
+  const flowEntry = flowKnown === null ? undefined : flowClosureEntryOf(ctx, operation.callee)
+  const flowCopies =
+    flowEntry === undefined ? null : stableBorrowEntryCopies(flowEntry, operation.arguments, stableActuals, potentiallyMovingArguments)
+  const flowBorrowed = flowCopies === null ? undefined : flowEntry
+  const flowArguments = copiedBorrowArguments(padded, declaredReceiverOperand ? 1 : 0, flowBorrowed, flowCopies)
   const candidateEntersStableEntry =
     candidate !== undefined &&
     !(firstEntry !== undefined && alternate !== undefined && alternateEntry !== undefined) &&
@@ -1657,7 +1682,9 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   const callMember =
     candidate === undefined
       ? flowKnown !== null
-        ? `${stableCallee ? 'callStableKnown' : 'callKnown'}<${flowKnown}>`
+        ? flowBorrowed !== undefined
+          ? `${stableCallee ? 'callStableKnownBorrowedEnvironment' : 'callKnownBorrowedEnvironment'}<${flowKnown}, &${flowBorrowed.name}>`
+          : `${stableCallee ? 'callStableKnown' : 'callKnown'}<${flowKnown}>`
         : stableCallee
           ? 'callStable'
           : 'call'
@@ -1737,7 +1764,7 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
             : `${operandText(ctx, calleeOperand)}.callWithReceiver(${[operationNativeCallReceiverText(ctx, operation, logicalThis.representation, operandText(ctx, logicalThis)), ...padded].join(', ')})`
           : guardable
             ? guardedInvocation()
-            : `${operandText(ctx, calleeOperand)}.${callMember}(${(candidateEntersStableEntry ? stableArguments : padded).join(', ')})`
+            : `${operandText(ctx, calleeOperand)}.${callMember}(${(candidateEntersStableEntry ? stableArguments : flowBorrowed !== undefined ? flowArguments : padded).join(', ')})`
   // A result the integer census narrowed from the candidate body's returns is
   // checked where it lands, on every path the call can take: the guard above
   // may miss and run whatever callable the member holds.

@@ -1291,7 +1291,8 @@ const thunkOf = (
   // can name, so they are stable actuals for the borrowed entry: entering it
   // directly binds them in place, where the owning entry moved each one into a
   // formal of its own and released the emptied shell on the way out.
-  const borrowedEntry = stableEntry !== undefined && !hasEnvironment && !isCoroutineBody(body) ? stableEntry : undefined
+  const borrowedEntry =
+    stableEntry !== undefined && (!hasEnvironment || stableEntry.environment) && !isCoroutineBody(body) ? stableEntry : undefined
   const call = `${borrowedEntry?.name ?? cppBodyName(body.sourceOwner)}(${[
     ...(hasEnvironment ? [isCoroutineBody(body) ? `*${cppEnvironmentLocalName}` : cppEnvironmentLocalName] : []),
     ...receiverActual,
@@ -2652,6 +2653,15 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   const stableBorrowEntries = new Map<string, StableBorrowEntry>()
   const physicalCounts = new Map<string, number>()
   for (const body of input.bodies) physicalCounts.set(String(body.sourceOwner), (physicalCounts.get(String(body.sourceOwner)) ?? 0) + 1)
+  // A closure's environment is a plain pointer its thunk unpacks before entering
+  // the body, so its borrowed entry can take that pointer first the way the
+  // owning entry does. A captured receiver is forwarded out of the environment
+  // and an accessor's environment is unpacked differently; both keep their
+  // owning entry only.
+  const closesOverPlainEnvironment = (owner: FunctionId): boolean => {
+    const admission = captures.of(owner)
+    return admission.kind === 'ok' && admission.layout.receiver === null && !captures.isAccessorEnvironment(owner)
+  }
   const stableEntryOf = (body: IrBody, dying: ReadonlySet<IrValueId>): StableBorrowEntry | null =>
     isRegionId(body.sourceOwner) || constructorBodies.has(String(body.sourceOwner))
       ? null
@@ -2667,7 +2677,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
           formalsBorrowedIn(body.sourceOwner),
           dying,
           {
-            captureFree: captures.of(body.sourceOwner).kind === 'none',
+            captureFree: captures.of(body.sourceOwner).kind === 'none' || closesOverPlainEnvironment(body.sourceOwner),
+            environment: closesOverPlainEnvironment(body.sourceOwner),
             synchronous: !isCoroutineBody(body),
             singleBody: physicalCounts.get(String(body.sourceOwner)) === 1,
             narrowedNumericAbi: formalsNarrowedIn(body.sourceOwner).size > 0 || resultNarrowedIn(body.sourceOwner)
@@ -2943,6 +2954,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
                   // it forwards unchanged: never moved (the receiver formal
                   // above is never in `narrowed`/moved sets) and never boxed.
                   `return ${stableEntry.name}(${[
+                    ...(stableEntry.environment ? [cppEnvironmentLocalName] : []),
                     ...(stableEntry.abi.receiver !== null ? [cppReceiverName] : []),
                     ...stableEntry.abi.parameters.map((_, ordinal) =>
                       stableEntry.formals.has(ordinal) ? cppFormalName(ordinal) : `std::move(${cppFormalName(ordinal)})`
