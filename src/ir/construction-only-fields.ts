@@ -5,6 +5,8 @@ import { dominatorTreeOf } from './dominance.js'
 import type { ClassConstruction } from './instantiation.js'
 import { allOperationsOf, type IrBlockId, type IrBody, type IrOperation } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
+import { cleanWindowReadsOf, useSitesOf, type WindowRead, type WindowSite } from './stable-cell-reads.js'
+import { everyStoreEffects, type WriteEffects } from './write-effects.js'
 import type { ReflectionDemand, ReflectionFieldOperation } from './reflection-demand.js'
 
 /**
@@ -409,6 +411,44 @@ export const stableFieldCellsOf = (
 }
 
 /**
+ * Reads of a data field of a stable receiver (`stableReceiversOf`) that no
+ * operation between the read and any of its uses can store (`WriteEffects`),
+ * the field the program does rewrite elsewhere included: `const fog =
+ * scene.fog` across statements that never assign a `fog` names the field at
+ * every use, as a construction-only field's read does. `extraUses` adds the
+ * sites a read's value is also seen at -- the reads of the cell it
+ * initializes, and their uses -- so the window covers every one.
+ */
+export const windowStableFieldReadsOf = (
+  body: IrBody,
+  receivers: ReadonlySet<IrValueId>,
+  integrity: { readonly restricts: (representation: Representation) => boolean },
+  dying: Pick<ReadonlySet<IrValueId>, 'has'>,
+  effects: WriteEffects,
+  extraUses: (value: IrValueId) => readonly WindowSite[] = () => []
+): ReadonlySet<IrValueId> => {
+  const keys = stringConstantsOf(body)
+  const reads: WindowRead[] = []
+  for (const [blockId, block] of body.blocks)
+    for (const [index, operation] of block.operations.entries()) {
+      if (operation.kind !== 'get' || !receivers.has(operation.receiver.value)) continue
+      if (dying.has(operation.result.id) || dying.has(operation.receiver.value)) continue
+      const key = keys.get(operation.key.value)
+      const receiver = operation.receiver.representation
+      if (key === undefined || receiver.kind !== 'class-ref' || integrity.restricts(receiver) || !effects.plainField(receiver, key))
+        continue
+      reads.push({
+        value: operation.result.id,
+        block: blockId,
+        index,
+        clobbers: (candidate) => effects.mayStore(body, candidate, key),
+        extraUses: extraUses(operation.result.id)
+      })
+    }
+  return cleanWindowReadsOf(body, reads, false)
+}
+
+/**
  * `stableFieldReadsOf` and `stableFieldCellsOf` together. A read whose one use
  * is the write into its cell is dying -- the write moves it in -- and so is no
  * stable read on its own; it becomes one when that cell is admitted, because
@@ -420,9 +460,11 @@ export const stableFieldReadsAndCellsOf = (
   fields: ConstructionOnlyFields,
   integrity: { readonly restricts: (representation: Representation) => boolean },
   dying: ReadonlySet<IrValueId>,
-  admits: (declaration: DeclarationId) => boolean
+  admits: (declaration: DeclarationId) => boolean,
+  effects: WriteEffects = everyStoreEffects
 ): { readonly reads: ReadonlySet<IrValueId>; readonly cells: ReadonlySet<DeclarationId> } => {
-  const reads = stableFieldReadsOf(body, receivers, fields, integrity, dying)
+  const reads = new Set(stableFieldReadsOf(body, receivers, fields, integrity, dying))
+  for (const value of windowStableFieldReadsOf(body, receivers, integrity, dying, effects)) reads.add(value)
   const uses = new Map<IrValueId, number>()
   const written = new Map<IrValueId, DeclarationId>()
   for (const block of body.blocks.values())
@@ -433,7 +475,26 @@ export const stableFieldReadsAndCellsOf = (
   const intoCell = (value: IrValueId): boolean => written.has(value) && uses.get(value) === 1
   // Asked of this body's values only, so the program's whole dying set is
   // filtered as it is asked, not copied for every body rendered.
-  const candidates = stableFieldReadsOf(body, receivers, fields, integrity, { has: (value) => dying.has(value) && !intoCell(value) })
+  const candidateDying = { has: (value: IrValueId) => dying.has(value) && !intoCell(value) }
+  const candidates = new Set(stableFieldReadsOf(body, receivers, fields, integrity, candidateDying))
+  if (effects !== everyStoreEffects) {
+    // A read stored into a cell is seen wherever the cell is read, and
+    // wherever those reads are used.
+    const sites = useSitesOf(body)
+    const cellSites = new Map<DeclarationId, WindowSite[]>()
+    for (const [block, contents] of body.blocks)
+      for (const [index, operation] of contents.operations.entries())
+        if (operation.kind === 'binding-read') {
+          const list = cellSites.get(operation.declaration) ?? []
+          list.push({ block, index }, ...(sites.get(operation.result.id) ?? []))
+          cellSites.set(operation.declaration, list)
+        }
+    const intoCellUses = (value: IrValueId): readonly WindowSite[] => {
+      const declaration = written.get(value)
+      return declaration !== undefined && intoCell(value) ? (cellSites.get(declaration) ?? []) : []
+    }
+    for (const value of windowStableFieldReadsOf(body, receivers, integrity, candidateDying, effects, intoCellUses)) candidates.add(value)
+  }
   const cells = stableFieldCellsOf(body, candidates, admits)
   const all = new Set(reads)
   for (const value of candidates) {

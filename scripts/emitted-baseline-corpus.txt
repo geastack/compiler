@@ -20,7 +20,7 @@ branded-primitive.ts.cpp c79ac4d7f2d6
 class-accessors.ts.cpp 5394903aa2d0
 class-inheritance.ts.cpp cfcc34bc3169
 class-intersection-ancestor.ts.cpp a60d5a1d12d9
-class-named-only-by-type-instance.ts.cpp d1a87de2f6ad
+class-named-only-by-type-instance.ts.cpp 097dbb0b7341
 class-named-only-by-type.ts.cpp 21a19bc262f2
 class-static-assignment.ts.cpp 758cdb4fdeb2
 class-static-block-identity.ts.cpp d4f2fa878fae
@@ -87,7 +87,7 @@ language.ts.cpp 7f13764b63eb
 literal-receiver-properties.ts.cpp a4497e0fc3e6
 logical-guard-optional-instance.ts.cpp 89a513dfff49
 logical-merge-boolean-left.ts.cpp 1f92efe0175a
-logical-merge-nullable-reference.ts.cpp a807f569a103
+logical-merge-nullable-reference.ts.cpp 81b786723feb
 logical.ts.cpp f9b3a5edd223
 loop-iteration-helper-repro.ts.cpp f126b9ba7159
 merge-array-materialization.ts.cpp 4a0d00312a2b
@@ -160,11 +160,11 @@ typed-array-pcm-map.ts.cpp 6be973175056
 typeof-narrowed-union-field-store.js.cpp 7586a9b87260
 typeof-narrowed-union-field-store.ts.cpp 47b02de72dac
 uncertified.txt 48aa7816f45b
-uniform-value-union.ts.cpp 2c6b9bfb8369
+uniform-value-union.ts.cpp a11e7f4f76a6
 uninhabited-intersection-branch.ts.cpp 0eb4281ae240
 uninstantiated-generic.ts.cpp 1621e1aebca3
 union-absent-class-arm.js.cpp 7b18a0bcb92b
 union-no-discriminant.ts.cpp 32fc8cb9202c
 update.ts.cpp 88298f76044f
-user-collection-method-names.ts.cpp dc3eb40c7192
+user-collection-method-names.ts.cpp e9e811e03683
 valueless-return.ts.cpp 8bd46d745b66

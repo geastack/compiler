@@ -22,6 +22,7 @@ import {
   stableReceiversOf,
   type ConstructionOnlyFields
 } from '../../ir/construction-only-fields.js'
+import { everyStoreEffects, type WriteEffects } from '../../ir/write-effects.js'
 import {
   DyingArgumentSet,
   dyingTransferUsesOf,
@@ -2985,7 +2986,8 @@ export const emitBody = (
   taskResults: ReadonlySet<IrValueId> = new Set(),
   conversionIsCertified?: (id: string) => boolean,
   programConversionRecipes?: readonly ProgramConversionRecipe[],
-  physicalIndexProtocols?: ReadonlyMap<DeclarationId, boolean>
+  physicalIndexProtocols?: ReadonlyMap<DeclarationId, boolean>,
+  writeEffects: WriteEffects = everyStoreEffects
 ): readonly CppArtifact[] => {
   // Every fact this body settles before a single line renders, computed here
   // -- from `body` and the plain, already-available inputs above -- and
@@ -3097,7 +3099,8 @@ export const emitBody = (
       if (captures.isBoxed(declaration) || captures.isCaptured(declaration)) return false
       const held = placement.representation
       return held?.kind === 'class-ref' || (held?.kind === 'optional' && held.payload.kind === 'class-ref')
-    }
+    },
+    writeEffects
   )
   const bodyFacts: EmitBodyFacts = {
     generatorBody: body.generator === true,

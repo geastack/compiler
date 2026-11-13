@@ -145,6 +145,8 @@ import {
 import { buildHostMethodAliasIndex } from './host/host-method-aliases.js'
 import { constructionOnlyFieldsOf, reflectiveFieldWritesOf } from '../../ir/construction-only-fields.js'
 import { cppRecursiveContainerDeclarations, cppRecursiveContainerTraceEdges } from './recursive-containers.js'
+import type { PlainFieldRead } from '../../ir/borrow-effects.js'
+import { writeEffectsOf } from '../../ir/write-effects.js'
 
 /**
  * One C++ translation unit, assembled from what earlier stages sealed.
@@ -2055,6 +2057,17 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   const storeSinkConstructors = new Set<string>()
   for (const [declaration, layout] of input.classes)
     if (layout.constructor !== null && !unsafeForStoreSink.has(declaration)) storeSinkConstructors.add(String(layout.constructor))
+  const plainFieldRead: PlainFieldRead = (receiver, key) => {
+    if (receiver.kind === 'class-ref') {
+      // A class over a host base reads its members through the host's
+      // protocol; only a wholly projected class has plain member loads.
+      if (input.classes.get(receiver.declaration)?.nativeBase !== null) return false
+      return classMemberOf(input.classes, receiver.declaration, key)?.kind === 'field'
+    }
+    if (receiver.kind === 'record')
+      return receiver.fields.some((field) => field.key === key) && !receiver.accessors.some((accessor) => accessor.key === key)
+    return false
+  }
   const {
     callableMemberCandidates,
     callableFlowCandidates,
@@ -2075,17 +2088,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     isStoreSinkConstructor: (body) => storeSinkConstructors.has(String(body.sourceOwner)),
     classInstanceOf: (declaration) => input.classes.get(declaration)?.instance ?? null,
     shapeLayoutOf: (shapeId) => input.deriver.layoutOf(shapeId as StructuralTypeId),
-    plainFieldRead: (receiver, key) => {
-      if (receiver.kind === 'class-ref') {
-        // A class over a host base reads its members through the host's
-        // protocol; only a wholly projected class has plain member loads.
-        if (input.classes.get(receiver.declaration)?.nativeBase !== null) return false
-        return classMemberOf(input.classes, receiver.declaration, key)?.kind === 'field'
-      }
-      if (receiver.kind === 'record')
-        return receiver.fields.some((field) => field.key === key) && !receiver.accessors.some((accessor) => accessor.key === key)
-      return false
-    },
+    plainFieldRead,
     isPrivateLocal: (body, declaration) => {
       const placement = input.placements.get(declaration)
       return (
@@ -2343,6 +2346,13 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // class whose reflection demand can write a field -- a boxed instance's
   // `obj[k] = v`, `Reflect.set`, `Object.assign` -- keeps that field's copy;
   // a missing census writes every field of every class.
+  // Field keys each body can store, through the bodies it calls (`ir/write-effects.ts`).
+  const writeEffects = writeEffectsOf(input.bodies, plainFieldRead, (receiver, key) => {
+    if (receiver.kind !== 'class-ref') return plainFieldRead(receiver, key)
+    if (input.classes.get(receiver.declaration)?.nativeBase !== null) return false
+    const member = classMemberOf(input.classes, receiver.declaration, key)?.kind
+    return member === 'field' || member === 'method'
+  })
   const constructionOnlyFields = constructionOnlyFieldsOf(
     input.bodies,
     classConstructions,
@@ -2904,7 +2914,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
         asyncResults.taskResults,
         programSite.conversionIsCertified,
         input.programConversionRecipes,
-        structs.classIndexProtocols
+        structs.classIndexProtocols,
+        writeEffects
       )
       const commonJsScope = [
         ...coroutineEnvironmentPrologueOf(promiseView ?? body, captures),
