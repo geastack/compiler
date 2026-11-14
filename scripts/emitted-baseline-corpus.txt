@@ -1,7 +1,7 @@
 ambient-global-guard.ts.cpp 976efed910c4
 ambient-layout-relevance.ts.cpp 88298f76044f
 ambient-merged-global.ts.cpp 2fc139f53077
-any-parameter-boxing.ts.cpp 7ea16de12bfd
+any-parameter-boxing.ts.cpp dada8faff6bd
 array-element-evidence-pruned.js.cpp ce547c796fe6
 array-length-store.ts.cpp f6db2ddad8c8
 array-literal-index.ts.cpp fe3f7e4a72c4
@@ -33,7 +33,7 @@ control.ts.cpp 52ca47906ab4
 counted-push-fill-loop.ts.cpp f1339423be3a
 declaration-constant-rival.js.cpp 6d2ff867a266
 declaration-constant-values.js.cpp 6d2ff867a266
-declared-dictionary.ts.cpp c261e5b56b37
+declared-dictionary.ts.cpp c8880234f55f
 default-parameter-patterns.ts.cpp bf451e39599e
 destructure-array-param.ts.cpp dcc02af96285
 destructure-param.ts.cpp 0af6b8777196
@@ -48,7 +48,7 @@ embedded-null-string.ts.cpp f7f5d62a0e55
 explicit-void-this.ts.cpp 9b9a6b7db59a
 expression-carrier-repro.ts.cpp 6d4e10eb2bfd
 fn.ts.cpp 748a85b07306
-for-in-narrowed-optional-field.ts.cpp 46620861c987
+for-in-narrowed-optional-field.ts.cpp d52ba306bc34
 function-call-rewrite.ts.cpp 4f2508d874db
 function-typed-value.ts.cpp 98a0ec93058a
 function-value-dispatch-get-repro.ts.cpp 0b7426b2b77c
@@ -118,7 +118,7 @@ optional-callable-prefix.ts.cpp 9a424f7d08a5
 optional-chain-as-guard.ts.cpp b778d788a012
 optional-chain-boundaries.ts.cpp 44463decb179
 optional-chain-tails.ts.cpp 0e60d3bde2bc
-optional-chain.ts.cpp 95848ee0ce15
+optional-chain.ts.cpp a14b0b17bbaa
 optional-collection-cell.ts.cpp 55d6260faeaf
 optional-slot-holds-null.ts.cpp 711bf812eea6
 optional-union-to-discriminated-repro.ts.cpp 6d2ff867a266
@@ -128,7 +128,7 @@ physical-class-ancestry-declared.ts.cpp 793e0c02132b
 printer-drift.txt bbdd9917900c
 property-access-unresolved-repro.ts.cpp 212b3bf28bfa
 record-into-named-layout.ts.cpp fb701366540a
-record-round-trip-through-box.ts.cpp e54ab6575191
+record-round-trip-through-box.ts.cpp 85d187253cb6
 record-structural-return.ts.cpp f9c869793bf8
 recursive-native-list.ts.cpp 1ee1b7e48cc8
 recursive-native-map.ts.cpp 90575fab70d6
@@ -157,8 +157,8 @@ typed-array-extending-interface.ts.cpp 217d9ccf7a71
 typed-array-index.ts.cpp bc2d9365ba94
 typed-array-intersection-carrier.ts.cpp 2d2576723158
 typed-array-pcm-map.ts.cpp 6be973175056
-typeof-narrowed-union-field-store.js.cpp 7586a9b87260
-typeof-narrowed-union-field-store.ts.cpp 47b02de72dac
+typeof-narrowed-union-field-store.js.cpp 71bfe00b8afa
+typeof-narrowed-union-field-store.ts.cpp 327c1d3aff6d
 uncertified.txt 48aa7816f45b
 uniform-value-union.ts.cpp a11e7f4f76a6
 uninhabited-intersection-branch.ts.cpp 0eb4281ae240

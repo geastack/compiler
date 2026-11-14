@@ -87,6 +87,8 @@ export interface ProgramFacts {
   readonly singleEvaluationClasses: ReadonlySet<DeclarationId>
   /** Cells the whole program writes once, with a function or class it allocates there -- see `definitionCellsOf`. */
   readonly definitionCells: ReadonlySet<DeclarationId>
+  /** Cells the whole program writes once, with a record it allocates there -- see `allocationCellsOf`. */
+  readonly allocationCells: ReadonlySet<DeclarationId>
 }
 
 /**
@@ -177,6 +179,40 @@ const definitionCellsOf = (bodies: readonly IrBody[]): ReadonlySet<DeclarationId
   }
   for (const declaration of definitions) if (writeCounts.get(declaration) !== 1) definitions.delete(declaration)
   return definitions
+}
+
+/**
+ * Cells the whole program writes exactly once, and with a record or object it
+ * allocates at that write: `const gull: Gull = { ... }`, a closure's own state
+ * captured by every method it hands out.
+ *
+ * A field read through such a cell needs no copy of the cell: the cell holds
+ * that one allocation from its write on (a read before the write is of
+ * `undefined`, which no field read gets past). And the allocation is plain, never
+ * a live view a dynamic writer stored, so its declared members are its own.
+ * Writes are counted from every body, renewals included, so a cell written
+ * anywhere else is not one.
+ */
+const allocationCellsOf = (bodies: readonly IrBody[]): ReadonlySet<DeclarationId> => {
+  const allocated = new Set<IrValueId>()
+  const writeCounts = new Map<DeclarationId, number>()
+  const allocations = new Set<DeclarationId>()
+  for (const body of bodies) {
+    for (const block of body.blocks.values()) {
+      for (const operation of allOperationsOf(block)) {
+        if (operation.kind === 'allocate-record' || operation.kind === 'allocate-ordinary-object') allocated.add(operation.result.id)
+        // A literal's own properties are defined one by one, each answering the same object.
+        if (operation.kind === 'define-own-property' && operation.result !== null && allocated.has(operation.receiver.value))
+          allocated.add(operation.result.id)
+        if (operation.kind === 'binding-renew') writeCounts.set(operation.declaration, 2)
+        if (operation.kind !== 'binding-write') continue
+        writeCounts.set(operation.declaration, (writeCounts.get(operation.declaration) ?? 0) + 1)
+        if (allocated.has(operation.value.value)) allocations.add(operation.declaration)
+      }
+    }
+  }
+  for (const declaration of allocations) if (writeCounts.get(declaration) !== 1) allocations.delete(declaration)
+  return allocations
 }
 
 const buildRepeatedConstructorIndex = (
@@ -483,6 +519,7 @@ export const programFactsOf = (
   const fixedFieldStateConstant = !nativeIntegrityRestricted.any && !fixedFieldDeletionsOf(bodies)
   const singleEvaluationClasses = singleEvaluationClassesOf(bodies)
   const definitionCells = definitionCellsOf(bodies)
+  const allocationCells = allocationCellsOf(bodies)
 
   return {
     callableMemberCandidates,
@@ -495,6 +532,7 @@ export const programFactsOf = (
     nativeIntegrityRestricted,
     fixedFieldStateConstant,
     singleEvaluationClasses,
-    definitionCells
+    definitionCells,
+    allocationCells
   }
 }

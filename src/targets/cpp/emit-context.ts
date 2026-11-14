@@ -755,6 +755,10 @@ export interface EmitBodyFacts {
   readonly asyncCoroutineBody: boolean
   /** See `EmitContext.returnsUnderFinallyGuard`. */
   readonly returnsUnderFinallyGuard: boolean
+  /** See `EmitContext.returnsOwnReceiver`. */
+  readonly returnsOwnReceiver: boolean
+  /** See `EmitContext.plainAllocationValues`. */
+  readonly plainAllocationValues: ReadonlySet<IrValueId>
   /** See `EmitContext.receiverValues`. */
   readonly receiverValues: ReadonlySet<IrValueId>
   /** See `EmitContext.bindingWriteCounts`. */
@@ -924,6 +928,18 @@ export interface EmitContext {
    * still reads it (`runtime/gea_runtime.h`'s `detail::returnCopy`).
    */
   readonly returnsUnderFinallyGuard: boolean
+  /**
+   * Whether every return hands back the receiver, which the signature then
+   * returns by reference (`translation-unit.ts`'s `returnsOwnReceiver`): each
+   * return names the receiver formal itself, never a copy or a temporary.
+   */
+  readonly returnsOwnReceiver: boolean
+  /**
+   * Values read from a cell that holds one plain allocation for the whole
+   * program (`ir/program-facts.ts`'s `allocationCells`). A field-view read off
+   * one is the allocation's own member: no live view can stand in for it.
+   */
+  readonly plainAllocationValues: ReadonlySet<IrValueId>
   /** The conventions of emitted bodies, shared with their signature renderer. */
   readonly abiOfCallable: (callable: FunctionId) => CallableAbi | null
   readonly methodEnvironment: (callable: FunctionId, what: string) => string
@@ -2217,6 +2233,8 @@ export const createEmitContext = (
     generatorBody: bodyFacts.generatorBody,
     asyncCoroutineBody: bodyFacts.asyncCoroutineBody,
     returnsUnderFinallyGuard: bodyFacts.returnsUnderFinallyGuard,
+    returnsOwnReceiver: bodyFacts.returnsOwnReceiver,
+    plainAllocationValues: bodyFacts.plainAllocationValues,
     virtualDispatch,
     directCallableBindings,
     callableMemberCandidates,

@@ -644,7 +644,7 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
     lines.push(`${defineValue(ctx, operation.result)} = ${rendered};`)
     return
   }
-  if (operation.nativeFieldViewRead) {
+  if (operation.nativeFieldViewRead && !plainAllocationMemberRead(ctx, operation)) {
     const rendered = nativeFieldViewReadText(ctx, operation, (carrier, key) => {
       // A class arm answering the key from a getter has no own field to
       // read natively: the plain allocation's answer is the getter's body
@@ -1336,6 +1336,51 @@ const fieldReadText = (ctx: EmitContext, representation: Representation, fieldNa
   return fields === null ? `${prefix}${cppRecordFieldName(fieldName)}` : tailAwareFieldReadText(fields, fieldName, prefix)
 }
 
+/**
+ * A field-view read whose receiver is a cell's one plain allocation
+ * (`EmitContext.plainAllocationValues`) and whose key is a declared member
+ * carried as the read's own result: the view protocol would only ever take its
+ * plain branch, which is this member (an absent optional one reads undefined,
+ * as its presence test says), so the read is the member's ordinary load --
+ * and, across a window nothing stores it in, an alias of it.
+ */
+const plainAllocationMemberRead = (ctx: EmitContext, operation: GetOperation): boolean => {
+  const receipt = operation.nativeFieldViewRead
+  const carrier = operation.receiver.representation
+  if (receipt === undefined || receipt.keyDomain !== undefined || receipt.originalAbsent === true) return false
+  if (!ctx.plainAllocationValues.has(operation.receiver.value)) return false
+  const accessors =
+    carrier.kind === 'record'
+      ? carrier.accessors
+      : carrier.kind === 'native-record-ref' && carrier.native === null
+        ? recordAccessorsOfShape(ctx.deriver, carrier.shapeId)
+        : null
+  if (accessors === null || accessors.some((accessor) => accessor.key === receipt.key)) return false
+  const source = declaredRecordFieldOf(ctx.deriver, carrier, receipt.key, ctx.classes)
+  return source !== null && representationKey(source.value) === representationKey(operation.result.representation)
+}
+
+/**
+ * A field-view store into a cell's one plain allocation, of a declared member:
+ * the view protocol's plain branch is the ordinary member store
+ * (`emitFieldStoreLines`, which keeps its own writability guard), so that is
+ * the whole store.
+ */
+const plainAllocationMemberWrite = (ctx: EmitContext, operation: SetOperation): boolean => {
+  const receipt = operation.nativeFieldViewWrite
+  const carrier = operation.receiver.representation
+  if (receipt === undefined || receipt.keyDomain !== undefined || receipt.openKeys === true) return false
+  if (!ctx.plainAllocationValues.has(operation.receiver.value)) return false
+  const accessors =
+    carrier.kind === 'record'
+      ? carrier.accessors
+      : carrier.kind === 'native-record-ref' && carrier.native === null
+        ? recordAccessorsOfShape(ctx.deriver, carrier.shapeId)
+        : null
+  if (accessors === null || accessors.some((accessor) => accessor.key === receipt.key)) return false
+  return declaredRecordFieldOf(ctx.deriver, carrier, receipt.key, ctx.classes) !== null
+}
+
 /** `receiver->field` with nothing around it: the rendering a stable field read may alias. */
 const plainFieldReadText = (ctx: EmitContext, operation: GetOperation, fieldName: string): string => {
   const receiver = constructorViewReceiverText(ctx, operation.receiver, fieldName, operandText(ctx, operation.receiver))
@@ -1707,7 +1752,7 @@ export const emitFieldStore = (
     if (operation.result) defineValueAlias(ctx, operation.result, operandText(ctx, operation.receiver))
     return
   }
-  if (operation.kind === 'set' && operation.nativeFieldViewWrite) {
+  if (operation.kind === 'set' && operation.nativeFieldViewWrite && !plainAllocationMemberWrite(ctx, operation)) {
     let viewContext = ctx
     if (operation.result) {
       lines.push(`${defineValue(ctx, operation.result)} = ${operandText(ctx, operation.receiver)};`)

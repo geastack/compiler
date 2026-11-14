@@ -116,7 +116,7 @@ import type { ReflectionExposure } from '../../ir/reflection-demand.js'
 import { classesConstructedUnobservably, functionsIgnoringTheirReceiver, type InstantiationFacts } from '../../ir/instantiation.js'
 import { renderJsonStructDeclarations } from './emit-json.js'
 import { programConversionText, type ConversionSite, type PrinterDrift } from './emit-narrowing.js'
-import { recordLayoutPolicyOf } from '../../projection/fields.js'
+import { recordAccessorsOfShape, recordFieldsOfShape, recordLayoutPolicyOf } from '../../projection/fields.js'
 import type { ConversionCensus } from '../../conversion/nodes.js'
 import type { RepresentationDeriver } from '../../representation/derive.js'
 import {
@@ -727,6 +727,39 @@ const borrowsReceiver = (body: IrBody): boolean =>
   body.abi?.receiver != null && cppRefcountedReceiver(body.abi.receiver) && !isCoroutineBody(body)
 
 /**
+ * Whether every return of this method hands back the receiver it was called
+ * on, so each of its entries returns the caller's own handle by reference.
+ *
+ * `v.set(x, y, z).add(w)` chains three's vector methods, and each returned
+ * `this` by value: a retain inside the callee and a release in the caller for
+ * a result that is the caller's own receiver, discarded or immediately called
+ * on. The receiver formal is a `const&` bound to an object the caller keeps
+ * alive past the call (`borrowsReceiver`), so a reference to it is valid for
+ * the caller's whole full-expression; a caller that keeps the result copies it
+ * as before, and a thunk returns by value.
+ *
+ * Constructible bodies are excluded (a constructor completes with its
+ * receiver too, through its own protocol), and so is a body with a try
+ * statement, whose returned value a finally clause may still read.
+ */
+const returnsOwnReceiver = (body: IrBody): boolean => {
+  const abi = body.abi
+  if (abi === null || abi.receiver === null || body.construct !== null || body.tryRegions.length > 0 || !borrowsReceiver(body)) return false
+  if (representationKey(abi.result) !== representationKey(abi.receiver)) return false
+  const receivers = new Set<IrValueId>()
+  for (const block of body.blocks.values())
+    for (const operation of allOperationsOf(block)) if (operation.kind === 'receiver') receivers.add(operation.result.id)
+  let returns = 0
+  for (const block of body.blocks.values()) {
+    const terminator = block.terminator
+    if (terminator.kind !== 'return') continue
+    if (terminator.value === null || terminator.value === undefined || !receivers.has(terminator.value.value)) return false
+    returns += 1
+  }
+  return returns > 0
+}
+
+/**
  * The struct one body's captured declarations share (`CaptureFrame`).
  *
  * Every field is declared at its carrier, with no box around it: the frame IS
@@ -1209,7 +1242,9 @@ const signatureOf = (
       ? `gea::Task<${cppResultTypeOf(effectiveAbi.result.value)}>`
       : narrowedResult
         ? cppNarrowedIntegerType
-        : cppResultTypeOf(effectiveAbi.result)
+        : returnsOwnReceiver(body)
+          ? `const ${cppResultTypeOf(effectiveAbi.result)}&`
+          : cppResultTypeOf(effectiveAbi.result)
   const formals = bodyFormalsOf(
     cppEnvironmentStructOf(captures, body.sourceOwner),
     effectiveAbi,
@@ -2066,6 +2101,12 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     }
     if (receiver.kind === 'record')
       return receiver.fields.some((field) => field.key === key) && !receiver.accessors.some((accessor) => accessor.key === key)
+    // An interface-typed record is the same struct, its members named by its shape.
+    if (receiver.kind === 'native-record-ref' && receiver.native === null)
+      return (
+        (recordFieldsOfShape(input.deriver, receiver.shapeId)?.some((field) => field.key === key) ?? false) &&
+        !(recordAccessorsOfShape(input.deriver, receiver.shapeId)?.some((accessor) => accessor.key === key) ?? true)
+      )
     return false
   }
   const {
@@ -2079,7 +2120,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     nativeIntegrityRestricted,
     fixedFieldStateConstant,
     singleEvaluationClasses,
-    definitionCells
+    definitionCells,
+    allocationCells
   } = programFactsOf(input.bodies, directCallables, input.placements, {
     captureFree: (functionId) => captures.of(functionId).kind === 'none',
     isBoxed: (declaration) => captures.isBoxed(declaration),
@@ -2915,7 +2957,9 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
         programSite.conversionIsCertified,
         input.programConversionRecipes,
         structs.classIndexProtocols,
-        writeEffects
+        writeEffects,
+        promiseView === null && returnsOwnReceiver(body),
+        allocationCells
       )
       const commonJsScope = [
         ...coroutineEnvironmentPrologueOf(promiseView ?? body, captures),

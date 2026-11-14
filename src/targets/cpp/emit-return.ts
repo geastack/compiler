@@ -2,7 +2,7 @@ import type { IrOperand, IrTerminatorOperation } from '../../ir/model.js'
 import { representationKey, type Representation } from '../../representation/model.js'
 import { settlesOverPayloadOrPromise } from '../../projection/slots.js'
 import type { EmitContext } from './emit-context.js'
-import { operandText, createCppEmitBlockedError } from './emit-context.js'
+import { operandText, createCppEmitBlockedError, cppReceiverName } from './emit-context.js'
 import { cppTypeOf, cppUndefinedIn } from './types.js'
 import { alignedValueText, dynamicPromiseAdoptionText, recipeText } from './emit-narrowing.js'
 import { structuralRecordViewText } from './emit-record-view.js'
@@ -262,6 +262,10 @@ export const emitReturn = (ctx: EmitContext, lines: string[], terminator: Extrac
   if (ctx.generatorBody) {
     const completion = generatorCompletionOf(ctx, terminator)
     lines.push(completion === null ? 'co_return;' : `co_return ${returnedCellText(ctx, completion.text)};`)
+    return
+  }
+  if (ctx.returnsOwnReceiver && terminator.value) {
+    lines.push(`return ${cppReceiverName};`)
     return
   }
   if (!terminator.value) {

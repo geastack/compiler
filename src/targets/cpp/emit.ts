@@ -2987,7 +2987,9 @@ export const emitBody = (
   conversionIsCertified?: (id: string) => boolean,
   programConversionRecipes?: readonly ProgramConversionRecipe[],
   physicalIndexProtocols?: ReadonlyMap<DeclarationId, boolean>,
-  writeEffects: WriteEffects = everyStoreEffects
+  writeEffects: WriteEffects = everyStoreEffects,
+  returnsOwnReceiver = false,
+  allocationCells: ReadonlySet<DeclarationId> = new Set()
 ): readonly CppArtifact[] => {
   // Every fact this body settles before a single line renders, computed here
   // -- from `body` and the plain, already-available inputs above -- and
@@ -3045,9 +3047,13 @@ export const emitBody = (
   // the read had already rendered.
   const receiverValues = new Set<IrValueId>()
   const bindingWriteCounts = new Map<DeclarationId, number>()
+  // Reads of a cell holding its one plain allocation (`ir/program-facts.ts`'s
+  // `allocationCells`): stable receivers, never a live view.
+  const plainAllocationValues = new Set<IrValueId>()
   let callsSuper = false
   for (const block of body.blocks.values()) {
     for (const operation of allOperationsOf(block)) {
+      if (operation.kind === 'binding-read' && allocationCells.has(operation.declaration)) plainAllocationValues.add(operation.result.id)
       // Censused in the same pass, for `EmitBodyFacts.receiverValues`: a
       // member access has to know whether its receiver came from `super`, and
       // the operation that defines it is the only place that says so.
@@ -3089,7 +3095,10 @@ export const emitBody = (
   // (string appends, array and JSON fills) that name its storage directly.
   const { reads: stableFieldReads, cells: stableFieldCells } = stableFieldReadsAndCellsOf(
     body,
-    stableReceiversOf(body, receiverValues, borrowedFormals, bindingWriteCounts, (declaration) => captures.isBoxed(declaration)),
+    new Set([
+      ...stableReceiversOf(body, receiverValues, borrowedFormals, bindingWriteCounts, (declaration) => captures.isBoxed(declaration)),
+      ...plainAllocationValues
+    ]),
     constructionOnlyFields,
     nativeIntegrityRestricted,
     bodyDyingArguments,
@@ -3106,6 +3115,8 @@ export const emitBody = (
     generatorBody: body.generator === true,
     asyncCoroutineBody: isAsyncCoroutineBody(body),
     returnsUnderFinallyGuard: body.tryRegions.some((region) => region.finallyEntry !== null),
+    returnsOwnReceiver,
+    plainAllocationValues,
     receiverValues,
     bindingWriteCounts,
     stableCellReads: stableCellReadsOf(body, (declaration) => placements.get(declaration)?.storage.kind === 'local'),

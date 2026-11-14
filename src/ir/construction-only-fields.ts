@@ -435,7 +435,12 @@ export const windowStableFieldReadsOf = (
       if (dying.has(operation.result.id) || dying.has(operation.receiver.value)) continue
       const key = keys.get(operation.key.value)
       const receiver = operation.receiver.representation
-      if (key === undefined || receiver.kind !== 'class-ref' || integrity.restricts(receiver) || !effects.plainField(receiver, key))
+      if (
+        key === undefined ||
+        (receiver.kind !== 'class-ref' && receiver.kind !== 'record' && receiver.kind !== 'native-record-ref') ||
+        integrity.restricts(receiver) ||
+        !effects.plainField(receiver, key)
+      )
         continue
       reads.push({
         value: operation.result.id,
