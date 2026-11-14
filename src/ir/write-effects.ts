@@ -42,7 +42,7 @@ const none: Local = { kind: 'none' }
 const all: Local = { kind: 'all' }
 
 const primitiveKinds: ReadonlySet<string> = new Set(['scalar', 'string', 'null', 'undefined', 'symbol', 'record-literal'])
-const primitive = (value: Representation): boolean => {
+export const primitive = (value: Representation): boolean => {
   if (value.kind === 'optional') return primitive(value.payload)
   if (value.kind === 'tagged-union') return value.arms.every((arm) => primitive(arm.value))
   return primitiveKinds.has(value.kind)
@@ -60,7 +60,7 @@ const nativeDataKinds: ReadonlySet<string> = new Set([
   'native-sequence',
   'native-handle'
 ])
-const nativeData = (value: Representation): boolean =>
+export const nativeData = (value: Representation): boolean =>
   value.kind === 'optional' ? nativeData(value.payload) : nativeDataKinds.has(value.kind)
 
 /**
@@ -68,7 +68,7 @@ const nativeData = (value: Representation): boolean =>
  * can neither call it back nor coerce it through a method of the program's
  * (`join` on an array of class instances calls their `toString`).
  */
-const inertArgument = (value: Representation): boolean => {
+export const inertArgument = (value: Representation): boolean => {
   if (value.kind === 'optional') return inertArgument(value.payload)
   if (value.kind === 'tagged-union') return value.arms.every((arm) => inertArgument(arm.value))
   if (primitive(value)) return true

@@ -90,6 +90,7 @@ import { splitGeneratorBodies } from './ir/generator-split.js'
 import { shakeProgram } from './ir/shake.js'
 import { pruneProvenBranches } from './ir/proven-branches.js'
 import { threadShortCircuitJoins } from './ir/short-circuit-threading.js'
+import { reuseFieldReads } from './ir/field-read-reuse.js'
 import { dropUnreadPureConversions } from './ir/pure-conversion-reuse.js'
 import { publishEmissionRepresentationsOf, type EmissionRepresentationPublication } from './ir/emission-representations.js'
 import { finalizeTypedComputedReads, reflectionExposureOf, type ReflectionExposure } from './ir/reflection-demand.js'
@@ -1200,7 +1201,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
         publishNativeCallableDataSlots({
           bodies: publishNativeCallablePrivateSlots({
             bodies: elideReadOnlySpreadCopies(
-              rewriteLiteralSetMembership(threadShortCircuitJoins(provenPruned!.bodies)),
+              rewriteLiteralSetMembership(reuseFieldReads(threadShortCircuitJoins(provenPruned!.bodies), classes, representations.deriver)),
               splitPlacements,
               representations.deriver
             ),
