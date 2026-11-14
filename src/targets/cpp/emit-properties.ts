@@ -178,7 +178,8 @@ import {
   stringMemberText,
   symbolMemberText,
   typedArrayAccessText,
-  integerTypedArrayElements
+  integerTypedArrayElements,
+  declareDenseWindow
 } from './emit-carrier-members.js'
 import { arrayBufferAccessText, dataViewAccessText, nativeBufferMethodValueText, sharedArrayBufferAccessText } from './emit-buffers.js'
 import { functionSourceReadClaimOf } from './function-source-reads.js'
@@ -2091,7 +2092,21 @@ const emitFieldStoreLines = (
             `"${representationKey(operation.receiver.representation.element)}"`
         )
       }
-      lines.push(`${arrayReceiver}->setElementAtIndex(${index}, ${storedValue});`)
+      // A store of a run of constant-index accesses (`ir/dense-read-windows.ts`):
+      // while the run's window holds -- dense, in range, writable -- the store
+      // is the cell's own assignment.
+      const window = operation.kind === 'set' ? ctx.denseWriteWindows.get(operation) : undefined
+      if (window === undefined) lines.push(`${arrayReceiver}->setElementAtIndex(${index}, ${storedValue});`)
+      else {
+        const name = `gea_read_window_${window.ordinal}`
+        declareDenseWindow(ctx, name, operation.receiver.representation)
+        const cells = window.initialize
+          ? `(${name}.cells = gea::denseWindowCellsMutable(${arrayReceiver}, ${window.last}))`
+          : `${name}.cells`
+        lines.push(
+          `if (${cells}) ${name}.cells[${index}].value = ${storedValue}; else ${arrayReceiver}->setElementAtIndex(${index}, ${storedValue});`
+        )
+      }
       finishArrayStore()
       return
     }

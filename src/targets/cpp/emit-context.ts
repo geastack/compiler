@@ -6,6 +6,7 @@ import { restrictsEveryCarrier, type IntegrityRestrictions } from '../../ir/inte
 import type { BorrowedArmProjection } from './borrowed-arm-projections.js'
 import type { StableBorrowEntry } from './borrowed-call-entry.js'
 import type { SharedStringLayout } from '../../ir/string-layout-reuse.js'
+import type { DenseReadWindow } from '../../ir/dense-read-windows.js'
 import type { LazySplit } from '../../ir/lazy-splits.js'
 import type { CapabilityKey } from '../../ir/certify.js'
 import type { DeclarationId, FunctionId, IrValueId, RegionId, SemanticResultId } from '../../identity/ids.js'
@@ -22,6 +23,7 @@ import type {
   CallOperation,
   ComputeOperation,
   GetOperation,
+  SetOperation,
   IrBlockId,
   IrBody,
   IrCaptureGroup,
@@ -1532,6 +1534,10 @@ export interface EmitContext {
   readonly hoistedResults: ReadonlySet<IrValueId>
   /** See `hoistedResults`'s doc for why this is settled the same way. */
   readonly sharedStringLayouts: ReadonlyMap<IrValueId, SharedStringLayout>
+  /** Constant-index element reads sharing one dense window (`ir/dense-read-windows.ts`), settled like `sharedStringLayouts`. */
+  readonly denseReadWindows: ReadonlyMap<IrValueId, DenseReadWindow>
+  /** The stores of those runs (`denseReadWindows`), keyed by operation. */
+  readonly denseWriteWindows: ReadonlyMap<SetOperation, DenseReadWindow>
   readonly prototypeMethodReads: ReadonlyMap<IrValueId, PrototypeMethodRead>
   /**
    * Lazy-arrow-field GETs whose one reader is the call that reads them as its
@@ -2002,6 +2008,8 @@ export const effectiveAbiOf = (abi: CallableAbi | null, admission: CaptureAdmiss
 export interface EmitBodyPrepassFacts {
   readonly hoistedResults: Set<IrValueId>
   readonly sharedStringLayouts: Map<IrValueId, SharedStringLayout>
+  readonly denseReadWindows: Map<IrValueId, DenseReadWindow>
+  readonly denseWriteWindows: Map<SetOperation, DenseReadWindow>
   readonly reusedStringLengths: Map<IrValueId, IrOperand>
   readonly loopInvariantValues: Set<IrValueId>
   readonly numericCalls: Map<CallOperation, NumericIntrinsic>
@@ -2148,6 +2156,8 @@ export const createEmitContext = (
   // still needs a mutable handle at all.
   const hoistedResults = new Set<IrValueId>()
   const sharedStringLayouts = new Map<IrValueId, SharedStringLayout>()
+  const denseReadWindows = new Map<IrValueId, DenseReadWindow>()
+  const denseWriteWindows = new Map<SetOperation, DenseReadWindow>()
   const reusedStringLengths = new Map<IrValueId, IrOperand>()
   const loopInvariantValues = new Set<IrValueId>()
   const numericCalls = new Map<CallOperation, NumericIntrinsic>()
@@ -2288,6 +2298,8 @@ export const createEmitContext = (
     hostNamespaceDefinitelyPresent: bodyFacts.hostNamespaceDefinitelyPresent,
     hoistedResults,
     sharedStringLayouts,
+    denseReadWindows,
+    denseWriteWindows,
     prototypeMethodReads,
     lazyCalleeReads,
     bindingNames: new Map(),
@@ -2362,6 +2374,8 @@ export const createEmitContext = (
     prepass: {
       hoistedResults,
       sharedStringLayouts,
+      denseReadWindows,
+      denseWriteWindows,
       reusedStringLengths,
       loopInvariantValues,
       numericCalls,

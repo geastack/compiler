@@ -4,7 +4,7 @@ ambient-merged-global.ts.cpp 2fc139f53077
 any-parameter-boxing.ts.cpp dada8faff6bd
 array-element-evidence-pruned.js.cpp ce547c796fe6
 array-length-store.ts.cpp f6db2ddad8c8
-array-literal-index.ts.cpp fe3f7e4a72c4
+array-literal-index.ts.cpp 20d3fcda05e6
 arrow-captures-receiver.ts.cpp 94bc1b478878
 arrow.ts.cpp 6634942010d4
 assign.ts.cpp 7e79e16b3b98
@@ -157,8 +157,8 @@ typed-array-extending-interface.ts.cpp 217d9ccf7a71
 typed-array-index.ts.cpp bc2d9365ba94
 typed-array-intersection-carrier.ts.cpp 2d2576723158
 typed-array-pcm-map.ts.cpp 6be973175056
-typeof-narrowed-union-field-store.js.cpp 71bfe00b8afa
-typeof-narrowed-union-field-store.ts.cpp 327c1d3aff6d
+typeof-narrowed-union-field-store.js.cpp d6d1bc7773b9
+typeof-narrowed-union-field-store.ts.cpp eb4a9368fa4c
 uncertified.txt 48aa7816f45b
 uniform-value-union.ts.cpp dea2d3741817
 uninhabited-intersection-branch.ts.cpp 0eb4281ae240

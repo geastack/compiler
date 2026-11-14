@@ -3540,6 +3540,8 @@ export const emitBody = (
   })
   for (const value of census.loopInvariantValues) prepass.loopInvariantValues.add(value)
   for (const [value, layout] of census.sharedStringLayouts) prepass.sharedStringLayouts.set(value, layout)
+  for (const [value, window] of census.denseReadWindows) prepass.denseReadWindows.set(value, window)
+  for (const [operation, window] of census.denseWriteWindows) prepass.denseWriteWindows.set(operation, window)
   for (const value of census.hoistedResults) prepass.hoistedResults.add(value)
   for (const [declaration, forwarded] of census.forwardedBindings) prepass.forwardedBindings.set(declaration, forwarded)
   for (const [value, prior] of census.reusedStringLengths) prepass.reusedStringLengths.set(value, prior)

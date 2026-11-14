@@ -1607,6 +1607,26 @@ template <typename... Arms>
 class TaggedUnion;
 template <typename T>
 struct Ref;
+/**
+ * A run of constant-index reads of one array, taken once at its first read
+ * (`ir/dense-read-windows.ts`): the cells when every index the run reads is
+ * plain dense storage, else null, and every read of a null window takes
+ * `readElementAtIndex`. Null until taken, so a member rendered without the
+ * first read still reads correctly.
+ */
+template <typename ArrayRef>
+struct DenseReadWindow {
+  typename ArrayRef::element_type::Cell* cells = nullptr;
+};
+template <typename Array>
+[[gnu::always_inline]] inline typename Array::Cell* denseWindowCells(const gea::Ref<Array>& array, long long last) {
+  return array->plainDenseThrough(last) ? array->cells.data() : nullptr;
+}
+/** `denseWindowCells` for a run that also stores: the array must also accept writes (`requireMutable`). */
+template <typename Array>
+[[gnu::always_inline]] inline typename Array::Cell* denseWindowCellsMutable(const gea::Ref<Array>& array, long long last) {
+  return array->plainDenseThrough(last) && !array->hasFrozenIntegrity() ? array->cells.data() : nullptr;
+}
 class DynamicObject;
 class FunctionObjectIdentity;
 class Value;
@@ -10197,6 +10217,14 @@ struct ArrayObject {
   // `elementAtIndex`'s dense case first: ordinary storage, in range, no hole or
   // undefined bookkeeping answers the cell after one unsigned compare, so an
   // integer-keyed read keeps the shape the borrowed accessor had.
+  /**
+   * Whether `readElementAtIndex` answers every index up to `last` from `cells`
+   * alone: the checks it makes per read, asked once for a run of reads
+   * (`gea::denseWindowCells`, `ir/dense-read-windows.ts`).
+   */
+  [[gnu::always_inline]] bool plainDenseThrough(long long last) const {
+    return !liveSource && !indexedDescriptors && static_cast<unsigned long long>(last) < cells.size() && holes.empty() && undefineds.empty();
+  }
   [[gnu::always_inline]] Element readElementAtIndex(long long index) const {
     if (!liveSource && !indexedDescriptors && static_cast<unsigned long long>(index) < cells.size() && holes.empty() &&
         undefineds.empty()) [[likely]]
