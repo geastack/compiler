@@ -3742,6 +3742,18 @@ inline void filterCycleCandidates(std::vector<CycleReference>& list, std::size_t
         ++allocationProfile().edgelessCandidates;
         if (reference.operations->profile != nullptr) ++reference.operations->profile().edgelessCandidates;
 #endif
+        // Keep the verdict. A long-lived holder of untraced objects -- three's
+        // material uniforms, a dictionary of `{ value }` view-target records --
+        // dips on every frame's borrow, and dropping it with its bit clear had
+        // the next dip buffer it and this probe walk every entry again: a
+        // sixth of Saltline's frame. Found edgeless twice, it is permanent,
+        // so its dips wait in `deferred` for the full collection (the one
+        // pass that would see an edge it gains later, as for any permanent
+        // object; see `deferredOverdue` for the bound). The first verdict
+        // only makes it mature, which a young pass may treat as a leaf: it has
+        // no traced edge to follow. An object that dies young never gets here
+        // twice, so its block is not held in `deferred`.
+        reference.counts->weak |= (reference.counts->weak & cycleMature) != 0 ? cyclePermanent : cycleMature;
         continue;
       }
       if (probe.selfEdges != 0 && probe.selfEdges == reference.counts->strong) {
