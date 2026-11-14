@@ -3051,9 +3051,20 @@ export const emitBody = (
   // `allocationCells`): stable receivers, never a live view.
   const plainAllocationValues = new Set<IrValueId>()
   let callsSuper = false
+  // A field read whose one use is the receiver of the next member read: its
+  // handle is consumed in the same expression, so it can be borrowed rather
+  // than retained and released (`nativeFieldViewBorrowedReadText`).
+  const fieldReadUses = new Map<IrValueId, number>()
+  const memberReceivers = new Set<IrValueId>()
+  const fieldReads = new Set<IrValueId>()
   for (const block of body.blocks.values()) {
     for (const operation of allOperationsOf(block)) {
       if (operation.kind === 'binding-read' && allocationCells.has(operation.declaration)) plainAllocationValues.add(operation.result.id)
+      for (const operand of operandsOfIrOperation(operation)) fieldReadUses.set(operand.value, (fieldReadUses.get(operand.value) ?? 0) + 1)
+      if (operation.kind === 'get') {
+        fieldReads.add(operation.result.id)
+        if (operation.key.value !== operation.receiver.value) memberReceivers.add(operation.receiver.value)
+      }
       // Censused in the same pass, for `EmitBodyFacts.receiverValues`: a
       // member access has to know whether its receiver came from `super`, and
       // the operation that defines it is the only place that says so.
@@ -3117,6 +3128,7 @@ export const emitBody = (
     returnsUnderFinallyGuard: body.tryRegions.some((region) => region.finallyEntry !== null),
     returnsOwnReceiver,
     plainAllocationValues,
+    borrowedFieldReads: new Set([...fieldReads].filter((value) => memberReceivers.has(value) && fieldReadUses.get(value) === 1)),
     receiverValues,
     bindingWriteCounts,
     stableCellReads: stableCellReadsOf(body, (declaration) => placements.get(declaration)?.storage.kind === 'local'),

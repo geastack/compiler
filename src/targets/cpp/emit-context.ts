@@ -759,6 +759,8 @@ export interface EmitBodyFacts {
   readonly returnsOwnReceiver: boolean
   /** See `EmitContext.plainAllocationValues`. */
   readonly plainAllocationValues: ReadonlySet<IrValueId>
+  /** See `EmitContext.borrowedFieldReads`. */
+  readonly borrowedFieldReads: ReadonlySet<IrValueId>
   /** See `EmitContext.receiverValues`. */
   readonly receiverValues: ReadonlySet<IrValueId>
   /** See `EmitContext.bindingWriteCounts`. */
@@ -940,6 +942,11 @@ export interface EmitContext {
    * one is the allocation's own member: no live view can stand in for it.
    */
   readonly plainAllocationValues: ReadonlySet<IrValueId>
+  /**
+   * Field reads whose one use is the receiver of another member read: the
+   * read can hand that read a reference instead of a retained handle.
+   */
+  readonly borrowedFieldReads: ReadonlySet<IrValueId>
   /** The conventions of emitted bodies, shared with their signature renderer. */
   readonly abiOfCallable: (callable: FunctionId) => CallableAbi | null
   readonly methodEnvironment: (callable: FunctionId, what: string) => string
@@ -2235,6 +2242,7 @@ export const createEmitContext = (
     returnsUnderFinallyGuard: bodyFacts.returnsUnderFinallyGuard,
     returnsOwnReceiver: bodyFacts.returnsOwnReceiver,
     plainAllocationValues: bodyFacts.plainAllocationValues,
+    borrowedFieldReads: bodyFacts.borrowedFieldReads,
     virtualDispatch,
     directCallableBindings,
     callableMemberCandidates,

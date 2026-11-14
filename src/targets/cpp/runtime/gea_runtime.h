@@ -31432,6 +31432,24 @@ Result readLiveField(
   return std::move(*answer);
 }
 
+/**
+ * `readLiveField` for a read whose only use is the receiver of the next member
+ * read in the same expression (`gull.pos.x`): the plain allocation answers a
+ * reference to its own member, so the handle is neither retained nor released;
+ * a live view's answer is moved into `slot`, a temporary the caller's full
+ * expression owns, and that is what is referenced. Nothing runs between this
+ * returning and the member load that consumes it.
+ */
+template <typename Result, typename Receiver, typename Key, typename Adapter, typename Fallback>
+const Result& readLiveFieldBorrowed(
+    const gea::Ref<Receiver>& receiver, const Key& fieldKey,
+    Adapter&& adapter, NativeFieldRead::AcceptFn accepts, Result& slot, Fallback&& fallback) {
+  if (!receiver) host::throwRuntimeError("TypeError", "Cannot read a property of a nullish native view");
+  if (!isLiveFieldViewReceiver(receiver)) [[likely]] return std::forward<Fallback>(fallback)();
+  slot = readLiveField<Result>(receiver, fieldKey, std::forward<Adapter>(adapter), accepts, [&]() -> Result { return std::forward<Fallback>(fallback)(); });
+  return slot;
+}
+
 template <typename Receiver, typename Key, typename Source, typename Adapter, typename Fallback>
 bool writeLiveField(
     const gea::Ref<Receiver>& receiver, const Key& fieldKey, const Source& value,

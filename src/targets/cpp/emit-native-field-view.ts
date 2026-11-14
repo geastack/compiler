@@ -275,6 +275,54 @@ export const nativeFieldViewReadForText = (
   )
 }
 
+/**
+ * A field-view read whose one use is the receiver of the next member read
+ * (`gull.pos.x` on a view-target record): spelled as a reference instead of a
+ * copied handle, so the plain allocation's answer costs no retain and no
+ * release. A live view's answer is held by `gea_field_slot`, a temporary of
+ * the caller's full expression, so the reference outlives the member load
+ * that consumes it (`readLiveFieldBorrowed`). Only the exact shape the plain
+ * read answers with its own member: a plain shared receiver, a declared,
+ * always-present, getter-free field already carried as the result; anything
+ * else keeps `nativeFieldViewReadText`.
+ */
+export const nativeFieldViewBorrowedReadText = (
+  ctx: EmitContext,
+  operation: GetOperation,
+  ordinaryReadOf: (
+    carrier: Representation,
+    key: string
+  ) => { readonly source: Representation; readonly text: string; readonly accessor?: true; readonly absentReadsUndefined?: true } | null
+): string | null => {
+  const receipt = operation.nativeFieldViewRead
+  if (receipt === undefined || receipt.keyDomain !== undefined || receipt.originalAbsent === true) return null
+  const carrier = operation.receiver.representation
+  if (
+    (carrier.kind !== 'record' && carrier.kind !== 'class-ref' && carrier.kind !== 'native-record-ref') ||
+    carrier.ownership !== 'shared-refcount'
+  )
+    return null
+  const target = operation.result.representation
+  if (
+    (target.kind !== 'record' && target.kind !== 'class-ref' && target.kind !== 'native-record-ref') ||
+    target.ownership !== 'shared-refcount'
+  )
+    return null
+  const actual = ordinaryReadOf(carrier, receipt.key)
+  if (actual === null || actual.accessor === true || actual.source.kind === 'optional' || actual.absentReadsUndefined === true) return null
+  const ordinary = receipt.sources.find((entry) => representationKey(entry.source) === representationKey(actual.source))
+  const result = cppTypeOf(target)
+  if (ordinary === undefined || cppTypeOf(actual.source) !== result) return null
+  const concrete = `static_cast<const ${result}&>(${actual.text})`
+  if (renderedLeaf(ctx, ordinary.conversion, concrete) !== concrete) return null
+  const { adapter, accepted } = fieldViewRoutesText(ctx, receipt, result)
+  return (
+    `([&](const auto& gea_field_receiver, ${result}&& gea_field_slot) -> const ${result}& { ` +
+    `return gea::record::readLiveFieldBorrowed<${result}>(gea_field_receiver, ${liveKeyText(receipt.key)}, ${adapter}, ${accepted}, ` +
+    `gea_field_slot, [&]() -> const ${result}& { return ${concrete}; }); })(${operandText(ctx, operation.receiver)}, ${result}())`
+  )
+}
+
 export const nativeFieldViewReadText = (
   ctx: EmitContext,
   operation: GetOperation,

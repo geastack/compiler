@@ -1732,13 +1732,26 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   const guardedInvocation = (): string => {
     const [receiverArgument, ...rest] = padded
     const self = 'gea_guard_receiver'
+    const receiverType = cppTypeOf(abi.receiver!)
+    // The receiver is taken by reference and handed to the prototype body as
+    // its direct call would hand it (a body that borrows its receiver gets no
+    // retain at all), where a by-value parameter copied it on every call of a
+    // guarded method -- every Vector3 call, once a dynamic write may shadow
+    // its methods. The body's borrowed entry is used when it admits these
+    // arguments, exactly as a direct call admits it. Only the shadowed path,
+    // which calls through the own property, takes a handle of its own.
     // A typed (non-generic) parameter: a generic lambda would make every
     // member template the callee names a dependent name needing `template`.
-    const forwarded = `std::move(${self})`
+    const borrowed = environmentFreeEntry(ctx.stableBorrowEntries.get(cppBodyName(guard!.functionId)))
+    const borrowedCopies =
+      borrowed === undefined ? null : stableBorrowEntryCopies(borrowed, operation.arguments, stableActuals, potentiallyMovingArguments)
+    const body =
+      borrowed !== undefined && borrowedCopies !== null
+        ? `${borrowed.name}(${copiedBorrowArguments([self, ...rest], 1, borrowed, borrowedCopies).join(', ')})`
+        : `${cppBodyName(guard!.functionId)}(${[self, ...rest].join(', ')})`
     return (
-      `[&](${cppTypeOf(abi.receiver!)} ${self}) -> decltype(auto) { return (static_cast<bool>(${self}) && !${self}->${cppRecordFieldPresenceName(guard!.key)}) ` +
-      `? ${cppBodyName(guard!.functionId)}(${[self, ...rest].join(', ')}) ` +
-      `: ${operandText(ctx, calleeOperand)}.${callMember}(${[forwarded, ...rest].join(', ')}); }(${receiverArgument})`
+      `[&](const ${receiverType}& ${self}) -> decltype(auto) { return (static_cast<bool>(${self}) && !${self}->${cppRecordFieldPresenceName(guard!.key)}) ` +
+      `? ${body} : ${operandText(ctx, calleeOperand)}.${callMember}(${[`${receiverType}(${self})`, ...rest].join(', ')}); }(${receiverArgument})`
     )
   }
   // A logical receiver that is a value this frame already holds (not withheld

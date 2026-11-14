@@ -3,7 +3,12 @@ import { errorConstructorGetText, errorConstructorMemberText } from './emit-erro
 import { dictionaryKeyDomainOf, isOpenDocument, ownershipOf, representationKey } from '../../representation/model.js'
 import { carrierDifference, shortCarrierText } from '../../representation/difference.js'
 import { nativeFieldOwnerReadText } from './emit-field-owner.js'
-import { nativeFieldViewOperandContext, nativeFieldViewReadText, nativeFieldViewWriteText } from './emit-native-field-view.js'
+import {
+  nativeFieldViewBorrowedReadText,
+  nativeFieldViewOperandContext,
+  nativeFieldViewReadText,
+  nativeFieldViewWriteText
+} from './emit-native-field-view.js'
 import { nativeObjectDataGetText, nativeObjectDataSetText } from './emit-native-object-data.js'
 import { nativeDocumentEntryText } from './emit-native-document-entry.js'
 import { nativeCallableOptionalDataReadText } from './emit-native-callable-data.js'
@@ -645,7 +650,15 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
     return
   }
   if (operation.nativeFieldViewRead && !plainAllocationMemberRead(ctx, operation)) {
-    const rendered = nativeFieldViewReadText(ctx, operation, (carrier, key) => {
+    const ordinaryReadOf = (
+      carrier: Representation,
+      key: string
+    ): {
+      readonly source: Representation
+      readonly text: string
+      readonly accessor?: true
+      readonly absentReadsUndefined?: true
+    } | null => {
       // A class arm answering the key from a getter has no own field to
       // read natively: the plain allocation's answer is the getter's body
       // (`parent?.options` over `A | B | ...`, each a getter).
@@ -675,7 +688,10 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
         text: `(gea_field_receiver->${cppRecordFieldPresenceName(key)} ? ${read} : ${absent})`,
         ...(undefinedText === null ? {} : { absentReadsUndefined: true as const })
       }
-    })
+    }
+    const rendered =
+      (ctx.borrowedFieldReads.has(operation.result.id) ? nativeFieldViewBorrowedReadText(ctx, operation, ordinaryReadOf) : null) ??
+      nativeFieldViewReadText(ctx, operation, ordinaryReadOf)
     if (rendered === null) throw new Error('a published field-view read lost its receipt')
     lines.push(`${defineValue(ctx, operation.result)} = ${rendered};`)
     return
