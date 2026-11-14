@@ -46,7 +46,9 @@ export const reuseFieldReads = (
 ): ReadonlyMap<PhysicalBodyId, IrBody> => {
   const accessorKeys = accessorKeysOf(bodies, classes, deriver)
   const codeFree = (receiver: Representation, key: string): boolean => {
-    if (accessorKeys.has(key)) return false
+    // A class instance is read through its own family's members, never a
+    // view's origin, so only a record answers to another shape's getter:
+    // three's `Euler` declaring `get x()` says nothing about `Vector3.x`.
     if (receiver.kind === 'class-ref') {
       if (classes.get(receiver.declaration)?.nativeBase !== null) return false
       return (
@@ -54,6 +56,7 @@ export const reuseFieldReads = (
         classFamilyOverridesOf(classes, receiver.declaration, key).length === 0
       )
     }
+    if (accessorKeys.has(key)) return false
     if (receiver.kind === 'record') return receiver.fields.some((field) => field.key === key)
     if (receiver.kind === 'native-record-ref' && receiver.native === null)
       return recordFieldsOfShape(deriver, receiver.shapeId)?.some((field) => field.key === key) ?? false

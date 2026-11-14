@@ -3,11 +3,13 @@
 //! expect: call seen 2 7
 //! expect: getter 1 2 3
 //! expect: loop 13 27
+//! expect: angle 1 2 1
 // A slab test reads `box.min` and `box.max` once per axis, on both arms of
 // each axis branch; the later reads take the earlier read's value, through a
 // phi where the arms meet. Each read still answers what the program wrote:
 // a store between two reads of a field, a call that writes it, a getter that
-// counts its calls, and a loop whose body rewrites the field every turn.
+// counts its calls, and a loop whose body rewrites the field every turn. A
+// getter named `x` on another class leaves `Vec`'s plain `x` reads reusable.
 
 class Vec {
   x: number
@@ -118,3 +120,13 @@ function rewriteInLoop(box: Box): string {
   return sum + ' ' + box.min.x * 3
 }
 console.log('loop ' + rewriteInLoop({ min: new Vec(3, 0, 0), max: new Vec(), solid: true }))
+
+class Angle {
+  turns = 0
+  get x(): number {
+    this.turns++
+    return this.turns
+  }
+}
+const angle = new Angle()
+console.log('angle ' + angle.x + ' ' + angle.x + ' ' + slab(0, 0, 0, 1, 0, 0)[0])
