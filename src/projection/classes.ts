@@ -118,6 +118,12 @@ export interface ClassLayout {
   readonly nativeStorage?: NativeClassStorage
   /** Typed own-property shadows, initially absent; prototype methods remain methods. */
   readonly methodOverrides?: readonly RecordField[]
+  /**
+   * Methods only a write through a dynamic receiver can shadow. They get no
+   * slot: such a write lands in the instance's native expando table, and a
+   * call checks the instance's expando bit before dispatching normally.
+   */
+  readonly dynamicMethodShadows?: readonly string[]
   /** Methods replaced on this prototype, rather than on ordinary instances. */
   readonly prototypeMethodMutations?: readonly string[]
   /** Uses outside the currently supported typed method-only prototype protocol. */
@@ -1124,6 +1130,7 @@ export const publishClassMethodOverrides = (
   input: ClassProjectionInput
 ): ReadonlyMap<DeclarationId, ClassLayout> => {
   const overrides = new Map<DeclarationId, Map<string, RecordField>>()
+  const dynamicShadows = new Map<DeclarationId, Set<string>>()
   const prototypeMutations = new Map<DeclarationId, Set<string>>()
   const prototypes = new Map<SemanticResultId, Set<DeclarationId>>()
   const prototypeBindings = new Map<DeclarationId, Set<DeclarationId>>()
@@ -1289,15 +1296,21 @@ export const publishClassMethodOverrides = (
     }
     return boxed
   }
-  const mark = (receiver: Representation, key: string | null, prototype: DeclarationId | null = null, symbolKeys = true): void => {
-    if (receiver.kind === 'optional') return mark(receiver.payload, key, prototype, symbolKeys)
-    if (receiver.kind === 'borrowed-ref') return mark(receiver.referent, key, prototype, symbolKeys)
+  const mark = (
+    receiver: Representation,
+    key: string | null,
+    prototype: DeclarationId | null = null,
+    symbolKeys = true,
+    viaDynamic = false
+  ): void => {
+    if (receiver.kind === 'optional') return mark(receiver.payload, key, prototype, symbolKeys, viaDynamic)
+    if (receiver.kind === 'borrowed-ref') return mark(receiver.referent, key, prototype, symbolKeys, viaDynamic)
     if (receiver.kind === 'tagged-union') {
-      for (const arm of receiver.arms) mark(arm.value, key, prototype, symbolKeys)
+      for (const arm of receiver.arms) mark(arm.value, key, prototype, symbolKeys, viaDynamic)
       return
     }
     if (receiver.kind === 'dynamic') {
-      for (const instance of boxedInstances().values()) mark(instance, key, prototype, symbolKeys)
+      for (const instance of boxedInstances().values()) mark(instance, key, prototype, symbolKeys, true)
       return
     }
     if (receiver.kind !== 'class-ref') return
@@ -1343,6 +1356,21 @@ export const publishClassMethodOverrides = (
       if (!representation) continue
       const abi = abiOfCallee(representation)
       if (!abi) continue
+      // A write through a dynamic receiver may land on any boxed instance, so
+      // it marks every method of every boxed class (three's `InterleavedBuffer.toJSON`
+      // marked all of Vector3, Object3D and Matrix4), and a computed key no
+      // proof bounds marks every method of its receiver's class (three's
+      // `BoxGeometry` writes `vector[u]`). A slot per method made each instance
+      // carry the whole method table. Both writes run the dynamic own-property
+      // protocol, which keeps a key the layout has no slot for in the expando
+      // table, so the rare shadow lives there instead
+      // (`ClassLayout.dynamicMethodShadows`). A spelled key keeps its slot.
+      if ((viaDynamic || key === null) && prototype === null) {
+        const keys = dynamicShadows.get(owner.declaration) ?? new Set<string>()
+        keys.add(name)
+        dynamicShadows.set(owner.declaration, keys)
+        continue
+      }
       const fields = overrides.get(owner.declaration) ?? new Map<string, RecordField>()
       // An own method holds the Function object, independently of the object
       // used to read it. Its stored entry therefore accepts logical this;
@@ -1405,6 +1433,7 @@ export const publishClassMethodOverrides = (
   return new Map(
     [...layouts].map(([declaration, layout]) => {
       const fields = overrides.get(declaration)
+      const shadows = [...(dynamicShadows.get(declaration) ?? [])].filter((key) => !fields?.has(key))
       const prototypeKeys = prototypeMutations.get(declaration)
       const unsupportedUses = unsupportedPrototypes.get(declaration)
       return [
@@ -1412,6 +1441,7 @@ export const publishClassMethodOverrides = (
         {
           ...layout,
           ...(fields ? { methodOverrides: [...fields.values()] } : {}),
+          ...(shadows.length > 0 ? { dynamicMethodShadows: shadows } : {}),
           ...(prototypeKeys ? { prototypeMethodMutations: [...prototypeKeys] } : {}),
           ...(unsupportedUses ? { prototypeUnsupportedUses: [...unsupportedUses] } : {})
         }

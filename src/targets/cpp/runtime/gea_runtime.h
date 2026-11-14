@@ -28778,6 +28778,27 @@ Ref<void> nativePropertyAnchor(const Ref<T>& object) {
   return Ref<void>(object);
 }
 
+namespace detail {
+/**
+ * Whether a class instance owns a native expando table: the header's
+ * `expandoEntry` bit, one load. A method only a write through a dynamic
+ * receiver can shadow (`CallOperation.expandoShadowGuard`) is called directly
+ * while this is clear, which is every instance nothing such wrote to.
+ */
+template <typename T>
+[[gnu::always_inline]] inline bool nativeExpandoPresent(const Ref<T>& object) {
+  return object && (refCountsOf(const_cast<std::remove_const_t<T>*>(object.get()))->weak & expandoEntry) != 0;
+}
+/** The value an instance's expando table holds as its own `key`, reading an accessor as `[[Get]]` would; empty when it holds none. */
+template <typename T>
+inline std::optional<Value> nativeExpandoOwnValue(const Ref<T>& object, std::string_view key) {
+  const auto table = expandoFor(nativePropertyAnchor(object), false);
+  const PropertyKey property = PropertyKey::string(std::string(key));
+  if (!table || table->ownProperty(property) == nullptr) return std::nullopt;
+  return table->getWithNativeReceiver(property, NativeCallReceiver::object(object));
+}
+}  // namespace detail
+
 /**
  * Integrity state for a statically typed native object.
  *

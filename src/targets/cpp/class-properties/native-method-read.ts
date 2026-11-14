@@ -1,6 +1,6 @@
 import type { CallableAbi, Representation } from '../../../representation/model.js'
 import { abiOfCallee } from '../../../projection/callee.js'
-import { classMethodValueArmsOf, methodCopyHeldBy } from '../../../projection/dispatch.js'
+import { classDynamicMethodShadowOf, classMethodValueArmsOf, methodCopyHeldBy } from '../../../projection/dispatch.js'
 import { classMethodOverrideOf } from '../../../projection/fields.js'
 import type { ConversionSite } from '../emit-narrowing.js'
 import { cppThunkEntryText, createCppEmitBlockedError } from '../emit-context.js'
@@ -61,6 +61,20 @@ export const nativeClassMethodReadText = (
       const stored = convert('native-method-read:own', override.value, carrier, `${object}->${cppRecordFieldName(key)}`)
       if (stored === null) return null
       selection = `if (${object}->${cppRecordFieldPresenceName(key)}) return ${stored}; ${selection}`
+    } else if (classDynamicMethodShadowOf(ctx.classes, arm.allocation, key)) {
+      // A shadow a dynamic write installed lives in the expando table
+      // (`ClassLayout.dynamicMethodShadows`), held as the slot would have held it.
+      const slot: Representation = { kind: 'function-value-dispatch', abi: { ...ownAbi, receiver: null } }
+      const stored = convert(
+        'native-method-read:own',
+        slot,
+        carrier,
+        `gea::detail::DynamicCarrier<${cppTypeOf(slot)}>::in(*gea_method_shadow, 0)`
+      )
+      if (stored === null) return null
+      selection =
+        `if (gea::detail::nativeExpandoPresent(${object})) { if (const auto gea_method_shadow = gea::detail::nativeExpandoOwnValue(${object}, ${JSON.stringify(key)})) return ${stored}; } ` +
+        selection
     }
     branches.push(
       `if (gea::host::hasNativeClassLayoutRef<${cppClassName(arm.allocation)}>(gea_method_receiver)) { ` +

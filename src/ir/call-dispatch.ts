@@ -8,7 +8,13 @@ import { closedStaticCallablesOf } from './static-callables.js'
 import { explicitObjectConstructEntryOf } from './construct-entry.js'
 import { closedCallFrameOf, publishOmittedArgumentConversions } from './call-entry.js'
 import type { ConversionCensus } from '../conversion/nodes.js'
-import { classFamilyOverridesOf, extendsClass, virtualDispatchFor, type VirtualDispatchVerdict } from '../projection/dispatch.js'
+import {
+  classDynamicMethodShadowOf,
+  classFamilyOverridesOf,
+  extendsClass,
+  virtualDispatchFor,
+  type VirtualDispatchVerdict
+} from '../projection/dispatch.js'
 import { classMemberOf, classMethodOverrideOf, classPrototypeMethodMutableOf, declaredRecordFieldOf } from '../projection/fields.js'
 import { abiKey, representationKey, walkRepresentation, type CallableAbi, type Representation } from '../representation/model.js'
 import { abiOfCallee } from '../projection/callee.js'
@@ -1143,10 +1149,28 @@ const rewriteBody = (
         callableBindings,
         callableMembers
       )
+      const guardProducer = producers.get(operation.callee.value)
+      const guardReceiver = guardProducer?.kind === 'get' ? guardProducer.receiver : undefined
+      const guardKey =
+        guardProducer?.kind === 'get' &&
+        guardReceiver?.representation.kind === 'class-ref' &&
+        operation.receiver?.value === guardReceiver.value
+          ? constantStringKeyOf(guardProducer.key.value, producers)
+          : null
+      const expandoShadowGuard =
+        guardKey !== null &&
+        guardReceiver?.representation.kind === 'class-ref' &&
+        classDynamicMethodShadowOf(classes, guardReceiver.representation.declaration, guardKey)
+          ? { key: guardKey }
+          : undefined
       if (target.kind === 'unresolved' && closedCallee === undefined) {
-        if (ownShadowGuard === undefined) return operation
+        if (ownShadowGuard === undefined && expandoShadowGuard === undefined) return operation
         blockChanged = true
-        return { ...operation, ownShadowGuard }
+        return {
+          ...operation,
+          ...(ownShadowGuard === undefined ? {} : { ownShadowGuard }),
+          ...(expandoShadowGuard === undefined ? {} : { expandoShadowGuard })
+        }
       }
       // A closed static body whose ABI has no receiver cannot observe the
       // constructor used for method syntax. Keep its evaluation in preceding
@@ -1168,7 +1192,8 @@ const rewriteBody = (
         ...received,
         ...(closedFrame === undefined ? {} : { closedFrame }),
         ...(target.kind === 'unresolved' ? {} : { target }),
-        ...(closedCallee === undefined ? {} : { closedCallee })
+        ...(closedCallee === undefined ? {} : { closedCallee }),
+        ...(expandoShadowGuard === undefined ? {} : { expandoShadowGuard })
       }
     })
     if (blockChanged) {

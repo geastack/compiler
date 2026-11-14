@@ -50,6 +50,7 @@ import { nativeMethodValueRecipeText } from '../emit-native-method.js'
 import { computedOverriddenMethodValueText, heldMethodCopyOf } from './computed-method-value.js'
 import { nativePrototypeMethodFallbackText } from './native-prototype.js'
 import {
+  classDynamicMethodShadowOf,
   classFamilyMayAllocate,
   classMethodValueArmsOf,
   classPrototypeMethodKeysOf,
@@ -189,7 +190,17 @@ export const classMethodValueText = (
     receiverRepresentation.kind === 'class-ref' && !dispatchesStatically(ctx, operation.receiver)
       ? classMethodOverrideOf(ctx.classes, receiverRepresentation.declaration, key)
       : null
-  const heldReceiver = override === null ? receiverText : 'gea_method_receiver'
+  // A shadow only a dynamic write installs has no slot: it is read from the
+  // instance's expando table (`ClassLayout.dynamicMethodShadows`).
+  // A read only a resolved call consumes is the callee of that call, which
+  // checks the expando table itself (`CallOperation.expandoShadowGuard`).
+  const shadowed =
+    override === null &&
+    !ctx.deferredMethodValues.has(operation.result.id) &&
+    receiverRepresentation.kind === 'class-ref' &&
+    !dispatchesStatically(ctx, operation.receiver) &&
+    classDynamicMethodShadowOf(ctx.classes, receiverRepresentation.declaration, key)
+  const heldReceiver = override === null && !shadowed ? receiverText : 'gea_method_receiver'
   const state = `${heldReceiver}->gea_method_state`
   const bodyValue = `gea::nativeClassMethodValue<${cppClassName(owner.declaration)}, &${cppCallableDeclarationTagName(method.callable)}>(${state}, ${payload})`
   const materialized =
@@ -218,6 +229,24 @@ export const classMethodValueText = (
     originalValue,
     dispatchesStatically(ctx, operation.receiver)
   )
+  if (shadowed) {
+    const slot: Representation = { kind: 'function-value-dispatch', abi: { ...bodyAbi, receiver: null } }
+    const stored = `gea::detail::DynamicCarrier<${cppTypeOf(slot)}>::in(*gea_method_shadow, 0)`
+    const owned =
+      nativeMethodValueRecipeText(ctx, operation, key, slot, valueRepresentation, stored, 'own', null) ??
+      operationConversionText(ctx, operation, 'method-frame', slot, valueRepresentation, stored)
+    if (owned === null) {
+      throw createCppEmitBlockedError(
+        `conversion:${representationKey(slot)}->${representationKey(valueRepresentation)}`,
+        `a dynamically shadowed method "${key}" cannot fill its published method-read convention`
+      )
+    }
+    const text =
+      `([&]() -> ${valueType} { const auto& ${heldReceiver} = ${receiverText}; ` +
+      `if (gea::detail::nativeExpandoPresent(${heldReceiver})) { if (const auto gea_method_shadow = gea::detail::nativeExpandoOwnValue(${heldReceiver}, ${JSON.stringify(key)})) return ${owned}; } ` +
+      `return ${fallback}; })()`
+    return { text, type: valueType, environment }
+  }
   if (override === null) return { text: fallback, type: valueType, environment }
   const ownedStorage = `${heldReceiver}->${cppRecordFieldName(key)}`
   const owned =
@@ -754,6 +783,8 @@ export const virtualCalleeClaim = (
   if (classFamilyOverridesOf(ctx.classes, receiver.declaration, key).length === 0) return null
   if (dispatchesStatically(ctx, operation.receiver)) return null
   if (classPrototypeMethodMutableOf(ctx.classes, receiver.declaration, key)) return null
+  // A dynamic shadow (`ClassLayout.dynamicMethodShadows`) keeps the virtual call:
+  // the call checks the expando table before dispatching (`CallOperation.expandoShadowGuard`).
   if (classMethodOverrideOf(ctx.classes, receiver.declaration, key) !== null) return null
   // One copy of a generic method dispatches through that copy's own member
   // (`projection/dispatch.ts`'s `virtualCopyFamiliesOf`), named by its convention.

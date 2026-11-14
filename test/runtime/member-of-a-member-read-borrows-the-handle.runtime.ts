@@ -2,7 +2,7 @@
 //! expect: wide label w!
 //! expect: scaled 2.000 own 7
 //! emitted-has: readLiveFieldBorrowed
-//! emitted-has: & gea_guard_receiver)
+//! emitted-has: nativeExpandoPresent(gea_shadow_receiver)
 // `unit.pos.x` off a record a live view may stand in for reads `pos` only to
 // read `x` off it, so the handle is borrowed, not retained and released: the
 // plain allocation answers its own member, and a live view's answer is held

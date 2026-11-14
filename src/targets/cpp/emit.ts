@@ -61,6 +61,7 @@ import type {
 import type { EmitReturnAtYield } from './emit-exceptions.js'
 import { allOperationsOf } from '../../ir/model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from '../../ir/queries.js'
+import { deferredMethodValuesOf } from '../../ir/native-method-frames.js'
 import { namesMoreThanOnce } from './evaluated-once.js'
 import type { CallableAbi, Representation } from '../../representation/model.js'
 import { carriesNativeUndefined, isOpenDocument, representationKey } from '../../representation/model.js'
@@ -3128,6 +3129,7 @@ export const emitBody = (
     returnsUnderFinallyGuard: body.tryRegions.some((region) => region.finallyEntry !== null),
     returnsOwnReceiver,
     plainAllocationValues,
+    deferredMethodValues: deferredMethodValuesOf(body),
     borrowedFieldReads: new Set([...fieldReads].filter((value) => memberReceivers.has(value) && fieldReadUses.get(value) === 1)),
     receiverValues,
     bindingWriteCounts,

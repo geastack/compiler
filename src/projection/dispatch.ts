@@ -1000,3 +1000,28 @@ export const virtualDispatchVerdictOf = (
 
   return { families, refused, dispatched }
 }
+
+/**
+ * Whether an instance carried as `declaration` may hold an own `key` that a
+ * write through a dynamic receiver installed over a method
+ * (`ClassLayout.dynamicMethodShadows`): on its own chain, or on a subclass it
+ * may really be. Such a shadow lives in the instance's native expando table,
+ * so a call checks that table before it dispatches.
+ */
+export const classDynamicMethodShadowOf = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  declaration: DeclarationId,
+  key: string
+): boolean => {
+  const seen = new Set<DeclarationId>()
+  for (let current: DeclarationId | null = declaration; current !== null && !seen.has(current);) {
+    seen.add(current)
+    const layout = classes.get(current)
+    if (!layout) break
+    if (layout.dynamicMethodShadows?.includes(key)) return true
+    current = layout.base
+  }
+  for (const [candidate, layout] of classes)
+    if (layout.dynamicMethodShadows?.includes(key) && extendsClass(classes, candidate, declaration)) return true
+  return false
+}

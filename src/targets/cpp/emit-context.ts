@@ -761,6 +761,8 @@ export interface EmitBodyFacts {
   readonly plainAllocationValues: ReadonlySet<IrValueId>
   /** See `EmitContext.borrowedFieldReads`. */
   readonly borrowedFieldReads: ReadonlySet<IrValueId>
+  /** See `EmitContext.deferredMethodValues`. */
+  readonly deferredMethodValues: ReadonlySet<IrValueId>
   /** See `EmitContext.receiverValues`. */
   readonly receiverValues: ReadonlySet<IrValueId>
   /** See `EmitContext.bindingWriteCounts`. */
@@ -947,6 +949,12 @@ export interface EmitContext {
    * read can hand that read a reference instead of a retained handle.
    */
   readonly borrowedFieldReads: ReadonlySet<IrValueId>
+  /**
+   * Method reads consumed only as the callee of a resolved call
+   * (`ir/native-method-frames.ts`'s `deferredMethodValuesOf`): no Function
+   * object is published for them, and the call settles any shadow itself.
+   */
+  readonly deferredMethodValues: ReadonlySet<IrValueId>
   /** The conventions of emitted bodies, shared with their signature renderer. */
   readonly abiOfCallable: (callable: FunctionId) => CallableAbi | null
   readonly methodEnvironment: (callable: FunctionId, what: string) => string
@@ -2243,6 +2251,7 @@ export const createEmitContext = (
     returnsOwnReceiver: bodyFacts.returnsOwnReceiver,
     plainAllocationValues: bodyFacts.plainAllocationValues,
     borrowedFieldReads: bodyFacts.borrowedFieldReads,
+    deferredMethodValues: bodyFacts.deferredMethodValues,
     virtualDispatch,
     directCallableBindings,
     callableMemberCandidates,

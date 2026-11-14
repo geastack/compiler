@@ -22,7 +22,7 @@ import type {
 import type { DeclarationId, FunctionId, IrValueId } from '../../identity/ids.js'
 import type { CallableAbi, Representation } from '../../representation/model.js'
 import { classLayoutsConstructedBy } from '../../projection/classes.js'
-import { classFamilyOverridesOf, virtualDispatchKey } from '../../projection/dispatch.js'
+import { classDynamicMethodShadowOf, classFamilyOverridesOf, virtualDispatchKey } from '../../projection/dispatch.js'
 import { cppVirtualMemberName } from './virtual-methods.js'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import { abiKey, representationKey } from '../../representation/model.js'
@@ -689,6 +689,11 @@ const emitUnionMethodCall = (ctx: EmitContext, lines: string[], operation: CallO
   // turn them into text against a receiver that has a name by now.
   const receiverText = operandText(ctx, read.receiver)
   const evidence = borrowEvidenceOf(ctx, operation)
+  // The member key, for an arm whose class a dynamic write may shadow
+  // (`ClassLayout.dynamicMethodShadows`): that arm checks the instance's
+  // expando table before calling its body.
+  const memberRead = ctx.propertyReadOrigins.get(operation.callee.value)
+  const memberKey = memberRead === undefined ? undefined : ctx.staticKeyTexts.get(memberRead.key.value)
   const branches = arms.map((arm, index) => {
     const tests: string[] = []
     let armText = receiverText
@@ -745,10 +750,25 @@ const emitUnionMethodCall = (ctx: EmitContext, lines: string[], operation: CallO
       entry === undefined
         ? null
         : stableBorrowEntryCopies(entry, operation.arguments, evidence.stableActuals, evidence.potentiallyMovingArguments)
-    const invocation =
+    const shadowed =
+      memberKey !== undefined &&
+      receiver !== null &&
+      arm.receiverRepresentation.kind === 'class-ref' &&
+      classDynamicMethodShadowOf(ctx.classes, arm.receiverRepresentation.declaration, memberKey)
+    const self = 'gea_shadow_receiver'
+    const called = shadowed ? [self, ...padded.slice(1)] : padded
+    const direct =
       entry === undefined || copies === null
-        ? `${cppBodyName(arm.callable)}(${padded.join(', ')})`
-        : `${entry.name}(${copiedBorrowArguments(padded, receiver === null ? 0 : 1, entry, copies).join(', ')})`
+        ? `${cppBodyName(arm.callable)}(${called.join(', ')})`
+        : `${entry.name}(${copiedBorrowArguments(called, receiver === null ? 0 : 1, entry, copies).join(', ')})`
+    const shadowCall = `gea_shadow_callable.callWithReceiver(${['gea::NativeCallReceiver::object(' + self + ')', ...padded.slice(1)].join(', ')})`
+    const invocation = !shadowed
+      ? direct
+      : `[&](const auto& ${self}) -> decltype(auto) { using gea_shadow_result = decltype(${direct}); ` +
+        `if (gea::detail::nativeExpandoPresent(${self})) [[unlikely]] { if (const auto gea_shadow = gea::detail::nativeExpandoOwnValue(${self}, ${cppStringLiteral(memberKey!)})) { ` +
+        `auto gea_shadow_callable = gea::detail::DynamicCarrier<${cppTypeOf({ kind: 'function-value-dispatch', abi: { ...abi, receiver: null } })}>::in(*gea_shadow, 0); ` +
+        `if constexpr (std::is_void_v<gea_shadow_result>) { ${shadowCall}; return; } else return static_cast<gea_shadow_result>(${shadowCall}); } } ` +
+        `return ${direct}; }(${receiver})`
     let body: string
     if (operation.result === null || operation.result.representation.kind === 'void') {
       body = `${invocation}; return;`
@@ -1766,18 +1786,69 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
     !isDeferredValue(ctx, logical.value) &&
     calleeOperand.value === operation.callee.value &&
     isCallableObject(calleeOperand.representation)
+  // `CallOperation.expandoShadowGuard`: a write through a dynamic receiver may
+  // have installed an own function over this method, and such a shadow lives
+  // in the instance's expando table rather than in a slot. The call runs as
+  // resolved unless the instance has a table holding the key; the receiver
+  // and the converted arguments are the lambda's arguments, so each is
+  // evaluated once whichever path runs.
+  const shadowGuard = operation.expandoShadowGuard
+  const shadowedInvocation = (
+    receiverText: string,
+    argumentTexts: readonly string[],
+    normal: (self: string, args: readonly string[]) => string
+  ): string => {
+    const held = abiOfCallee(operation.callee.representation)
+    if (shadowGuard === undefined || held === null || held.receiver === null)
+      throw createCppEmitBlockedError(
+        'call-abi:expando-shadow',
+        'a call a dynamic write may shadow has no receiver-taking method convention'
+      )
+    const self = 'gea_shadow_receiver'
+    const names = argumentTexts.map((_, index) => `gea_shadow_argument_${index}`)
+    const forwarded = names.map((name) => `std::forward<decltype(${name})>(${name})`)
+    const shadow = cppTypeOf({ kind: 'function-value-dispatch', abi: { ...held, receiver: null } })
+    const shadowCall = `gea_shadow_callable.callWithReceiver(${['gea::NativeCallReceiver::object(' + self + ')', ...forwarded].join(', ')})`
+    return (
+      `[&](const auto& ${self}${names.map((name) => `, auto&& ${name}`).join('')}) -> decltype(auto) { ` +
+      `auto gea_shadow_normal = [&]() -> decltype(auto) { return ${normal(self, forwarded)}; }; ` +
+      'using gea_shadow_result = decltype(gea_shadow_normal()); ' +
+      `if (gea::detail::nativeExpandoPresent(${self})) [[unlikely]] { ` +
+      `if (const auto gea_shadow = gea::detail::nativeExpandoOwnValue(${self}, ${cppStringLiteral(shadowGuard.key)})) { ` +
+      `auto gea_shadow_callable = gea::detail::DynamicCarrier<${shadow}>::in(*gea_shadow, 0); ` +
+      `if constexpr (std::is_void_v<gea_shadow_result>) { ${shadowCall}; return; } else return static_cast<gea_shadow_result>(${shadowCall}); } } ` +
+      `return gea_shadow_normal(); }(${[receiverText, ...argumentTexts].join(', ')})`
+    )
+  }
+  const genericArguments = candidateEntersStableEntry ? stableArguments : flowBorrowed !== undefined ? flowArguments : padded
+  if (shadowGuard !== undefined && ((dispatched === undefined && direct === undefined && abi.receiver === null) || guardable))
+    throw createCppEmitBlockedError('call-abi:expando-shadow', 'a call a dynamic write may shadow is spelled without its receiver')
   const invocation =
     dispatched !== undefined
-      ? `${virtualPadded[0]}->${dispatched.member}(${virtualPadded.slice(1).join(', ')})`
+      ? shadowGuard !== undefined
+        ? shadowedInvocation(virtualPadded[0]!, virtualPadded.slice(1), (self, args) => `${self}->${dispatched.member}(${args.join(', ')})`)
+        : `${virtualPadded[0]}->${dispatched.member}(${virtualPadded.slice(1).join(', ')})`
       : direct !== undefined
-        ? `${stableEntry?.name ?? direct}(${stableArguments.join(', ')})`
+        ? shadowGuard !== undefined
+          ? shadowedInvocation(
+              stableArguments[0]!,
+              stableArguments.slice(1),
+              (self, args) => `${stableEntry?.name ?? direct}(${[self, ...args].join(', ')})`
+            )
+          : `${stableEntry?.name ?? direct}(${stableArguments.join(', ')})`
         : abi.receiver === null && logicalThis !== null
           ? lazyLogicalReceiver(logicalThis)
             ? `${operandText(ctx, calleeOperand)}.callWithLazyReceiver(${[`[&]() -> gea::NativeCallReceiver { return ${operationNativeCallReceiverText(ctx, operation, logicalThis.representation, operandText(ctx, logicalThis))}; }`, ...padded].join(', ')})`
             : `${operandText(ctx, calleeOperand)}.callWithReceiver(${[operationNativeCallReceiverText(ctx, operation, logicalThis.representation, operandText(ctx, logicalThis)), ...padded].join(', ')})`
           : guardable
             ? guardedInvocation()
-            : `${operandText(ctx, calleeOperand)}.${callMember}(${(candidateEntersStableEntry ? stableArguments : flowBorrowed !== undefined ? flowArguments : padded).join(', ')})`
+            : shadowGuard !== undefined
+              ? shadowedInvocation(
+                  genericArguments[0]!,
+                  genericArguments.slice(1),
+                  (self, args) => `${operandText(ctx, calleeOperand)}.${callMember}(${[self, ...args].join(', ')})`
+                )
+              : `${operandText(ctx, calleeOperand)}.${callMember}(${genericArguments.join(', ')})`
   // A result the integer census narrowed from the candidate body's returns is
   // checked where it lands, on every path the call can take: the guard above
   // may miss and run whatever callable the member holds.

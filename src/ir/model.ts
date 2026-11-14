@@ -463,6 +463,15 @@ export interface CallOperation extends IrOperationBase {
    */
   readonly ownShadowGuard?: { readonly functionId: FunctionId; readonly key: string }
   /**
+   * The method key a write through a dynamic receiver may have shadowed on
+   * this call's receiver (`classDynamicMethodShadowOf`). Such a shadow has no
+   * slot: it lives in the instance's native expando table, so the emitter
+   * tests the instance's expando bit -- clear on every instance nothing wrote
+   * through a dynamic receiver -- and calls the shadow only when the table
+   * holds the key. The call is otherwise resolved as if no shadow could exist.
+   */
+  readonly expandoShadowGuard?: { readonly key: string }
+  /**
    * The compiler-owned body identity of this call's callee, when the same
    * producer/member resolution used by `target` proved it without requiring
    * capture-free physical devirtualization.  This is deliberately separate
