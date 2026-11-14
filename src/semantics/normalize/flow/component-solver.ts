@@ -777,6 +777,24 @@ type EdgeStates<S extends object> = S | readonly S[] | null
 const SMALL_EDGES = 8
 /** How far ahead of its last edge read `observedState` looks before asking the dependency. */
 const CURSOR_WINDOW = 4
+/**
+ * Whether two equally sized fact collections hold the same facts in the same
+ * order. Stepping two iterators by hand allocated a result object per fact on
+ * each side, several percent of a large solve's allocation; an array side is
+ * indexed instead, and only a set against a set steps one iterator by hand.
+ */
+const sameOrder = <V>(mine: Iterable<V> & object, theirs: Iterable<V> & object): boolean => {
+  const indexed = Array.isArray(theirs) ? (theirs as readonly V[]) : Array.isArray(mine) ? (mine as readonly V[]) : null
+  if (indexed !== null) {
+    let index = 0
+    for (const fact of indexed === theirs ? mine : theirs) if (fact !== indexed[index++]) return false
+    return true
+  }
+  const right = (theirs as Set<V>).values()
+  for (const fact of mine) if (fact !== right.next().value) return false
+  return true
+}
+
 const edgeCount = (edges: unknown): number =>
   edges === null ? 0 : edges instanceof Map || edges instanceof Set ? edges.size : Array.isArray(edges) ? edges.length : 1
 const NO_EDGE_STATES: readonly never[] = []
@@ -1027,9 +1045,7 @@ export abstract class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlo
     if (mine === theirs) return true
     if (!(mine instanceof Set || Array.isArray(mine)) || !(theirs instanceof Set || Array.isArray(theirs))) return false
     if (this.size !== other.size) return false
-    const left = mine.values()
-    const right = theirs.values()
-    for (let a = left.next(), b = right.next(); !a.done; a = left.next(), b = right.next()) if (a.value !== b.value) return false
+    if (!sameOrder(mine as Iterable<V> & object, theirs as Iterable<V> & object)) return false
     this.facts = theirs
     this.flags |= SHARED_FACTS
     other.flags |= SHARED_FACTS
