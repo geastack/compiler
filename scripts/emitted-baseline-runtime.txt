@@ -118,7 +118,7 @@ base-typed-read-of-a-field-a-subclass-redeclares-as-an-accessor.runtime.js.cpp c
 bigint-of-number-bigint-or-class-union.ts.cpp 83d5f932ee8a
 binary-view-arm-beside-a-live-record-view.runtime.ts.cpp f367dc1574a4
 bind-guarded-when-a-boxed-instance-can-shadow-it.runtime.ts.cpp 975511f83b01
-bind-guarded-when-a-logger-reaches-an-emitter.runtime.ts.cpp 7aabac301b05
+bind-guarded-when-a-logger-reaches-an-emitter.runtime.ts.cpp 236f7fcd3744
 bind-method-value-to-receiver.ts.cpp ae91f1059140
 bind-of-unknown-origin-method-guards-own-bind.runtime.ts.cpp 07380bfd85c2
 bind-stays-builtin-when-a-computed-write-cannot-reach-the-function.runtime.ts.cpp 86bb50c642e1
@@ -799,6 +799,7 @@ merge-arm-dictionary-into-header-union.ts.cpp 7336257ce407
 merge-arm-empty-array-into-native-array.ts.cpp f1b520762837
 merge-arm-nullish-fallback-is-dead.ts.cpp f8cbb9c04b1f
 merged-interface-emit-dispatch.runtime.ts.cpp cba8b1dd354e
+method-shadowed-through-an-any-parameter.runtime.ts.cpp 1e87e9592c5a
 method-slot-widened-parameter-narrowed-in-frame.ts.cpp fb27f756b9ea
 method-with-tagged-view-parameter-into-wider-view-union-slot.runtime.ts.cpp 9bb5ab8fa72d
 mixed-dictionary-union.ts.cpp 2089379e5f24
@@ -1117,7 +1118,7 @@ property-test-over-a-boxed-map.runtime.ts.cpp 904e47e21af9
 prototype-constructor-and-number-reflection.runtime.js.cpp bba276d365dd
 prototype-method-own-length.runtime.js.cpp 9aa016a9ecdc
 prototype-method-value-call.runtime.js.cpp a5dc1dbdc7ce
-prototype-object-class-typed-instance.ts.cpp 02c2e804e43a
+prototype-object-class-typed-instance.ts.cpp 803edc63ef5b
 proxy-answered-method-called-with-the-proxy-as-this-aborts-by-name.runtime.ts.cpp 4a9b1cd4ca9e
 proxy-error-module-at-any-stays-native.runtime.ts.cpp 79a1e561b4ca
 proxy-error-module-method-reads-become-typed-callables.runtime.ts.cpp d66c524266c3

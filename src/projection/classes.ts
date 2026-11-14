@@ -1235,11 +1235,69 @@ export const publishClassMethodOverrides = (
       }
     }
   }
+  // A write through a dynamic receiver (`target[key] = value` with `target:
+  // any`) lands on whatever object was boxed into it, so it shadows a method
+  // of every class whose instance enters a dynamic slot. Which values are
+  // boxed is settled only by lowering (`ir/boxed-bind-assumptions.ts`), after
+  // this layout is fixed; the declared slot each operand enters
+  // (`conversionRoles`: an `any` parameter, an `any[]` element, an `any`
+  // field) is the semantic layer's own statement of that boundary.
+  let boxed: Map<DeclarationId, Representation> | undefined
+  const boxedInstances = (): ReadonlyMap<DeclarationId, Representation> => {
+    if (boxed) return boxed
+    boxed = new Map()
+    const holdsDynamic = (slot: Representation): boolean =>
+      slot.kind === 'dynamic' ||
+      (slot.kind === 'optional' && holdsDynamic(slot.payload)) ||
+      (slot.kind === 'tagged-union' && slot.arms.some((arm) => holdsDynamic(arm.value)))
+    const collect = (carrier: Representation): void => {
+      if (carrier.kind === 'optional') return collect(carrier.payload)
+      if (carrier.kind === 'borrowed-ref') return collect(carrier.referent)
+      if (carrier.kind === 'tagged-union') return carrier.arms.forEach((arm) => collect(arm.value))
+      if (carrier.kind === 'class-ref') boxed?.set(genericRootOf(carrier.declaration), carrier)
+    }
+    // An array of instances entering an `any[]` slot boxes each element, not
+    // the array: `installAll([element], key)` hands the callee the instance.
+    const enter = (carrier: Representation, slot: Representation): void => {
+      if (holdsDynamic(slot)) return collect(carrier)
+      if (slot.kind === 'optional') return enter(carrier, slot.payload)
+      if (carrier.kind === 'optional') return enter(carrier.payload, slot)
+      if (carrier.kind === 'borrowed-ref') return enter(carrier.referent, slot)
+      if (carrier.kind === 'array-object' && slot.kind === 'array-object') enter(carrier.element, slot.element)
+    }
+    const carrierOfResult = (operand: SemanticOperand | undefined): Representation | undefined =>
+      operand?.source.kind === 'result' ? input.plan.selected.get(operand.source.result) : undefined
+    // A binding's cell holds the carrier its introducing operation published
+    // (`projectBindingPlacements`): `for (const target of targets)` over an
+    // `any[]` boxes each instance into `target`'s cell, not into a slot.
+    const cells = new Map<DeclarationId, Representation>()
+    for (const operation of input.graph.operations.values()) {
+      if (operation.family !== 'binding' || (operation.action !== 'initialize' && operation.action !== 'declare')) continue
+      const published = resultOf(operation, 'value')
+      const cell = published ? input.plan.selected.get(published.id) : undefined
+      if (cell && !cells.has(operation.declaration)) cells.set(operation.declaration, cell)
+    }
+    for (const operation of input.graph.operations.values()) {
+      for (const target of operation.conversionRoles ?? []) {
+        const carrier = carrierOfResult(operation.operands.find((each) => each.role === target.role && each.ordinal === target.ordinal))
+        if (carrier) enter(carrier, input.deriver.derive(target.type))
+      }
+      if (operation.family !== 'binding' || (operation.action !== 'initialize' && operation.action !== 'write')) continue
+      const cell = cells.get(operation.declaration)
+      const carrier = carrierOfResult(operandOf(operation, operation.action === 'initialize' ? 'initializer' : 'value'))
+      if (cell && carrier) enter(carrier, cell)
+    }
+    return boxed
+  }
   const mark = (receiver: Representation, key: string | null, prototype: DeclarationId | null = null, symbolKeys = true): void => {
     if (receiver.kind === 'optional') return mark(receiver.payload, key, prototype, symbolKeys)
     if (receiver.kind === 'borrowed-ref') return mark(receiver.referent, key, prototype, symbolKeys)
     if (receiver.kind === 'tagged-union') {
       for (const arm of receiver.arms) mark(arm.value, key, prototype, symbolKeys)
+      return
+    }
+    if (receiver.kind === 'dynamic') {
+      for (const instance of boxedInstances().values()) mark(instance, key, prototype, symbolKeys)
       return
     }
     if (receiver.kind !== 'class-ref') return
