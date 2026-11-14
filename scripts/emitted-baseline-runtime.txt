@@ -5,7 +5,7 @@ abstract-getter-implemented-by-a-subclass-field.runtime.ts.cpp de2484e76d12
 abstract-method-first-override-omits-parameters.runtime.ts.cpp 698c47c808e3
 abstract-method-implementors-declaring-fewer-parameters.runtime.ts.cpp 3d5eb285f548
 abstract-method-returning-this-dispatches-across-siblings.runtime.ts.cpp 54dc67abcddd
-abstract-method-with-no-implementation.ts.cpp c44925ca641e
+abstract-method-with-no-implementation.ts.cpp c86641ba3c9d
 ambient-record-global-unused-stays-harmless.runtime.ts.cpp 3b2db285007b
 and-condition-over-optional-string-mode.runtime.ts.cpp 5cdafef6c9bf
 annotated-field-stores-an-any-value.runtime.ts.cpp b8960d5c91c4
@@ -297,7 +297,7 @@ constructor-function-array-field-of-pushed-records.runtime.js.cpp b6d57f91d004
 constructor-function-instance-into-inline-record-param-keeps-identity.runtime.js.cpp 8d9f5ee02e65
 constructor-function-method-field-calls-sibling-through-this.runtime.js.cpp 8d5be70c50fe
 constructor-function-omitted-option-dead-byte-guards.runtime.js.cpp a50c01b1f1d3
-constructor-function-omitted-option-dead-guards.runtime.js.cpp 111cc92efe94
+constructor-function-omitted-option-dead-guards.runtime.js.cpp bf80030e8163
 constructor-function-untyped-buffer-field-stays-native.runtime.js.cpp 20266eb45624
 constructor-null-default-array-parameter.runtime.js.cpp 64e01a6e5b49
 constructor-read-off-instance-into-family.ts.cpp 3f0007046058
@@ -623,7 +623,7 @@ in-boxed-key.ts.cpp 14990bb803ed
 in-dynamic-key-on-guarded-open-interface.runtime.ts.cpp b6d003961688
 in-over-error-or-interface-extending-error.runtime.ts.cpp da25cd375bfa
 in-unique-symbol-key-sidecar.ts.cpp 83051dca530a
-index-signature-primitive-read-logical-and-observes-absence.runtime.ts.cpp ba933aa620d4
+index-signature-primitive-read-logical-and-observes-absence.runtime.ts.cpp fbce2bddfe35
 index-signature-primitive-read-typeof-and-nullish-observe-absence.runtime.ts.cpp f2b123dc496e
 index-signature-read-assigned-to-untyped-local-keeps-its-carrier.runtime.ts.cpp e70e3014327f
 index-signature-read-into-unknown-or-any-observes-absence.runtime.ts.cpp 826114d44c62
@@ -655,8 +655,8 @@ instance-reparented-onto-mixin-subclass.ts.cpp 3d9c4c14639f
 instanceof-a-generic-class.ts.cpp 3e0cd644c93b
 instanceof-arm-of-unconstructed-class-into-interface-view.runtime.ts.cpp 94ad5ed8b110
 instanceof-chain-tests-the-unnarrowed-value.runtime.ts.cpp 36e3bdfd4afb
-instanceof-class-record-string-union.ts.cpp eb4958012c6e
-instanceof-class-union-through-nested-record-views.runtime.ts.cpp af5edd1c0aa6
+instanceof-class-record-string-union.ts.cpp c610a317406f
+instanceof-class-union-through-nested-record-views.runtime.ts.cpp 350fcc7d9c4b
 instanceof-date-over-a-union-of-native-carriers.runtime.ts.cpp cc0ae2fcf6a6
 instanceof-derived-class.ts.cpp faac20f3a75e
 instanceof-else-arm-narrowed-to-never-is-not-converted.runtime.ts.cpp 414e64f72f72
@@ -765,6 +765,7 @@ live-view-open-key-writes-reach-the-original.runtime.js.cpp 9849eaff04c5
 live-view-value-walks-read-the-original.runtime.js.cpp 5ea0c1c25389
 local-iteration.ts.cpp edce49b62945
 logical-and-object-left-falsy-arm.ts.cpp 4115125872c2
+logical-merge-of-mixed-operands-tested-without-building-it.runtime.ts.cpp f7a509091b46
 logical-native-merge.ts.cpp 0ef439c3eea9
 logical-object-union-falsy-absence.ts.cpp 5540183785bc
 loop-invariant-ref-argument.ts.cpp 13b32e0863b3
@@ -1010,7 +1011,7 @@ object-spread-optional-interface-fields-into-record.runtime.ts.cpp 136b97695856
 object-values-entries-of-base-typed-subclass-instances.runtime.ts.cpp 4663a02d9179
 object-values-of-mixed-field-record.ts.cpp 9fdf7a2fa37e
 object-values-reads-fields-nothing-else-spells.runtime.ts.cpp fd65203bd2c4
-observed-indexed-absence-kept-in-a-store-a-comparison-and-instanceof.runtime.js.cpp 5b09ff4d1588
+observed-indexed-absence-kept-in-a-store-a-comparison-and-instanceof.runtime.js.cpp 87a5c3f02b62
 odd-divisor-remainder-skips-the-zero-check.runtime.ts.cpp 393f68fa7641
 open-document-adopted-into-record-key-order.runtime.ts.cpp 171f8f483664
 open-document-boxed-arm-into-document-field-is-viewed.runtime.ts.cpp 60679fe73edb
@@ -1043,7 +1044,7 @@ optional-union-narrowed-to-record-beside-class-arm.runtime.ts.cpp 6b67d58a303e
 optional-void-call-abi.ts.cpp baec9dae12bf
 options-record-nested-interface-field-written-by-string-key.runtime.ts.cpp de8520496fd7
 options-view-reads-an-absent-union-field-as-undefined.runtime.js.cpp 5fe934d65279
-or-chain-over-object-create-null-bag.runtime.ts.cpp 0a01f3270c06
+or-chain-over-object-create-null-bag.runtime.ts.cpp cdc6760abbf4
 overload-any-implementation-returns-null.runtime.ts.cpp 8e30ed03c95d
 overload-omitted-argument-of-required-implementation-parameter.runtime.ts.cpp b3ff06d1a1ac
 overload-return-names-a-generic-class-copy.runtime.ts.cpp c0a7bc17f0e4
