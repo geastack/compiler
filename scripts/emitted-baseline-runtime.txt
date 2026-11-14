@@ -260,6 +260,7 @@ co-return-union-of-value-or-promise-settles-same-tick.runtime.ts.cpp e44de28f10e
 codec-table-static-method-dispatch.runtime.ts.cpp bd03ce41608a
 collection-get-native-union.ts.cpp d652be5063db
 composed-field-descriptor.runtime.js.cpp d8765d2119fe
+computed-axis-store-leaves-the-class-methods-unguarded.runtime.ts.cpp 0211dc75d90d
 computed-class-prototype-method.ts.cpp d68731c3ae0a
 computed-get-over-literal-key-union.ts.cpp 91c40fbbdc64
 computed-key-bag-passed-as-union-argument.runtime.js.cpp 70ca1901e4e3
@@ -467,7 +468,7 @@ for-await-over-async-generator-method.runtime.ts.cpp 5d32dc636569
 for-await-over-async-iterable-interface.ts.cpp 87e8b9d18b78
 for-await-over-sync-iterables-of-promises.runtime.ts.cpp 8789e9e12b7d
 for-await-two-loops-interleave.runtime.ts.cpp d16c786cdd55
-for-in-bag-writes-each-key-onto-class-fields.runtime.js.cpp 75508068e16a
+for-in-bag-writes-each-key-onto-class-fields.runtime.js.cpp 0f1d299392ac
 for-in-generic-key.ts.cpp 242896916a52
 for-in-over-sparse-array.ts.cpp 4ea4f5a61a42
 for-let-per-iteration-binding-closures.runtime.ts.cpp 2dbab40b697c

@@ -1307,6 +1307,10 @@ export const publishClassMethodOverrides = (
     // Intrinsics without a key operand (`Object.assign`) copy whatever own
     // keys their source holds, symbols included, and keep `undefined` here.
     let runtimeKey: SemanticOperand | undefined
+    // The whole-program upper bound on a computed key (`provenKeyTexts`):
+    // three's `BoxGeometry` writes `vector[u]` with `u` only ever 'x', 'y' or
+    // 'z', and marking every Vector3 method for it guarded each of their calls.
+    let proven: readonly string[] | undefined
     if (
       operation.family === 'property' &&
       (operation.internalMethod === 'set' || operation.internalMethod === 'delete' || operation.internalMethod === 'define-own-property')
@@ -1314,7 +1318,10 @@ export const publishClassMethodOverrides = (
       receiver = operandOf(operation, 'receiver')
       const named = operandOf(operation, 'key')
       if (named?.source.kind === 'constant') key = named.source.text
-      else runtimeKey = named
+      else {
+        runtimeKey = named
+        proven = operation.provenKeyTexts
+      }
     } else if (operation.family === 'invocation' && operation.intrinsicMutation) {
       receiver = operation.operands.find((operand) => operand.role === 'argument' && operand.ordinal === 0)
       if (operation.intrinsicMutation === 'reflect-set' || operation.intrinsicMutation === 'object-define-property') {
@@ -1327,12 +1334,15 @@ export const publishClassMethodOverrides = (
     const symbolKeys = runtimeKey === undefined || !keyExcludesSymbols(carrierOf(runtimeKey))
     const selected = receiver.source.kind === 'result' ? input.plan.selected.get(receiver.source.result) : undefined
     const prototypeOrigins = receiver.source.kind === 'result' ? prototypes.get(receiver.source.result) : undefined
-    if (prototypeOrigins?.size) {
-      for (const declaration of prototypeOrigins) {
-        const instance = layouts.get(declaration)?.instance
-        if (instance) mark(instance, key, declaration, symbolKeys)
-      }
-    } else mark(selected ?? input.deriver.derive(receiver.type), key, null, symbolKeys)
+    const keys: readonly (string | null)[] = key === null && proven !== undefined && proven.length > 0 ? proven : [key]
+    for (const each of keys) {
+      if (prototypeOrigins?.size) {
+        for (const declaration of prototypeOrigins) {
+          const instance = layouts.get(declaration)?.instance
+          if (instance) mark(instance, each, declaration, symbolKeys)
+        }
+      } else mark(selected ?? input.deriver.derive(receiver.type), each, null, symbolKeys)
+    }
   }
   return new Map(
     [...layouts].map(([declaration, layout]) => {
