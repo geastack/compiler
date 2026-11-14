@@ -23443,30 +23443,43 @@ inline Value installOrdinaryConstructorPrototype(Value ctor) {
 
 namespace dictionary {
 /**
+ * A key as the view the tables compare. A constant key arrives as the string
+ * literal the emitter spelled, and the view takes its length from the array:
+ * converting it through `const char*` measured the literal on every read --
+ * three's uniform reads (`uniforms.diffuse`, `uniforms.projectionMatrix`) ran
+ * a strlen per lookup, per material, per frame -- and would have cut a key
+ * holding a NUL short.
+ */
+template <typename Key>
+[[gnu::always_inline]] inline std::string_view keyView(const Key& key) {
+  if constexpr (std::is_array_v<Key>) return std::string_view(key, std::extent_v<Key> - 1);
+  else return std::string_view(key);
+}
+/**
  * The present-or-absent read of a keyed table (`has(k) ? Carrier(read(k)) :
  * Carrier()`). A table with a single-lookup `readIfPresent` answers through
  * it; any other answers through its own `has` and `read`, unchanged.
  */
 template <typename Carrier, typename Table, typename Key>
 inline Carrier readIfPresent(const Table& table, const Key& key) {
-  if constexpr (requires { table.template readIfPresent<Carrier>(std::string_view(key)); })
-    return table.template readIfPresent<Carrier>(std::string_view(key));
+  if constexpr (requires { table.template readIfPresent<Carrier>(keyView(key)); })
+    return table.template readIfPresent<Carrier>(keyView(key));
   else
     return table.has(key) ? Carrier(table.read(key)) : Carrier();
 }
 /** `readIfPresent` for a constant key, with the emitting site's position hint (`Dictionary::hintedPosition`). */
 template <typename Carrier, typename Table, typename Key>
 inline Carrier readIfPresentHinted(const Table& table, const Key& key, std::atomic<std::uint32_t>& hint) {
-  if constexpr (requires { table.template readIfPresentHinted<Carrier>(std::string_view(key), hint); })
-    return table.template readIfPresentHinted<Carrier>(std::string_view(key), hint);
+  if constexpr (requires { table.template readIfPresentHinted<Carrier>(keyView(key), hint); })
+    return table.template readIfPresentHinted<Carrier>(keyView(key), hint);
   else
     return readIfPresent<Carrier>(table, key);
 }
 /** `table.read(key)` for a constant key, with the emitting site's position hint. */
 template <typename Table, typename Key>
 inline auto readHinted(const Table& table, const Key& key, std::atomic<std::uint32_t>& hint) {
-  if constexpr (requires { table.readHinted(std::string_view(key), hint); })
-    return table.readHinted(std::string_view(key), hint);
+  if constexpr (requires { table.readHinted(keyView(key), hint); })
+    return table.readHinted(keyView(key), hint);
   else
     return table.read(key);
 }
