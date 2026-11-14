@@ -276,7 +276,7 @@ const dictionaryReadText = (ctx: EmitContext, operation: GetOperation): string |
   // site, so each read site remembers where it last found its key.
   const hinted = operation.receiver.representation.key === 'string' && ctx.staticKeyTexts.get(operation.key.value) !== undefined
   const withHint = (text: string): string =>
-    `([&]() -> decltype(auto) { static constinit std::atomic<std::uint32_t> gea_key_hint{0}; return ${text}; }())`
+    `([&]() -> decltype(auto) { static constinit std::atomic<std::uint64_t> gea_key_hint{0}; return ${text}; }())`
   const raw = hinted
     ? withHint(`gea::dictionary::readHinted(${table.table}, ${table.key}, gea_key_hint)`)
     : `${table.member}read(${table.key})`

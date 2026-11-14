@@ -13939,6 +13939,28 @@ class StableEntryStore {
  * references to existing elements valid where a vector's reallocation would
  * dangle them.
  */
+namespace detail {
+/**
+ * The interned key sequence of a string-keyed table (`Dictionary::layoutId`):
+ * tables holding the same keys at the same positions -- three's uniform tables,
+ * cloned from one template per material -- share one id, so a read site that
+ * cached (id, slot) reads the slot of any of them without hashing or comparing
+ * the key. Ids are never reused; the table stops growing at a fixed bound, and
+ * a table whose sequence it cannot hold has no layout.
+ */
+inline std::uint32_t internDictionaryLayout(const std::string& encoded) {
+  static std::mutex lock;
+  static auto* const layouts = new std::unordered_map<std::string, std::uint32_t>();
+  const std::lock_guard<std::mutex> held(lock);
+  const auto found = layouts->find(encoded);
+  if (found != layouts->end()) return found->second;
+  if (layouts->size() >= (std::size_t{1} << 16)) return 0;
+  const auto id = static_cast<std::uint32_t>(layouts->size() + 1);
+  layouts->emplace(encoded, id);
+  return id;
+}
+}  // namespace detail
+
 template <typename V>
 class Dictionary {
  public:
@@ -13998,6 +14020,7 @@ class Dictionary {
    */
   void migrateTo(detail::DictionaryAliasHandle<V> alias) {
     static_assert(aliasable, "only a Dictionary<Value> can view another object");
+    invalidateLayout();
     first_.reset();
     entries_.clear();
     index_.clear();
@@ -14020,6 +14043,7 @@ class Dictionary {
     if (!first_ && entries_.empty()) {
       enumerableKeys_.reset();
       noteKey(key);
+      invalidateLayout();
       first_.emplace(detail::duplicateString(key), V{});
       if constexpr (aliasable) detail::noteDocumentDataKeyCreated(this, key);
       return first_->second;
@@ -14028,6 +14052,7 @@ class Dictionary {
     if (found != npos) return entries_[found].second;
     enumerableKeys_.reset();
     noteKey(key);
+    invalidateLayout();
     Entry& entry = entries_.emplace_back(detail::duplicateString(key), V{});
     GEA_EH_TRY_ANY(gea_eh_failed) {
       indexInsert(entries_.size() - 1);
@@ -14108,6 +14133,53 @@ class Dictionary {
     return readIfPresent<Carrier>(key);
   }
   /**
+   * The slot of a constant key read at one site, asked of the site's cached
+   * (layout, slot) pair first. A table with the cached layout holds the same
+   * keys at the same slots, so the slot is the answer -- absence included --
+   * with no hash and no key compare; it is what an inline cache keyed on a
+   * hidden class does. A table without a layout keeps the position hint in the
+   * low half. Relaxed: the pair is one word, so it never tears, and a stale one
+   * only sends the read to the lookup.
+   */
+  std::uint32_t layoutSlot(std::string_view key, std::atomic<std::uint64_t>& hint) const {
+    const std::uint64_t cached = hint.load(std::memory_order_relaxed);
+    const std::uint32_t layout = layoutId();
+    if (layout != 0 && static_cast<std::uint32_t>(cached >> 32) == layout) [[likely]] return static_cast<std::uint32_t>(cached);
+    std::uint32_t slot = kAbsentSlot;
+    if (first_ && first_->first == key) slot = 0;
+    else if (mayHoldKey(key)) {
+      const std::uint32_t at = layout == 0 && (cached >> 32) == 0 ? static_cast<std::uint32_t>(cached) : kAbsentSlot;
+      if (at != kAbsentSlot && at != 0 && at - 1 < entries_.size() && entries_[at - 1].first == key) slot = at;
+      else {
+        const std::size_t found = findPosition(key);
+        if (found != npos && found < kAbsentSlot - 1) slot = static_cast<std::uint32_t>(found + 1);
+      }
+    }
+    if (layout != 0 || slot != kAbsentSlot) hint.store((std::uint64_t{layout} << 32) | slot, std::memory_order_relaxed);
+    return slot;
+  }
+  /** `read` with a site's layout-keyed cache (`layoutSlot`). */
+  V readHinted(std::string_view key, std::atomic<std::uint64_t>& hint) const {
+    if constexpr (!aliasable) {
+      if (!view_) [[likely]] {
+        const std::uint32_t slot = layoutSlot(key, hint);
+        return slot == kAbsentSlot ? V{} : slot == 0 ? first_->second : entries_[slot - 1].second;
+      }
+    }
+    return read(key);
+  }
+  /** `readIfPresent` with a site's layout-keyed cache (`layoutSlot`). */
+  template <typename Carrier>
+  Carrier readIfPresentHinted(std::string_view key, std::atomic<std::uint64_t>& hint) const {
+    if constexpr (!aliasable) {
+      if (!view_) [[likely]] {
+        const std::uint32_t slot = layoutSlot(key, hint);
+        return slot == kAbsentSlot ? Carrier() : slot == 0 ? Carrier(first_->second) : Carrier(entries_[slot - 1].second);
+      }
+    }
+    return readIfPresent<Carrier>(key);
+  }
+  /**
    * `has(key) ? Carrier(read(key)) : Carrier()` with one lookup for a plain
    * table: no view and no Document alias or overlay, where `has` and `read`
    * both answer exactly the own entry. Every other table asks both, as before.
@@ -14166,13 +14238,14 @@ class Dictionary {
       }
     }
     if (first_ && first_->first == key) {
-      enumerableKeys_.reset(); first_.reset(); forgetAttributes(key);
+      enumerableKeys_.reset(); invalidateLayout(); first_.reset(); forgetAttributes(key);
       if constexpr (aliasable) detail::forgetDocumentDataKey(this, key);
       return;
     }
     const std::size_t found = findPosition(key);
     if (found == npos) return;
     enumerableKeys_.reset();
+    invalidateLayout();
     entries_.erase(found);
     if (entries_.size() <= kScanLimit) index_.clear();
     else rebuildIndex();
@@ -14614,6 +14687,7 @@ class Dictionary {
     if (view_) [[unlikely]] detail::refuseAliasedDictionaryStore();
     enumerableKeys_.reset();
     noteKey(key);
+    invalidateLayout();
     if (!first_ && entries_.empty()) {
       first_.emplace(detail::duplicateString(key), std::move(value));
       return;
@@ -14744,6 +14818,45 @@ class Dictionary {
    * an alias holds no entries of its own here.
    */
   std::uint64_t keyMask_ = 0;
+  // `layoutId`: 0 until asked after a change of the key sequence, kNoLayout
+  // once the table has changed under its readers too often to be worth naming.
+  // Read through `std::atomic_ref`: a const read computes it, and concurrent
+  // readers may race to store the same id. A copy holds the same keys, so it
+  // keeps the id.
+  static constexpr std::uint32_t kAbsentSlot = static_cast<std::uint32_t>(-1);
+  static constexpr std::uint32_t kNoLayout = static_cast<std::uint32_t>(-1);
+  mutable std::uint32_t layoutId_ = 0;
+  mutable std::uint32_t layoutComputations_ = 0;
+  void invalidateLayout() {
+    if (layoutId_ != kNoLayout) std::atomic_ref<std::uint32_t>(layoutId_).store(0, std::memory_order_relaxed);
+  }
+  /** The interned key sequence this table holds now (`detail::internDictionaryLayout`), or 0 when it has none. */
+  std::uint32_t layoutId() const {
+    const std::uint32_t id = std::atomic_ref<std::uint32_t>(layoutId_).load(std::memory_order_relaxed);
+    if (id != 0) [[likely]] return id == kNoLayout ? 0 : id;
+    return computeLayoutId();
+  }
+  [[gnu::noinline]] std::uint32_t computeLayoutId() const {
+    std::atomic_ref<std::uint32_t> id(layoutId_);
+    // A table rebuilt between reads -- one grown a key at a time while a site
+    // reads it -- would intern a sequence per step; it keeps the plain lookup.
+    if (std::atomic_ref<std::uint32_t>(layoutComputations_).fetch_add(1, std::memory_order_relaxed) >= 8 || entries_.size() > 1024) {
+      id.store(kNoLayout, std::memory_order_relaxed);
+      return 0;
+    }
+    std::string encoded;
+    const auto append = [&](std::string_view key) {
+      const auto size = static_cast<std::uint32_t>(key.size());
+      encoded.append(reinterpret_cast<const char*>(&size), sizeof size);
+      encoded.append(key);
+    };
+    encoded.push_back(first_ ? '\x01' : '\x00');
+    if (first_) append(first_->first);
+    for (std::size_t position = 0; position < entries_.size(); ++position) append(entries_[position].first);
+    const std::uint32_t interned = detail::internDictionaryLayout(encoded);
+    id.store(interned == 0 ? kNoLayout : interned, std::memory_order_relaxed);
+    return interned;
+  }
   static constexpr unsigned keyBit(std::string_view key) {
     const std::size_t size = key.size();
     const unsigned edges = size == 0 ? 0u : static_cast<unsigned>(static_cast<unsigned char>(key[0])) * 3u + static_cast<unsigned char>(key[size - 1]);
@@ -23469,7 +23582,7 @@ inline Carrier readIfPresent(const Table& table, const Key& key) {
 }
 /** `readIfPresent` for a constant key, with the emitting site's position hint (`Dictionary::hintedPosition`). */
 template <typename Carrier, typename Table, typename Key>
-inline Carrier readIfPresentHinted(const Table& table, const Key& key, std::atomic<std::uint32_t>& hint) {
+inline Carrier readIfPresentHinted(const Table& table, const Key& key, std::atomic<std::uint64_t>& hint) {
   if constexpr (requires { table.template readIfPresentHinted<Carrier>(keyView(key), hint); })
     return table.template readIfPresentHinted<Carrier>(keyView(key), hint);
   else
@@ -23477,7 +23590,7 @@ inline Carrier readIfPresentHinted(const Table& table, const Key& key, std::atom
 }
 /** `table.read(key)` for a constant key, with the emitting site's position hint. */
 template <typename Table, typename Key>
-inline auto readHinted(const Table& table, const Key& key, std::atomic<std::uint32_t>& hint) {
+inline auto readHinted(const Table& table, const Key& key, std::atomic<std::uint64_t>& hint) {
   if constexpr (requires { table.readHinted(keyView(key), hint); })
     return table.readHinted(keyView(key), hint);
   else
