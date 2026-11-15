@@ -169,7 +169,7 @@ callable-own-mutation-guards.runtime.js.cpp 628eb9e20d16
 callable-result-conversion.ts.cpp 1fd137584f3d
 callback-call-with-this-arg.ts.cpp 3200af41adf8
 calls-through-an-alias-are-callers.runtime.ts.cpp 4c949db36c68
-captured-array-loop-takes-one-window.runtime.ts.cpp 13cf4a6b95c5
+captured-array-loop-takes-one-window.runtime.ts.cpp a70b4391e398
 captured-cell-branch-assignment.ts.cpp 5b3be1454f19
 captured-let-assigned-on-either-branch-has-one-cell.runtime.ts.cpp 7f0707e8ea63
 captured-slot-alias.runtime.ts.cpp bbd391d78a08
@@ -178,7 +178,7 @@ census-typed-maps-into-document-parameter-stay-native.runtime.ts.cpp 2342fcf267f
 census-union-parameter-into-narrower-census-union-parameter.runtime.ts.cpp e7aa99fd02dd
 census-union-parameter-stored-into-optional-record-field.runtime.ts.cpp a94da0ecf940
 circular-list-head-null-placeholder-literal.runtime.ts.cpp 56a1b870d8a9
-clamping-box-loop-takes-one-window.runtime.ts.cpp 9fc8804dc0a0
+clamping-box-loop-takes-one-window.runtime.ts.cpp bffe92415ae1
 class-accessors-viewed-as-record.ts.cpp 3440f10a11da
 class-alias-cast-to-constructor-type-holds-the-class.runtime.ts.cpp 899717f1eecc
 class-arm-into-declared-interface-slot.ts.cpp 7a105ce636f7
@@ -1441,4 +1441,5 @@ wide-optional-options-spread-prefix-keys.runtime.ts.cpp 8dd0433b7d6b
 wide-record-spread-short-flag-tail.runtime.ts.cpp 221a2956b905
 widened-field-in-arithmetic-and-locals.runtime.js.cpp 04b0e4de9cf8
 wider-options-record-into-nullable-narrower-options.runtime.ts.cpp 133ff47ce91b
+window-element-binding-borrows-its-cell.runtime.ts.cpp f1684f4a782d
 worker-module-realms.ts.cpp 7309a7a741ba

@@ -1650,6 +1650,14 @@ export interface EmitContext {
   readonly aliasedStableFieldReads: Set<IrValueId>
   /** The field text each admitted cell names, set by its one write before any read renders. */
   readonly stableFieldCellTexts: Map<DeclarationId, string>
+  /** Dense window reads that rendered as the window's cell itself, an lvalue (`denseElementText`). Filled as the body renders. */
+  readonly denseCellReads: Set<IrValueId>
+  /**
+   * The pointer each borrowed window cell (`borrowedWindowCells`) was declared
+   * as, set by its one write when that write's read rendered as the cell, before
+   * any read of it renders.
+   */
+  readonly borrowedWindowCellNames: Map<DeclarationId, string>
   /** Dominating native length results, selected by the IR reuse proof. Settled the same way as `hoistedResults`. */
   readonly reusedStringLengths: ReadonlyMap<IrValueId, IrOperand>
   /** Withheld values whose single reader is a call, and which therefore reach exactly one operand position -- see `emit.ts`'s `consumedByCall`. Settled the same way as `hoistedResults`. */
@@ -1832,6 +1840,12 @@ export interface EmitContext {
    * distinct objects. Decided once the scope plan exists, before rendering.
    */
   readonly denseOutlined: ReadonlyMap<number, DenseRegion>
+  /**
+   * Cells that hold the address of the window cell they are written from
+   * (`ir/borrowed-window-cells.ts`), decided by `emitBody` once the windows
+   * are admitted.
+   */
+  readonly borrowedWindowCells: ReadonlySet<DeclarationId>
   /** Reads of a wrapped window's `length` that the preheader already took, by the window's ordinal. */
   readonly denseLengths: ReadonlyMap<IrValueId, number>
   /** Subscripts a wrapped window may take in the integers -- see `denseRemainderCompanion`. */
@@ -2065,6 +2079,7 @@ export interface EmitBodyPrepassFacts {
   readonly denseGroups: Map<number, DenseGroup>
   readonly denseRegions: DenseRegion[]
   readonly denseOutlined: Map<number, DenseRegion>
+  readonly borrowedWindowCells: Set<DeclarationId>
   readonly denseLengths: Map<IrValueId, number>
   readonly deferrable: Set<IrValueId>
 }
@@ -2214,6 +2229,7 @@ export const createEmitContext = (
   const denseGroups = new Map<number, DenseGroup>()
   const denseRegions: DenseRegion[] = []
   const denseOutlined = new Map<number, DenseRegion>()
+  const borrowedWindowCells = new Set<DeclarationId>()
   const denseLengths = new Map<IrValueId, number>()
   const deferrable = new Set<IrValueId>()
   const ctx: EmitContext = {
@@ -2330,6 +2346,8 @@ export const createEmitContext = (
     stableFieldCells: bodyFacts.stableFieldCells,
     aliasedStableFieldReads: new Set(),
     stableFieldCellTexts: new Map(),
+    denseCellReads: new Set(),
+    borrowedWindowCellNames: new Map(),
     reusedStringLengths,
     callArgumentOnly,
     classTableRoots: bodyFacts.classTableRoots,
@@ -2365,6 +2383,7 @@ export const createEmitContext = (
     denseIndices: new Map(),
     denseGroups,
     denseOutlined,
+    borrowedWindowCells,
     computeOrigins: bodyFacts.computeOrigins,
     freshReceiverStores: bodyFacts.freshReceiverStores,
     outOfOrderFreshStores: bodyFacts.outOfOrderFreshStores,
@@ -2432,6 +2451,7 @@ export const createEmitContext = (
       denseGroups,
       denseRegions,
       denseOutlined,
+      borrowedWindowCells,
       denseLengths,
       deferrable
     }
@@ -3282,6 +3302,11 @@ const renderMutableEmitContextFields: ReadonlySet<string> = new Set([
   // that, and the field text its later reads print in place of the cell.
   'aliasedStableFieldReads',
   'stableFieldCellTexts',
+  // The same test for window cells: WHICH cells may hold a window cell's
+  // address is the prepass's `borrowedWindowCells`; whether the one write's
+  // read printed as the cell is decided where `emitGet` spells it.
+  'denseCellReads',
+  'borrowedWindowCellNames',
   // A wrapped dense window's subscript companion, minted and declared beside
   // the read that needed it (`denseRemainderCompanion`). WHICH accesses a
   // window admits is `admitDenseWindows`' prepass answer; this is only what

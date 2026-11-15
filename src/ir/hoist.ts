@@ -1,7 +1,7 @@
 import type { DeclarationId, IrValueId } from '../identity/ids.js'
 import { controlFlowGraphOf, cyclicBlocksOf, dominatorTreeOf, naturalLoopsOf, type DominatorTree } from './dominance.js'
 import { borrowSafeOperationsOf } from './borrow-effects.js'
-import type { IrBlockId, IrBody, IrNonTerminatorOperation, IrOperand, SetOperation } from './model.js'
+import type { GetOperation, IrBlockId, IrBody, IrNonTerminatorOperation, IrOperand, SetOperation } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import { representationKey } from '../representation/model.js'
 
@@ -111,6 +111,46 @@ const storageNeutralKinds: ReadonlySet<string> = new Set([
   'get',
   'phi'
 ])
+
+/**
+ * Whether anything in a set of blocks can change what an array answers: a
+ * store, a call, an allocation -- any operation outside the whitelist below.
+ *
+ * A store into a record's data field and a pure `Math` call over Numbers run
+ * none of the program's code and touch no array: a capsule mover clamps with
+ * `Math.max(box.min.x, Math.min(box.max.x, p.x))` and pushes `position.x` out
+ * of each box, and either one kept its box loop from checking `boxes` once.
+ * `codeFreeStore` is the target's answer to which stores those are.
+ *
+ * `codeFreeGet` says which property reads run none of the program's code. The
+ * hoist plan passes none and trusts every read, so a getter that pushes onto
+ * the array it walks is not seen there. A caller that holds an array's cell
+ * across the loop (`borrowedWindowCellsOf`) cannot afford that: the getter's
+ * push would free the storage it points into.
+ */
+export const arrayStorageMutationOf = (
+  body: IrBody,
+  codeFreeStore: (operation: SetOperation) => boolean = () => false,
+  codeFreeGet: (operation: GetOperation) => boolean = () => true
+): ((blocks: ReadonlySet<IrBlockId>) => boolean) => {
+  let neutralCalls: ReadonlySet<IrNonTerminatorOperation> | null = null
+  const touchesNoArray = (operation: IrNonTerminatorOperation): boolean => {
+    if (operation.kind === 'get') return codeFreeGet(operation)
+    if (storageNeutralKinds.has(operation.kind) || isNumberWidthConversion(operation) || isPresenceConversion(operation)) return true
+    if (operation.kind === 'set') return codeFreeStore(operation)
+    if (operation.kind !== 'call') return false
+    neutralCalls ??= borrowSafeOperationsOf(body)
+    return neutralCalls.has(operation)
+  }
+  return (blocks) => {
+    for (const blockId of blocks) {
+      const block = body.blocks.get(blockId)
+      if (!block) continue
+      for (const operation of block.operations) if (!touchesNoArray(operation)) return true
+    }
+    return false
+  }
+}
 
 /**
  * @param programConstants cells written exactly once program-wide, with that
@@ -282,28 +322,7 @@ export const loopInvariantHoistsOf = (
    * of another; regaining that needs an alias proof (distinct allocation sites),
    * not a weaker invariance test.
    */
-  // A store into a record's data field and a pure `Math` call over Numbers
-  // run none of the program's code and touch no array: a capsule mover
-  // clamps with `Math.max(box.min.x, Math.min(box.max.x, p.x))` and pushes
-  // `position.x` out of each box, and either one kept its box loop from
-  // checking `boxes` once.
-  let neutralCalls: ReadonlySet<IrNonTerminatorOperation> | null = null
-  const touchesNoArray = (operation: IrNonTerminatorOperation): boolean => {
-    if (storageNeutralKinds.has(operation.kind) || isNumberWidthConversion(operation) || isPresenceConversion(operation)) return true
-    if (operation.kind === 'set') return codeFreeStore(operation)
-    if (operation.kind !== 'call') return false
-    neutralCalls ??= borrowSafeOperationsOf(body)
-    return neutralCalls.has(operation)
-  }
-
-  const mutatesArrayStorage = (blocks: ReadonlySet<IrBlockId>): boolean => {
-    for (const blockId of blocks) {
-      const block = body.blocks.get(blockId)
-      if (!block) continue
-      for (const operation of block.operations) if (!touchesNoArray(operation)) return true
-    }
-    return false
-  }
+  const mutatesArrayStorage = arrayStorageMutationOf(body, codeFreeStore)
 
   /**
    * Whether every operation in these blocks is one that cannot hand control to

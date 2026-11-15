@@ -23,7 +23,9 @@ import {
   stableReceiversOf,
   type ConstructionOnlyFields
 } from '../../ir/construction-only-fields.js'
-import { everyStoreEffects, type WriteEffects } from '../../ir/write-effects.js'
+import { everyStoreEffects, nativeData, type WriteEffects } from '../../ir/write-effects.js'
+import { borrowSafeOperationsOf } from '../../ir/borrow-effects.js'
+import { borrowedWindowCellsOf } from '../../ir/borrowed-window-cells.js'
 import {
   DyingArgumentSet,
   dyingTransferUsesOf,
@@ -55,7 +57,9 @@ import type {
   TestOperation,
   ParameterOperation,
   ReceiverOperation,
+  GetOperation,
   GlobalThisOperation,
+  SetOperation,
   UnresolvableReferenceOperation,
   YieldOperation
 } from '../../ir/model.js'
@@ -145,7 +149,7 @@ import type { IntegerStorageFacts } from '../../ir/integers.js'
 import { noInstantiationFacts, type InstantiationFacts } from '../../ir/instantiation.js'
 import { observesEveryCallableIdentity, type CallableIdentityDemand } from '../../ir/callable-identity-demand.js'
 import { stringConstantsOf } from '../../ir/dead-values.js'
-import type { HoistPlan } from '../../ir/hoist.js'
+import { arrayStorageMutationOf, type HoistPlan } from '../../ir/hoist.js'
 import type { DenseRegion } from '../../ir/dense-loops.js'
 import { bodyValueOriginsOf, irBodyCensusOf } from '../../ir/facts.js'
 import {
@@ -3279,6 +3283,20 @@ export const emitBody = (
         if (capture.kind === 'ok') for (const slot of capture.layout.slots) capturedQueryCells.add(slot.declaration)
       }
   let entryPrologue: readonly string[] = []
+  // A view write runs the view's routine and a reactive cell notifies its
+  // subscribers; only a bare member store is code-free.
+  const codeFreeStore = (operation: SetOperation): boolean => {
+    const key = keyTexts.get(operation.key.value)
+    if (key === undefined || operation.nativeFieldViewWrite !== undefined || operation.nativeDocumentEntry !== undefined) return false
+    if (operation.typedComputedWrite !== undefined) return false
+    const receiver =
+      operation.receiver.representation.kind === 'optional' ? operation.receiver.representation.payload : operation.receiver.representation
+    if (!writeEffects.plainField(receiver, key)) return false
+    const declaring = receiver.kind === 'class-ref' ? (classMemberOf(classes, receiver.declaration, key)?.owner ?? null) : null
+    const struct = declaring !== null ? cppClassName(declaring) : structNameOfReceiver(receiver)
+    if (struct === null) return false
+    return ctx.hosts.reactive.celled.get(struct)?.has(key) !== true && ctx.hosts.reactive.revisions.get(struct)?.has(key) !== true
+  }
   // Every per-body census, in the one order they depend on each other in --
   // `ir/facts.ts` owns that order now, and this backend supplies only the
   // questions about its own carriers plus the two storage steps that have to
@@ -3287,22 +3305,7 @@ export const emitBody = (
     integerStorage: narrowedStorage,
     copiedCapture: (declaration) => copiedCaptureName(ctx, declaration) !== null,
     settledCapture: (declaration) => copiedCaptureName(ctx, declaration, true) !== null,
-    // A view write runs the view's routine and a reactive cell notifies its
-    // subscribers; only a bare member store is code-free.
-    codeFreeStore: (operation) => {
-      const key = keyTexts.get(operation.key.value)
-      if (key === undefined || operation.nativeFieldViewWrite !== undefined || operation.nativeDocumentEntry !== undefined) return false
-      if (operation.typedComputedWrite !== undefined) return false
-      const receiver =
-        operation.receiver.representation.kind === 'optional'
-          ? operation.receiver.representation.payload
-          : operation.receiver.representation
-      if (!writeEffects.plainField(receiver, key)) return false
-      const declaring = receiver.kind === 'class-ref' ? (classMemberOf(classes, receiver.declaration, key)?.owner ?? null) : null
-      const struct = declaring !== null ? cppClassName(declaring) : structNameOfReceiver(receiver)
-      if (struct === null) return false
-      return ctx.hosts.reactive.celled.get(struct)?.has(key) !== true && ctx.hosts.reactive.revisions.get(struct)?.has(key) !== true
-    },
+    codeFreeStore,
     // A read of a plain field defers like an Array's `length` does -- see
     // `deferrableValuesOf`. Not a read of a reactive CELL: `gea_this->count`
     // spells the `Signal<double>` itself, and only the temporary it used to be
@@ -3583,6 +3586,35 @@ export const emitBody = (
   // After the hoists, because a window's own bound is often the loop-invariant
   // read they relocate, and a relocated value is one this may name.
   admitDenseWindows(ctx, prepass, body)
+  // After the windows: a cell may point at the window cell it is written from
+  // only when that read renders as the cell itself -- an array of counted or
+  // struct elements read as its own carrier (`denseElementText`). Every
+  // property read in the loop has to run none of the program's code: a getter
+  // that pushes onto the array would free the storage the cell points into.
+  const windowReads = new Set<IrValueId>()
+  for (const operation of ctx.denseAccesses.keys()) {
+    if (operation.kind !== 'get' || operation.receiver.representation.kind !== 'array-object') continue
+    const element = operation.receiver.representation.element
+    if (element.kind !== 'scalar' && representationKey(element) === representationKey(operation.result.representation))
+      windowReads.add(operation.result.id)
+  }
+  if (windowReads.size > 0) {
+    const codeFreeReads = borrowSafeOperationsOf(body, new Set(), writeEffects.plainField)
+    const codeFreeGet = (operation: GetOperation): boolean =>
+      operation.hostMethod !== undefined || nativeData(operation.receiver.representation) || codeFreeReads.has(operation)
+    for (const declaration of borrowedWindowCellsOf(
+      body,
+      windowReads,
+      arrayStorageMutationOf(body, codeFreeStore, codeFreeGet),
+      (declaration) => {
+        const placement = placements.get(declaration)
+        if (placement?.storage.kind !== 'local' || placement.storage.owner !== body.sourceOwner) return false
+        if (captures.isBoxed(declaration) || captures.isCaptured(declaration)) return false
+        return !ctx.forwardedBindings.has(declaration) && !ctx.typeQueryBindings.has(declaration)
+      }
+    ))
+      prepass.borrowedWindowCells.add(declaration)
+  }
   const isSingleBlock = body.blockOrder.length === 1
   const orderLabels = isSingleBlock ? new Map<IrBlockId, string>() : blockLabelsOf(body.blockOrder)
   const owner = sectionOwnerOf(body)

@@ -605,6 +605,7 @@ const denseElementText = (ctx: EmitContext, operation: GetOperation): string | n
   ) {
     const slot = `gea_dense_read_${ctx.declarations.length}`
     ctx.declarations.push({ name: slot, type: `std::optional<${cppTypeOf(element)}>` })
+    ctx.denseCellReads.add(operation.result.id)
     return `(${dense.flag} ? ${dense.text} : std::as_const(${slot}.emplace(${general})))`
   }
   return `(${dense.flag} ? ${fast ?? dense.text} : ${general})`
