@@ -384,12 +384,14 @@ export const buildCaptureIndex = (
 ): CaptureIndex => {
   const boxedDeclarations = new Set<DeclarationId>()
   const requiresEarlyBoxDeclarations = new Set<DeclarationId>()
+  const settledBoxes = new Set<DeclarationId>()
   const capturedDeclarations = new Set<DeclarationId>()
   const bodyBySourceOwner = new Map<FunctionId | RegionId, IrBody>()
   for (const body of bodies) {
     bodyBySourceOwner.set(body.sourceOwner, body)
     for (const declaration of body.facts?.boxed ?? []) boxedDeclarations.add(declaration)
     for (const declaration of body.facts?.requiresEarlyBox ?? []) requiresEarlyBoxDeclarations.add(declaration)
+    for (const declaration of body.facts?.settledBoxes ?? []) settledBoxes.add(declaration)
     for (const declaration of body.facts?.capturedDeclarations ?? []) capturedDeclarations.add(declaration)
   }
 
@@ -497,6 +499,7 @@ export const buildCaptureIndex = (
     // A dissolved group's members are read by their own closures through the frame.
     isCaptured: (declaration) => capturedDeclarations.has(declaration) || frameMemberOf(declaration) !== null,
     requiresEarlyBox: (declaration) => requiresEarlyBoxDeclarations.has(declaration),
+    isSettledBox: (declaration) => settledBoxes.has(declaration),
     readsReceiver: (owner) => bodyBySourceOwner.get(owner)?.facts?.readsReceiver ?? false,
     groupOf: (owner) => (dissolvedGroupMembers.has(owner) ? null : (bodyBySourceOwner.get(owner)?.facts?.captureGroup ?? null)),
     isAccessorEnvironment: (owner) => accessorEnvironmentOwners.has(owner),

@@ -263,18 +263,34 @@ export const bindingReference = (
 }
 
 /**
- * The name this body reads another frame's local through when its environment
- * holds a by-value copy of it, or `null` for anything else.
+ * The name this body reads another frame's local through when that local
+ * holds one value for as long as this body runs, or `null` for anything else.
  *
  * Unboxed means nothing rebinds the declaration once a closure has captured
- * it, so the copy holds the same value for as long as this body runs, whatever
- * code it calls. A frame member or a boxed slot is shared storage and can
- * change under a call.
+ * it, whatever code this body calls. That holds wherever the value lives: in
+ * this body's environment as a copy, or in the owner's frame, which an
+ * unboxed declaration joins only when its one write runs once per call of the
+ * owner -- a read here that did not throw came after that write. A collision
+ * world's `raycast` reads its `boxes` through the frame it shares with
+ * `addBox`, and every box paid the bounds and view checks again because the
+ * frame slot was taken for mutable storage.
+ *
+ * A boxed declaration the program writes exactly once holds one value too
+ * (`IrBodyFacts.settledBoxes`): it is boxed only because a hoisted function
+ * declaration may run before its write, as `raycast`'s owner declares
+ * `rebuildGrid` above `const boxes`. Its frame slot is the box itself, so
+ * the name is the value -- but its one write can still run after this body
+ * starts, in code it calls, so a caller asks for one (`settled`) only where
+ * the loop it reads in changes no storage. Any other boxed slot is one a call
+ * can change.
  */
-export const copiedCaptureName = (ctx: EmitContext, declaration: DeclarationId): string | null => {
+export const copiedCaptureName = (ctx: EmitContext, declaration: DeclarationId, settled = false): string | null => {
   const placement = ctx.placements.get(declaration)
   if (placement?.storage.kind !== 'local' || placement.storage.owner === ctx.owner) return null
-  if (ctx.captures.isBoxed(declaration)) return null
+  const boxed = ctx.captures.isBoxed(declaration)
+  if (boxed && !(settled && ctx.captures.isSettledBox(declaration))) return null
   const captured = bindingReference(ctx, declaration, 'a captured cell')
-  return captured.capture === true && captured.frame !== true && !captured.boxed ? captured.name : null
+  if (captured.capture !== true) return null
+  if (captured.frame === true) return captured.name
+  return !boxed && !captured.boxed ? captured.name : null
 }

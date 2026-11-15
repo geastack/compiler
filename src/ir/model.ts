@@ -1842,6 +1842,14 @@ export interface IrBodyFacts {
    */
   readonly requiresEarlyBox: ReadonlySet<DeclarationId>
   /**
+   * The `boxed` declarations the program writes exactly once, outside every
+   * loop. They are boxed
+   * only because a closure can run before that write -- a hoisted function
+   * declaration reading a `const` declared below it -- so once a read has
+   * seen the value, no later read sees another.
+   */
+  readonly settledBoxes?: ReadonlySet<DeclarationId>
+  /**
    * The recursion group this body is a member of (`IrCaptureGroup`), absent
    * for every body that is not one. A member's `capturedDeclarations` and
    * `capturedReceiver` are the GROUP's, identical for every member, because

@@ -3278,6 +3278,7 @@ export const emitBody = (
   const census = irBodyCensusOf(body, {
     integerStorage: narrowedStorage,
     copiedCapture: (declaration) => copiedCaptureName(ctx, declaration) !== null,
+    settledCapture: (declaration) => copiedCaptureName(ctx, declaration, true) !== null,
     // A read of a plain field defers like an Array's `length` does -- see
     // `deferrableValuesOf`. Not a read of a reactive CELL: `gea_this->count`
     // spells the `Signal<double>` itself, and only the temporary it used to be

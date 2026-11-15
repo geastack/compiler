@@ -12,8 +12,8 @@ annotated-field-stores-an-any-value.runtime.ts.cpp 2abf0c317f07
 annotated-generic-function-alias.ts.cpp 0ba96f2c1d37
 any-argument-guard-copy-beside-typed-callers.runtime.ts.cpp a1990842961a
 any-argument-outside-a-guard-parameter-domain.runtime.ts.cpp f450de861e24
-any-array-callbacks-read-fields-of-the-native-records-they-are-handed.runtime.js.cpp a488ef49c014
-any-array-element-tested-for-presence-keeps-its-absence.runtime.js.cpp 26484e75cf1b
+any-array-callbacks-read-fields-of-the-native-records-they-are-handed.runtime.js.cpp e2ec5fa82c83
+any-array-element-tested-for-presence-keeps-its-absence.runtime.js.cpp 243043fed670
 any-asserted-to-promise-then-dispatches-on-the-box.runtime.ts.cpp d029a930797e
 any-cast-this-member-call-dispatches-over-the-receiver-classes.runtime.ts.cpp 972bdbcad5ef
 any-dictionary-into-named-interface.runtime.ts.cpp d23a03415e2d
@@ -169,6 +169,7 @@ callable-own-mutation-guards.runtime.js.cpp 628eb9e20d16
 callable-result-conversion.ts.cpp 1fd137584f3d
 callback-call-with-this-arg.ts.cpp 3200af41adf8
 calls-through-an-alias-are-callers.runtime.ts.cpp 4c949db36c68
+captured-array-loop-takes-one-window.runtime.ts.cpp 13cf4a6b95c5
 captured-cell-branch-assignment.ts.cpp 5b3be1454f19
 captured-let-assigned-on-either-branch-has-one-cell.runtime.ts.cpp 7f0707e8ea63
 captured-slot-alias.runtime.ts.cpp bbd391d78a08
@@ -1181,7 +1182,7 @@ regexp-test-coerces-its-argument.ts.cpp d3fa27e6e776
 regexp-utf16-coordinate.ts.cpp 277a05920f0f
 regexp-word-boundary-range-start.ts.cpp ed928302ee08
 repeated-construction.ts.cpp d28978d1d7ee
-repeated-field-reads-reuse-the-first-read.runtime.ts.cpp deb17f8b5a35
+repeated-field-reads-reuse-the-first-read.runtime.ts.cpp 23d14d4147f9
 repeated-union-selection-reuses-the-dominating-one.runtime.ts.cpp a5e5d879a11b
 rest-array-of-any-spread-into-a-null-absent-parameter.runtime.ts.cpp dc577b078473
 rest-forwarding-spread-argument.ts.cpp 314777777637

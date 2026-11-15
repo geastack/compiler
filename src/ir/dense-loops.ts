@@ -88,6 +88,12 @@ export interface DenseArray {
    * both assigned and invariant.
    */
   readonly relocatedReads: readonly IrValueId[]
+  /**
+   * The cell whose own `length` is the loop's bound, when the bound is one of
+   * `relocatedReads`. A window through that cell is the one array whose read
+   * the hoist plan already had to prove the loop cannot change.
+   */
+  readonly lengthCell?: DeclarationId
   /** Whether the test admits the bound itself (`<=`), so the window is one wider. */
   readonly inclusive: boolean
   /** The counter's step, checked non-negative at the preheader. */
@@ -381,7 +387,7 @@ export const denseLoopPlanMatches = (
  * and boxing decision, not a fact of the program. `admitsCell` is that one
  * hook (`emit-arrays.ts`'s `denseCellName` is its sole implementation).
  */
-export type DenseCellPolicy = (declaration: DeclarationId) => boolean
+export type DenseCellPolicy = (declaration: DeclarationId, boundsTheLoop: boolean) => boolean
 
 /** The windows a body ends up able to render, once `admittedDenseLoopPlanOf` has trimmed the raw plan. */
 export interface AdmittedDenseLoopPlan {
@@ -401,10 +407,15 @@ export interface AdmittedDenseLoopPlan {
  * access at all (`ir/integers.ts`) -- on top of the same question for the
  * array it is a row of.
  */
-const referenceIsAdmitted = (reference: DenseReference, integerValues: ReadonlySet<IrValueId>, admitsCell: DenseCellPolicy): boolean => {
-  if (reference.kind === 'cell') return admitsCell(reference.declaration)
+const referenceIsAdmitted = (
+  reference: DenseReference,
+  integerValues: ReadonlySet<IrValueId>,
+  admitsCell: DenseCellPolicy,
+  lengthCell: DeclarationId | undefined
+): boolean => {
+  if (reference.kind === 'cell') return admitsCell(reference.declaration, reference.declaration === lengthCell)
   if (reference.kind === 'value') return true
-  return integerValues.has(reference.key.value) && referenceIsAdmitted(reference.holder, integerValues, admitsCell)
+  return integerValues.has(reference.key.value) && referenceIsAdmitted(reference.holder, integerValues, admitsCell, undefined)
 }
 
 /**
@@ -449,9 +460,9 @@ export const admittedDenseLoopPlanOf = (
     plan.arrays
       .filter(
         (array) =>
-          admitsCell(array.counter) &&
-          (array.rows === undefined || admitsCell(array.rows.counter)) &&
-          referenceIsAdmitted(array.reference, integerValues, admitsCell) &&
+          admitsCell(array.counter, false) &&
+          (array.rows === undefined || admitsCell(array.rows.counter, false)) &&
+          referenceIsAdmitted(array.reference, integerValues, admitsCell, array.lengthCell) &&
           array.relocatedReads.every((value) => relocated.has(value))
       )
       .map((array) => array.ordinal)
@@ -699,6 +710,7 @@ export const denseLoopsOf = (body: IrBody, hoists: HoistPlan = loopInvariantHois
         counter: loop.counter,
         bound: folded?.bound ?? loop.bound,
         relocatedReads: rows && host ? host.relocatedReads : loop.relocatedReads,
+        ...(!rows && !folded && loop.lengthCell !== undefined ? { lengthCell: loop.lengthCell } : {}),
         inclusive: loop.inclusive,
         step: folded ? folded.step : loop.step,
         widened: loop.widened,
@@ -954,10 +966,32 @@ interface LoopWindows {
   readonly counter: DeclarationId
   readonly bound: IrOperand
   readonly relocatedReads: readonly IrValueId[]
+  readonly lengthCell?: DeclarationId
   readonly inclusive: boolean
   readonly step: IrOperand | null
   readonly widened: boolean
   readonly candidates: readonly WindowCandidate[]
+}
+
+/**
+ * The reads a bound of `captured.length` needs moved out of the loop: the
+ * cell read and the length read on it. `for (let i = 0; i < boxes.length; i++)`
+ * over an array a closure captured is the commonest loop a collision world
+ * runs, and it re-read the capture and its length on every turn. Like a
+ * captured bound, whether the read can move is the target's capture layout
+ * and its proof that the loop resizes no array, so the window is taken
+ * conditionally and admitted only when the target's hoist plan moved both.
+ */
+const capturedLengthOf = (
+  bound: IrOperand,
+  context: Omit<WindowContext, 'counter'>
+): { readonly reads: readonly IrValueId[]; readonly cell: DeclarationId } | null => {
+  const read = context.operationOf.get(bound.value)
+  if (read?.kind !== 'get' || read.receiver.representation.kind !== 'array-object') return null
+  if (context.constantTexts.get(read.key.value) !== 'length') return null
+  const cell = context.readsCell.get(read.receiver.value)
+  if (cell === undefined || (context.cellWrites.get(cell) ?? []).length > 0) return null
+  return { reads: [read.receiver.value, bound.value], cell }
 }
 
 const loopWindowsOf = (
@@ -986,7 +1020,9 @@ const loopWindowsOf = (
   // something the IR states. The window takes it conditionally and the
   // target admits it only when its own hoist plan moved the read out.
   const boundCell = invariantBound === null ? context.readsCell.get(right.value) : undefined
-  const relocatedReads = boundCell !== undefined && (context.cellWrites.get(boundCell) ?? []).length === 0 ? [right.value] : []
+  const capturedLength = invariantBound === null && boundCell === undefined ? capturedLengthOf(right, context) : null
+  const relocatedReads =
+    boundCell !== undefined && (context.cellWrites.get(boundCell) ?? []).length === 0 ? [right.value] : (capturedLength?.reads ?? [])
   const bound = invariantBound ?? (relocatedReads.length > 0 ? right : null)
   if (bound === null) return null
   // Exactly one advance, by an amount the preheader can name. Several
@@ -1012,6 +1048,7 @@ const loopWindowsOf = (
     counter,
     bound,
     relocatedReads,
+    ...(capturedLength ? { lengthCell: capturedLength.cell } : {}),
     inclusive: test.operator === '<=',
     step,
     widened: advanceReachesAnAccess(loop, body, graph, advance.block, counter),

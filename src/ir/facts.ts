@@ -166,6 +166,8 @@ export interface IrBodyCensusPolicy {
   readonly formalStorage: (settled: IrBodyCensusBeforeHoists) => ReadonlySet<DeclarationId>
   /** Whether this body reads the declaration through its own by-value copy, which no call it makes can change. */
   readonly copiedCapture: (declaration: DeclarationId) => boolean
+  /** Whether it reads a box written exactly once (`IrBodyFacts.settledBoxes`), which code the loop calls may still write. */
+  readonly settledCapture?: (declaration: DeclarationId) => boolean
 }
 
 /** What is known when `formalStorage` runs: everything except the hoists and the two censuses that read them. */
@@ -259,7 +261,7 @@ export const irBodyCensusOf = (body: IrBody, policy: IrBodyCensusPolicy): IrBody
   const stableFormals = policy.formalStorage(settled)
 
   const loopInvariantValues = loopInvariantValuesOf(body)
-  const hoists = loopInvariantHoistsOf(body, policy.integerStorage.cellConstants, policy.copiedCapture)
+  const hoists = loopInvariantHoistsOf(body, policy.integerStorage.cellConstants, policy.copiedCapture, policy.settledCapture)
   const hoistedStringLayouts = sharedStringLayoutsOf(body, hoists, dead)
   const stringReceivers = stableStringReceiversOf(body, stableFormals, policy.stringQueryCell)
   const straightLineStringLayouts = straightLineStringLayoutsOf(

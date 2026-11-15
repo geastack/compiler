@@ -262,6 +262,8 @@ export interface CaptureIndex {
    * to render first leaves the other branch dereferencing an empty handle.
    */
   readonly requiresEarlyBox: (declaration: DeclarationId) => boolean
+  /** Whether a boxed declaration is written exactly once (`IrBodyFacts.settledBoxes`). */
+  readonly isSettledBox: (declaration: DeclarationId) => boolean
   /**
    * Whether this body reads `this` -- in its own operations, or in a closure
    * it allocates that has no receiver of its own and so reads this one.
@@ -329,6 +331,7 @@ export const emptyCaptureIndex: CaptureIndex = {
   isBoxed: () => false,
   isCaptured: () => false,
   requiresEarlyBox: () => false,
+  isSettledBox: () => false,
   readsReceiver: () => false,
   groupOf: () => null,
   isAccessorEnvironment: () => false,

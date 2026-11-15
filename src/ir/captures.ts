@@ -2,7 +2,7 @@ import type { DeclarationId, FunctionId, IrValueId, PhysicalBodyId, RegionId } f
 import type { BindingPlacement } from '../projection/bindings.js'
 import type { Representation } from '../representation/model.js'
 import { representationKey } from '../representation/model.js'
-import { dominatorTreeOf, isVisible, type DefinitionSite } from './dominance.js'
+import { cyclicBlocksOf, dominatorTreeOf, isVisible, type DefinitionSite } from './dominance.js'
 import type { IrBlockId, IrBody, IrBodyFacts, IrCaptureGroup } from './model.js'
 
 /**
@@ -324,6 +324,7 @@ interface CaptureFacts {
   readonly allocatedFunctionIds: ReadonlySet<FunctionId | RegionId>
   readonly boxed: ReadonlySet<DeclarationId>
   readonly earlyBox: ReadonlySet<DeclarationId>
+  readonly settled: ReadonlySet<DeclarationId>
   readonly readsReceiver: (owner: FunctionId | RegionId) => boolean
 }
 
@@ -349,12 +350,17 @@ const computeCaptureFacts = (
   // cell written more than once overwrites its entry, which never matters:
   // `reassigned` refuses every such cell before the answer is consulted.
   const writtenValues = new Map<DeclarationId, IrValueId>()
+  // A write a loop of its body repeats is one write in the program text and
+  // a new value on every turn.
+  const writtenInCycle = new Set<DeclarationId>()
   const allocatedFunctionOfValue = new Map<IrValueId, FunctionId>()
   for (const body of bodies) {
+    const cyclic = cyclicBlocksOf(body)
     for (const blockId of body.blockOrder) {
       const block = body.blocks.get(blockId)
       if (!block) continue
       for (const operation of block.operations) {
+        if (operation.kind === 'binding-write' && cyclic.has(blockId)) writtenInCycle.add(operation.declaration)
         if (operation.kind === 'allocate-callable') {
           allocatedFunctionIds.add(operation.functionId)
           // An SSA id embeds the physical body it belongs to
@@ -560,6 +566,7 @@ const computeCaptureFacts = (
     allocatedFunctionIds,
     boxed,
     earlyBox: capturedBeforeInitialization,
+    settled: new Set([...boxed].filter((declaration) => !reassigned.has(declaration) && !writtenInCycle.has(declaration))),
     readsReceiver
   }
 }
@@ -625,6 +632,15 @@ export const publishCaptureFacts = (
     earlyBoxByOwner.set(placement.storage.owner, owned)
   }
 
+  const settledByOwner = new Map<FunctionId | RegionId, Set<DeclarationId>>()
+  for (const declaration of facts.settled) {
+    const placement = placements.get(declaration)
+    if (placement?.storage.kind !== 'local') continue
+    const owned = settledByOwner.get(placement.storage.owner) ?? new Set<DeclarationId>()
+    owned.add(declaration)
+    settledByOwner.set(placement.storage.owner, owned)
+  }
+
   const empty = new Set<DeclarationId>()
   const published = new Map<PhysicalBodyId, IrBody>()
   for (const body of bodyList) {
@@ -637,6 +653,7 @@ export const publishCaptureFacts = (
       readsReceiver: facts.readsReceiver(owner),
       boxed: boxedByOwner.get(owner) ?? empty,
       requiresEarlyBox: earlyBoxByOwner.get(owner) ?? empty,
+      settledBoxes: settledByOwner.get(owner) ?? empty,
       ...(group ? { captureGroup: { id: group.id, owner: group.owner, members: group.members } } : {})
     }
     published.set(body.owner, { ...body, facts: bodyFacts })

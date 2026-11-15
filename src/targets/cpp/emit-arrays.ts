@@ -953,19 +953,21 @@ const advancesByOne = (loop: NaturalLoop, facts: FillFacts): boolean => {
 }
 
 /** The plain C++ name a dense window may read its array or its counter through, or `null` when this body has no such name for the cell. */
-const denseCellName = (ctx: EmitContext, declaration: DeclarationId): string | null => {
+const denseCellName = (ctx: EmitContext, declaration: DeclarationId, boundsTheLoop = false): string | null => {
   const placement = ctx.placements.get(declaration)
   if (!placement) return null
   // A buffer cell is a string, not an array a dense window or a fill loop could address.
   if (ctx.charCodeBuffers.cells.has(declaration)) return null
   if (placement.storage.kind === 'region') return realmBindingName(ctx.placements, declaration)
   if (placement.storage.kind !== 'local') return null
-  if (ctx.captures.isBoxed(declaration)) return null
-  if (placement.storage.owner === ctx.owner) return bindingReference(ctx, declaration, 'a dense Array window').name
+  if (placement.storage.owner === ctx.owner)
+    return ctx.captures.isBoxed(declaration) ? null : bindingReference(ctx, declaration, 'a dense Array window').name
   // A parallel region's row callback reads every array it indexes as a
   // capture, and without this each element read paid the bounds and view
-  // checks the window hoists.
-  return copiedCaptureName(ctx, declaration)
+  // checks the window hoists. A settled box qualifies only as the array whose
+  // length bounds the loop: the hoist that moved that read out proved the loop
+  // changes no storage, so nothing it runs can write the box either.
+  return copiedCaptureName(ctx, declaration, boundsTheLoop)
 }
 
 /** One dense-window operand as a `long long`; the census already narrowed most of them, and the rest are ordinary `number` cells. */
@@ -1002,7 +1004,7 @@ export const admitDenseWindows = (ctx: EmitContext, prepass: EmitBodyPrepassFact
   const admitted = admittedDenseLoopPlanOf(
     plan,
     ctx.integerValues,
-    (declaration) => denseCellName(ctx, declaration) !== null,
+    (declaration, boundsTheLoop) => denseCellName(ctx, declaration, boundsTheLoop) !== null,
     ctx.hoistedResults
   )
   for (const [operation, access] of admitted.accesses) prepass.denseAccesses.set(operation, access)
@@ -1038,7 +1040,7 @@ interface DenseHolder {
  */
 const denseHolderOf = (ctx: EmitContext, lines: string[], reference: DenseReference, array: DenseArray): DenseHolder | null => {
   if (reference.kind === 'cell') {
-    const name = denseCellName(ctx, reference.declaration)
+    const name = denseCellName(ctx, reference.declaration, reference.declaration === array.lengthCell)
     if (name === null) return null
     if (reference.conversion === undefined) throw new Error(`dense cell ${reference.declaration} has no certified conversion`)
     const converted = namedConversionText(ctx, 'emit-arrays.ts:dense-cell', reference.conversion, name)

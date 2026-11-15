@@ -2,6 +2,7 @@ import type { DeclarationId, IrValueId } from '../identity/ids.js'
 import { controlFlowGraphOf, cyclicBlocksOf, dominatorTreeOf, naturalLoopsOf, type DominatorTree } from './dominance.js'
 import type { IrBlockId, IrBody, IrNonTerminatorOperation, IrOperand } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
+import { representationKey } from '../representation/model.js'
 
 /**
  * Loop-invariant operations, and the block each one moves to.
@@ -81,12 +82,23 @@ const isNumberWidthConversion = (operation: IrNonTerminatorOperation): boolean =
   operation.result.representation.domain === 'number'
 
 /**
+ * A value put into an optional of its own carrier: `hitBox = box` stores a
+ * box into a `CollisionBox | null`. The payload is already the right carrier,
+ * so the conversion only marks it present and reaches no user code.
+ */
+const isPresenceConversion = (operation: IrNonTerminatorOperation): boolean =>
+  operation.kind === 'convert' &&
+  operation.result.representation.kind === 'optional' &&
+  representationKey(operation.result.representation.payload) === representationKey(operation.source.representation)
+
+/**
  * The operation kinds that cannot change what an array answers.
  *
  * Deliberately a whitelist: a kind absent here blocks the move, so a kind
  * added to the IR later is fail-closed rather than silently admitted. `set`,
  * `convert` and every allocation are out on purpose -- a store writes array
- * storage, and a conversion of an unknown value can reach user code.
+ * storage, and a conversion of an unknown value can reach user code. A `phi`
+ * only names which incoming value a merge holds.
  */
 const storageNeutralKinds: ReadonlySet<string> = new Set([
   'constant',
@@ -95,7 +107,8 @@ const storageNeutralKinds: ReadonlySet<string> = new Set([
   'binding-write',
   'parameter',
   'receiver',
-  'get'
+  'get',
+  'phi'
 ])
 
 /**
@@ -110,7 +123,8 @@ const storageNeutralKinds: ReadonlySet<string> = new Set([
 export const loopInvariantHoistsOf = (
   body: IrBody,
   programConstants: ReadonlyMap<DeclarationId, number> = new Map(),
-  copiedCapture: (declaration: DeclarationId) => boolean = () => false
+  copiedCapture: (declaration: DeclarationId) => boolean = () => false,
+  settledCapture: (declaration: DeclarationId) => boolean = () => false
 ): HoistPlan => {
   // A try region renders as one `try { } catch { }` chunk assembled from
   // several blocks at once, so a relocation into or out of one has no single
@@ -271,7 +285,7 @@ export const loopInvariantHoistsOf = (
       const block = body.blocks.get(blockId)
       if (!block) continue
       for (const operation of block.operations) {
-        if (!storageNeutralKinds.has(operation.kind) && !isNumberWidthConversion(operation)) return true
+        if (!storageNeutralKinds.has(operation.kind) && !isNumberWidthConversion(operation) && !isPresenceConversion(operation)) return true
       }
     }
     return false
@@ -306,6 +320,12 @@ export const loopInvariantHoistsOf = (
 
   /** Answered once per loop: the walk is over every operation the loop owns. */
   const arrayStorageMutated = new Map<IrBlockId, boolean>()
+
+  const storageMutatedBy = (loop: { readonly header: IrBlockId; readonly blocks: ReadonlySet<IrBlockId> }): boolean => {
+    const mutated = arrayStorageMutated.get(loop.header) ?? mutatesArrayStorage(loop.blocks)
+    arrayStorageMutated.set(loop.header, mutated)
+    return mutated
+  }
 
   const relocated = new Set<IrValueId>()
   const into = new Map<IrBlockId, IrNonTerminatorOperation[]>()
@@ -373,11 +393,7 @@ export const loopInvariantHoistsOf = (
           // An element load and a `length` read both answer from storage this
           // loop may rewrite. `isPureRead` proved the handle invariant; this
           // proves the bytes behind it are too.
-          if (operation.kind === 'get' && !immutableStringRead(operation)) {
-            const mutated = arrayStorageMutated.get(loop.header) ?? mutatesArrayStorage(loop.blocks)
-            arrayStorageMutated.set(loop.header, mutated)
-            if (mutated) continue
-          }
+          if (operation.kind === 'get' && !immutableStringRead(operation) && storageMutatedBy(loop)) continue
           // A cell read moved ahead of the loop has to name a cell something
           // already assigned; a write that only happens AFTER the loop leaves
           // the variable uninitialized at the new position.
@@ -387,12 +403,17 @@ export const loopInvariantHoistsOf = (
           // none reads the same value on every turn as at its preheader's end,
           // and a capture this body holds its own copy of reads the same value
           // whatever the loop calls: a row loop calling a helper otherwise re-read
-          // its captured bound on every turn.
+          // its captured bound on every turn. A settled box holds one value
+          // from its one write on, but that write can run inside the loop, in
+          // code the loop calls, after the preheader read: only a loop that
+          // changes no storage reads it early.
           if (operation.kind === 'binding-read' && !isProgramConstant(operation.declaration)) {
             const written = cellWrites.get(operation.declaration) ?? []
             const assigned =
               written.length === 0
-                ? copiedCapture(operation.declaration) || runsNoOtherCode(loop.blocks)
+                ? copiedCapture(operation.declaration) ||
+                  runsNoOtherCode(loop.blocks) ||
+                  (settledCapture(operation.declaration) && !storageMutatedBy(loop))
                 : written.some((write) => dominance.dominates(write.block, preheader))
             if (!assigned) continue
           }
