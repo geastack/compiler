@@ -679,6 +679,11 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
       let read = plainFieldReadText(plain, plainOperation, key)
       if (source.value.kind === 'scalar') read = `static_cast<${cppTypeOf(source.value)}>(${read})`
       if (source.required) return { source: source.value, text: read }
+      if (
+        representationKey(carrier) === representationKey(operation.receiver.representation) &&
+        allocationKeepsField(ctx, operation.receiver, key)
+      )
+        return { source: source.value, text: read }
       // An absent own key reads undefined. A union spells it as its undefined
       // arm and a Value or a reference as its own; their default does not.
       const undefinedText = cppUndefinedIn(source.value)
@@ -1569,8 +1574,23 @@ const fixedFieldPresenceText = (ctx: EmitContext, receiver: IrOperand, fieldName
   // proof is not enough here: its bit is an instance member a decoder may
   // leave unset.
   if (field.required && ctx.fixedFieldStateConstant) return null
+  if (allocationKeepsField(ctx, receiver, fieldName)) return null
   return `${constructorViewReceiverText(ctx, receiver, fieldName, operandText(ctx, receiver))}${memberAccessOperator(representation.ownership)}${cppRecordFieldPresenceName(fieldName)}`
 }
+
+/**
+ * Whether `receiver` holds a cell's one allocation (`ctx.allocationFieldKeys`)
+ * that defined `fieldName`, a key nothing in the program can delete from its
+ * carrier (`fixedFieldState`): the allocation raised the field's presence bit
+ * and nothing lowers it, so the field is present for the object's whole life
+ * however few family members declare it required. A Gull-only field of an
+ * interface family is optional in the family's one layout because a Hound
+ * never has it, yet the gull's own methods read it through `gull`, the cell
+ * holding the literal that wrote it.
+ */
+const allocationKeepsField = (ctx: EmitContext, receiver: IrOperand, fieldName: string): boolean =>
+  ctx.allocationFieldKeys.get(receiver.value)?.has(fieldName) === true &&
+  ctx.nativeIntegrityRestricted.fixedFieldState(receiver.representation, fieldName)
 
 /** A native slot is read through the exact conversion lowering certified. */
 const narrowedFieldReadText = (
@@ -2453,8 +2473,9 @@ const emitFieldStoreLines = (
     // itself stays an instance member there that allocation set to `true`.
     const fieldStatePinned =
       field &&
-      field.required &&
-      (ctx.fixedFieldStateConstant || ctx.nativeIntegrityRestricted.fixedFieldState(operation.receiver.representation, fieldName))
+      ((field.required &&
+        (ctx.fixedFieldStateConstant || ctx.nativeIntegrityRestricted.fixedFieldState(operation.receiver.representation, fieldName))) ||
+        allocationKeepsField(ctx, operation.receiver, fieldName))
     if (field && !fieldStatePinned) stores.push(`${receiverText}${accessor}${cppRecordFieldPresenceName(fieldName)} = true;`)
     // A fresh record's keys are known statically, so only a store the IR
     // proved out of layout order speaks to the runtime; a required field is

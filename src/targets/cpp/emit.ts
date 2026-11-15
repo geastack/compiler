@@ -1,6 +1,7 @@
 import type { NativeDebugSource } from './native-debug-source.js'
 import { nativeCallablePrototypeObservationText } from './emit-native-callable-data.js'
 import type { ProgramConversionRecipe } from '../../ir/program-conversions.js'
+import type { AllocationCell } from '../../ir/program-facts.js'
 import { objectTagExpression, objectTagCapability } from './emit-object-tag.js'
 import { restrictsEveryCarrier, type IntegrityRestrictions } from '../../ir/integrity-restrictions.js'
 import { emitAllocateProxy, emitProxyArmTest, emitProxyPart, emitProxyTrapCheck } from './emit-proxy.js'
@@ -2990,7 +2991,7 @@ export const emitBody = (
   physicalIndexProtocols?: ReadonlyMap<DeclarationId, boolean>,
   writeEffects: WriteEffects = everyStoreEffects,
   returnsOwnReceiver = false,
-  allocationCells: ReadonlySet<DeclarationId> = new Set()
+  allocationCells: ReadonlyMap<DeclarationId, AllocationCell> = new Map()
 ): readonly CppArtifact[] => {
   // Every fact this body settles before a single line renders, computed here
   // -- from `body` and the plain, already-available inputs above -- and
@@ -3051,6 +3052,7 @@ export const emitBody = (
   // Reads of a cell holding its one plain allocation (`ir/program-facts.ts`'s
   // `allocationCells`): stable receivers, never a live view.
   const plainAllocationValues = new Set<IrValueId>()
+  const allocationFieldKeys = new Map<IrValueId, ReadonlySet<string>>()
   let callsSuper = false
   // A field read whose one use is the receiver of the next member read: its
   // handle is consumed in the same expression, so it can be borrowed rather
@@ -3060,7 +3062,12 @@ export const emitBody = (
   const fieldReads = new Set<IrValueId>()
   for (const block of body.blocks.values()) {
     for (const operation of allOperationsOf(block)) {
-      if (operation.kind === 'binding-read' && allocationCells.has(operation.declaration)) plainAllocationValues.add(operation.result.id)
+      const cell = operation.kind === 'binding-read' ? allocationCells.get(operation.declaration) : undefined
+      if (cell !== undefined && operation.kind === 'binding-read') {
+        plainAllocationValues.add(operation.result.id)
+        if (representationKey(operation.result.representation) === cell.representation)
+          allocationFieldKeys.set(operation.result.id, cell.keys)
+      }
       for (const operand of operandsOfIrOperation(operation)) fieldReadUses.set(operand.value, (fieldReadUses.get(operand.value) ?? 0) + 1)
       if (operation.kind === 'get') {
         fieldReads.add(operation.result.id)
@@ -3129,6 +3136,7 @@ export const emitBody = (
     returnsUnderFinallyGuard: body.tryRegions.some((region) => region.finallyEntry !== null),
     returnsOwnReceiver,
     plainAllocationValues,
+    allocationFieldKeys,
     deferredMethodValues: deferredMethodValuesOf(body),
     borrowedFieldReads: new Set([...fieldReads].filter((value) => memberReceivers.has(value) && fieldReadUses.get(value) === 1)),
     receiverValues,

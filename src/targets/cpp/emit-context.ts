@@ -764,6 +764,8 @@ export interface EmitBodyFacts {
   readonly returnsOwnReceiver: boolean
   /** See `EmitContext.plainAllocationValues`. */
   readonly plainAllocationValues: ReadonlySet<IrValueId>
+  /** See `EmitContext.allocationFieldKeys`. */
+  readonly allocationFieldKeys: ReadonlyMap<IrValueId, ReadonlySet<string>>
   /** See `EmitContext.borrowedFieldReads`. */
   readonly borrowedFieldReads: ReadonlySet<IrValueId>
   /** See `EmitContext.deferredMethodValues`. */
@@ -949,6 +951,13 @@ export interface EmitContext {
    * one is the allocation's own member: no live view can stand in for it.
    */
   readonly plainAllocationValues: ReadonlySet<IrValueId>
+  /**
+   * For each of those reads held in the very carrier its allocation was
+   * written as, the keys that allocation defined (`AllocationCell.keys`): each
+   * field's presence bit was raised there, so it stays up wherever nothing can
+   * delete that key (`emit-properties.ts`'s `allocationKeepsField`).
+   */
+  readonly allocationFieldKeys: ReadonlyMap<IrValueId, ReadonlySet<string>>
   /**
    * Field reads whose one use is the receiver of another member read: the
    * read can hand that read a reference instead of a retained handle.
@@ -2263,6 +2272,7 @@ export const createEmitContext = (
     returnsUnderFinallyGuard: bodyFacts.returnsUnderFinallyGuard,
     returnsOwnReceiver: bodyFacts.returnsOwnReceiver,
     plainAllocationValues: bodyFacts.plainAllocationValues,
+    allocationFieldKeys: bodyFacts.allocationFieldKeys,
     borrowedFieldReads: bodyFacts.borrowedFieldReads,
     deferredMethodValues: bodyFacts.deferredMethodValues,
     virtualDispatch,
