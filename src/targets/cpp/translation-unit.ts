@@ -116,7 +116,7 @@ import type { ReflectionExposure } from '../../ir/reflection-demand.js'
 import { classesConstructedUnobservably, functionsIgnoringTheirReceiver, type InstantiationFacts } from '../../ir/instantiation.js'
 import { renderJsonStructDeclarations } from './emit-json.js'
 import { programConversionText, type ConversionSite, type PrinterDrift } from './emit-narrowing.js'
-import { recordAccessorsOfShape, recordFieldsOfShape, recordLayoutPolicyOf } from '../../projection/fields.js'
+import { recordLayoutPolicyOf } from '../../projection/fields.js'
 import type { ConversionCensus } from '../../conversion/nodes.js'
 import type { RepresentationDeriver } from '../../representation/derive.js'
 import {
@@ -145,7 +145,7 @@ import {
 import { buildHostMethodAliasIndex } from './host/host-method-aliases.js'
 import { constructionOnlyFieldsOf, reflectiveFieldWritesOf } from '../../ir/construction-only-fields.js'
 import { cppRecursiveContainerDeclarations, cppRecursiveContainerTraceEdges } from './recursive-containers.js'
-import type { PlainFieldRead } from '../../ir/borrow-effects.js'
+import { plainFieldReadOf } from '../../ir/plain-field-read.js'
 import { writeEffectsOf } from '../../ir/write-effects.js'
 
 /**
@@ -2092,23 +2092,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   const storeSinkConstructors = new Set<string>()
   for (const [declaration, layout] of input.classes)
     if (layout.constructor !== null && !unsafeForStoreSink.has(declaration)) storeSinkConstructors.add(String(layout.constructor))
-  const plainFieldRead: PlainFieldRead = (receiver, key) => {
-    if (receiver.kind === 'class-ref') {
-      // A class over a host base reads its members through the host's
-      // protocol; only a wholly projected class has plain member loads.
-      if (input.classes.get(receiver.declaration)?.nativeBase !== null) return false
-      return classMemberOf(input.classes, receiver.declaration, key)?.kind === 'field'
-    }
-    if (receiver.kind === 'record')
-      return receiver.fields.some((field) => field.key === key) && !receiver.accessors.some((accessor) => accessor.key === key)
-    // An interface-typed record is the same struct, its members named by its shape.
-    if (receiver.kind === 'native-record-ref' && receiver.native === null)
-      return (
-        (recordFieldsOfShape(input.deriver, receiver.shapeId)?.some((field) => field.key === key) ?? false) &&
-        !(recordAccessorsOfShape(input.deriver, receiver.shapeId)?.some((accessor) => accessor.key === key) ?? true)
-      )
-    return false
-  }
+  const plainFieldRead = plainFieldReadOf(input.classes, input.deriver)
   const {
     callableMemberCandidates,
     callableFlowCandidates,

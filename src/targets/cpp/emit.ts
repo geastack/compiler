@@ -23,8 +23,8 @@ import {
   stableReceiversOf,
   type ConstructionOnlyFields
 } from '../../ir/construction-only-fields.js'
-import { everyStoreEffects, nativeData, type WriteEffects } from '../../ir/write-effects.js'
-import { borrowSafeOperationsOf } from '../../ir/borrow-effects.js'
+import { everyStoreEffects, type WriteEffects } from '../../ir/write-effects.js'
+import { codeFreeGetOf } from '../../ir/plain-field-read.js'
 import { borrowedWindowCellsOf } from '../../ir/borrowed-window-cells.js'
 import {
   DyingArgumentSet,
@@ -57,7 +57,6 @@ import type {
   TestOperation,
   ParameterOperation,
   ReceiverOperation,
-  GetOperation,
   GlobalThisOperation,
   SetOperation,
   UnresolvableReferenceOperation,
@@ -3297,6 +3296,7 @@ export const emitBody = (
     if (struct === null) return false
     return ctx.hosts.reactive.celled.get(struct)?.has(key) !== true && ctx.hosts.reactive.revisions.get(struct)?.has(key) !== true
   }
+  const codeFreeGet = codeFreeGetOf(body, writeEffects.plainField)
   // Every per-body census, in the one order they depend on each other in --
   // `ir/facts.ts` owns that order now, and this backend supplies only the
   // questions about its own carriers plus the two storage steps that have to
@@ -3306,6 +3306,7 @@ export const emitBody = (
     copiedCapture: (declaration) => copiedCaptureName(ctx, declaration) !== null,
     settledCapture: (declaration) => copiedCaptureName(ctx, declaration, true) !== null,
     codeFreeStore,
+    codeFreeGet,
     // A read of a plain field defers like an Array's `length` does -- see
     // `deferrableValuesOf`. Not a read of a reactive CELL: `gea_this->count`
     // spells the `Signal<double>` itself, and only the temporary it used to be
@@ -3588,9 +3589,7 @@ export const emitBody = (
   admitDenseWindows(ctx, prepass, body)
   // After the windows: a cell may point at the window cell it is written from
   // only when that read renders as the cell itself -- an array of counted or
-  // struct elements read as its own carrier (`denseElementText`). Every
-  // property read in the loop has to run none of the program's code: a getter
-  // that pushes onto the array would free the storage the cell points into.
+  // struct elements read as its own carrier (`denseElementText`).
   const windowReads = new Set<IrValueId>()
   for (const operation of ctx.denseAccesses.keys()) {
     if (operation.kind !== 'get' || operation.receiver.representation.kind !== 'array-object') continue
@@ -3599,9 +3598,6 @@ export const emitBody = (
       windowReads.add(operation.result.id)
   }
   if (windowReads.size > 0) {
-    const codeFreeReads = borrowSafeOperationsOf(body, new Set(), writeEffects.plainField)
-    const codeFreeGet = (operation: GetOperation): boolean =>
-      operation.hostMethod !== undefined || nativeData(operation.receiver.representation) || codeFreeReads.has(operation)
     for (const declaration of borrowedWindowCellsOf(
       body,
       windowReads,

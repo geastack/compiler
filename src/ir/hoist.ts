@@ -1,6 +1,7 @@
 import type { DeclarationId, IrValueId } from '../identity/ids.js'
 import { controlFlowGraphOf, cyclicBlocksOf, dominatorTreeOf, naturalLoopsOf, type DominatorTree } from './dominance.js'
 import { borrowSafeOperationsOf } from './borrow-effects.js'
+import { codeFreeGetOf } from './plain-field-read.js'
 import type { GetOperation, IrBlockId, IrBody, IrNonTerminatorOperation, IrOperand, SetOperation } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import { representationKey } from '../representation/model.js'
@@ -99,7 +100,8 @@ const isPresenceConversion = (operation: IrNonTerminatorOperation): boolean =>
  * added to the IR later is fail-closed rather than silently admitted. `set`,
  * `convert` and every allocation are out on purpose -- a store writes array
  * storage, and a conversion of an unknown value can reach user code. A `phi`
- * only names which incoming value a merge holds.
+ * only names which incoming value a merge holds. A `get` is out too: a getter
+ * runs program code, so each read asks `codeFreeGet`.
  */
 const storageNeutralKinds: ReadonlySet<string> = new Set([
   'constant',
@@ -108,7 +110,6 @@ const storageNeutralKinds: ReadonlySet<string> = new Set([
   'binding-write',
   'parameter',
   'receiver',
-  'get',
   'phi'
 ])
 
@@ -122,16 +123,16 @@ const storageNeutralKinds: ReadonlySet<string> = new Set([
  * of each box, and either one kept its box loop from checking `boxes` once.
  * `codeFreeStore` is the target's answer to which stores those are.
  *
- * `codeFreeGet` says which property reads run none of the program's code. The
- * hoist plan passes none and trusts every read, so a getter that pushes onto
- * the array it walks is not seen there. A caller that holds an array's cell
- * across the loop (`borrowedWindowCellsOf`) cannot afford that: the getter's
- * push would free the storage it points into.
+ * `codeFreeGet` says which property reads run none of the program's code
+ * (`codeFreeGetOf`). A getter is a read too, and it can push onto the array
+ * the loop walks: trusting every read hoisted a loop's `boxes.length` past a
+ * getter that grew `boxes`, so the loop stopped at the length it began with,
+ * and a push that moved the storage left its window reading freed cells.
  */
 export const arrayStorageMutationOf = (
   body: IrBody,
-  codeFreeStore: (operation: SetOperation) => boolean = () => false,
-  codeFreeGet: (operation: GetOperation) => boolean = () => true
+  codeFreeStore: (operation: SetOperation) => boolean,
+  codeFreeGet: (operation: GetOperation) => boolean
 ): ((blocks: ReadonlySet<IrBlockId>) => boolean) => {
   let neutralCalls: ReadonlySet<IrNonTerminatorOperation> | null = null
   const touchesNoArray = (operation: IrNonTerminatorOperation): boolean => {
@@ -166,7 +167,8 @@ export const loopInvariantHoistsOf = (
   programConstants: ReadonlyMap<DeclarationId, number> = new Map(),
   copiedCapture: (declaration: DeclarationId) => boolean = () => false,
   settledCapture: (declaration: DeclarationId) => boolean = () => false,
-  codeFreeStore: (operation: SetOperation) => boolean = () => false
+  codeFreeStore: (operation: SetOperation) => boolean = () => false,
+  codeFreeGet: (operation: GetOperation) => boolean = codeFreeGetOf(body, () => false)
 ): HoistPlan => {
   // A try region renders as one `try { } catch { }` chunk assembled from
   // several blocks at once, so a relocation into or out of one has no single
@@ -322,7 +324,7 @@ export const loopInvariantHoistsOf = (
    * of another; regaining that needs an alias proof (distinct allocation sites),
    * not a weaker invariance test.
    */
-  const mutatesArrayStorage = arrayStorageMutationOf(body, codeFreeStore)
+  const mutatesArrayStorage = arrayStorageMutationOf(body, codeFreeStore, codeFreeGet)
 
   /**
    * Whether every operation in these blocks is one that cannot hand control to

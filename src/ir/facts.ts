@@ -170,6 +170,8 @@ export interface IrBodyCensusPolicy {
   readonly settledCapture?: (declaration: DeclarationId) => boolean
   /** Whether this store writes a data field and runs nothing: no setter, no view routine, no reactive cell. */
   readonly codeFreeStore?: (operation: SetOperation) => boolean
+  /** Whether this property read runs none of the program's code (`ir/plain-field-read.ts`'s `codeFreeGetOf`); absent, only native data and host methods do. */
+  readonly codeFreeGet?: (operation: GetOperation) => boolean
 }
 
 /** What is known when `formalStorage` runs: everything except the hoists and the two censuses that read them. */
@@ -268,7 +270,8 @@ export const irBodyCensusOf = (body: IrBody, policy: IrBodyCensusPolicy): IrBody
     policy.integerStorage.cellConstants,
     policy.copiedCapture,
     policy.settledCapture,
-    policy.codeFreeStore
+    policy.codeFreeStore,
+    policy.codeFreeGet
   )
   const hoistedStringLayouts = sharedStringLayoutsOf(body, hoists, dead)
   const stringReceivers = stableStringReceiversOf(body, stableFormals, policy.stringQueryCell)

@@ -778,6 +778,7 @@ logical-and-object-left-falsy-arm.ts.cpp 4115125872c2
 logical-merge-of-mixed-operands-tested-without-building-it.runtime.ts.cpp f7a509091b46
 logical-native-merge.ts.cpp 0ef439c3eea9
 logical-object-union-falsy-absence.ts.cpp 5540183785bc
+loop-getter-that-pushes-keeps-the-length-live.runtime.ts.cpp b84758b11870
 loop-invariant-ref-argument.ts.cpp 13b32e0863b3
 loop-move-single-use.ts.cpp 3ec4d20f6579
 map-callback-any-tuple-rebuilt-into-a-stated-position.runtime.ts.cpp c9d6babc6bee

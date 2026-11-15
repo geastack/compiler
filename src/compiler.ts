@@ -10,6 +10,7 @@ import { publishConversionRecipes } from './ir/publish-conversion-recipes.js'
 import { discardUnreadCallResults } from './ir/dead-values.js'
 import { programConversionKey, publishProgramConversionRecipes, type ProgramConversionRecipe } from './ir/program-conversions.js'
 import { publishDenseLoopPlan } from './ir/dense-loops.js'
+import { plainFieldReadOf } from './ir/plain-field-read.js'
 import { publishLogicalReceivers } from './ir/logical-receivers.js'
 import { publishNativeHostMethodReads } from './ir/native-host-method-reads.js'
 import { publishNativeCallablePrivateSlots } from './ir/native-callable-own-property.js'
@@ -1697,7 +1698,8 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   const denseLoopPlannedOf = (): Map<PhysicalBodyId, IrBody> => {
     const taken = finalRecipeBodies!
     finalRecipeBodies = null
-    return new Map([...taken].map(([id, body]) => [id, publishDenseLoopPlan(body, splitPlacements, conversionCensus)]))
+    const plainFieldRead = plainFieldReadOf(executableClasses, representations.deriver)
+    return new Map([...taken].map(([id, body]) => [id, publishDenseLoopPlan(body, splitPlacements, conversionCensus, plainFieldRead)]))
   }
   const certifiedBodies = finalRecipeBodies ? denseLoopPlannedOf() : null
   finalRecipeBodies = null

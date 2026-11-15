@@ -13,7 +13,8 @@ import {
   type NaturalLoop
 } from './dominance.js'
 import { loopInvariantHoistsOf, type HoistPlan } from './hoist.js'
-import { borrowSafeOperationsOf } from './borrow-effects.js'
+import { borrowSafeOperationsOf, type PlainFieldRead } from './borrow-effects.js'
+import { codeFreeGetOf } from './plain-field-read.js'
 import { representationKey, type Representation, type TypedArrayElementDomain } from '../representation/model.js'
 import type { IrBlockId, IrBody, IrNonTerminatorOperation, IrOperand } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
@@ -297,13 +298,23 @@ export const emptyDenseLoopPlan: DenseLoopPlan = { arrays: [], groups: [], acces
 const denseStorageConversionIsOrdinary = (node: ConversionNode, conversions: ConversionCensus): boolean =>
   nativeArrayViewPlansOf(recipeClosureOf([node], conversions.nodeById).values()).length === 0
 
-/** Dense preheaders perform real reads; their transport belongs to the lowered body's certificate too. */
+/**
+ * Dense preheaders perform real reads; their transport belongs to the lowered body's certificate too.
+ *
+ * `plainFieldRead` is the target's own answer (`plainFieldReadOf`): the hoists
+ * this plan locates values by may be no more optimistic than the ones the
+ * target renders, since a window's setup names its bound where these put it.
+ */
 export const publishDenseLoopPlan = (
   body: IrBody,
   placements: ReadonlyMap<DeclarationId, BindingPlacement>,
-  conversions: ConversionCensus
+  conversions: ConversionCensus,
+  plainFieldRead: PlainFieldRead
 ): IrBody => {
-  const raw = denseLoopsOf(body)
+  const raw = denseLoopsOf(
+    body,
+    loopInvariantHoistsOf(body, undefined, undefined, undefined, undefined, codeFreeGetOf(body, plainFieldRead))
+  )
   const seal = (reference: DenseReference): DenseReference | null => {
     if (reference.kind === 'element') {
       const holder = seal(reference.holder)
