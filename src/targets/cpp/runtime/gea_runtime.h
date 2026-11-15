@@ -490,6 +490,15 @@ inline const bool terminateFlushInstalled = [] {
 
 }  // namespace detail
 
+// A checked typed window's Number index (`DenseArray.checked`): a whole
+// number inside the element count the preheader took, so it names an element.
+// Anything else -- a fraction, a negative, NaN, past the end -- takes the
+// view's own path, which drops the write or answers the read.
+[[gnu::always_inline]] inline bool denseCheckedIndex(double key, std::size_t extent) {
+  std::uint32_t index;
+  return detail::doubleArrayIndex(key, index) && index < extent;
+}
+
 // A loop guard must validate Number operands before converting them to native
 // indices. Fractional/non-finite inputs keep the ordinary access path. Once
 // these inputs are safe integers, the endpoint sums fit in int64_t (at most

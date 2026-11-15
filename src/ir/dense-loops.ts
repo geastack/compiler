@@ -163,6 +163,22 @@ export interface DenseArray {
    * the row for the current turn is taken, behind the folded flag.
    */
   readonly rows?: DenseRowRange
+  /**
+   * A typed-array window whose indices the loop's own test does not bound --
+   * `position[v * 3 + 1]`, a vertex writer's strided store. The preheader
+   * takes the view's pointer and length once, and each access compares its
+   * index with that length instead of re-reading the view.
+   *
+   * Worth a window without the proof because a typed element store is a
+   * may-alias store: after each one the backend re-reads the view's buffer,
+   * length, detach flag and base, so a quad writer paid five loads per float.
+   * Measured on Saltline's HUD quad emit: 94 ns a quad, 66 with the six output
+   * views taken once (V8 46). A view cannot be resized, and `nativeOnly`
+   * already rules out code that could detach its buffer, so the length taken
+   * at the preheader holds for the whole loop. `bases` carries no meaning for
+   * one of these.
+   */
+  readonly checked?: true
 }
 
 /** The enclosing loop's counter range a folded row window's check walks. */
@@ -313,7 +329,8 @@ export const publishDenseLoopPlan = (
 ): IrBody => {
   const raw = denseLoopsOf(
     body,
-    loopInvariantHoistsOf(body, undefined, undefined, undefined, undefined, codeFreeGetOf(body, plainFieldRead))
+    loopInvariantHoistsOf(body, undefined, undefined, undefined, undefined, codeFreeGetOf(body, plainFieldRead)),
+    plainFieldRead
   )
   const seal = (reference: DenseReference): DenseReference | null => {
     if (reference.kind === 'element') {
@@ -511,7 +528,11 @@ export const admittedDenseLoopPlanOf = (
   return { arrays, groups, accesses, lengths, regions }
 }
 
-export const denseLoopsOf = (body: IrBody, hoists: HoistPlan = loopInvariantHoistsOf(body)): DenseLoopPlan => {
+export const denseLoopsOf = (
+  body: IrBody,
+  hoists: HoistPlan = loopInvariantHoistsOf(body),
+  plainFieldRead: PlainFieldRead = () => false
+): DenseLoopPlan => {
   // A try region renders as one assembled chunk, so a preheader inside one has
   // no single place for the setup to land -- the same restriction `hoist.ts`
   // takes, and for the same reason.
@@ -610,9 +631,14 @@ export const denseLoopsOf = (body: IrBody, hoists: HoistPlan = loopInvariantHois
   // the loop's own operations, and naming that value in the preheader emits a
   // use of a variable no statement has assigned yet.
 
+  // A typed window holds a raw pointer, so no operation in its loop may run
+  // program code; a data field read (`plainFieldRead`, the target's answer)
+  // runs none, and a quad writer reads its corners off `this` every turn.
+  const nativeOperations = borrowSafeOperationsOf(body, new Set(), plainFieldRead)
   const found = loops.map((loop) =>
     loopWindowsOf(loop, body, graph, loops, {
       body,
+      nativeOperations,
       values: body.values,
       readsCell,
       constantTexts,
@@ -657,6 +683,7 @@ export const denseLoopsOf = (body: IrBody, hoists: HoistPlan = loopInvariantHois
     if (!outer || !innerLoop || !outerLoop) continue
     const windows = foldedWindowsOf(inner, innerLoop, outer, outerLoop, {
       body,
+      nativeOperations,
       values: body.values,
       readsCell,
       constantTexts,
@@ -726,7 +753,8 @@ export const denseLoopsOf = (body: IrBody, hoists: HoistPlan = loopInvariantHois
         step: folded ? folded.step : loop.step,
         widened: loop.widened,
         ...(folded ? { seed: folded.seed } : {}),
-        ...(rows ? { rows } : {})
+        ...(rows ? { rows } : {}),
+        ...(candidate.checked ? { checked: true as const } : {})
       })
       for (const operation of candidate.operations) {
         const flag = flagAt(blockOfOperation.get(operation) ?? loop.preheader)
@@ -922,6 +950,9 @@ const denseRegionsOf = (
     if (!loop || folded.has(index)) continue
     const restricted = arrays.filter((array) => array.group === group && stored.has(array.ordinal) && array.rows === undefined)
     if (restricted.length === 0) continue
+    // A checked access can take its cold half inside the fast version of the
+    // loop, which a restricted pointer's region does not allow for.
+    if (arrays.some((array) => array.group === group && array.checked === true)) continue
     const named = new Set(arrays.filter((array) => array.group === group).map((array) => array.ordinal))
     let sound = true
     for (const [operation, access] of accesses) {
@@ -1130,6 +1161,7 @@ interface WindowCandidate {
   readonly bases: readonly DenseOffset[]
   readonly operations: readonly IrNonTerminatorOperation[]
   readonly signed: readonly IrNonTerminatorOperation[]
+  readonly checked: boolean
 }
 
 interface WindowRecord {
@@ -1146,6 +1178,8 @@ interface WindowRecord {
   readonly operations: IrNonTerminatorOperation[]
   /** The accesses whose index is a remainder and may be negative (`DenseAccess.signed`). */
   readonly signed: IrNonTerminatorOperation[]
+  /** Some access's index is not the counter plus invariants (`DenseArray.checked`). */
+  checked: boolean
   sound: boolean
 }
 
@@ -1212,6 +1246,8 @@ const heldArrayOf = (
 
 interface WindowContext {
   readonly body: IrBody
+  /** The operations that run none of the program's code (`borrowSafeOperationsOf` with the target's field answer). */
+  readonly nativeOperations: ReadonlySet<IrNonTerminatorOperation>
   /** Every value's producer carrier, before a use site applies flow narrowing. */
   readonly values: ReadonlyMap<IrValueId, Representation>
   readonly readsCell: ReadonlyMap<IrValueId, DeclarationId>
@@ -1235,7 +1271,7 @@ interface WindowContext {
  */
 const windowsOfLoop = (blocks: ReadonlySet<IrBlockId>, body: IrBody, context: WindowContext): readonly WindowCandidate[] => {
   const byReference = new Map<string, WindowRecord>()
-  const nativeOperations = borrowSafeOperationsOf(body)
+  const nativeOperations = context.nativeOperations
   // No pointer may outlive a callback that can replace/detach its storage.
   // Numeric typed-array writes alias bytes but cannot invalidate geometry.
   const nativeOnly = [...blocks].every((id) => body.blocks.get(id)?.operations.every((operation) => nativeOperations.has(operation)))
@@ -1283,9 +1319,44 @@ const windowsOfLoop = (blocks: ReadonlySet<IrBlockId>, body: IrBody, context: Wi
       if (typed !== null && ((wrapped && modulus === null) || held.reference.kind === 'element')) continue
       const base = wrapped ? null : indexBaseOf(operation.key, context, blocks)
       const found = byReference.get(key)
+      // An unbounded index into a typed view still takes the view once; the
+      // access checks itself against the length the preheader read.
+      if (base === undefined && typed !== null && !wrapped) {
+        if (!found)
+          byReference.set(key, {
+            ...held,
+            element,
+            typed,
+            wrapped,
+            modulus,
+            bases: [],
+            operations: [operation],
+            signed: [],
+            checked: true,
+            sound: true
+          })
+        else if (found.wrapped) found.sound = false
+        else {
+          found.checked = true
+          found.operations.push(operation)
+        }
+        continue
+      }
       if (base === undefined) {
         if (found) found.sound = false
-        else byReference.set(key, { ...held, element, typed, wrapped, modulus, bases: [], operations: [], signed: [], sound: false })
+        else
+          byReference.set(key, {
+            ...held,
+            element,
+            typed,
+            wrapped,
+            modulus,
+            bases: [],
+            operations: [],
+            signed: [],
+            checked: false,
+            sound: false
+          })
         continue
       }
       if (!found) {
@@ -1298,6 +1369,7 @@ const windowsOfLoop = (blocks: ReadonlySet<IrBlockId>, body: IrBody, context: Wi
           bases: [base],
           operations: [operation],
           signed: signed ? [operation] : [],
+          checked: false,
           sound: true
         })
         continue

@@ -2838,6 +2838,9 @@ export const cppDenseRowsName = (ordinal: number): string => `gea_dense_rows_${o
 /** One loop's dense-window condition. Loop-invariant by construction, which is what lets the backend version the loop on it. */
 export const cppDenseFlagName = (group: number): string => `gea_dense_ok_${group}`
 
+/** A checked typed window's element count, read once at the preheader -- see `DenseArray.checked`. */
+export const cppDenseExtentName = (ordinal: number): string => `gea_dense_extent_${ordinal}`
+
 /** A wrapped window's own length, read once at the preheader -- see `DenseLoopPlan.lengths`. */
 export const cppDenseLengthName = (ordinal: number): string => `gea_dense_len_${ordinal}`
 

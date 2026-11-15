@@ -15,6 +15,7 @@ import { nativeCallableOptionalDataReadText } from './emit-native-callable-data.
 import type { DefineOwnPropertyOperation, GetOperation, IrOperand, SetOperation } from '../../ir/model.js'
 import type { DeclarationId, FunctionId, IrValueId } from '../../identity/ids.js'
 import {
+  cppDenseExtentName,
   cppDenseFlagName,
   cppDensePointerName,
   createCppEmitBlockedError,
@@ -544,11 +545,19 @@ const denseCellText = (
   const key = ctx.denseIndices.get(operation.key.value) ?? operandText(ctx, operation.key)
   const flag = cppDenseFlagName(access.flag)
   const integral = ctx.denseIndices.has(operation.key.value) || ctx.integerValues.has(operation.key.value)
-  const guarded = !access.signed
-    ? flag
-    : integral
-      ? `${flag} && (${key}) >= 0`
-      : `${flag} && (${key}) >= 0 && static_cast<double>(static_cast<long long>(${key})) == (${key})`
+  // A checked window's index is not bounded by the loop: it is compared with
+  // the view's length the preheader took, unsigned so a negative one fails too.
+  // A Number index is asked whether it is a whole one as well.
+  const checked = ctx.denseArrays.find((array) => array.ordinal === access.array)?.checked === true
+  const guarded = checked
+    ? integral
+      ? `${flag} && static_cast<std::size_t>(${key}) < ${cppDenseExtentName(access.array)}`
+      : `${flag} && gea::denseCheckedIndex(${key}, ${cppDenseExtentName(access.array)})`
+    : !access.signed
+      ? flag
+      : integral
+        ? `${flag} && (${key}) >= 0`
+        : `${flag} && (${key}) >= 0 && static_cast<double>(static_cast<long long>(${key})) == (${key})`
   return {
     pointer: cppDensePointerName(access.array),
     index: `static_cast<std::size_t>(${key})`,

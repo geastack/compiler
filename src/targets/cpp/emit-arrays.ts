@@ -27,6 +27,7 @@ import {
   cppDenseDivisorName,
   cppDenseFlagName,
   cppDenseLengthName,
+  cppDenseExtentName,
   cppDensePointerName,
   cppDenseRowName,
   cppDenseRowsName,
@@ -1108,6 +1109,15 @@ export const emitDenseSetup = (ctx: EmitContext, lines: string[], blockId: IrBlo
       const holder = denseHolderOf(ctx, lines, array.reference, array)
       if (holder === null) continue
       const pointer = cppDensePointerName(array.ordinal)
+      // A checked window bounds each access itself (`DenseArray.checked`):
+      // the preheader only names the view's elements and how many there are.
+      // A detached buffer has none, and `data()` would abort on it.
+      if (array.checked === true && array.typed !== null) {
+        const extent = cppDenseExtentName(array.ordinal)
+        ctx.declarations.push({ name: pointer, type: `${cppScalarType(array.typed)}*` }, { name: extent, type: 'std::size_t' })
+        lines.push(`${extent} = ${holder.text}->size();`, `${pointer} = ${extent} > 0 ? ${holder.text}->data() : nullptr;`)
+        continue
+      }
       const cells = `${holder.text}->cells`
       const data = array.typed === null ? `${cells}.data()` : `${holder.text}->data()`
       const size = array.typed === null ? `${cells}.size()` : `${holder.text}->size()`

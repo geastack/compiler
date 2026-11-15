@@ -467,7 +467,7 @@ fixed-field-define-property-widening.runtime.js.cpp e2af5c1a6166
 fixed-field-define-property.runtime.js.cpp ef569e0cafc0
 flat-over-tuples-and-from-entries-of-entries.ts.cpp 7fd2a585518f
 flat-record-reached-through-an-any-view-keeps-identity.runtime.ts.cpp 0d583a2a899a
-float32-stencil-hot-loop.ts.cpp fe964aae2603
+float32-stencil-hot-loop.ts.cpp 7fdd5329af56
 fn-classref.ts.cpp 2bca1c4f62bf
 fn-scalar.ts.cpp 0ebb1e179ff1
 for-await-break-closes-async-generator.runtime.ts.cpp e1d4abdec981
@@ -1202,7 +1202,7 @@ returned-inferred-union.js.cpp b583dbba9316
 returned-nested-union.js.cpp 9c4f39c94ce5
 returned-object-bag.js.cpp eb68242d9c8b
 reused-field-reads-name-the-field.runtime.ts.cpp 1c406e773cee
-runtime-module-int-const.ts.cpp f4d3b0eee2a5
+runtime-module-int-const.ts.cpp a04b6e23931b
 runtime-size-mask-index.ts.cpp 76746dbe319a
 same-block-reads-before-last-transferring-use-move.runtime.ts.cpp 75ba46449fb5
 scalar-arm-member-read-into-open-result.runtime.js.cpp da8a701f36d7
@@ -1276,6 +1276,7 @@ straight-line-char-code-reads-share-one-layout.runtime.ts.cpp 5063fdfffbe2
 strict-delete-module-exports.ts.cpp a81b21476c26
 strict-delete.ts.cpp ef9ca218f404
 strict-equality-between-tagged-unions.runtime.ts.cpp b57396f0b325
+strided-typed-writes-take-one-view.runtime.ts.cpp 4950d9c65068
 string-and-regexp-walks-over-long-mixed-width-text.runtime.ts.cpp c407e4eaa5c1
 string-array-into-set-or-any-array-parameter.runtime.ts.cpp 1caf8f5148f9
 string-field-append.ts.cpp 355d0d91a5b2
@@ -1345,7 +1346,7 @@ type-predicate-batch-operations-keep-their-storage.runtime.ts.cpp 5d42210bcab6
 type-query-escapes.ts.cpp 02bb929534a0
 type-query-snapshots.ts.cpp 7df957bc82ec
 typed-array-buffer-into-array-buffer-like.ts.cpp deb22d825adb
-typed-array-byte-offsets.runtime.ts.cpp ec45dd976a5f
+typed-array-byte-offsets.runtime.ts.cpp 2d96e780398d
 typed-array-construct-from-boxed-array-or-length.runtime.js.cpp 8e95558fcaf8
 typed-array-from-an-absent-buffer-entry.runtime.ts.cpp 693bdb9ab5b6
 typed-array-into-buffer-source-parameter.runtime.ts.cpp 7e86051a4bb5
@@ -1438,7 +1439,7 @@ virtual-call-through-a-base-whose-override-narrows-unknown.ts.cpp fac15d1d9601
 virtual-parameter-widening.ts.cpp b6e25b765651
 void-call-stored-into-union.ts.cpp b3e7ef67d60c
 wide-family-assign-walks-a-step-table.runtime.ts.cpp 12227da34d6e
-wide-offset-rounds-past-two-to-the-53.runtime.ts.cpp 0765e8abcb75
+wide-offset-rounds-past-two-to-the-53.runtime.ts.cpp 4a2fd7885a0b
 wide-optional-options-spread-prefix-keys.runtime.ts.cpp 8dd0433b7d6b
 wide-record-spread-short-flag-tail.runtime.ts.cpp 221a2956b905
 widened-field-in-arithmetic-and-locals.runtime.js.cpp 04b0e4de9cf8
