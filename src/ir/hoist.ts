@@ -1,6 +1,7 @@
 import type { DeclarationId, IrValueId } from '../identity/ids.js'
 import { controlFlowGraphOf, cyclicBlocksOf, dominatorTreeOf, naturalLoopsOf, type DominatorTree } from './dominance.js'
-import type { IrBlockId, IrBody, IrNonTerminatorOperation, IrOperand } from './model.js'
+import { borrowSafeOperationsOf } from './borrow-effects.js'
+import type { IrBlockId, IrBody, IrNonTerminatorOperation, IrOperand, SetOperation } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import { representationKey } from '../representation/model.js'
 
@@ -124,7 +125,8 @@ export const loopInvariantHoistsOf = (
   body: IrBody,
   programConstants: ReadonlyMap<DeclarationId, number> = new Map(),
   copiedCapture: (declaration: DeclarationId) => boolean = () => false,
-  settledCapture: (declaration: DeclarationId) => boolean = () => false
+  settledCapture: (declaration: DeclarationId) => boolean = () => false,
+  codeFreeStore: (operation: SetOperation) => boolean = () => false
 ): HoistPlan => {
   // A try region renders as one `try { } catch { }` chunk assembled from
   // several blocks at once, so a relocation into or out of one has no single
@@ -280,13 +282,25 @@ export const loopInvariantHoistsOf = (
    * of another; regaining that needs an alias proof (distinct allocation sites),
    * not a weaker invariance test.
    */
+  // A store into a record's data field and a pure `Math` call over Numbers
+  // run none of the program's code and touch no array: a capsule mover
+  // clamps with `Math.max(box.min.x, Math.min(box.max.x, p.x))` and pushes
+  // `position.x` out of each box, and either one kept its box loop from
+  // checking `boxes` once.
+  let neutralCalls: ReadonlySet<IrNonTerminatorOperation> | null = null
+  const touchesNoArray = (operation: IrNonTerminatorOperation): boolean => {
+    if (storageNeutralKinds.has(operation.kind) || isNumberWidthConversion(operation) || isPresenceConversion(operation)) return true
+    if (operation.kind === 'set') return codeFreeStore(operation)
+    if (operation.kind !== 'call') return false
+    neutralCalls ??= borrowSafeOperationsOf(body)
+    return neutralCalls.has(operation)
+  }
+
   const mutatesArrayStorage = (blocks: ReadonlySet<IrBlockId>): boolean => {
     for (const blockId of blocks) {
       const block = body.blocks.get(blockId)
       if (!block) continue
-      for (const operation of block.operations) {
-        if (!storageNeutralKinds.has(operation.kind) && !isNumberWidthConversion(operation) && !isPresenceConversion(operation)) return true
-      }
+      for (const operation of block.operations) if (!touchesNoArray(operation)) return true
     }
     return false
   }

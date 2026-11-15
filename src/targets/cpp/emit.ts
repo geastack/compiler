@@ -3279,6 +3279,22 @@ export const emitBody = (
     integerStorage: narrowedStorage,
     copiedCapture: (declaration) => copiedCaptureName(ctx, declaration) !== null,
     settledCapture: (declaration) => copiedCaptureName(ctx, declaration, true) !== null,
+    // A view write runs the view's routine and a reactive cell notifies its
+    // subscribers; only a bare member store is code-free.
+    codeFreeStore: (operation) => {
+      const key = keyTexts.get(operation.key.value)
+      if (key === undefined || operation.nativeFieldViewWrite !== undefined || operation.nativeDocumentEntry !== undefined) return false
+      if (operation.typedComputedWrite !== undefined) return false
+      const receiver =
+        operation.receiver.representation.kind === 'optional'
+          ? operation.receiver.representation.payload
+          : operation.receiver.representation
+      if (!writeEffects.plainField(receiver, key)) return false
+      const declaring = receiver.kind === 'class-ref' ? (classMemberOf(classes, receiver.declaration, key)?.owner ?? null) : null
+      const struct = declaring !== null ? cppClassName(declaring) : structNameOfReceiver(receiver)
+      if (struct === null) return false
+      return ctx.hosts.reactive.celled.get(struct)?.has(key) !== true && ctx.hosts.reactive.revisions.get(struct)?.has(key) !== true
+    },
     // A read of a plain field defers like an Array's `length` does -- see
     // `deferrableValuesOf`. Not a read of a reactive CELL: `gea_this->count`
     // spells the `Signal<double>` itself, and only the temporary it used to be

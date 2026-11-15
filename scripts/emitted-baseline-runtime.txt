@@ -178,6 +178,7 @@ census-typed-maps-into-document-parameter-stay-native.runtime.ts.cpp 2342fcf267f
 census-union-parameter-into-narrower-census-union-parameter.runtime.ts.cpp e7aa99fd02dd
 census-union-parameter-stored-into-optional-record-field.runtime.ts.cpp a94da0ecf940
 circular-list-head-null-placeholder-literal.runtime.ts.cpp 56a1b870d8a9
+clamping-box-loop-takes-one-window.runtime.ts.cpp 9fc8804dc0a0
 class-accessors-viewed-as-record.ts.cpp 3440f10a11da
 class-alias-cast-to-constructor-type-holds-the-class.runtime.ts.cpp 899717f1eecc
 class-arm-into-declared-interface-slot.ts.cpp 7a105ce636f7
