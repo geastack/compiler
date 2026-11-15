@@ -81,8 +81,8 @@ export const isNumberKey = (key: ts.Type): boolean =>
 
 const hasIndexSignatureFor = (checker: ts.TypeChecker, receiver: ts.Type, key: ts.Type | null): boolean => {
   if (key !== null && isSymbolKey(key)) return checker.getIndexInfosOfType(receiver).some((info) => isSymbolKey(info.keyType))
-  const kind = key !== null && isNumberKey(key) ? ts.IndexKind.Number : ts.IndexKind.String
-  return checker.getIndexTypeOfType(receiver, kind) !== undefined
+  const readsNumberIndex = key !== null && isNumberKey(key) && checker.getIndexTypeOfType(receiver, ts.IndexKind.Number) !== undefined
+  return readsNumberIndex || checker.getIndexTypeOfType(receiver, ts.IndexKind.String) !== undefined
 }
 
 export const isDictionaryRead = (
