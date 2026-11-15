@@ -292,7 +292,14 @@ export const nativeFieldViewBorrowedReadText = (
   ordinaryReadOf: (
     carrier: Representation,
     key: string
-  ) => { readonly source: Representation; readonly text: string; readonly accessor?: true; readonly absentReadsUndefined?: true } | null
+  ) => { readonly source: Representation; readonly text: string; readonly accessor?: true; readonly absentReadsUndefined?: true } | null,
+  /**
+   * A frame slot a live view's answer is moved into, so the reference outlives
+   * the expression (`EmitContext.fieldPointerValues`). Without one the slot is
+   * a temporary of the full expression, which only a consumer in that same
+   * expression may read through.
+   */
+  slot?: string
 ): string | null => {
   const receipt = operation.nativeFieldViewRead
   if (receipt === undefined || receipt.keyDomain !== undefined || receipt.originalAbsent === true) return null
@@ -317,9 +324,9 @@ export const nativeFieldViewBorrowedReadText = (
   if (renderedLeaf(ctx, ordinary.conversion, concrete) !== concrete) return null
   const { adapter, accepted } = fieldViewRoutesText(ctx, receipt, result)
   return (
-    `([&](const auto& gea_field_receiver, ${result}&& gea_field_slot) -> const ${result}& { ` +
+    `([&](const auto& gea_field_receiver, ${result}${slot === undefined ? '&&' : '&'} gea_field_slot) -> const ${result}& { ` +
     `return gea::record::readLiveFieldBorrowed<${result}>(gea_field_receiver, ${liveKeyText(receipt.key)}, ${adapter}, ${accepted}, ` +
-    `gea_field_slot, [&]() -> const ${result}& { return ${concrete}; }); })(${operandText(ctx, operation.receiver)}, ${result}())`
+    `gea_field_slot, [&]() -> const ${result}& { return ${concrete}; }); })(${operandText(ctx, operation.receiver)}, ${slot ?? `${result}()`})`
   )
 }
 

@@ -44,8 +44,31 @@ export const reuseFieldReads = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   deriver: RepresentationDeriver
 ): ReadonlyMap<PhysicalBodyId, IrBody> => {
+  const codeFree = codeFreeFieldReadOf(bodies.values(), classes, deriver)
+  let output: Map<PhysicalBodyId, IrBody> | null = null
+  for (const [id, body] of bodies) {
+    const reused = reusedBody(body, codeFree)
+    if (reused === body) continue
+    output ??= new Map(bodies)
+    output.set(id, reused)
+  }
+  return output ?? bodies
+}
+
+/** Whether reading `key` off a value carried as `receiver` loads a data field no getter of the program can answer. */
+export type CodeFreeFieldRead = (receiver: Representation, key: string) => boolean
+
+/**
+ * The one answer to which field reads this pass, and the borrowed reads that
+ * lean on the same proof (`borrowed-field-reads.ts`), may treat as a load.
+ */
+export const codeFreeFieldReadOf = (
+  bodies: Iterable<IrBody>,
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  deriver: RepresentationDeriver
+): CodeFreeFieldRead => {
   const accessorKeys = accessorKeysOf(bodies, classes, deriver)
-  const codeFree = (receiver: Representation, key: string): boolean => {
+  return (receiver, key) => {
     // A class instance is read through its own family's members, never a
     // view's origin, so only a record answers to another shape's getter:
     // three's `Euler` declaring `get x()` says nothing about `Vector3.x`.
@@ -62,14 +85,6 @@ export const reuseFieldReads = (
       return recordFieldsOfShape(deriver, receiver.shapeId)?.some((field) => field.key === key) ?? false
     return false
   }
-  let output: Map<PhysicalBodyId, IrBody> | null = null
-  for (const [id, body] of bodies) {
-    const reused = reusedBody(body, codeFree)
-    if (reused === body) continue
-    output ??= new Map(bodies)
-    output.set(id, reused)
-  }
-  return output ?? bodies
 }
 
 /**
@@ -79,7 +94,7 @@ export const reuseFieldReads = (
  * still be answered by a getter of the shape it came from.
  */
 const accessorKeysOf = (
-  bodies: ReadonlyMap<PhysicalBodyId, IrBody>,
+  bodies: Iterable<IrBody>,
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   deriver: RepresentationDeriver
 ): ReadonlySet<string> => {
@@ -106,7 +121,7 @@ const accessorKeysOf = (
       for (const field of recordFieldsOfShape(deriver, representation.shapeId) ?? []) visit(field.value)
     }
   }
-  for (const body of bodies.values()) for (const representation of body.values.values()) visit(representation)
+  for (const body of bodies) for (const representation of body.values.values()) visit(representation)
   return keys
 }
 
@@ -131,8 +146,25 @@ const readShapeOf = (operation: GetOperation): string => {
   return `${representationKey(result.representation)}|${JSON.stringify(rest)}`
 }
 
-const reusedBody = (body: IrBody, codeFree: (receiver: Representation, key: string) => boolean): IrBody => {
-  if (body.tryRegions.length > 0) return body
+/** What an operation forgets: every read, the reads of one key, the reads through one cell, or nothing. */
+export type FieldReadKill =
+  { readonly kind: 'all' } | { readonly kind: 'key'; readonly key: string } | { readonly kind: 'cell'; readonly cell: DeclarationId } | null
+
+/**
+ * The facts this pass tracks over one body: which reads are candidates, the
+ * receiver each one names (a cell for a binding read, else the SSA value), and
+ * what every other operation forgets.
+ */
+export interface FieldReadFacts {
+  readonly candidates: ReadonlyMap<GetOperation, { readonly key: string; readonly shape: string }>
+  readonly pinned: ReadonlySet<IrValueId>
+  readonly receiverOf: (value: IrValueId) => string
+  readonly killOf: (operation: IrNonTerminatorOperation) => FieldReadKill
+  readonly forgets: (kill: FieldReadKill, fact: { readonly receiver: string; readonly key: string }) => boolean
+  readonly factId: (receiver: string, key: string, shape: string) => string
+}
+
+export const fieldReadFactsOf = (body: IrBody, codeFree: CodeFreeFieldRead): FieldReadFacts => {
   const keys = stringConstantsOf(body)
   const cells = new Map<IrValueId, DeclarationId>()
   const producers = new Map<IrValueId, IrNonTerminatorOperation>()
@@ -157,20 +189,12 @@ const reusedBody = (body: IrBody, codeFree: (receiver: Representation, key: stri
       if (key === undefined || !codeFree(operation.receiver.representation, key)) continue
       candidates.set(operation, { key, shape: readShapeOf(operation) })
     }
-  if (candidates.size < 2) return body
   const receiverOf = (value: IrValueId): string => {
     const cell = cells.get(value)
     return cell === undefined ? `value:${value}` : `cell:${cell}`
   }
-  // What an operation forgets: every read, the reads of one key, the reads
-  // through one cell, or nothing.
-  type Kill =
-    | { readonly kind: 'all' }
-    | { readonly kind: 'key'; readonly key: string }
-    | { readonly kind: 'cell'; readonly cell: DeclarationId }
-    | null
-  const all: Kill = { kind: 'all' }
-  const killOf = (operation: IrNonTerminatorOperation): Kill => {
+  const all: FieldReadKill = { kind: 'all' }
+  const killOf = (operation: IrNonTerminatorOperation): FieldReadKill => {
     switch (operation.kind) {
       case 'constant':
       case 'binding-read':
@@ -216,14 +240,21 @@ const reusedBody = (body: IrBody, codeFree: (receiver: Representation, key: stri
         return all
     }
   }
-  const apply = (facts: Map<string, Available>, kill: Kill): void => {
+  const forgets = (kill: FieldReadKill, fact: { readonly receiver: string; readonly key: string }): boolean =>
+    kill !== null && (kill.kind === 'all' || (kill.kind === 'key' ? fact.key === kill.key : fact.receiver === `cell:${kill.cell}`))
+  const factId = (receiver: string, key: string, shape: string): string => `${receiver}\u0000${key}\u0000${shape}`
+  return { candidates, pinned, receiverOf, killOf, forgets, factId }
+}
+
+const reusedBody = (body: IrBody, codeFree: CodeFreeFieldRead): IrBody => {
+  if (body.tryRegions.length > 0) return body
+  const { candidates, pinned, receiverOf, killOf, forgets, factId } = fieldReadFactsOf(body, codeFree)
+  if (candidates.size < 2) return body
+  const apply = (facts: Map<string, Available>, kill: FieldReadKill): void => {
     if (kill === null) return
     if (kill.kind === 'all') facts.clear()
-    else
-      for (const [id, fact] of facts)
-        if (kill.kind === 'key' ? fact.key === kill.key : fact.receiver === `cell:${kill.cell}`) facts.delete(id)
+    else for (const [id, fact] of facts) if (forgets(kill, fact)) facts.delete(id)
   }
-  const factId = (receiver: string, key: string, shape: string): string => `${receiver}\u0000${key}\u0000${shape}`
   const graph = controlFlowGraphOf(body)
   const predecessorsOf = (block: IrBlockId): readonly IrBlockId[] => [...new Set(graph.predecessors.get(block) ?? [])]
   const values = new Map(body.values)

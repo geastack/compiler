@@ -146,6 +146,7 @@ import { buildHostMethodAliasIndex } from './host/host-method-aliases.js'
 import { constructionOnlyFieldsOf, reflectiveFieldWritesOf } from '../../ir/construction-only-fields.js'
 import { cppRecursiveContainerDeclarations, cppRecursiveContainerTraceEdges } from './recursive-containers.js'
 import { plainFieldReadOf } from '../../ir/plain-field-read.js'
+import { codeFreeFieldReadOf } from '../../ir/field-read-reuse.js'
 import { writeEffectsOf } from '../../ir/write-effects.js'
 
 /**
@@ -2093,6 +2094,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   for (const [declaration, layout] of input.classes)
     if (layout.constructor !== null && !unsafeForStoreSink.has(declaration)) storeSinkConstructors.add(String(layout.constructor))
   const plainFieldRead = plainFieldReadOf(input.classes, input.deriver)
+  const codeFreeFieldRead = codeFreeFieldReadOf(input.bodies, input.classes, input.deriver)
   const {
     callableMemberCandidates,
     callableFlowCandidates,
@@ -2943,7 +2945,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
         structs.classIndexProtocols,
         writeEffects,
         promiseView === null && returnsOwnReceiver(body),
-        allocationCells
+        allocationCells,
+        codeFreeFieldRead
       )
       const commonJsScope = [
         ...coroutineEnvironmentPrologueOf(promiseView ?? body, captures),

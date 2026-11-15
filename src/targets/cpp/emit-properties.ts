@@ -18,6 +18,7 @@ import {
   cppDenseFlagName,
   cppDensePointerName,
   createCppEmitBlockedError,
+  defineFieldPointer,
   defineValue,
   defineValueAlias,
   nameOfValue,
@@ -28,6 +29,7 @@ import {
   type ReactiveRevisionOrigin,
   isIntegerKeyValue,
   isIntegerStorageValue,
+  storageTypeOf,
   storedEnvironmentText
 } from './emit-context.js'
 import { declaredHostMethodRead, emitNativeHostStore, nativeHostMemberText } from './host/emit-host-properties.js'
@@ -612,6 +614,24 @@ const denseElementText = (ctx: EmitContext, operation: GetOperation): string | n
 }
 
 export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperation): void => {
+  emitGetRendering(ctx, lines, operation)
+  // A field pointer a pointer merge takes whose read rendered as a value of its
+  // own: the copy goes to a frame slot whose address the merge takes. Any
+  // other read that could not borrow keeps its value as it was.
+  if (ctx.fieldPointerMergeInputs.has(operation.result.id) && !ctx.fieldPointerTexts.has(operation.result.id)) {
+    const value = ctx.valueNames.get(operation.result.id)
+    if (value === undefined) throw new Error(`field pointer ${operation.result.id} rendered no value`)
+    const slot = `gea_field_slot_${ctx.declarations.length}`
+    ctx.declarations.push({
+      name: slot,
+      type: `std::optional<${storageTypeOf(ctx, operation.result.id, operation.result.representation)}>`
+    })
+    lines.push(`${slot}.emplace(${value});`)
+    ctx.fieldPointerTexts.set(operation.result.id, `&*${slot}`)
+  }
+}
+
+const emitGetRendering = (ctx: EmitContext, lines: string[], operation: GetOperation): void => {
   const objectData = nativeObjectDataGetText(ctx, operation)
   if (objectData !== null) {
     lines.push(`${defineValue(ctx, operation.result)} = ${objectData};`)
@@ -694,6 +714,17 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
         source: source.value,
         text: `(gea_field_receiver->${cppRecordFieldPresenceName(key)} ? ${read} : ${absent})`,
         ...(undefinedText === null ? {} : { absentReadsUndefined: true as const })
+      }
+    }
+    // A field pointer names the view's answer in a slot of the frame, or the
+    // plain allocation's own member.
+    if (ctx.fieldPointerValues.has(operation.result.id)) {
+      const slot = `gea_field_slot_${ctx.declarations.length}`
+      const borrowed = nativeFieldViewBorrowedReadText(ctx, operation, ordinaryReadOf, slot)
+      if (borrowed !== null) {
+        ctx.declarations.push({ name: slot, type: cppTypeOf(operation.result.representation) })
+        lines.push(`${defineFieldPointer(ctx, operation.result)} = &${borrowed};`)
+        return
       }
     }
     const rendered =
@@ -1192,6 +1223,11 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
     return
   }
   const read = accessorShadowedFieldReadText(ctx, operation, fieldName) ?? fixedFieldReadText(ctx, operation, fieldName)
+  // A field pointer names the member itself, when the read is the bare load.
+  if (ctx.fieldPointerValues.has(operation.result.id) && read === plainFieldReadText(ctx, operation, fieldName)) {
+    lines.push(`${defineFieldPointer(ctx, operation.result)} = &(${read});`)
+    return
+  }
   // A construction-only field of this body's own receiver holds one value
   // from the read to every use (`ctx.stableFieldReads`), so the read names
   // the member. Only the plain member load qualifies: a presence test or a

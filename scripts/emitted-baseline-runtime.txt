@@ -1186,7 +1186,7 @@ regexp-test-coerces-its-argument.ts.cpp d3fa27e6e776
 regexp-utf16-coordinate.ts.cpp 277a05920f0f
 regexp-word-boundary-range-start.ts.cpp ed928302ee08
 repeated-construction.ts.cpp d28978d1d7ee
-repeated-field-reads-reuse-the-first-read.runtime.ts.cpp 23d14d4147f9
+repeated-field-reads-reuse-the-first-read.runtime.ts.cpp aa4ee824da05
 repeated-union-selection-reuses-the-dominating-one.runtime.ts.cpp a5e5d879a11b
 rest-array-of-any-spread-into-a-null-absent-parameter.runtime.ts.cpp dc577b078473
 rest-forwarding-spread-argument.ts.cpp 314777777637
@@ -1201,6 +1201,7 @@ returned-generic-spelling.ts.cpp 6105a153eb4d
 returned-inferred-union.js.cpp b583dbba9316
 returned-nested-union.js.cpp 9c4f39c94ce5
 returned-object-bag.js.cpp eb68242d9c8b
+reused-field-reads-name-the-field.runtime.ts.cpp 1c406e773cee
 runtime-module-int-const.ts.cpp f4d3b0eee2a5
 runtime-size-mask-index.ts.cpp 76746dbe319a
 same-block-reads-before-last-transferring-use-move.runtime.ts.cpp 75ba46449fb5
@@ -1442,5 +1443,5 @@ wide-optional-options-spread-prefix-keys.runtime.ts.cpp 8dd0433b7d6b
 wide-record-spread-short-flag-tail.runtime.ts.cpp 221a2956b905
 widened-field-in-arithmetic-and-locals.runtime.js.cpp 04b0e4de9cf8
 wider-options-record-into-nullable-narrower-options.runtime.ts.cpp 133ff47ce91b
-window-element-binding-borrows-its-cell.runtime.ts.cpp f1684f4a782d
+window-element-binding-borrows-its-cell.runtime.ts.cpp ef97ffa21326
 worker-module-realms.ts.cpp 7309a7a741ba

@@ -1658,6 +1658,13 @@ export interface EmitContext {
    * any read of it renders.
    */
   readonly borrowedWindowCellNames: Map<DeclarationId, string>
+  /**
+   * The pointer expression each field pointer (`fieldPointerValues`) rendered
+   * as: its own `const T*` for a borrowed read or merge, or the address of the
+   * frame slot a read that could not borrow was copied into. Filled as the body
+   * renders; a merge's edge writes read it.
+   */
+  readonly fieldPointerTexts: Map<IrValueId, string>
   /** Dominating native length results, selected by the IR reuse proof. Settled the same way as `hoistedResults`. */
   readonly reusedStringLengths: ReadonlyMap<IrValueId, IrOperand>
   /** Withheld values whose single reader is a call, and which therefore reach exactly one operand position -- see `emit.ts`'s `consumedByCall`. Settled the same way as `hoistedResults`. */
@@ -1846,6 +1853,13 @@ export interface EmitContext {
    * are admitted.
    */
   readonly borrowedWindowCells: ReadonlySet<DeclarationId>
+  /**
+   * Field reads, and the merges of them, that render as a pointer to the field
+   * (`ir/borrowed-field-reads.ts`), decided by `emitBody` before rendering.
+   */
+  readonly fieldPointerValues: ReadonlySet<IrValueId>
+  /** The field pointers some pointer merge takes on an edge: each needs a pointer even when its read could not borrow. */
+  readonly fieldPointerMergeInputs: ReadonlySet<IrValueId>
   /** Reads of a wrapped window's `length` that the preheader already took, by the window's ordinal. */
   readonly denseLengths: ReadonlyMap<IrValueId, number>
   /** Subscripts a wrapped window may take in the integers -- see `denseRemainderCompanion`. */
@@ -2080,6 +2094,8 @@ export interface EmitBodyPrepassFacts {
   readonly denseRegions: DenseRegion[]
   readonly denseOutlined: Map<number, DenseRegion>
   readonly borrowedWindowCells: Set<DeclarationId>
+  readonly fieldPointerValues: Set<IrValueId>
+  readonly fieldPointerMergeInputs: Set<IrValueId>
   readonly denseLengths: Map<IrValueId, number>
   readonly deferrable: Set<IrValueId>
 }
@@ -2230,6 +2246,8 @@ export const createEmitContext = (
   const denseRegions: DenseRegion[] = []
   const denseOutlined = new Map<number, DenseRegion>()
   const borrowedWindowCells = new Set<DeclarationId>()
+  const fieldPointerValues = new Set<IrValueId>()
+  const fieldPointerMergeInputs = new Set<IrValueId>()
   const denseLengths = new Map<IrValueId, number>()
   const deferrable = new Set<IrValueId>()
   const ctx: EmitContext = {
@@ -2348,6 +2366,7 @@ export const createEmitContext = (
     stableFieldCellTexts: new Map(),
     denseCellReads: new Set(),
     borrowedWindowCellNames: new Map(),
+    fieldPointerTexts: new Map(),
     reusedStringLengths,
     callArgumentOnly,
     classTableRoots: bodyFacts.classTableRoots,
@@ -2384,6 +2403,8 @@ export const createEmitContext = (
     denseGroups,
     denseOutlined,
     borrowedWindowCells,
+    fieldPointerValues,
+    fieldPointerMergeInputs,
     computeOrigins: bodyFacts.computeOrigins,
     freshReceiverStores: bodyFacts.freshReceiverStores,
     outOfOrderFreshStores: bodyFacts.outOfOrderFreshStores,
@@ -2452,6 +2473,8 @@ export const createEmitContext = (
       denseRegions,
       denseOutlined,
       borrowedWindowCells,
+      fieldPointerValues,
+      fieldPointerMergeInputs,
       denseLengths,
       deferrable
     }
@@ -2556,6 +2579,21 @@ export const defineValue = (ctx: EmitContext, result: IrResult, spelling?: strin
   ctx.valueNames.set(result.id, name)
   ctx.declarations.push({ name, type: spelling ?? storageTypeOf(ctx, result.id, result.representation) })
   if (spelling === undefined) ctx.ownedValues.add(result.id)
+  return name
+}
+
+/**
+ * Declares this result as a `const T*` and publishes it as the value it points
+ * at, read-only (`EmitContext.fieldPointerValues`): a consumer that moves
+ * copies. Returns the pointer's own name, which a merge's edge writes assign.
+ */
+export const defineFieldPointer = (ctx: EmitContext, result: IrResult): string => {
+  if (ctx.valueNames.has(result.id)) throw new Error(`ir value ${result.id} is defined twice in one body, which SSA form forbids`)
+  const name = `v${ctx.nextValueOrdinal}`
+  ctx.nextValueOrdinal += 1
+  ctx.declarations.push({ name, type: `const ${storageTypeOf(ctx, result.id, result.representation)}*` })
+  ctx.valueNames.set(result.id, `std::as_const(*${name})`)
+  ctx.fieldPointerTexts.set(result.id, name)
   return name
 }
 
@@ -3307,6 +3345,9 @@ const renderMutableEmitContextFields: ReadonlySet<string> = new Set([
   // read printed as the cell is decided where `emitGet` spells it.
   'denseCellReads',
   'borrowedWindowCellNames',
+  // And for field pointers: WHICH values are pointers is the prepass's
+  // `fieldPointerValues`; this is the pointer each one was declared as.
+  'fieldPointerTexts',
   // A wrapped dense window's subscript companion, minted and declared beside
   // the read that needed it (`denseRemainderCompanion`). WHICH accesses a
   // window admits is `admitDenseWindows`' prepass answer; this is only what

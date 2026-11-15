@@ -26,6 +26,8 @@ import {
 import { everyStoreEffects, type WriteEffects } from '../../ir/write-effects.js'
 import { codeFreeGetOf } from '../../ir/plain-field-read.js'
 import { borrowedWindowCellsOf } from '../../ir/borrowed-window-cells.js'
+import { borrowedFieldReadsOf } from '../../ir/borrowed-field-reads.js'
+import type { CodeFreeFieldRead } from '../../ir/field-read-reuse.js'
 import {
   DyingArgumentSet,
   dyingTransferUsesOf,
@@ -79,6 +81,7 @@ import {
   cppReceiverName,
   createCppEmitBlockedError,
   createEmitContext,
+  defineFieldPointer,
   defineValue,
   defineValueAlias,
   nameOfValue,
@@ -2994,7 +2997,8 @@ export const emitBody = (
   physicalIndexProtocols?: ReadonlyMap<DeclarationId, boolean>,
   writeEffects: WriteEffects = everyStoreEffects,
   returnsOwnReceiver = false,
-  allocationCells: ReadonlyMap<DeclarationId, AllocationCell> = new Map()
+  allocationCells: ReadonlyMap<DeclarationId, AllocationCell> = new Map(),
+  codeFreeFieldRead: CodeFreeFieldRead = () => false
 ): readonly CppArtifact[] => {
   // Every fact this body settles before a single line renders, computed here
   // -- from `body` and the plain, already-available inputs above -- and
@@ -3611,6 +3615,38 @@ export const emitBody = (
     ))
       prepass.borrowedWindowCells.add(declaration)
   }
+  // After the windows and the forwarded cells: a field read through a cell
+  // the body owns may name the field across the statements that reuse it, and
+  // so may the merges of such reads (`ir/borrowed-field-reads.ts`). Only a
+  // counted handle is worth it, and only a receiver the read renders straight
+  // off: an absent receiver is a presence test, a snapshot read a copy's.
+  for (const value of borrowedFieldReadsOf(
+    body,
+    codeFreeFieldRead,
+    (declaration) => {
+      const placement = placements.get(declaration)
+      if (placement?.storage.kind !== 'local' || placement.storage.owner !== body.sourceOwner) return false
+      if (captures.isBoxed(declaration) || captures.isCaptured(declaration)) return false
+      return !ctx.stableFieldCells.has(declaration) && !ctx.forwardedBindings.has(declaration) && !ctx.typeQueryBindings.has(declaration)
+    },
+    (operation) => {
+      const receiver = operation.receiver.representation.kind
+      const result = operation.result.representation
+      return (
+        (receiver === 'class-ref' || receiver === 'record' || receiver === 'native-record-ref') &&
+        (result.kind === 'class-ref' || result.kind === 'record' || result.kind === 'native-record-ref') &&
+        result.ownership === 'shared-refcount' &&
+        operation.spreadSnapshot !== true
+      )
+    },
+    // A stable field read already names the member (`EmitContext.stableFieldReads`).
+    (value) => ctx.deferrable.has(value) || ctx.stableFieldReads.has(value)
+  ))
+    prepass.fieldPointerValues.add(value)
+  for (const block of body.blocks.values())
+    for (const operation of block.operations)
+      if (operation.kind === 'phi' && prepass.fieldPointerValues.has(operation.result.id))
+        for (const incoming of operation.incoming) prepass.fieldPointerMergeInputs.add(incoming.value.value)
   const isSingleBlock = body.blockOrder.length === 1
   const orderLabels = isSingleBlock ? new Map<IrBlockId, string>() : blockLabelsOf(body.blockOrder)
   const owner = sectionOwnerOf(body)
@@ -3619,7 +3655,14 @@ export const emitBody = (
   // exist before any predecessor renders -- including a predecessor that comes
   // earlier in the block order than the merge itself. Minting every merge's
   // name up front is what makes that hold without depending on block order.
-  const mergeWrites = mergeWritesOf(ctx, body, (result) => defineValue(ctx, result))
+  // A merge of field pointers is a pointer too; its edges assign addresses.
+  const pointerMerges = new Set<string>()
+  const mergeWrites = mergeWritesOf(ctx, body, (result) => {
+    if (!ctx.fieldPointerValues.has(result.id)) return defineValue(ctx, result)
+    const name = defineFieldPointer(ctx, result)
+    pointerMerges.add(name)
+    return name
+  })
   // After the merges, because a block that writes one is not empty.
   const flow = threadedFlowOf(ctx, body, orderLabels, hoists, mergeWrites)
   const labels = flow.labels
@@ -3753,6 +3796,13 @@ export const emitBody = (
       // The writes belong after everything this block computed and before it
       // transfers control: that is exactly where the incoming value is live.
       for (const write of mergeWrites.get(blockId) ?? []) {
+        if (pointerMerges.has(write.name)) {
+          const pointer = ctx.fieldPointerTexts.get(write.value.value)
+          if (pointer === undefined)
+            throw new Error(`field pointer merge ${write.name} reads ${write.value.value}, which rendered no pointer`)
+          lines.push(`${write.name} = ${pointer};`)
+          continue
+        }
         const raw = operandText(ctx, write.value)
         const converted = alignedValueText(ctx, 'emit.ts:2111', write.value.representation, write.target, raw)
         if (converted === null) {
