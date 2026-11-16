@@ -322,6 +322,29 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
     const held = objectHoldersOf(graph, source)
     if (held.length === 0) return
     if (isDynamic(graph, destination)) return exposeToDynamic(source)
+    // A getter seen through a by-value copy runs once, when the copy is made,
+    // and never again: `boxes.push(lazy)` into a `Box[]` of structs would
+    // snapshot `lazy.min` where JavaScript calls the getter at every
+    // `boxes[i].min`. A destination reading a key some source answers with an
+    // accessor needs the live view only a shared carrier has. This holds
+    // whether or not the edge joins the two alias classes: a host's own
+    // signature (`Array.prototype.push`) does not, and is the usual way in.
+    const accessorKeys = new Set<string>()
+    for (const core of held) {
+      const shape = graph.structuralTypes.get(core)?.shape
+      if (shape?.kind === 'object')
+        for (const member of shape.members)
+          if (member.accessor !== null && member.key.kind !== 'symbol') accessorKeys.add(`${member.key.kind}:${member.key.value}`)
+    }
+    if (accessorKeys.size > 0)
+      for (const core of objectHoldersOf(graph, destination)) {
+        const shape = graph.structuralTypes.get(core)?.shape
+        if (
+          shape?.kind === 'object' &&
+          shape.members.some((member) => member.key.kind !== 'symbol' && accessorKeys.has(`${member.key.kind}:${member.key.value}`))
+        )
+          disqualified.add(core)
+      }
     // Only the object-shaped cores join: an alias through a shared primitive
     // id would let any comparison against that primitive disqualify both.
     if (join) connect([...held, ...objectHoldersOf(graph, destination)])

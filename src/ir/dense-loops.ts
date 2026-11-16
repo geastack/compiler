@@ -14,6 +14,7 @@ import {
 } from './dominance.js'
 import { loopInvariantHoistsOf, type HoistPlan } from './hoist.js'
 import { borrowSafeOperationsOf, type PlainFieldRead } from './borrow-effects.js'
+import type { CodeFreeFieldRead } from './field-read-reuse.js'
 import { codeFreeGetOf } from './plain-field-read.js'
 import { representationKey, type Representation, type TypedArrayElementDomain } from '../representation/model.js'
 import type { IrBlockId, IrBody, IrNonTerminatorOperation, IrOperand } from './model.js'
@@ -317,20 +318,25 @@ const denseStorageConversionIsOrdinary = (node: ConversionNode, conversions: Con
 /**
  * Dense preheaders perform real reads; their transport belongs to the lowered body's certificate too.
  *
- * `plainFieldRead` is the target's own answer (`plainFieldReadOf`): the hoists
- * this plan locates values by may be no more optimistic than the ones the
- * target renders, since a window's setup names its bound where these put it.
+ * `plainFieldRead` and `codeFreeFieldRead` are the target's own answers
+ * (`plainFieldReadOf`, `codeFreeFieldReadOf`): the hoists this plan locates
+ * values by may be no more optimistic than the ones the target renders, since
+ * a window's setup names its bound where these put it. A window admits a loop
+ * only when its reads run no program code, and a field of the receiver's own
+ * type still runs a getter when the receiver is a live view of a shape that
+ * answers the key with one, so admission asks both too.
  */
 export const publishDenseLoopPlan = (
   body: IrBody,
   placements: ReadonlyMap<DeclarationId, BindingPlacement>,
   conversions: ConversionCensus,
-  plainFieldRead: PlainFieldRead
+  plainFieldRead: PlainFieldRead,
+  codeFreeFieldRead: CodeFreeFieldRead
 ): IrBody => {
   const raw = denseLoopsOf(
     body,
-    loopInvariantHoistsOf(body, undefined, undefined, undefined, undefined, codeFreeGetOf(body, plainFieldRead)),
-    plainFieldRead
+    loopInvariantHoistsOf(body, undefined, undefined, undefined, undefined, codeFreeGetOf(body, plainFieldRead, codeFreeFieldRead)),
+    (receiver, key) => plainFieldRead(receiver, key) && codeFreeFieldRead(receiver, key)
   )
   const seal = (reference: DenseReference): DenseReference | null => {
     if (reference.kind === 'element') {

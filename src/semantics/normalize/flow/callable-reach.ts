@@ -1100,6 +1100,7 @@ const sharedAnswers: SharedAnswerIndex = new WeakMap()
 const refusalMemoEnabled = process.env['GEA_REFUSAL_MEMO'] !== '0'
 
 const sharedStats = { asks: 0, hits: 0, stores: 0, refusals: 0, ungrounded: 0 }
+const wipEscapes = new Map<string, number>() // WIP-SOLVER-TIMING
 const intactCheckIds = new WeakMap<object, number>()
 let intactChecksSeen = 0
 const intactCheckIdOf = (check: object | undefined): string => {
@@ -1937,6 +1938,7 @@ const closedMemberCallableUses = (
     shareable?: (value: T | null) => boolean
   ): SharedProvenanceAnswer<T> => {
     sharedStats.asks++
+    if (process.env['GEA_WIP_PROOF_STATS'] && sharedStats.asks % 500000 === 0) console.error(memberProofStats()) // WIP-SOLVER-TIMING
     let byReceiverTypeAt = sharedAnswers.get(flow)
     if (!byReceiverTypeAt) sharedAnswers.set(flow, (byReceiverTypeAt = new WeakMap()))
     let byArgumentsUsesAt = byReceiverTypeAt.get(receiverTypeAt)
@@ -2019,6 +2021,25 @@ const closedMemberCallableUses = (
     // is still not stored. One large library compile asked `record-plan:` 1.5M times and kept
     // 16k answers because 98% of the asks refused.
     if (computed.value === null && !grounded) sharedStats.ungrounded++
+    if (computed.value === null && !grounded && process.env['GEA_WIP_PROOF_STATS']) {
+      // WIP-SOLVER-TIMING: which escaped hypotheses keep refusals out of the memo
+      const describe = (key: object): string => {
+        const node = key as Partial<ts.Node>
+        if (typeof node.kind === 'number' && typeof node.getSourceFile === 'function') {
+          const file = node.getSourceFile()
+          const line = file.getLineAndCharacterOfPosition((key as ts.Node).getStart(file)).line + 1
+          return `${ts.SyntaxKind[node.kind]} ${file.fileName.split('/').pop()}:${line} ${(key as ts.Node).getText(file).replace(/\s+/g, ' ').slice(0, 50)}`
+        }
+        const named = key as { name?: unknown; escapedName?: unknown; kind?: unknown }
+        return `${key.constructor?.name ?? 'object'} ${String(named.escapedName ?? named.name ?? named.kind ?? '')}`
+      }
+      for (const key of escaped) {
+        const label = `${identity.split(':')[0]} <- ${describe(key)}`
+        wipEscapes.set(label, (wipEscapes.get(label) ?? 0) + 1)
+      }
+      if (sharedStats.ungrounded % 200000 === 0)
+        console.error('[WIP-ESCAPES]\n' + [...wipEscapes].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([label, count]) => `  ${count} ${label}`).join('\n'))
+    }
     if ((shareable?.(computed.value) ?? true) && (computed.value !== null || (grounded && refusalMemoEnabled))) {
       const recorded: (readonly [ts.Expression, OpenUseKind])[] = []
       for (const [reference, kinds] of opens) for (const kind of kinds) recorded.push([reference, kind])

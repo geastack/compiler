@@ -3300,7 +3300,7 @@ export const emitBody = (
     if (struct === null) return false
     return ctx.hosts.reactive.celled.get(struct)?.has(key) !== true && ctx.hosts.reactive.revisions.get(struct)?.has(key) !== true
   }
-  const codeFreeGet = codeFreeGetOf(body, writeEffects.plainField)
+  const codeFreeGet = codeFreeGetOf(body, writeEffects.plainField, codeFreeFieldRead)
   // Every per-body census, in the one order they depend on each other in --
   // `ir/facts.ts` owns that order now, and this backend supplies only the
   // questions about its own carriers plus the two storage steps that have to

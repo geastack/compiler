@@ -1,3 +1,4 @@
+import { progress } from '../frontend-timing.js' // WIP-SOLVER-TIMING: not for commit
 import { callableCompletionSummaryOf } from './flow/callable-completions.js'
 import { relative } from 'node:path'
 import ts from '#typescript'
@@ -2762,7 +2763,11 @@ export const censusGlobalHostMutations = (
   // that walk, once the shared layout grows per-binding-element slots.
   const frameForwardingIsModelled = (frame: SourceInvocationFrame): boolean =>
     frame.forwarding.kind === 'values' || frame.forwarding.reason === 'destructured-parameter'
+  let wipSites = 0 // WIP-SOLVER-TIMING
+  let wipClosedMs = 0
+  let wipSlowest = 0
   for (const site of reachableFlowCalls) {
+    if (++wipSites % 500 === 0) progress(`host-mutations call sites ${wipSites}/${reachableFlowCalls.length}, closedCalleeBodiesOf ${(wipClosedMs / 1000).toFixed(1)}s, slowest ${(wipSlowest / 1000).toFixed(1)}s`)
     const explicitDeclaration = site.explicitThis ? flow.targetOf(site.explicitThis.callee)?.declaration : null
     const staticDeclaration =
       explicitDeclaration && ts.isFunctionLike(explicitDeclaration)
@@ -2893,7 +2898,15 @@ export const censusGlobalHostMutations = (
       // authority, which knows about the escape, so `sink( receiver );
       // receiver.run( globalThis )` was admitted as running only program bodies
       // and never asked whether it hands the global object to an open callee.
+      if (wipSites >= Number(process.env['GEA_WIP_TRACE_FROM'] ?? Infinity)) {
+        const wipFile = site.call.getSourceFile()
+        progress(`host-mutations site ${wipSites} ${wipFile.fileName.split('/').pop()}:${wipFile.getLineAndCharacterOfPosition(site.call.getStart(wipFile)).line + 1} ${site.call.getText(wipFile).replace(/\s+/g, ' ').slice(0, 100)}`)
+      }
+      const wipAt = performance.now()
       const closedBodies = callableFrames.closedCalleeBodiesOf?.(site.call) ?? null
+      const wipTook = performance.now() - wipAt
+      wipClosedMs += wipTook
+      if (wipTook > wipSlowest) wipSlowest = wipTook
       const allocationProven =
         process.env['GEA_NO_ALLOCATION_PROVEN'] !== '1' &&
         closedBodies !== null &&

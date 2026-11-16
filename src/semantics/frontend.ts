@@ -108,7 +108,7 @@ import {
 } from './normalize/reachability.js'
 import { createProgram, defaultCompilerOptions } from './program.js'
 import { createJsxRuntimeModuleResolver } from './jsx-runtime-provider.js'
-import { createFrontendTiming } from './frontend-timing.js'
+import { createFrontendTiming, progress, progressed } from './frontend-timing.js'
 import type { DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
 // The ambient host-protocol census -- what this program's own declarations
 // say a host owns -- lives in its own module purely for the architecture
@@ -1269,7 +1269,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // alive across the boundary raised the peak from 7 GB to 11 GB.
     const built =
       upstream && !process.env['GEA_FLOW_CENSUS_OFF']
-        ? indexValueFlow(
+        ? progressed('  round: value-flow index', () => indexValueFlow(
             compiled.checker,
             compiled.sourceFiles,
             reachable,
@@ -1278,7 +1278,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
             upstream.callTargetsAt,
             buildIsStrict,
             upstream.explicitThisAt
-          )
+          ))
         : baseValueFlow
     // The round that settles the fixpoint rebuilds the very index the round
     // before it built (its census inputs no longer move), and that round's
@@ -1304,6 +1304,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // consumers now also see one set of write and call-site objects instead
     // of two that are equal only field by field.
     const valueFlow: ValueFlowIndex = contentEqual ? { ...contentEqual } : built
+    const previousFlow = roundFlows[roundFlows.length - 1]
+    if (previousFlow !== undefined) progress(`  round: index vs previous round: ${contentEqual ? 'content-equal' : 'changed'}`)
     if (contentEqual) shareSourceValueSession(contentEqual, valueFlow)
     // No round's solver is retired when the next round replaces it. Every
     // round's census stays on the `upstream` chain of every later one, down
@@ -1322,13 +1324,13 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     commonJsModuleRecords.attachToFlow(valueFlow)
     if (statedModules) attachStatedModuleSet(valueFlow, statedModules)
     if (scriptScope) attachClosedScriptScope(valueFlow, scriptScope)
-    const collectionsThisRound = censusCollectionBindings(
+    const collectionsThisRound = progressed('  round: collection census', () => censusCollectionBindings(
       compiled.checker,
       compiled.sourceFiles,
       reachable,
       upstream ?? emptyParameterBindingCensus,
       valueFlow
-    )
+    ))
     // MOVED INSIDE the fixpoint, exactly as `collections` was, and the long
     // comment that used to sit below this loop explaining why it could not be
     // was WRONG. It argued that a bag's answer is an `ObjectBagShape` with no
@@ -1344,8 +1346,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // downstream of the cache's getter was dynamic behind that one refusal.
     const bagsThisRound = process.env['GEA_BAG_OFF']
       ? emptyObjectBagCensus
-      : censusObjectBagBindings(compiled.checker, compiled.sourceFiles, reachable, upstream ?? emptyParameterBindingCensus, valueFlow)
-    const returnStage = composeReturnBindings(
+      : progressed('  round: object-bag census', () => censusObjectBagBindings(compiled.checker, compiled.sourceFiles, reachable, upstream ?? emptyParameterBindingCensus, valueFlow))
+    const returnStage = progressed('  round: parameter and return censuses', () => composeReturnBindings(
       compiled.checker,
       compiled.sourceFiles,
       reachable,
@@ -1369,8 +1371,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
       bagsThisRound,
       upstream,
       commonJsModuleRecords
-    )
-    const parameters = withSharedArrayStorage(
+    ))
+    const parameters = progressed('  round: field, local and storage views', () => withSharedArrayStorage(
       compiled.checker,
       compiled.sourceFiles,
       reachable,
@@ -1398,7 +1400,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
         )
       ),
       valueFlow
-    )
+    ))
     return { parameters, facts: { returns: returnStage.returns, collections: collectionsThisRound, bags: bagsThisRound, valueFlow } }
   }
   /**
@@ -1454,16 +1456,21 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // A stable count alone can hide changed carriers or a same-size swap of cells.
   const settled = settleBindingCensus(compose)
   timing.mark('binding-fixpoint')
+  progress('structural @1457 if')
   if (process.env['GEA_ROUNDS_DEBUG'])
     process.stderr.write(`[ROUNDS] ${settled.round} rounds, boundCount ${settled.parameters.boundCount}\n`)
+  progress('structural @1459 parameters')
   const parameters: ParameterBindingCensus = settled.parameters
   // Every one of these is the SETTLING round's own instance, which is what the
   // snapshot exists to guarantee: the structural mapper below and the censuses
   // that produced `parameters` are looking at the identical answers.
+  progress('structural @1463 { collections, bags, valueFlow }')
   const { collections, bags, valueFlow } = settled.facts
   // The census belonging to the round `parameters` is, which is the one
   // `types` (and therefore every `typeAt`) answers from.
+  progress('structural @1466 returns')
   const returns: ReturnBindingCensus | null = settled.facts.returns
+  progress('structural @1467 absent')
   const absent = censusAbsentGlobals(
     compiled.checker,
     compiled.sourceFiles,
@@ -1476,8 +1483,11 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // producer publishes an unresolvable name's value and `citeExpressionResult`
   // predicts it, so both must read one census rather than ask the checker
   // twice. See `unresolvable-names.ts`.
+  progress('structural @1479 unresolvableNames')
   const unresolvableNames = censusUnresolvableNames(compiled.checker, compiled.sourceFiles, hostProvidedNames)
+  progress('structural @1480 identities')
   const identities = createIdentityTable(compiled.program, compiled.checker, specializations)
+  progress('structural @1481 prototypeReparentings')
   const prototypeReparentings = prototypeReparentingsOf(compiled.checker, identities, compiled.sourceFiles)
   // Beside `absent` and `identities`, the two facts this rests on: which host
   // globals are declared absent, and how to name the AST positions the answer
@@ -1485,8 +1495,11 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // any type -- a structural `never` here would collapse to the same id as a
   // TypeScript inference's own `never`, so the proof has to come from the
   // guard's own shape and the host's own statement instead.
+  progress('structural @1488 deadTypeofGuards')
   const deadTypeofGuards = censusDeadTypeofGuards(compiled.sourceFiles, absent, identities)
+  progress('structural @1489 declaredIntegers')
   const declaredIntegers = censusDeclaredIntegers(compiled.checker, compiled.sourceFiles, identities)
+  progress('structural @1490 nativeFunctionSignatures')
   const nativeFunctionSignatures = censusNativeFunctionSignatures(
     compiled.checker,
     compiled.sourceFiles,
@@ -1516,12 +1529,14 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // `parameters` would answer some nodes more precisely than the one those
   // censuses actually consulted, and the mapper would then disagree with the
   // view that produced the bindings it is mapping.
+  progress('structural @1519 if')
   if (process.env['GEA_BINDING_DEBUG']) {
     process.stderr.write(
       `[BINDINGS] bound=${parameters.boundCount} refusals=${JSON.stringify([...censusRefusalCounts(parameters.refusals)])}\n`
     )
     process.stderr.write(parameters.debugReport?.() ?? '')
   }
+  progress('structural @1525 if')
   if (process.env['GEA_BAG_DEBUG']) {
     process.stderr.write(`[BAG] bound=${bags.boundCount} refusals=${JSON.stringify([...censusRefusalCounts(bags.refusals)])}\n`)
     process.stderr.write(bags.debugReport())
@@ -1531,6 +1546,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // refuses names a carrier the checker's `[TYPE]` line does not show -- a
   // `typeof`-narrowed `string` read that reaches the field as a number is a
   // disagreement between these two lines, and only seeing both locates it.
+  progress('structural @1534 if')
   if (process.env['GEA_TYPE_AT']) {
     const [want, lineText] = String(process.env['GEA_TYPE_AT']).split('#')
     const wantLine = Number(lineText)
@@ -1557,7 +1573,9 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   }
   // Before the mapper, which lays every family member out as the one layout
   // this census names -- see `interface-families.ts`.
+  progress('structural @1560 interfaceFamilies')
   const interfaceFamilies = interfaceFamiliesOf(compiled.checker, identities, compiled.sourceFiles)
+  progress('structural @1561 if')
   if (process.env['GEA_FAMILY_DEBUG']) {
     for (const family of interfaceFamilies.families) {
       process.stderr.write(`[FAMILY] ${family.key}: ${family.members.map((member) => member.name.text).join(' ')}\n`)
@@ -1566,16 +1584,20 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // Descriptor input facts become usable only after the existing mutation
   // census seals this shared set. Its rawTypeAt input bypasses structural
   // descriptor inference, so this introduces no inference cycle.
+  progress('structural @1569 globalHostMutationTaint')
   const globalHostMutationTaint = new HostMutationTaint()
   // One reaching-definition proof, shared by the invocation producer (which
   // lowers a static `require` to a module record) and the global host
   // mutation census (which must agree with it on which calls those are).
+  progress('structural @1573 commonJsRequire')
   const commonJsRequire = createCommonJsRequireCensus(
     compiled.checker,
     compiled.program.getSourceFiles(),
     input.commonJsGlobals ?? new Map()
   )
+  progress('structural @1578 hostMutationFactsSealed')
   let hostMutationFactsSealed = false
+  progress('structural @1579 intrinsicPropertyContext')
   const intrinsicPropertyContext = {
     checker: compiled.checker,
     identities,
@@ -1595,12 +1617,14 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
    * on faith. After the seal the same receipt is replayed against the sealed
    * facts. A receipt with no obligations is the same answer at both stages.
    */
+  progress('structural @1598 receiptUnderIntrinsicObligations')
   const receiptUnderIntrinsicObligations = <T>(work: () => T | null): T | null => {
     const proof = intrinsicProtocols.capture(work)
     if (!hostMutationFactsSealed)
       return proof.requirements.length === 0 || intrinsicProtocols.include(proof.requirements) ? proof.value : null
     return failedIntrinsicProtocolRequirements(intrinsicPropertyContext, proof.requirements).length === 0 ? proof.value : null
   }
+  progress('structural @1604 types')
   const types = createStructuralMapper(
     compiled.checker,
     identities,
@@ -1657,6 +1681,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // into `parameters`/`returns`/`collections`/`bags`, and nothing downstream
   // reads `cellFacts` back, so this cannot change what any of those censuses,
   // or `types` itself, answer.
+  progress('structural @1660 cellFacts')
   const cellFacts = publishCellFacts(
     buildCellFactsTable(
       identities,
@@ -1669,6 +1694,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // renumbers the emitted C++.
     Boolean(process.env['GEA_CELL_FACTS_AGREEMENT'])
   )
+  progress('structural @1672 if')
   if (process.env['GEA_CELL_FACTS_DEBUG']) {
     process.stderr.write(
       `[CELLS] declarations=${cellFacts.table.all.length} twoOwner=${cellFacts.table.twoOwnerClaims.length} ` +
@@ -1678,6 +1704,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // The STRUCTURAL half of `GEA_TYPE_AT`: the mapper's own answer, which is
   // what every producer publishes -- a `[CENSUS]` union-arms line and a
   // `[STRUCT]` line that disagree locate a reduction between the two.
+  progress('structural @1681 if')
   if (process.env['GEA_TYPE_AT']) {
     const [want, lineText] = String(process.env['GEA_TYPE_AT']).split('#')
     const wantLine = Number(lineText)
@@ -1697,15 +1724,21 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
       visit(file)
     }
   }
+  progress('structural @1700 prototypeFallback')
   const prototypeFallback = input.dynamicFallback
     ? prototypeMutatedConstructorTypes(compiled.sourceFiles, compiled.checker, types, identities)
     : { types: new Set<StructuralTypeId>(), callables: new Set<FunctionId>() }
+  progress('structural @1703 dynamicFallbackTypes')
   const dynamicFallbackTypes = input.dynamicFallback
     ? new Set<StructuralTypeId>([...proxyFallbackTypes(compiled.sourceFiles, compiled.checker, types), ...prototypeFallback.types])
     : new Set<StructuralTypeId>()
+  progress('structural @1706 dynamicWrittenTypes')
   const dynamicWrittenTypes = anyKeyedWriteTypes(compiled.sourceFiles, compiled.checker, types)
+  progress('structural @1707 classHeritage')
   const classHeritage = classHeritageOf(compiled.checker, identities, compiled.sourceFiles, prototypeReparentings.baseOf)
+  progress('structural @1708 classCopyHeritage')
   const classCopyHeritage = classCopyHeritageOf(compiled.checker, identities, specializations, compiled.sourceFiles, classHeritage)
+  progress('structural @1709 deadMethodCopies')
   const deadMethodCopies = deadMethodCopiesOf(
     compiled.checker,
     identities,
@@ -1714,8 +1747,11 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     classHeritage,
     classCopyHeritage
   )
+  progress('structural @1717 census')
   const census = censusProgram(compiled.sourceFiles, identities, reachable, specializations, namespacePaths, deadMethodCopies)
+  progress('structural @1718 sourceValueSession')
   const sourceValueSession = sourceValueSessionOf(compiled.checker, valueFlow)
+  progress('structural @1719 specializedSourceFramesOf')
   const specializedSourceFramesOf = createSpecializedSourceFrames(census, identities, specializations, types, sourceValueSession)
   // Before normalization, not after: the table seals when the graph does, and a
   // census that interns a type it is the first to ask about would be asking a
@@ -1734,6 +1770,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // `context.hostProtocols` holds the SAME map instance -- never a copy --
   // every producer sees it fully populated by the time `normalizeProgram`
   // actually calls any of them.
+  progress('structural @1737 hosts')
   const hosts: HostCensus = {
     protocols: new Map(),
     externals: new Map(),
@@ -1751,6 +1788,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // One authority, two readers -- `derive.ts`'s carrier policy (through
   // `compiler.ts`) and the iteration producers below, which have to agree
   // about which sources take the native-cursor path.
+  progress('structural @1754 keyedCollections')
   const keyedCollections = keyedCollectionDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
   // The same shape of fact as `keyedCollections`, with the same two readers
   // that must agree: `derive.ts`'s `GeneratorDeclarationPolicy` (through
@@ -1759,11 +1797,17 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // `for`-`of` over one skips the `@@iterator` lookup. Resolving it twice would
   // let one side take the fast path for a declaration the other did not
   // recognise.
+  progress('structural @1762 generatorDeclarationEarly')
   const generatorDeclarationEarly = generatorDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
+  progress('structural @1763 asyncGeneratorDeclarationEarly')
   const asyncGeneratorDeclarationEarly = asyncGeneratorDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
+  progress('structural @1764 mapIteratorDeclarationEarly')
   const mapIteratorDeclarationEarly = mapIteratorDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
+  progress('structural @1765 arrayIteratorDeclarationEarly')
   const arrayIteratorDeclarationEarly = arrayIteratorDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
+  progress('structural @1766 standardBuffers')
   const standardBuffers = standardBufferDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
+  progress('structural @1767 wellKnownSymbols')
   const wellKnownSymbols = wellKnownSymbolDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
   // A computed write key narrowed to a proven finite set -- a
   // `setValues(values)` method writing `this[ key ] = newValue` for each key. Built
@@ -1772,6 +1816,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // `computedKeyTextsOf` a few lines down (which narrows a `get`/`set`
   // operation's REFLECTION demand, `ir/reflection-demand.ts`).
   // `GEA_HOST_CENSUS_KEY_SETS_OFF` keeps every computed key unknown for both.
+  progress('structural @1775 computedKeysOf')
   const computedKeysOf = process.env['GEA_HOST_CENSUS_KEY_SETS_OFF']
     ? undefined
     : createCensusComputedKeysOf(
@@ -1788,6 +1833,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // `computedKeyTextsOf` below checks the for-in arm's "Object.prototype
   // carries no enumerable key" assumption against -- the same identity
   // `global-host-mutations.ts`'s own `objectPrototypeKeysOf` resolves.
+  progress('structural @1791 objectPrototypeDeclaration')
   const objectPrototypeDeclaration: DeclarationId | null = (() => {
     const anchor = compiled.sourceFiles[0]
     const objectSymbol = anchor ? compiled.checker.resolveName('Object', anchor, ts.SymbolFlags.Value, false) : undefined
@@ -1801,6 +1847,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // copy that reaches it -- an unmemoized re-proof per copy is exactly the
   // mistake that once turned a 32s compile into 746s (see
   // `geatsc-escape-proof-needs-memoized-predicates` in project memory).
+  progress('structural @1804 provenKeyTextsCache')
   const provenKeyTextsCache = new Map<ts.Expression, readonly string[] | null>()
   /**
    * `ProducerContext.computedKeyTextsOf` -- see that field's own comment for
@@ -1815,6 +1862,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
    * proven" answer a refused proof gives, never a stale one built on an
    * incomplete census.
    */
+  progress('structural @1818 computedKeyTextsOf')
   const computedKeyTextsOf = (key: ts.Expression): readonly string[] | null => {
     if (!hostMutationFactsSealed) return null
     const cached = provenKeyTextsCache.get(key)
@@ -1852,19 +1900,27 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     provenKeyTextsCache.set(key, result)
     return result
   }
+  progress('structural @1855 nativeCollectionOverrides')
   const nativeCollectionOverrides = nativeCollectionOverridesOf(compiled.checker, identities, compiled.sourceFiles, classHeritage)
+  progress('structural @1856 nativeErrorOverrides')
   const nativeErrorOverrides = nativeErrorOverridesOf(compiled.checker, identities, compiled.sourceFiles, classHeritage)
+  progress('structural @1857 installedGlobalProperties')
   const installedGlobalProperties = new Map<ts.PropertyAccessExpression, DeclarationId>()
+  progress('structural @1858 ownedGlobalProperties')
   const ownedGlobalProperties = new Set<DeclarationId>()
   // The final parameter census is also the signature mapper's authority for
   // full actual-argument frames. Publication and citation share these sites.
+  progress('structural @1861 actualArgumentSites')
   const actualArgumentSites = new Set<ts.Node>()
+  progress('structural @1862 for')
   for (const [owner, sites] of argumentsObjects.usesByOwner)
     if (parameters.implicitArgumentsTupleAt?.(owner)) for (const site of sites) actualArgumentSites.add(site)
+  progress('structural @1864 settledArgumentsObjects')
   const settledArgumentsObjects = { ...argumentsObjects, actualFrameOf: (node: ts.Node) => actualArgumentSites.has(node) }
   // Everything a producer reads but the two ordinal counters, which are minted
   // per normalization below: the counters are read only while operations are
   // minted, and this context lives as long as the frontend does.
+  progress('structural @1868 context')
   const context: Omit<ProducerContext, 'ordinals' | 'evaluationOrdinals'> = {
     nativeIterableAt: (source, consumer) => {
       if (!hostMutationFactsSealed) return null
@@ -1989,6 +2045,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     arrayIteratorDeclaration: arrayIteratorDeclarationEarly,
     ...(returns ? { returns } : {})
   }
+  progress('structural @1992 hostInput')
   const hostInput: HostProtocolInput = {
     checker: compiled.checker,
     identities,
@@ -2017,14 +2074,18 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     hostProvidedNames: unresolvableNames.hostProvidedNames,
     absent
   }
+  progress('structural @2020 typedArrayElements')
   const typedArrayElements = new Map<DeclarationId, TypedArrayElementDomain>()
+  progress('structural @2021 hostProtocolBindings')
   hostProtocolBindings(hostInput, hosts)
+  progress('structural @2022 ambientHostBindings')
   ambientHostBindings(hostInput, hosts, typedArrayElements)
   // The nine typed-array INSTANCE interfaces, resolved by name and unioned
   // over whatever the seed walk above already found. Unconditional, because a
   // program can hold a typed array without ever naming one -- see
   // `typedArrayDeclarationsOf`. The two agree wherever both answer; this one
   // also answers where the walk has no seed.
+  progress('structural @2028 for')
   for (const [declaration, domain] of typedArrayDeclarationsOf(
     compiled.checker,
     identities,
@@ -2038,22 +2099,30 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // census already bound weakly (as a structural body, or as a protocol with
   // no carrier) must end up on the backend's own carrier, not beside it. See
   // `bindStandardClasses`.
+  progress('structural @2041 bindStandardClasses')
   bindStandardClasses(hostInput, hosts, input.standardClasses ?? new Set())
+  progress('structural @2042 hostGlobalBindings')
   const hostGlobalBindings = new Set<DeclarationId>([...hosts.hostSingletonBindings, ...hosts.hostNamespaceBindings])
   // The mutation census must see the exact identities whose representation
   // policy carries them outside `globalThis`: typed-array instances and native
   // host handles.  Passing identities, rather than spelling names in the
   // census, keeps a caller declaration or merged ambient symbol from acquiring
   // this proof.
+  progress('structural @2048 nativeReceiverDeclarations')
   const nativeReceiverDeclarations = new Set<DeclarationId>(typedArrayElements.keys())
+  progress('structural @2049 for')
   for (const [declaration, binding] of hosts.protocols) if (binding.native !== null) nativeReceiverDeclarations.add(declaration)
+  progress('structural @2050 nativeReceiverSymbols')
   const nativeReceiverSymbols = new Set<ts.Symbol>()
+  progress('structural @2051 nativeConstructorSymbols')
   const nativeConstructorSymbols = new Set<ts.Symbol>()
   // `bindStandardClasses` publishes the carrier policy, while the mutation
   // census needs the checker's instance identity at each call result. Resolve
   // that identity again from the policy's own names so an unmentioned class is
   // still proven (and a caller declaration with the same spelling is not).
+  progress('structural @2056 receiverAnchor')
   const receiverAnchor = compiled.sourceFiles[0]
+  progress('structural @2057 if')
   if (receiverAnchor) {
     for (const name of [...typedArrayInstanceInterfaceNames, ...(input.standardClasses ?? [])]) {
       const symbol = compiled.checker.resolveName(name, receiverAnchor, ts.SymbolFlags.Interface, false)
@@ -2070,7 +2139,9 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
       if (declaration) nativeReceiverDeclarations.add(declaration)
     }
   }
+  progress('structural @2073 standardClassNames')
   const standardClassNames = input.standardClasses ?? new Set<string>()
+  progress('structural @2074 admitNativeConstructor')
   const admitNativeConstructor = (constructor: ts.Symbol | undefined, location: ts.Node): void => {
     const valueDeclaration = constructor?.valueDeclaration
     if (!constructor || !valueDeclaration || !isAmbientDeclaration(valueDeclaration)) return
@@ -2085,7 +2156,9 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
       if (declaration) nativeReceiverDeclarations.add(declaration)
     }
   }
+  progress('structural @2088 executableSourceFiles')
   const executableSourceFiles = new Set(compiled.sourceFiles)
+  progress('structural @2089 for')
   for (const file of compiled.program.getSourceFiles()) {
     if (executableSourceFiles.has(file)) {
       for (const name of standardClassNames) {
@@ -2117,6 +2190,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
       }
     }
   }
+  progress('structural @2120 native constructors done; censusGlobalHostMutations')
   // `absorb`, not a copy of the set: the census's per-key facts are not in
   // its legacy set view, and dropping them would lose writes.
   globalHostMutationTaint.absorb(
@@ -2148,6 +2222,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     )
   )
   hostMutationFactsSealed = true
+  progress('structural @2151 for')
   for (const [file, protocols] of compiled.sourceTransformProtocols ?? []) {
     const proof = intrinsicProtocols.capture(() => {
       for (const protocol of protocols) {
@@ -2168,6 +2243,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // protocol must not fall through to the replacement's host template.
     intrinsicProtocols.replace(protocols, proof.requirements)
   }
+  progress('structural @2171 installedGlobals')
   const installedGlobals = installedGlobalPropertiesOf(
     compiled.checker,
     identities,
@@ -2180,12 +2256,15 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     !globalHostMutationTaint.has('*'),
     census.candidates
   )
+  progress('structural @2183 for')
   for (const [access, declaration] of installedGlobals.accesses) installedGlobalProperties.set(access, declaration)
+  progress('structural @2184 for')
   for (const declaration of installedGlobals.declarations) {
     ownedGlobalProperties.add(declaration)
     hosts.externals.delete(declaration)
     hosts.externalFiles.delete(declaration)
   }
+  progress('structural @2189 failedIntrinsicRequirements')
   const failedIntrinsicRequirements = failedIntrinsicProtocolRequirements(intrinsicPropertyContext, intrinsicProtocols.requirements())
   // `GEA_LEDGER_DEBUG=1` pairs with the publish-time `[LEDGER]` lines
   // `createDeferredIntrinsicProtocolLedger`'s `replace` prints for every scope:
@@ -2194,6 +2273,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // point the compiler itself asks -- the same `failedIntrinsicProtocolRequirements`
   // call the certification gate uses, so nothing here can disagree with the
   // real answer; it only narrates it.
+  progress('structural @2197 if')
   if (process.env['GEA_LEDGER_DEBUG'] !== undefined) {
     const clauses = new Map<string, number>()
     for (const requirement of failedIntrinsicRequirements) {
@@ -2217,6 +2297,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
       `[LEDGER-SUMMARY] failed=${failedIntrinsicRequirements.length} clauses=${[...clauses].map(([clause, count]) => `${clause}:${count}`).join(',')}`
     )
   }
+  progress('structural @2220 intrinsicProtocolDiagnostics')
   const intrinsicProtocolDiagnostics: DiagnosticEvidence[] = failedIntrinsicRequirements.map((requirement, ordinal) => {
     const file = requirement.location.getSourceFile()
     const position = file.getLineAndCharacterOfPosition(requirement.location.getStart(file))
@@ -2245,21 +2326,35 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
       location: { file: file.fileName, line: position.line + 1, column: position.character + 1 }
     }
   })
+  progress('structural @2248 promiseDeclaration')
   const promiseDeclaration = promiseDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
+  progress('structural @2249 promiseLikeDeclaration')
   const promiseLikeDeclaration = promiseLikeDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
+  progress('structural @2250 dateDeclaration')
   const dateDeclaration = dateDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
+  progress('structural @2251 stringObjectDeclaration')
   const stringObjectDeclaration = stringObjectDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
+  progress('structural @2252 errorDeclarations')
   const errorDeclarations = errorDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
+  progress('structural @2253 functionDeclaration')
   const functionDeclaration = functionDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
+  progress('structural @2254 constructorSlotSubclasses')
   const constructorSlotSubclasses = constructorSlotSubclassesOf(compiled.checker, identities, compiled.sourceFiles, classHeritage)
+  progress('structural @2255 uninstantiableClasses')
   const uninstantiableClasses = uninstantiableClassesOf(compiled.checker, identities, compiled.sourceFiles)
+  progress('structural @2256 interfaceImplementors')
   const interfaceImplementors = interfaceImplementorsOf(compiled.checker, identities, compiled.sourceFiles)
+  progress('structural @2257 generatorDeclaration')
   const generatorDeclaration = generatorDeclarationEarly
+  progress('structural @2258 asyncGeneratorDeclaration')
   const asyncGeneratorDeclaration = asyncGeneratorDeclarationEarly
+  progress('structural @2259 mapIteratorDeclaration')
   const mapIteratorDeclaration = mapIteratorDeclarationEarly
   // Resolved the same way and for the same reason as `keyedCollections` above.
+  progress('structural @2261 regexpDeclarations')
   const regexpDeclarations = regexpDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
   timing.mark('structural-and-host-censuses')
+  progress('structural @2263 normalized')
   const normalized = normalizeProgram({
     census,
     types: table,

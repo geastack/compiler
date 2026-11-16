@@ -178,6 +178,8 @@ const VALUE_ORIGIN = 'source-value-origin'
 const VALUE_ORIGIN_DOMAIN: readonly string[] = [VALUE_ORIGIN]
 const NO_DOMAINS: readonly string[] = []
 const NO_CAUSES: readonly never[] = []
+const NO_ITERATION_WRITES: readonly never[] = []
+const WIP_SOLVER_BASE = process.env['GEA_SOLVER_AB'] === 'base' // WIP-SOLVER-TIMING: not for commit
 const CARRIES_VALUE = 1
 const SEEDED = 2
 /**
@@ -1359,6 +1361,31 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     if (paired === undefined) patternContainers.set(reads, (paired = reads.map((element) => [element, bindingContainer(element)] as const)))
     return paired
   }
+  /**
+   * The same pairs filed under their binding container: `key-uses` asks
+   * `holdersOf` for the containers that hold the object, as `key-reads` does
+   * for named reads, instead of `observe`-ing the container of every
+   * destructuring read of the key in the program on every re-evaluation of
+   * every object it can hold. Positions keep the list's order, which is the
+   * order the scan this replaces visited them in.
+   */
+  const patternReadsByContainer = new Map<readonly ts.BindingElement[], Map<Query, number[]>>()
+  const patternReadsByContainerOf = (reads: readonly ts.BindingElement[]): Map<Query, number[]> => {
+    let byContainer = patternReadsByContainer.get(reads)
+    if (byContainer !== undefined) return byContainer
+    patternReadsByContainer.set(reads, (byContainer = new Map()))
+    const paired = patternContainersOf(reads)
+    for (let position = 0; position < paired.length; position++) {
+      const holder = paired[position]![1]
+      if (holder === null) continue
+      let positions = byContainer.get(holder)
+      if (positions === undefined) byContainer.set(holder, (positions = []))
+      positions.push(position)
+      // Found by `holdersOf` only once it exists, as `key-reads` seeds its receivers.
+      seed(holder)
+    }
+    return byContainer
+  }
   const bindingContainer = (element: ts.BindingElement): Query | null => {
     const holder = element.parent.parent
     if (ts.isParameter(holder)) return holder.dotDotDotToken ? null : nodeQuery('parameter', holder)
@@ -1934,6 +1961,36 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   // them runs once per array-literal re-evaluation over every such write, and
   // unwrapping and interning the same source again each time was most of it.
   let valueIterationWrites: readonly (readonly [(typeof flow.allWrites)[number], Query])[] | null = null
+  /**
+   * The same writes filed under their source's value query, so an array
+   * literal asks `holdersOf` for the sources that hold it instead of
+   * `observe`-ing every `for...of` source in the program. Positions keep
+   * `valueIterationWrites`' order, the order the scan this replaces used.
+   */
+  let valueIterationsBySource: Map<Query, number[]> | null = null
+  const valueIterationsHolding = (
+    container: Value,
+    holdersOf: (fact: Value) => Iterable<Query>
+  ): readonly (readonly [(typeof flow.allWrites)[number], Query])[] => {
+    const writes = (valueIterationWrites ??= flow.allWrites
+      .filter((write) => write.iterationOrigin?.mode === 'values')
+      .map((write) => [write, value(write.iterationOrigin!.source)] as const))
+    if (valueIterationsBySource === null) {
+      valueIterationsBySource = new Map()
+      for (let position = 0; position < writes.length; position++) {
+        const source = writes[position]![1]
+        let positions = valueIterationsBySource.get(source)
+        if (positions === undefined) valueIterationsBySource.set(source, (positions = []))
+        positions.push(position)
+        seed(source)
+      }
+    }
+    const found: number[] = []
+    for (const holder of holdersOf(container)) for (const position of valueIterationsBySource.get(holder) ?? NO_POSITIONS) found.push(position)
+    if (found.length === 0) return NO_ITERATION_WRITES
+    found.sort((a, b) => a - b)
+    return found.map((position) => writes[position]!)
+  }
   /**
    * The part of `case 'callers'` that no fact can move: which candidate sites
    * are syntax-and-checker matches for `owner`. `new Factory( state )` on a
@@ -4720,18 +4777,31 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           // left `const { app } = p; sink(app)` out of the inventory, which is
           // a hole in a closure proof, not a missing capability.
           for (const reads of [patternReadsByKey.get(key), unknownPatternReads])
-            if (reads !== undefined)
+            if (reads !== undefined && WIP_SOLVER_BASE)
               for (const [element, holder] of patternContainersOf(reads)) {
                 if (holder === null || !observe(holder).has(container)) continue
                 if (element.dotDotDotToken || bindingElementKey(element) === null) fail('unmodelled-container-read', element)
                 else for (const reference of referencesOf(element)) facts.add(reference)
               }
+            else if (reads !== undefined && reads.length > 0) {
+              const byContainer = patternReadsByContainerOf(reads)
+              const found: number[] = []
+              for (const holder of holdersOf(container)) for (const position of byContainer.get(holder) ?? NO_POSITIONS) found.push(position)
+              found.sort((a, b) => a - b)
+              for (const position of found) {
+                const element = reads[position]!
+                if (element.dotDotDotToken || bindingElementKey(element) === null) fail('unmodelled-container-read', element)
+                else for (const reference of referencesOf(element)) facts.add(reference)
+              }
+            }
           if (ts.isArrayLiteralExpression(container) && (key === ELEMENT_KEY || isCanonicalIndex(key)))
-            for (const [write, source] of (valueIterationWrites ??= flow.allWrites
-              .filter((write) => write.iterationOrigin?.mode === 'values')
-              .map((write) => [write, value(write.iterationOrigin!.source)] as const))) {
+            for (const [write, source] of WIP_SOLVER_BASE
+              ? (valueIterationWrites ??= flow.allWrites
+                  .filter((write) => write.iterationOrigin?.mode === 'values')
+                  .map((write) => [write, value(write.iterationOrigin!.source)] as const))
+              : valueIterationsHolding(container, holdersOf)) {
               const origin = write.iterationOrigin!
-              if (!observe(source).has(container)) continue
+              if (WIP_SOLVER_BASE && !observe(source).has(container)) continue
               if (origin.asynchronous || deferredIntrinsicProtocolLedgerOf(flow)?.require('Array', origin.source) !== true) {
                 fail('unproven-array-iteration', write.site)
                 continue

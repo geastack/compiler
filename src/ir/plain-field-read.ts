@@ -3,6 +3,7 @@ import type { ClassLayout } from '../projection/classes.js'
 import { classMemberOf, recordAccessorsOfShape, recordFieldsOfShape } from '../projection/fields.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import { borrowSafeOperationsOf, type PlainFieldRead } from './borrow-effects.js'
+import type { CodeFreeFieldRead } from './field-read-reuse.js'
 import type { GetOperation, IrBody } from './model.js'
 import { nativeData } from './write-effects.js'
 
@@ -42,12 +43,22 @@ export const plainFieldReadOf =
  * host method. A getter is a property read too, and it can push onto the array
  * a loop walks; `ir/hoist.ts` asks this before treating a read as touching no
  * array.
+ *
+ * `plainFieldRead` judges the receiver's own type, and a record viewed as that
+ * type reads through its origin: a `Box` whose `min` is a data field still
+ * runs a getter when the box is a live view of a shape that answers `min` with
+ * one. `codeFreeFieldRead` (`field-read-reuse.ts`) knows every key some getter
+ * of the program answers, so a field read must satisfy both.
  */
-export const codeFreeGetOf = (body: IrBody, plainFieldRead: PlainFieldRead): ((operation: GetOperation) => boolean) => {
+export const codeFreeGetOf = (
+  body: IrBody,
+  plainFieldRead: PlainFieldRead,
+  codeFreeFieldRead: CodeFreeFieldRead
+): ((operation: GetOperation) => boolean) => {
   let safe: ReturnType<typeof borrowSafeOperationsOf> | null = null
   return (operation) => {
     if (operation.hostMethod !== undefined || nativeData(operation.receiver.representation)) return true
-    safe ??= borrowSafeOperationsOf(body, new Set(), plainFieldRead)
+    safe ??= borrowSafeOperationsOf(body, new Set(), (receiver, key) => plainFieldRead(receiver, key) && codeFreeFieldRead(receiver, key))
     return safe.has(operation)
   }
 }

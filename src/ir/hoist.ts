@@ -168,7 +168,11 @@ export const loopInvariantHoistsOf = (
   copiedCapture: (declaration: DeclarationId) => boolean = () => false,
   settledCapture: (declaration: DeclarationId) => boolean = () => false,
   codeFreeStore: (operation: SetOperation) => boolean = () => false,
-  codeFreeGet: (operation: GetOperation) => boolean = codeFreeGetOf(body, () => false)
+  codeFreeGet: (operation: GetOperation) => boolean = codeFreeGetOf(
+    body,
+    () => false,
+    () => false
+  )
 ): HoistPlan => {
   // A try region renders as one `try { } catch { }` chunk assembled from
   // several blocks at once, so a relocation into or out of one has no single
@@ -362,12 +366,70 @@ export const loopInvariantHoistsOf = (
     return mutated
   }
 
+  /**
+   * The field keys a loop stores through, or `null` when it may store any:
+   * a computed key, a call that is not a pure native one, a read that can run
+   * a getter. An element store into an Array or a typed view writes no field.
+   */
+  const storedKeys = new WeakMap<ReadonlySet<IrBlockId>, ReadonlySet<string> | null>()
+  let neutralCalls: ReadonlySet<IrNonTerminatorOperation> | null = null
+  const fieldKeysStoredBy = (blocks: ReadonlySet<IrBlockId>): ReadonlySet<string> | null => {
+    if (storedKeys.has(blocks)) return storedKeys.get(blocks) ?? null
+    const keys = new Set<string>()
+    const scan = (): ReadonlySet<string> | null => {
+      for (const blockId of blocks)
+        for (const operation of body.blocks.get(blockId)?.operations ?? []) {
+          if (storageNeutralKinds.has(operation.kind) || isNumberWidthConversion(operation) || isPresenceConversion(operation)) continue
+          if (operation.kind === 'get') {
+            if (codeFreeGet(operation)) continue
+            return null
+          }
+          if (operation.kind === 'set') {
+            const receiver = operation.receiver.representation.kind
+            if (receiver === 'typed-array' || receiver === 'array-object') continue
+            const text = constantTexts.get(operation.key.value)
+            if (text === undefined) return null
+            keys.add(text)
+            continue
+          }
+          if (operation.kind === 'call') {
+            neutralCalls ??= borrowSafeOperationsOf(body)
+            if (neutralCalls.has(operation)) continue
+          }
+          return null
+        }
+      return keys
+    }
+    const found = scan()
+    storedKeys.set(blocks, found)
+    return found
+  }
+
+  /**
+   * A data field read the loop cannot change: no getter answers it
+   * (`codeFreeGet`) and nothing in the loop stores that key. A quad writer
+   * reads its corner arrays off `this` on every turn, and each read stood
+   * between the typed view and a window over it. A field is not array storage,
+   * so a loop that writes arrays may still move it.
+   */
+  const settledFieldRead = (operation: IrNonTerminatorOperation, blocks: ReadonlySet<IrBlockId>): boolean => {
+    if (operation.kind !== 'get') return false
+    const receiver = operation.receiver.representation.kind
+    if (receiver !== 'class-ref' && receiver !== 'record' && receiver !== 'native-record-ref') return false
+    const key = constantTexts.get(operation.key.value)
+    if (key === undefined || !codeFreeGet(operation)) return false
+    const stored = fieldKeysStoredBy(blocks)
+    return stored !== null && !stored.has(key)
+  }
+
   const relocated = new Set<IrValueId>()
   const into = new Map<IrBlockId, IrNonTerminatorOperation[]>()
 
   /** Whether this operation reads only, and reads only things that cannot move. */
   const isPureRead = (operation: IrNonTerminatorOperation, blocks: ReadonlySet<IrBlockId>): boolean => {
     if (operation.kind === 'constant') return true
+    // The body's receiver names one object for the whole call.
+    if (operation.kind === 'receiver') return true
     if (operation.kind === 'compute') {
       if (!pureOperators.has(operation.operator)) return false
       // Only a non-zero constant divisor: a narrowed `%` becomes an integer
@@ -391,7 +453,9 @@ export const loopInvariantHoistsOf = (
       // Array elements and immutable string builtins: a record or class receiver can
       // reach an accessor, which is a call, and a call is not something this
       // may run an extra time or in a different order.
-      return operation.receiver.representation.kind === 'array-object' || immutableStringRead(operation)
+      return (
+        operation.receiver.representation.kind === 'array-object' || immutableStringRead(operation) || settledFieldRead(operation, blocks)
+      )
     }
     return false
   }
@@ -428,7 +492,13 @@ export const loopInvariantHoistsOf = (
           // An element load and a `length` read both answer from storage this
           // loop may rewrite. `isPureRead` proved the handle invariant; this
           // proves the bytes behind it are too.
-          if (operation.kind === 'get' && !immutableStringRead(operation) && storageMutatedBy(loop)) continue
+          if (
+            operation.kind === 'get' &&
+            !immutableStringRead(operation) &&
+            !settledFieldRead(operation, loop.blocks) &&
+            storageMutatedBy(loop)
+          )
+            continue
           // A cell read moved ahead of the loop has to name a cell something
           // already assigned; a write that only happens AFTER the loop leaves
           // the variable uninitialized at the new position.

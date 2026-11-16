@@ -10,6 +10,7 @@ import type { RepresentationDeriver } from '../representation/derive.js'
 import { representationKey, type CallableAbi, type Representation } from '../representation/model.js'
 import type { HostSpellings } from '../targets/cpp/host/host-members.js'
 import { publishDenseLoopPlan } from './dense-loops.js'
+import { codeFreeFieldReadOf } from './field-read-reuse.js'
 import { plainFieldReadOf } from './plain-field-read.js'
 import { hostNamespaceReadsOf } from './host-namespace-reads.js'
 import { allOperationsOf, type GetOperation, type IrBody, type IrOperation } from './model.js'
@@ -179,6 +180,7 @@ export const publishConversionRecipes = (input: PublishConversionRecipesInput): 
     : undefined
   const virtualFrames = settledVirtualCallFramesOf(input.bodies.values(), input.classes, input.conversions)
   const plainFieldRead = plainFieldReadOf(input.classes, input.deriver)
+  const codeFreeFieldRead = codeFreeFieldReadOf(input.bodies.values(), input.classes, input.deriver)
   const hostMethodAliases = buildHostMethodAliasIndex([...input.bodies.values()], input.placements, input.hosts)
   const bodies = new Map<PhysicalBodyId, IrBody>()
   for (const [id, body] of nativeBodies) {
@@ -291,7 +293,10 @@ export const publishConversionRecipes = (input: PublishConversionRecipesInput): 
         }
       ])
     )
-    bodies.set(id, publishDenseLoopPlan({ ...body, blocks, hostNamespaceCensus }, input.placements, input.conversions, plainFieldRead))
+    bodies.set(
+      id,
+      publishDenseLoopPlan({ ...body, blocks, hostNamespaceCensus }, input.placements, input.conversions, plainFieldRead, codeFreeFieldRead)
+    )
   }
   const needsReadProof = [...bodies.values()].some((body) =>
     [...body.blocks.values()].some((block) =>
