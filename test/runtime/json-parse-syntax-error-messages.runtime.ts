@@ -66,6 +66,8 @@
 //! expect: "\"a\nb\"" dynamic SyntaxError: Bad control character in string literal in JSON at position 2 (line 1 column 3)
 //! expect: "\"a\u0000b\"" dynamic SyntaxError: Bad control character in string literal in JSON at position 2 (line 1 column 3)
 //! expect: "\"\\x\"" dynamic SyntaxError: Bad escaped character in JSON at position 2 (line 1 column 3)
+//! expect: "\"\\Ā\"" dynamic SyntaxError: Unexpected token 'Ā', ""\Ā"" is not valid JSON
+//! expect: "\"\\é\"" dynamic SyntaxError: Bad escaped character in JSON at position 2 (line 1 column 3)
 //! expect: "\"\\u12G4\"" dynamic SyntaxError: Bad Unicode escape in JSON at position 5 (line 1 column 6)
 //! expect: "\"\\u12\"" dynamic SyntaxError: Bad Unicode escape in JSON at position 5 (line 1 column 6)
 //! expect: "\"\\uzz00\"" dynamic SyntaxError: Bad Unicode escape in JSON at position 3 (line 1 column 4)
@@ -124,6 +126,7 @@
 //! expect: "{\"a\":tru1}" point SyntaxError: Unexpected number in JSON at position 8 (line 1 column 9)
 //! expect: "{\"b\":nul\"x\",\"a\":1}" point SyntaxError: Unexpected string in JSON at position 8 (line 1 column 9)
 //! expect: "{\"b\":fals-1,\"a\":1}" point SyntaxError: Unexpected number in JSON at position 9 (line 1 column 10)
+//! expect: "{\"b\":\"\\Ā\",\"a\":1}" point SyntaxError: Unexpected token 'Ā', "{"b":"\Ā","a":1}" is not valid JSON
 //! expect: "{bad" point SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
 //! expect: "{" point SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
 //! expect: "{\"a\"" point SyntaxError: Expected ':' after property name in JSON at position 4 (line 1 column 5)
@@ -157,6 +160,7 @@
 //! expect: "[1e]" numbers SyntaxError: Exponent part is missing a number in JSON at position 3 (line 1 column 4)
 //! expect: "[-]" numbers SyntaxError: No number after minus sign in JSON at position 2 (line 1 column 3)
 //! expect: "[\"a\u0001\"]" numbers SyntaxError: Bad control character in string literal in JSON at position 3 (line 1 column 4)
+//! expect: "[\"\\Ā\"]" numbers SyntaxError: Unexpected token 'Ā', "["\Ā"]" is not valid JSON
 //! expect: "[1,2,3,4,5,6,7,8,9,10,11,]" numbers SyntaxError: Unexpected token ']', ..."8,9,10,11,]" is not valid JSON
 //! expect: "{\"a\":1,}" numbers SyntaxError: Expected double-quoted property name in JSON at position 7 (line 1 column 8)
 //! expect: "{bad" numbers SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
@@ -280,6 +284,8 @@ const dynamic = [
   '"a\nb"',
   '"a\u0000b"',
   '"\\x"',
+  '"\\Ā"',
+  '"\\é"',
   '"\\u12G4"',
   '"\\u12"',
   '"\\uzz00"',
@@ -342,6 +348,7 @@ const points = [
   '{"a":tru1}',
   '{"b":nul"x","a":1}',
   '{"b":fals-1,"a":1}',
+  '{"b":"\\Ā","a":1}',
   '{bad',
   '{',
   '{"a"',
@@ -379,6 +386,7 @@ const arrays = [
   '[1e]',
   '[-]',
   '["a\u0001"]',
+  '["\\Ā"]',
   '[1,2,3,4,5,6,7,8,9,10,11,]',
   '{"a":1,}',
   '{bad',
