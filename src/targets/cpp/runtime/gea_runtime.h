@@ -49976,6 +49976,12 @@ class Reader {
     unexpectedToken();
   }
 
+  [[noreturn]] void badEscape() const {
+    constexpr unsigned char utf8LeadAboveLatin1 = 0xC4;
+    if (static_cast<unsigned char>(data_[pos_]) >= utf8LeadAboveLatin1) unexpectedToken();
+    malformed("Bad escaped character");
+  }
+
   /** The byte at the cursor must open a key. V8 words the first key of an object and a key after a comma differently; `advance` records which one this is, and consuming a `{` clears it. */
   void expectKey() {
     if (peek() == '"') return;
@@ -50371,7 +50377,7 @@ class Reader {
         }
         default:
           --pos_;
-          malformed("Bad escaped character");
+          badEscape();
       }
       const std::size_t run = pos_;
       pos_ = jsonStringScan(data_, size_, pos_);
@@ -50420,7 +50426,7 @@ class Reader {
       if (escape != '"' && escape != '\\' && escape != '/' && escape != 'b' && escape != 'f' && escape != 'n' && escape != 'r' &&
           escape != 't') {
         ++pos_;
-        malformed("Bad escaped character");
+        badEscape();
       }
       pos_ += 2;
     }
