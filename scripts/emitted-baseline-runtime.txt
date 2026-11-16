@@ -238,7 +238,7 @@ clone-copy-source-record-through-callback.runtime.js.cpp 60dd3ee5e9f4
 clone-copy-source-record-through-detached-call.runtime.js.cpp fa5d102d773e
 clone-copy-source-record-through-helper.runtime.js.cpp e4c8275ec013
 clone-copy-source-record-through-holder.runtime.js.cpp 16edd4fc2cb5
-clone-idiom-family-dispatch.runtime.js.cpp 12eaed3fb007
+clone-idiom-family-dispatch.runtime.js.cpp dee1d8bb6801
 clone-idiom-override-narrows-copy-source.runtime.js.cpp 15417ded1ff5
 clone-idiom-unallocated-base-override-narrows-copy-source.runtime.js.cpp 1c0b6479f8fe
 clone-through-each-subclass-copy-override.runtime.js.cpp 42fae7bcefe7
@@ -588,13 +588,15 @@ generic-split-copy-into-its-any-copy.runtime.ts.cpp 0f2b8a5ce279
 generic-state-function-array.ts.cpp c3ffd99f0f0b
 generic-subclass-constructor-is-not-implicit.ts.cpp fb8389d23861
 generic-three-level-chain-this-call-reaches-own-base-copy.runtime.ts.cpp 3f2a7fe47033
+getter-pushed-into-a-record-array-runs-at-each-read.runtime.ts.cpp 7e9b76774417
+getter-viewed-as-number-field-converts-its-answer.runtime.ts.cpp 0991c924c25a
 global-var-constructor-reassigned.ts.cpp c87f01aa977a
 global-var-constructor-redefined-through-global-object.ts.cpp e26c41a7e85a
 globalthis-as-optional-record.ts.cpp 638f3223434b
 globalthis-constructor-entry-reads-present-value.ts.cpp 4e793ba72eee
 globalthis-reads-a-script-var.ts.cpp 3306aee52063
 grouped-carrier-field-read.runtime.js.cpp 8ec3a4336d41
-grouped-field-read.runtime.js.cpp d50798f45a6e
+grouped-field-read.runtime.js.cpp 6d0d1f9e520e
 guard-proven-union-arm-keeps-unchecked-get.runtime.ts.cpp 867aee60a55f
 guarded-member-call-integer-result-rewritten.runtime.ts.cpp 1dd419a9a4d9
 guarded-member-call-integer-result.runtime.ts.cpp f968f10d1b2c
@@ -782,6 +784,8 @@ logical-object-union-falsy-absence.ts.cpp 5540183785bc
 loop-getter-that-pushes-keeps-the-length-live.runtime.ts.cpp b84758b11870
 loop-invariant-ref-argument.ts.cpp 13b32e0863b3
 loop-move-single-use.ts.cpp 3ec4d20f6579
+loop-reads-a-settled-field-once.runtime.ts.cpp 1334a4e49efa
+loop-view-getter-that-pushes-keeps-the-length-live.runtime.ts.cpp dae5dfef1822
 map-callback-any-tuple-rebuilt-into-a-stated-position.runtime.ts.cpp c9d6babc6bee
 map-entries-into-iterable-iterator-frame-field.runtime.ts.cpp 0a7cf18e9274
 map-get-or-install-list-keeps-the-install-branch.runtime.ts.cpp 74230e210b5c
@@ -1094,7 +1098,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp 2a67d2df0367
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 1274df4e8af2
-printer-drift.txt 3b1c91c26717
+printer-drift.txt e0fb90c27fc2
 private-names-are-not-own-properties.ts.cpp 862d394b5f45
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp 3a9f81f60107
@@ -1143,6 +1147,7 @@ readonly-tuple-literal-into-union-with-string-array.runtime.ts.cpp 8bf1f41ef2ea
 recast-record-keeps-required-presence.runtime.ts.cpp 3a60f724a78c
 receiver-ignored-construct.ts.cpp dc03276b835c
 record-attributes-constant-unless-frozen.runtime.ts.cpp 62a5b8080b4d
+record-compared-with-optional-of-same-record.ts.cpp 7725d2b26926
 record-conversions-are-unit-functions.runtime.ts.cpp 07e74d452668
 record-field-narrowed-to-buffer-is-dead.ts.cpp 59abbb3d5de0
 record-index-sidecar.ts.cpp de8dba2d5528
@@ -1186,7 +1191,7 @@ regexp-sticky-zero-length.ts.cpp cd5918880b5b
 regexp-test-coerces-its-argument.ts.cpp d3fa27e6e776
 regexp-utf16-coordinate.ts.cpp 277a05920f0f
 regexp-word-boundary-range-start.ts.cpp ed928302ee08
-repeated-construction.ts.cpp d28978d1d7ee
+repeated-construction.ts.cpp 26d3844ff1ee
 repeated-field-reads-reuse-the-first-read.runtime.ts.cpp aa4ee824da05
 repeated-union-selection-reuses-the-dominating-one.runtime.ts.cpp a5e5d879a11b
 rest-array-of-any-spread-into-a-null-absent-parameter.runtime.ts.cpp dc577b078473
@@ -1277,7 +1282,7 @@ straight-line-char-code-reads-share-one-layout.runtime.ts.cpp 5063fdfffbe2
 strict-delete-module-exports.ts.cpp a81b21476c26
 strict-delete.ts.cpp ef9ca218f404
 strict-equality-between-tagged-unions.runtime.ts.cpp b57396f0b325
-strided-typed-writes-take-one-view.runtime.ts.cpp 4950d9c65068
+strided-typed-writes-take-one-view.runtime.ts.cpp 5a0cb033678f
 string-and-regexp-walks-over-long-mixed-width-text.runtime.ts.cpp c407e4eaa5c1
 string-array-into-set-or-any-array-parameter.runtime.ts.cpp 1caf8f5148f9
 string-field-append.ts.cpp 355d0d91a5b2
@@ -1341,7 +1346,7 @@ tuple-rest-abi.ts.cpp bea27486515b
 tuple-typed-rest-spread.runtime.js.cpp e7a417ae168c
 tuple-view-over-json-array-stores-native-entry-in-its-lane.runtime.ts.cpp 2fddcb8fc9f9
 type-guard-intersection-of-family-member.ts.cpp 661ea9625410
-type-only-class-reflection.runtime.js.cpp 17eaeddb5a46
+type-only-class-reflection.runtime.js.cpp 10dc55b7e209
 type-only-specifier-import-does-not-evaluate.runtime.ts.cpp abf3f82ec297
 type-predicate-batch-operations-keep-their-storage.runtime.ts.cpp 5d42210bcab6
 type-query-escapes.ts.cpp 02bb929534a0
@@ -1431,7 +1436,7 @@ untyped-code-writes-method-record-into-typed-field.runtime.ts.cpp b74b4609ec75
 untyped-listener-through-any-receiver-reads-event-fields.runtime.ts.cpp d22ba19d89b3
 untyped-map-into-document-or-unknown-map-parameter.runtime.ts.cpp 44b333dcf2fa
 untyped-map-returned-as-typed-map.runtime.ts.cpp 501f490f63a3
-untyped-parameter-called-with-a-subclass-then-its-base-holds-the-base.runtime.js.cpp 9c89003207de
+untyped-parameter-called-with-a-subclass-then-its-base-holds-the-base.runtime.js.cpp d13512a98491
 unused-subclass-is-pruned.ts.cpp 0ad01066274a
 value-record-literal-union.ts.cpp d4ae8a517d83
 view-target-member-store-takes-the-plain-member.runtime.ts.cpp 5f96b5717b1a

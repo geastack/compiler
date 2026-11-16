@@ -11079,6 +11079,17 @@ class ArrayBuffer {
     size_ = heap_.size();
   }
 
+  /** Tag for the borrowing constructor below. */
+  struct Borrowed {};
+
+  /**
+   * Views a block the host owns and keeps alive for as long as any view of it
+   * can run -- a display's scanout framebuffer, which an app renders into in
+   * place instead of into a copy. The buffer never frees it; growing (which no
+   * view of a fixed block does) or transferring copies it out first.
+   */
+  ArrayBuffer(Borrowed, std::uint8_t* bytes, std::size_t byteLength) noexcept : data_(bytes), size_(byteLength) {}
+
   ArrayBuffer(const ArrayBuffer&) = delete;
   ArrayBuffer& operator=(const ArrayBuffer&) = delete;
   ArrayBuffer(ArrayBuffer&&) = delete;
@@ -11097,7 +11108,7 @@ class ArrayBuffer {
     requireAttached();
     std::vector<std::uint8_t> result;
     if (usingHeap_) result = std::move(heap_);
-    else result.assign(inline_, inline_ + size_);
+    else result.assign(data_, data_ + size_);
     size_ = 0;
     data_ = inline_;
     usingHeap_ = false;
@@ -11117,7 +11128,7 @@ class ArrayBuffer {
   /** `TextEncoder::encode`'s upfront sizing: grows capacity to at least `requested` in place while it still fits inline, else moves (once) to the `vector` fallback -- the one path an ArrayBuffer's byte count ever grows through; a `new ArrayBuffer(n)` itself never resizes (see the class comment above). */
   void reserve(std::size_t requested) {
     requireAttached();
-    if (!usingHeap_ && requested <= kInlineCapacity) return;
+    if (!usingHeap_ && data_ == inline_ && requested <= kInlineCapacity) return;
     migrateToHeap();
     heap_.reserve(requested);
     data_ = heap_.data();
@@ -11129,7 +11140,7 @@ class ArrayBuffer {
     requireAttached();
     const std::size_t offset = static_cast<std::size_t>(position - data_);
     const std::size_t count = static_cast<std::size_t>(last - first);
-    if (!usingHeap_ && size_ + count <= kInlineCapacity) {
+    if (!usingHeap_ && data_ == inline_ && size_ + count <= kInlineCapacity) {
       if (offset != size_) std::memmove(inline_ + offset + count, inline_ + offset, size_ - offset);
       for (std::size_t written = 0; written < count; ++written, ++first) inline_[offset + written] = static_cast<std::uint8_t>(*first);
       size_ += count;
@@ -11151,7 +11162,7 @@ class ArrayBuffer {
 
   void migrateToHeap() {
     if (usingHeap_) return;
-    heap_.assign(inline_, inline_ + size_);
+    heap_.assign(data_, data_ + size_);
     usingHeap_ = true;
   }
 

@@ -1144,15 +1144,30 @@ const stepOf = (
 ): IrOperand | null | undefined => {
   const compute = operationOf.get(written.value)
   if (compute?.kind !== 'compute') return undefined
+  // An `i32`/`int` counter's advance reads the cell through the widening view
+  // to a plain Number before `++` -- exact, so still the counter itself.
+  const readsCounter = (operand: IrOperand): boolean => {
+    if (readsCell.get(operand.value) === counter) return true
+    const view = operationOf.get(operand.value)
+    return (
+      view?.kind === 'convert' &&
+      view.source.representation.kind === 'scalar' &&
+      view.source.representation.integerWidth !== undefined &&
+      view.result.representation.kind === 'scalar' &&
+      view.result.representation.domain === 'number' &&
+      view.result.representation.integerWidth === undefined &&
+      readsCell.get(view.source.value) === counter
+    )
+  }
   if (compute.form === 'update') {
     const target = compute.operands[0]
-    return target && readsCell.get(target.value) === counter && compute.operator === '++' ? null : undefined
+    return target && readsCounter(target) && compute.operator === '++' ? null : undefined
   }
   if (compute.form !== 'binary' || compute.operator !== '+') return undefined
   const [left, right] = compute.operands
   if (!left || !right) return undefined
-  if (readsCell.get(left.value) === counter) return right
-  if (readsCell.get(right.value) === counter) return left
+  if (readsCounter(left)) return right
+  if (readsCounter(right)) return left
   return undefined
 }
 

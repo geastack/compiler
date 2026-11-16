@@ -1195,6 +1195,25 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
     lines.push(`${defineValue(ctx, operation.result)} = ${dynamicComparison};`)
     return
   }
+  // A host data struct crosses by value (`derive.ts`: data-only bound bodies are
+  // `owned`), so every assignment copies it and no copy keeps the object's
+  // identity. `===` between two of them has no answer to spell; comparing the
+  // fields would call two distinct objects equal.
+  const ownedHostStruct = (carrier: Representation): boolean => {
+    const value = carrier.kind === 'optional' ? carrier.payload : carrier
+    return value.kind === 'native-record-ref' && value.ownership === 'owned' && value.native !== null
+  }
+  if (
+    identitySpelling &&
+    representationKey(firstCarrier) !== representationKey(secondCarrier) &&
+    (ownedHostStruct(firstCarrier) || ownedHostStruct(secondCarrier))
+  ) {
+    throw createCppEmitBlockedError(
+      `conversion:${representationKey(first.representation)}->${representationKey(second.representation)}`,
+      `binary "${operation.operator}" compares a host struct held by value, which carries no object identity; ` +
+        'track which object is held another way (a flag or an index)'
+    )
+  }
   if (representationKey(first.representation) !== representationKey(second.representation)) {
     throw createCppEmitBlockedError(
       `conversion:${representationKey(first.representation)}->${representationKey(second.representation)}`,
