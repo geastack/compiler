@@ -804,21 +804,6 @@ export const createLayoutTypeResolver = (
     if (!symbol || !declaration) return null
 
     const declared = checker.getTypeOfSymbolAtLocation(symbol, declaration)
-    // `Array.isArray(value)` narrows a value declared `any`/`unknown` to
-    // `any[]`.  That is a control-flow fact about the ONE dynamic value, not
-    // an allocation or an element-wise conversion.  Returning the declared
-    // dynamic type keeps its `gea::Value` carrier, so the predicate's live
-    // branch uses Value's recorded Array exotic hooks in place.  Deriving the
-    // checker's `any[]` here would instead select `ArrayObject<Value>` and
-    // force a dynamic-to-native array materialization: a differently typed
-    // native array would be copied, and aliases through the original dynamic
-    // value would stop observing indexed writes, deletes, and length changes.
-    //
-    // This is deliberately limited to a declared dynamic source AND the
-    // checker's `any[]` result above.  A typed union's sole Array arm still
-    // takes the arm-selection path below and remains a native array; no
-    // statically typed array is routed through Value.
-    if ((declared.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return declared
     const arms = declared.isUnion() ? declared.types : [declared]
     // A `ReadonlyArray<T>` arm is an Array at runtime -- `Array.isArray` is
     // true for it -- though it is not assignable to the mutable `any[]` the

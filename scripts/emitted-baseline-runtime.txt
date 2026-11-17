@@ -19,6 +19,7 @@ any-cast-this-member-call-dispatches-over-the-receiver-classes.runtime.ts.cpp 97
 any-dictionary-into-named-interface.runtime.ts.cpp d23a03415e2d
 any-generic-binding-takes-its-consumer-representation.runtime.ts.cpp 6ad9137c3060
 any-member-of-a-typed-record-into-inferred-field.runtime.js.cpp 3e47039febab
+any-narrowed-by-isarray-reads-through-a-live-array-view.runtime.ts.cpp bae81e54ac02
 any-object-literal-accessors-enumerate-through-get.runtime.ts.cpp 17611b8f6302
 any-record-union-arm-into-interface-parameter.runtime.ts.cpp dbd1d41109b3
 any-sourced-null-into-optional-class-field.runtime.ts.cpp 924eebbd38f8
@@ -50,7 +51,7 @@ array-literal-asserted-narrower-keeps-its-own-elements.runtime.ts.cpp 131a15d3ea
 array-logical-receiver-with-dynamic-this.runtime.ts.cpp 5ebba3e75c80
 array-multiple-windows.ts.cpp e34dc4ba5882
 array-mutator-frozen-integrity.ts.cpp 3053c797d3d5
-array-narrowed-box-method-call-keeps-receiver.runtime.ts.cpp a8b181a079ef
+array-narrowed-box-method-call-keeps-receiver.runtime.ts.cpp 3a2dc3bc186d
 array-object-call-argument-aliasing.ts.cpp d61d7a1c5ca8
 array-pattern-defaults-keep-positions.ts.cpp e6488ea25180
 array-pattern-elision-over-generator.ts.cpp af2437109d7c
@@ -140,7 +141,7 @@ bound-method-read-of-a-this-stating-field.runtime.ts.cpp 4ebfcb88ecad
 bound-methods-into-promiselike-then.runtime.ts.cpp f1fc8e8a8461
 bound-rest-method-packs-fixed-interface-arguments.runtime.ts.cpp 630fcb15ae9f
 boxed-byte-block-property-test.runtime.ts.cpp d95715e00743
-boxed-date-narrowed-by-instanceof-calls-its-method.runtime.ts.cpp 21c5665f12f3
+boxed-date-narrowed-by-instanceof-calls-its-method.runtime.ts.cpp 05bd49405c68
 boxed-date-reads-absent-member.runtime.ts.cpp 6f3b0e14384d
 boxed-live-view-enumerates-the-original.runtime.js.cpp f4c73b2754bb
 boxed-payload-scope.ts.cpp 3593bf832bd1
@@ -371,7 +372,7 @@ downcast-method-read-absent-on-other-arm.ts.cpp 9db8adb41515
 drift.txt 3984cc4302df
 dynamic-array-absent-element.ts.cpp 8e609a6e13c0
 dynamic-array-literal-gather.runtime.js.cpp 60a83cabf76e
-dynamic-array-projection.ts.cpp 1eae2374ff84
+dynamic-array-projection.ts.cpp fa171c8fb6c0
 dynamic-array-rebuild-keeps-holes-and-order.runtime.ts.cpp cb536c6de47c
 dynamic-bag-method-call-behind-property-guard.runtime.js.cpp b1041fd75d09
 dynamic-call-argument-views-the-callers-record-and-array.runtime.js.cpp cced05d95c0f
@@ -630,7 +631,7 @@ identified-callable-moves.runtime.ts.cpp 5b1f34ef5a68
 implicit-arguments-actual-frame.runtime.js.cpp 79f827c69dfe
 implicit-arguments-number.js.cpp 6d574394fa32
 implicit-arguments-returned-member.js.cpp 546662efc5d2
-in-boxed-key-over-string-dictionary.ts.cpp ac82d0e7c309
+in-boxed-key-over-string-dictionary.ts.cpp 74ee6c48fa8c
 in-boxed-key.ts.cpp 14990bb803ed
 in-dynamic-key-on-guarded-open-interface.runtime.ts.cpp aed9a88ec648
 in-over-error-or-interface-extending-error.runtime.ts.cpp da25cd375bfa
@@ -941,7 +942,7 @@ nested-callback-field-initializer.runtime.ts.cpp a7ea118831ce
 nested-dynamic-operand-roles.ts.cpp 81256627015a
 nested-generic-construct-alias-filling.runtime.ts.cpp 03ee42a65aa2
 nested-generic-construct-object-filling.runtime.ts.cpp 0fabe864e62a
-nested-literal-in-document-array-reads-absent-member.runtime.ts.cpp d02151c9bcfc
+nested-literal-in-document-array-reads-absent-member.runtime.ts.cpp f78bdf8145b9
 nested-typed-array-union-narrowing.ts.cpp 164db4c8da23
 nested-union-arm-recast-keeps-inner-discriminant.ts.cpp 862de1d7b109
 never-arm-conditional-merge.ts.cpp 314bc90e6d70
@@ -1424,7 +1425,7 @@ unknown-narrowed-by-instanceof-date-unboxes-to-native-date.runtime.ts.cpp ae1189
 unknown-narrowed-by-instanceof-host-types-unboxes-natively.runtime.ts.cpp becc7d0ff336
 unknown-narrowed-by-instanceof-map-unboxes-to-native-map.runtime.ts.cpp ac6df54ee60f
 unknown-narrowed-by-instanceof-regexp-unboxes-to-native-pattern.runtime.ts.cpp e8403cd7f2a1
-unknown-narrowed-by-typeof-and-isarray-reads-natively.runtime.ts.cpp 6bf82f4688c1
+unknown-narrowed-by-typeof-and-isarray-reads-natively.runtime.ts.cpp ea396ca871de
 unknown-valued-dictionary-parameter-takes-its-argument-dictionary.runtime.ts.cpp 85fc40245f27
 unshared-array-fresh-factory.ts.cpp 30c3c4a7fda3
 unshared-array-read-only-argument.ts.cpp 38feb9c26ad1
