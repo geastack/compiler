@@ -630,6 +630,7 @@ hook-receives-arguments-its-declaration-omits.runtime.ts.cpp aacab816e248
 hook-replacements-narrower-than-the-call-receive-every-argument.runtime.ts.cpp 2dc9e465bde0
 host-accessor-call-through-module-helper.runtime.ts.cpp 896b1bb48c49
 host-function-call-through-captured-binding.runtime.ts.cpp f87680874941
+host-function-value-over-a-union-parameter.runtime.ts.cpp 7825efc4ba5e
 host-method-alias.runtime.js.cpp 61ceae313c3d
 host-method-read-as-value.ts.cpp 7b8e740796c1
 host-number-and-string-as-callback-values.runtime.ts.cpp ee76a340c6ec
