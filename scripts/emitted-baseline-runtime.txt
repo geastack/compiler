@@ -675,6 +675,7 @@ instanceof-else-arm-narrowed-to-never-is-not-converted.runtime.ts.cpp 414e64f72f
 instanceof-error-over-boxed-error-subclass.runtime.ts.cpp 0a264d21327a
 instanceof-error-over-error-subclass-union-arm.runtime.ts.cpp 9d1e8c940a2d
 instanceof-error-over-union-carrier.ts.cpp 95bfad61f527
+instanceof-over-a-value-held-as-a-native-record.runtime.ts.cpp b48747dc64bb
 instanceof-over-union-with-record-arm-after-a-boxed-callable.runtime.ts.cpp b80385a10e75
 instanceof-over-union-with-record-arm-after-an-empty-literal.runtime.ts.cpp d5cc729e30f1
 instanceof-over-union-with-record-arm-after-boxed-tuples.runtime.ts.cpp c89f0f42a0c6
