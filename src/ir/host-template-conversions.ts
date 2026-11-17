@@ -10,6 +10,7 @@ import { canonicalIndexLiteral } from '../representation/array-index.js'
 import { isNativeCallableCarrier } from '../representation/callable-object.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import { storedCarrier } from '../representation/primitives.js'
+import { isNativeError } from '../representation/prototype-domains.js'
 import { hostReceiverProtocolOf } from '../representation/host-templates.js'
 import { isCanonicalNumberPropertyKeyText, representationKey, type RecordField, type Representation } from '../representation/model.js'
 import { hostMemberOf, type HostSpellings } from '../targets/cpp/host/host-members.js'
@@ -404,10 +405,11 @@ export const hostObjectWalkPlanOf = (
     const target = source.kind === 'optional' ? source.payload : source
     const shared = 'ownership' in target && target.ownership === 'shared-refcount'
     const fields = knownFieldsOf(deriver, target)
+    const boxed = target.kind === 'dynamic' || isNativeError(target)
     const targets =
       target.kind === 'dictionary'
         ? [target.value]
-        : target.kind === 'dynamic'
+        : boxed
           ? []
           : shared && fields !== null
             ? [
@@ -421,7 +423,7 @@ export const hostObjectWalkPlanOf = (
       for (const operand of operation.arguments.slice(1))
         for (const value of leavesOf(operand.representation))
           if (knownFieldsOf(deriver, value) !== null && 'ownership' in value && value.ownership === 'shared-refcount')
-            admit(value, target.kind === 'dynamic' ? 'assign:dynamic' : `assign:${representationKey(target)}`, targets)
+            admit(value, boxed ? 'assign:dynamic' : `assign:${representationKey(target)}`, targets)
   }
   if (source !== undefined && host.member === 'getOwnPropertyDescriptor') {
     const into = descriptorValueOf(deriver, result)

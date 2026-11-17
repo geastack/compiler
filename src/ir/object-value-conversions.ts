@@ -1,13 +1,14 @@
 import type { ConversionNodeId } from '../conversion/algebra.js'
 import type { ConversionCensus } from '../conversion/nodes.js'
 import { isNativeCallableCarrier } from '../representation/callable-object.js'
+import { isNativeError } from '../representation/prototype-domains.js'
 import { recordFieldsOfShape } from '../projection/fields.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import { representationKey, type Representation, type RecordField } from '../representation/model.js'
 import type { IrOperand } from './model.js'
 
 export interface ObjectValueConversionInput {
-  readonly role: 'descriptor-value' | 'callable-property'
+  readonly role: 'descriptor-value' | 'callable-property' | 'error-property'
   readonly argument: number
   readonly field: string
   readonly source: Representation
@@ -59,10 +60,12 @@ export const objectValueConversionInputsOf = (
     ]
   }
   const target = args[0]?.representation
-  if (intrinsic !== 'object-assign' || !target || !isNativeCallableCarrier(target.kind)) return []
+  if (intrinsic !== 'object-assign' || !target) return []
+  const role = isNativeCallableCarrier(target.kind) ? 'callable-property' : isNativeError(target) ? 'error-property' : null
+  if (role === null) return []
   return args.slice(1).flatMap((argument, index) =>
     fieldsOf(argument.representation).map((field) => ({
-      role: 'callable-property',
+      role,
       argument: index + 1,
       field: field.key,
       source: field.value,

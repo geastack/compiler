@@ -32395,7 +32395,11 @@ bool copyOwnPropertiesInCreationOrder(const gea::Ref<T>& source, Each&& each, bo
   if constexpr (detail::NativeFieldTable<T>) {
     if (source && (always || detail::NativeOwnAccessors<T> || detail::findNativeOwnKeyOrder(source.get()) != nullptr ||
                    detail::copiesThroughNativeView(source))) {
-      for (const PropertyKey& key : nativeEnumerableStringKeys(source)) each(key.text(), nativeDynamicGet(source, key));
+      for (const PropertyKey& key : nativeOwnPropertyKeys(source)) {
+        if (key.isSymbol()) continue;
+        const Optional<PropertyDescriptor> descriptor = nativeOwnPropertyDescriptor(source, key);
+        if (descriptor.has_value() && descriptor->enumerable) each(key.text(), nativeDynamicGet(source, key));
+      }
       return true;
     }
   } else {
