@@ -987,6 +987,7 @@ nullable-json-and-non-null-asserted-date.runtime.ts.cpp 1b47ad0da5d6
 nullish-assignment-constant-proves-the-cell-present.runtime.ts.cpp 5b75f9c1d5af
 nullish-iterable-parameter-default-array.runtime.ts.cpp d4ed9762b52b
 nullish-union.ts.cpp b208230d1908
+number-format-exact-ties-round-up.runtime.ts.cpp 1dd31f0d3a83
 number-keyed-index-signature-with-any-key.runtime.ts.cpp b17bf98adbfd
 number-of-class-with-value-of.runtime.ts.cpp 25713a7a7bac
 number-predicates-over-a-dynamic-argument.runtime.ts.cpp f7c30578b103
