@@ -243,6 +243,8 @@ const instanceofTaggedUnionMapText = (
  * composite renderers above already claim those keys, and routing them here
  * would move their output.
  */
+const nativeRecordInstanceProtocols: readonly string[] = ['DateConstructor', 'RegExpConstructor']
+
 const compositeNativeInstanceProtocols: ReadonlySet<string> = new Set([
   ...errorConstructorNames.keys(),
   'RegExpConstructor',
@@ -468,6 +470,7 @@ export const cppInstanceofHelperKeys: ReadonlySet<string> = new Set([
     `computation:instanceof:optional:native-handle(${protocol})`,
     `computation:instanceof:tagged-union:native-handle(${protocol})`
   ]),
+  ...nativeRecordInstanceProtocols.map((protocol) => `computation:instanceof:native-record-ref:native-handle(${protocol})`),
   // `v instanceof <program class>` -- `constructorFamilyInstanceofText`'s own
   // three renderable left shapes.
   ...constructorFamilyLeftKinds.map((left) => `computation:instanceof:${left}:constructor-family`),
@@ -668,6 +671,9 @@ export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOpera
   ) {
     return compositeNativeInstanceText(ctx, left, constructor.protocol)
   }
+  if (left.representation.kind === 'native-record-ref' && nativeRecordInstanceProtocols.includes(constructor.protocol)) {
+    return nativeInstanceLeafText(ctx, constructor.protocol, left.representation, operandText(ctx, left))
+  }
   if (typedArrayConstructorDomains.has(constructor.protocol)) {
     if (recipe === undefined)
       throw createCppEmitBlockedError(
@@ -687,11 +693,11 @@ export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOpera
   }
   if (isNativeError(left.representation)) return `(${operandText(ctx, left)})->instanceOf("${name}")`
   if (left.representation.kind !== 'dynamic') {
-    // A statically typed left operand is a question the checker already
-    // answered, and answering it again from a carrier would be a second
-    // authority over the same fact -- one that cannot see the narrowing the
-    // checker performed. Refused until the constant folding is written where
-    // the proof lives.
+    // A statically typed left operand other than a native record is a
+    // question the checker already answered, and answering it again from a
+    // carrier would be a second authority over the same fact -- one that
+    // cannot see the narrowing the checker performed. Refused until the
+    // constant folding is written where the proof lives.
     throw createCppEmitBlockedError(
       `runtime-helper:computation:instanceof:${left.representation.kind}:native-handle(${constructor.protocol})`,
       `"instanceof" over a "${representationKey(left.representation)}" left operand is settled by the checker, and this backend renders only the boxed test`
