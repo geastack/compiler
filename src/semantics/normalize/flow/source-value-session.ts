@@ -1986,7 +1986,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       }
     }
     const found: number[] = []
-    for (const holder of holdersOf(container)) for (const position of valueIterationsBySource.get(holder) ?? NO_POSITIONS) found.push(position)
+    for (const holder of holdersOf(container))
+      for (const position of valueIterationsBySource.get(holder) ?? NO_POSITIONS) found.push(position)
     if (found.length === 0) return NO_ITERATION_WRITES
     found.sort((a, b) => a - b)
     return found.map((position) => writes[position]!)
@@ -4786,7 +4787,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             else if (reads !== undefined && reads.length > 0) {
               const byContainer = patternReadsByContainerOf(reads)
               const found: number[] = []
-              for (const holder of holdersOf(container)) for (const position of byContainer.get(holder) ?? NO_POSITIONS) found.push(position)
+              for (const holder of holdersOf(container))
+                for (const position of byContainer.get(holder) ?? NO_POSITIONS) found.push(position)
               found.sort((a, b) => a - b)
               for (const position of found) {
                 const element = reads[position]!

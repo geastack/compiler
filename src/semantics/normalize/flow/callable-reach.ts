@@ -2038,7 +2038,14 @@ const closedMemberCallableUses = (
         wipEscapes.set(label, (wipEscapes.get(label) ?? 0) + 1)
       }
       if (sharedStats.ungrounded % 200000 === 0)
-        console.error('[WIP-ESCAPES]\n' + [...wipEscapes].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([label, count]) => `  ${count} ${label}`).join('\n'))
+        console.error(
+          '[WIP-ESCAPES]\n' +
+            [...wipEscapes]
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, 12)
+              .map(([label, count]) => `  ${count} ${label}`)
+              .join('\n')
+        )
     }
     if ((shareable?.(computed.value) ?? true) && (computed.value !== null || (grounded && refusalMemoEnabled))) {
       const recorded: (readonly [ts.Expression, OpenUseKind])[] = []

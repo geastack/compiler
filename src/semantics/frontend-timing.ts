@@ -23,9 +23,7 @@ export const progressed = <T>(label: string, action: () => T): T => {
     return action()
   } finally {
     const used = process.cpuUsage(cpu)
-    progress(
-      `${label} done in ${((performance.now() - start) / 1000).toFixed(1)}s (cpu ${((used.user + used.system) / 1e6).toFixed(1)}s)`
-    )
+    progress(`${label} done in ${((performance.now() - start) / 1000).toFixed(1)}s (cpu ${((used.user + used.system) / 1e6).toFixed(1)}s)`)
   }
 }
 

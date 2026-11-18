@@ -43,7 +43,10 @@ interface OpenedFile {
 type FlagTable = Record<string, Record<string, number>>
 
 const isHandle = (value: unknown): value is Handle =>
-  typeof value === 'object' && value !== null && !Array.isArray(value) && ('n' in value || 't' in value || 's' in value || 'g' in value || 'o' in value)
+  typeof value === 'object' &&
+  value !== null &&
+  !Array.isArray(value) &&
+  ('n' in value || 't' in value || 's' in value || 'g' in value || 'o' in value)
 
 const pascal = (name: string): string => name.charAt(0).toUpperCase() + name.slice(1)
 
@@ -62,7 +65,10 @@ export const tsgoTypeScript = (real: Ts): Ts => {
     const text = koffi.decode(pointer, 'char', -1)
     nativeFree(pointer)
     const value = JSON.parse(text) as T
-    if (typeof value === "object" && value !== null && "error" in value) throw new Error(`tsgo ${String(request["method"] ?? request["field"] ?? request["op"])}: ${String((value as { error: unknown }).error)}`)
+    if (typeof value === 'object' && value !== null && 'error' in value)
+      throw new Error(
+        `tsgo ${String(request['method'] ?? request['field'] ?? request['op'])}: ${String((value as { error: unknown }).error)}`
+      )
     return value
   }
 
@@ -559,7 +565,12 @@ export const tsgoTypeScript = (real: Ts): Ts => {
   // ---- checker ----
   // Methods whose arguments carry TypeScript enum values typescript-go numbers differently.
   const argumentAdapters: Record<string, (args: unknown[]) => unknown[]> = {
-    resolveName: ([name, location, meaning, excludeGlobals]) => [name, location, corsaFlags('SymbolFlags', meaning as number), excludeGlobals],
+    resolveName: ([name, location, meaning, excludeGlobals]) => [
+      name,
+      location,
+      corsaFlags('SymbolFlags', meaning as number),
+      excludeGlobals
+    ],
     getSymbolsInScope: ([location, meaning]) => [location, corsaFlags('SymbolFlags', meaning as number)],
     getNullableType: ([type, flags]) => [type, corsaFlags('TypeFlags', flags as number)],
     typeToString: ([type]) => [type],
@@ -597,12 +608,14 @@ export const tsgoTypeScript = (real: Ts): Ts => {
     if (value instanceof TsgoSymbol) return `symbol(${value.name}@${(value.declarations ?? []).map(declarationLabel).join('|')})`
     if (value instanceof TsgoSignature) return `signature(${declarationLabel(value.declaration)})`
     const record = value as Record<string, unknown>
-    if ('kind' in record && 'pos' in record) return `${real.SyntaxKind[record['kind'] as number]}@${declarationLabel(value as TypeScript.Node)}`
+    if ('kind' in record && 'pos' in record)
+      return `${real.SyntaxKind[record['kind'] as number]}@${declarationLabel(value as TypeScript.Node)}`
     if ('escapedName' in record && 'flags' in record) {
       const symbol = value as TypeScript.Symbol
       return `symbol(${symbol.name}@${(symbol.declarations ?? []).map(declarationLabel).join('|')})`
     }
-    if ('parameters' in record && 'declaration' in record) return `signature(${declarationLabel((value as TypeScript.Signature).declaration)})`
+    if ('parameters' in record && 'declaration' in record)
+      return `signature(${declarationLabel((value as TypeScript.Signature).declaration)})`
     if ('flags' in record && 'checker' in record) {
       const reference = comparisonChecker() as unknown as TypeScript.TypeChecker
       return `type(${reference.typeToString(value as TypeScript.Type)})`
@@ -620,7 +633,9 @@ export const tsgoTypeScript = (real: Ts): Ts => {
       return (...args: unknown[]): unknown => {
         const result = callOn('checker', method, adapt ? adapt(args) : args)
         const reference = comparisonChecker()
-        const nodeOnly = args.every((arg) => arg === undefined || typeof arg !== 'object' || (arg !== null && 'kind' in arg && 'pos' in arg))
+        const nodeOnly = args.every(
+          (arg) => arg === undefined || typeof arg !== 'object' || (arg !== null && 'kind' in arg && 'pos' in arg)
+        )
         const real = reference?.[key]
         if (!nodeOnly || typeof real !== 'function') return result
         let expected: unknown
@@ -635,7 +650,8 @@ export const tsgoTypeScript = (real: Ts): Ts => {
           const key2 = `${key}: ${theirs} -> ${mine}`
           const count = (comparisonMismatches.get(key2) ?? 0) + 1
           comparisonMismatches.set(key2, count)
-          if (count === 1) console.error(`[tsgo-compare] ${key}(${args.map((arg) => summarize(arg, 'ts')).join(', ')}): ts ${theirs} | tsgo ${mine}`)
+          if (count === 1)
+            console.error(`[tsgo-compare] ${key}(${args.map((arg) => summarize(arg, 'ts')).join(', ')}): ts ${theirs} | tsgo ${mine}`)
         }
         return result
       }
@@ -685,7 +701,8 @@ export const tsgoTypeScript = (real: Ts): Ts => {
       } else if (key === 'jsx') out[key] = enumName(real.JsxEmit as unknown as Record<number, string>, value)
       else if (key === 'newLine') continue
       else if (key === 'lib') continue
-      else if (typeof value === 'boolean' || typeof value === 'string' || Array.isArray(value) || typeof value === 'number') out[key] = value
+      else if (typeof value === 'boolean' || typeof value === 'string' || Array.isArray(value) || typeof value === 'number')
+        out[key] = value
       else if (typeof value === 'object') out[key] = value
     }
     // Every file the TypeScript program holds is a root below, libraries included.
@@ -731,10 +748,13 @@ export const tsgoTypeScript = (real: Ts): Ts => {
     objectOfId = new Map()
     if (process.env['GEA_TSGO_DEBUG']) {
       const missing = files.filter((_file, index) => !stradaFiles[index]).map((file) => file.name)
-      console.error(`[tsgo] opened ${files.length} files (${missing.length} without a TypeScript twin: ${missing.slice(0, 3).join(', ')}), generation ${generation}`)
+      console.error(
+        `[tsgo] opened ${files.length} files (${missing.length} without a TypeScript twin: ${missing.slice(0, 3).join(', ')}), generation ${generation}`
+      )
       const corsaNames = new Set(files.map((file) => normalizedPath(file.name)))
       const lonely = sources.filter((source) => !corsaNames.has(normalizedPath(absolute(source.fileName)))).map((source) => source.fileName)
-      if (lonely.length > 0) console.error(`[tsgo] ${lonely.length} TypeScript files typescript-go did not load: ${lonely.slice(0, 3).join(', ')}`)
+      if (lonely.length > 0)
+        console.error(`[tsgo] ${lonely.length} TypeScript files typescript-go did not load: ${lonely.slice(0, 3).join(', ')}`)
     }
   }
 
@@ -792,7 +812,8 @@ export const tsgoTypeScript = (real: Ts): Ts => {
     if (process.env['GEA_TSGO_COMPARE'])
       for (const [label, count] of [...comparisonMismatches].sort((a, b) => b[1] - a[1]).slice(0, 25))
         console.error(`[tsgo-compare-summary] ${count}x ${label.slice(0, 260)}`)
-    if (process.env['GEA_TSGO_DEBUG']) console.error(`[tsgo] ${stats.calls} bridge calls; unmapped ${JSON.stringify(Object.fromEntries(unmappedKinds))}`)
+    if (process.env['GEA_TSGO_DEBUG'])
+      console.error(`[tsgo] ${stats.calls} bridge calls; unmapped ${JSON.stringify(Object.fromEntries(unmappedKinds))}`)
   })
 
   return new Proxy(real, {

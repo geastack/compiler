@@ -1269,16 +1269,18 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // alive across the boundary raised the peak from 7 GB to 11 GB.
     const built =
       upstream && !process.env['GEA_FLOW_CENSUS_OFF']
-        ? progressed('  round: value-flow index', () => indexValueFlow(
-            compiled.checker,
-            compiled.sourceFiles,
-            reachable,
-            censusTypeVia(upstream),
-            upstream.callDeclarationAt,
-            upstream.callTargetsAt,
-            buildIsStrict,
-            upstream.explicitThisAt
-          ))
+        ? progressed('  round: value-flow index', () =>
+            indexValueFlow(
+              compiled.checker,
+              compiled.sourceFiles,
+              reachable,
+              censusTypeVia(upstream),
+              upstream.callDeclarationAt,
+              upstream.callTargetsAt,
+              buildIsStrict,
+              upstream.explicitThisAt
+            )
+          )
         : baseValueFlow
     // The round that settles the fixpoint rebuilds the very index the round
     // before it built (its census inputs no longer move), and that round's
@@ -1324,13 +1326,9 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     commonJsModuleRecords.attachToFlow(valueFlow)
     if (statedModules) attachStatedModuleSet(valueFlow, statedModules)
     if (scriptScope) attachClosedScriptScope(valueFlow, scriptScope)
-    const collectionsThisRound = progressed('  round: collection census', () => censusCollectionBindings(
-      compiled.checker,
-      compiled.sourceFiles,
-      reachable,
-      upstream ?? emptyParameterBindingCensus,
-      valueFlow
-    ))
+    const collectionsThisRound = progressed('  round: collection census', () =>
+      censusCollectionBindings(compiled.checker, compiled.sourceFiles, reachable, upstream ?? emptyParameterBindingCensus, valueFlow)
+    )
     // MOVED INSIDE the fixpoint, exactly as `collections` was, and the long
     // comment that used to sit below this loop explaining why it could not be
     // was WRONG. It argued that a bag's answer is an `ObjectBagShape` with no
@@ -1346,61 +1344,67 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // downstream of the cache's getter was dynamic behind that one refusal.
     const bagsThisRound = process.env['GEA_BAG_OFF']
       ? emptyObjectBagCensus
-      : progressed('  round: object-bag census', () => censusObjectBagBindings(compiled.checker, compiled.sourceFiles, reachable, upstream ?? emptyParameterBindingCensus, valueFlow))
-    const returnStage = progressed('  round: parameter and return censuses', () => composeReturnBindings(
-      compiled.checker,
-      compiled.sourceFiles,
-      reachable,
-      censusParameterBindings(
+      : progressed('  round: object-bag census', () =>
+          censusObjectBagBindings(compiled.checker, compiled.sourceFiles, reachable, upstream ?? emptyParameterBindingCensus, valueFlow)
+        )
+    const returnStage = progressed('  round: parameter and return censuses', () =>
+      composeReturnBindings(
         compiled.checker,
         compiled.sourceFiles,
         reachable,
-        upstream,
-        // `GEA_PARAM_INDEX_OFF` hands the census no index, so it builds its
-        // own -- which is what every round used to do. Kept the way
-        // `GEA_BAG_OFF` and `GEA_FLOW_CENSUS_OFF` are kept: the arms of the
-        // measurement that justified this have to stay runnable from one
-        // build, or the next person cannot check the claim.
-        process.env['GEA_PARAM_INDEX_OFF'] ? undefined : parameterIndex,
-        valueFlow,
-        specializations,
-        hostProvidedNames
-      ),
-      collectionsThisRound,
-      valueFlow,
-      bagsThisRound,
-      upstream,
-      commonJsModuleRecords
-    ))
-    const parameters = progressed('  round: field, local and storage views', () => withSharedArrayStorage(
-      compiled.checker,
-      compiled.sourceFiles,
-      reachable,
-      withJsDocTypeNames(
-        compiled.checker,
-        compiled.sourceFiles,
-        reachable,
-        withFieldBindings(
+        censusParameterBindings(
           compiled.checker,
           compiled.sourceFiles,
           reachable,
-          withLocalBindings(
+          upstream,
+          // `GEA_PARAM_INDEX_OFF` hands the census no index, so it builds its
+          // own -- which is what every round used to do. Kept the way
+          // `GEA_BAG_OFF` and `GEA_FLOW_CENSUS_OFF` are kept: the arms of the
+          // measurement that justified this have to stay runnable from one
+          // build, or the next person cannot check the claim.
+          process.env['GEA_PARAM_INDEX_OFF'] ? undefined : parameterIndex,
+          valueFlow,
+          specializations,
+          hostProvidedNames
+        ),
+        collectionsThisRound,
+        valueFlow,
+        bagsThisRound,
+        upstream,
+        commonJsModuleRecords
+      )
+    )
+    const parameters = progressed('  round: field, local and storage views', () =>
+      withSharedArrayStorage(
+        compiled.checker,
+        compiled.sourceFiles,
+        reachable,
+        withJsDocTypeNames(
+          compiled.checker,
+          compiled.sourceFiles,
+          reachable,
+          withFieldBindings(
             compiled.checker,
             compiled.sourceFiles,
             reachable,
-            returnStage.view,
+            withLocalBindings(
+              compiled.checker,
+              compiled.sourceFiles,
+              reachable,
+              returnStage.view,
+              collectionsThisRound,
+              valueFlow,
+              bagsThisRound,
+              upstream,
+              commonJsModuleRecords
+            ),
             collectionsThisRound,
-            valueFlow,
-            bagsThisRound,
-            upstream,
-            commonJsModuleRecords
-          ),
-          collectionsThisRound,
-          valueFlow
-        )
-      ),
-      valueFlow
-    ))
+            valueFlow
+          )
+        ),
+        valueFlow
+      )
+    )
     return { parameters, facts: { returns: returnStage.returns, collections: collectionsThisRound, bags: bagsThisRound, valueFlow } }
   }
   /**

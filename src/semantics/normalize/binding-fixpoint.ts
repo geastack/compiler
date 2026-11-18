@@ -176,7 +176,9 @@ export const settleBindingCensus = <Facts>(
     // this round's `facts` and the round's index/session graph is free the
     // moment `next` goes out of scope, unlike the old flow where the outer
     // `round` binding kept it reachable until being overwritten one line later.
-    progress(`census round ${rounds} ${changed ? 'changed' : 'settled'}: boundCount ${next.parameters.boundCount}${unsettled.length ? ` -- ${unsettled[0]?.slice(0, 200)}` : ''}`)
+    progress(
+      `census round ${rounds} ${changed ? 'changed' : 'settled'}: boundCount ${next.parameters.boundCount}${unsettled.length ? ` -- ${unsettled[0]?.slice(0, 200)}` : ''}`
+    )
     if (!changed) return { ...next, round: rounds }
     previousCensus = next.parameters
   }
