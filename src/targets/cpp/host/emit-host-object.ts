@@ -51,6 +51,7 @@ import {
   cppStringLiteral,
   cppTypeOf,
   cppUndefinedValue,
+  fieldPropertyKeyText,
   unitFunctionName
 } from '../types.js'
 import {
@@ -110,7 +111,7 @@ const dynamicCarrier: Representation = { kind: 'dynamic', reason: 'declared-any-
 const objectValueConversionText = (
   ctx: EmitContext,
   operation: CallOperation,
-  role: 'descriptor-value' | 'callable-property',
+  role: 'descriptor-value' | 'callable-property' | 'error-property',
   argument: number,
   field: string,
   source: Representation,
@@ -2859,6 +2860,71 @@ const assignIntoCallableText = (ctx: EmitContext, operation: CallOperation, targ
   return `([&]() { ${body} return ${targetText}; })()`
 }
 
+const assignIntoNativeErrorText = (ctx: EmitContext, operation: CallOperation, target: IrOperand): string => {
+  const result = operation.result?.representation
+  if (result !== undefined && representationKey(result) !== representationKey(target.representation)) {
+    throw createCppEmitBlockedError(
+      'host-member-call:Object.assign',
+      `"Object.assign" is typed "T & U" and this call's result carries "${representationKey(result)}", which is not the ` +
+        `native Error target's own "${representationKey(target.representation)}" -- the copy writes into the target and ` +
+        'returns it, so a result carrying anything else is a second answer this renderer may not invent'
+    )
+  }
+  const store = (key: string, value: string): string =>
+    `if (!gea::nativeDynamicSet(gea_assign_error, ${key}, ${value})) ` +
+    'gea::host::throwRuntimeError("TypeError", "Cannot assign to read only property");'
+  const copyText = (sourceView: ObjectView, sourceIndex: number, representation: Representation): string => {
+    if (sourceView.kind !== 'known')
+      return refuseObjectCarrier(
+        'assign',
+        representation,
+        'the target is a native Error, whose added properties this backend writes one key at a time, and only a source ' +
+          'whose own keys the checker knows is copied into one'
+      )
+    const storeText = (field: RecordField, snapshot: string | null = null): string => {
+      const value = getOwnValue(ctx, sourceView, field)
+      const boxed = objectValueConversionText(
+        ctx,
+        operation,
+        'error-property',
+        sourceIndex + 1,
+        field.key,
+        value.representation,
+        value.text
+      )
+      const presence = ownKeyPresenceText('assign', sourceView, field)
+      const enumerable = `${sourceView.receiver}${sourceView.accessor}${cppRecordFieldAttributesName(field.key)}.enumerable`
+      const condition = [snapshot, presence, enumerable].filter((term) => term !== null).join(' && ')
+      return `if (${condition}) ${store(fieldPropertyKeyText(field.key), boxed)}`
+    }
+    const fields = assignedKeyFields(ctx, sourceView)
+    const stringStores = fields.filter((field) => !field.key.startsWith('sym(')).map((field) => storeText(field))
+    const symbolFields = fields.filter((field) => field.key.startsWith('sym('))
+    const snapshots = symbolFields.map((field, at) => {
+      const presence = ownKeyPresenceText('assign', sourceView, field)
+      return presence === null ? null : { name: `gea_assign_had_${sourceIndex}_${at}`, presence }
+    })
+    const captured = snapshots.flatMap((snapshot) => (snapshot === null ? [] : [`const bool ${snapshot.name} = ${snapshot.presence};`]))
+    const symbolStores = symbolFields.map((field, at) => storeText(field, snapshots[at]?.name ?? null))
+    const creationOrdered = creationOrderedOwnCopyText(ctx, sourceView, 'assign:dynamic', (key, value) =>
+      store(`gea::PropertyKey::string(${key})`, value)
+    )
+    const strings = creationOrdered === null ? stringStores.join(' ') : `if (!${creationOrdered}) { ${stringStores.join(' ')} }`
+    return [...captured, strings, ...symbolStores].join(' ')
+  }
+  const copies = operation.arguments.slice(1).map((source, sourceIndex) => {
+    const representation = source.representation
+    if (representation.kind === 'null' || representation.kind === 'undefined') return ''
+    if (representation.kind !== 'optional') return copyText(objectViewOf(ctx, 'assign', source, 'source'), sourceIndex, representation)
+    const receiver = operandText(ctx, source)
+    const payload = objectViewFrom(ctx, 'assign', representation.payload, `(*(${receiver}))`, 'source')
+    return `if ((${receiver}).has_value()) { ${copyText(payload, sourceIndex, representation)} }`
+  })
+  const body = `const auto& gea_assign_error = ${operandText(ctx, target)}; ${copies.join(' ')}`
+  if (operation.result === null) return `([&]() { ${body} })()`
+  return `([&]() { ${body} return gea_assign_error; })()`
+}
+
 const assignText = (ctx: EmitContext, operation: CallOperation): string => {
   const native = nativeOwnAssignmentText(ctx, operation)
   if (native !== null) return native
@@ -2868,6 +2934,7 @@ const assignText = (ctx: EmitContext, operation: CallOperation): string => {
   if (sources.length === 0)
     throw createCppEmitBlockedError('host-member-call:Object.assign', '"Object.assign" takes a source object, and this call passes none')
   if (isNativeCallableCarrier(target.representation.kind)) return assignIntoCallableText(ctx, operation, target)
+  if (isNativeError(target.representation)) return assignIntoNativeErrorText(ctx, operation, target)
   const targetView = objectViewOf(ctx, 'assign', target, 'target')
   if (targetView.kind === 'known') {
     const result = operation.result?.representation

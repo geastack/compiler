@@ -988,6 +988,7 @@ object-assign-described-source-into-narrower-literal.runtime.ts.cpp 0bfdedbfd78a
 object-assign-dynamic-source-into-typed-dictionary.runtime.ts.cpp 4e11cb66c0c9
 object-assign-fresh-literal-into-document-return.runtime.ts.cpp 22072600c6f5
 object-assign-fresh-target-laid-out-as-intersection.runtime.ts.cpp c991848b367d
+object-assign-into-native-error.runtime.ts.cpp fbcf118987a5
 object-assign-literal-target-merges-optional-options.runtime.ts.cpp 5a1221baf802
 object-assign-native-error-into-class-instance.runtime.ts.cpp 4724cd41315a
 object-assign-record-into-any-document-field.runtime.ts.cpp 794dc0d895e1
