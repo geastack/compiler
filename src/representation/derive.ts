@@ -409,6 +409,40 @@ export const createRepresentationDeriver = (
   /** The carrier a *stored* position holds -- see `storedCarrier`. */
   const deriveStored = (id: StructuralTypeId): Representation => storedCarrier(derive(id))
   const isDataOnlyBody = (id: StructuralTypeId): boolean => isDataOnlyObjectShape(shapeOf(id), shapeOf)
+  const holdsOnlyData = (id: StructuralTypeId, visited: Set<StructuralTypeId> = new Set()): boolean => {
+    if (visited.has(id)) return true
+    visited.add(id)
+    const holds = (member: StructuralTypeId) => holdsOnlyData(member, visited)
+    const holdsFields = (members: readonly StructuralMember[]) => members.every((member) => member.accessor === null && holds(member.type))
+    const shape = shapeOf(id)
+    switch (shape?.kind) {
+      case 'primitive':
+        return shape.primitive !== 'any' && shape.primitive !== 'unknown'
+      case 'literal':
+      case 'unique-symbol':
+        return true
+      case 'union':
+      case 'intersection':
+        return shape.members.every(holds)
+      case 'array':
+        return holds(shape.element) && holdsFields(shape.extension)
+      case 'tuple':
+        return shape.elements.every((element) => holds(element.type))
+      case 'object':
+        return !shape.membersDropped && holdsFields(shape.members) && shape.index.every((index) => holds(index.value))
+      case 'declared':
+      case 'object-anchor':
+        return shape.body !== null && holds(shape.body)
+      default:
+        return false
+    }
+  }
+  const isDictionaryBody = (id: StructuralTypeId): boolean => {
+    const body = shapeOf(id)
+    if (body?.kind !== 'object' || body.membersDropped) return false
+    const index = dictionaryIndexOf(body)
+    return index !== null && holdsOnlyData(index.value)
+  }
 
   type RecursiveContainerSource =
     | {
@@ -2890,7 +2924,8 @@ export const createRepresentationDeriver = (
         // operations belong to the host whether or not this compiler was told
         // the type's spelling, and inventing a layout for it would be the
         // guess this rule exists to prevent.
-        const boundWithoutCarrier = bound !== null && !bound.native && shape.body !== null && isDataOnlyBody(shape.body)
+        const boundWithoutCarrier =
+          bound !== null && !bound.native && shape.body !== null && (isDataOnlyBody(shape.body) || isDictionaryBody(shape.body))
         if (bound && !boundWithoutCarrier) {
           const invocable = shape.body ? shapeOf(shape.body) : null
           const call = invocable?.kind === 'signature' ? hostInvocationAbiOf(invocable.call, 'overload') : null
