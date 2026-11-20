@@ -1,7 +1,7 @@
 // Corrected against real `node`, which prints `false` in the third position:
 // the index probed with `in` is a hole, and `in` answers absence for a hole.
 //! expect: 5,false,false,undefined,undefined,9,11
-//! emitted-has: gea::runtime::iterator::getIterator
+//! emitted-has: checkedNativeArrayView
 
 // `Array.isArray` proves the live dynamic value is an Array without turning
 // it into a fresh `ArrayObject<Value>`.  The aliases below must consequently
