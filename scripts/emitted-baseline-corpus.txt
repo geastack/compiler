@@ -13,7 +13,7 @@ await-basic.ts.cpp d869bea3b0f4
 bag-member-disjoint-writes.js.cpp d770a45c9bac
 base-placeholder-unknown.ts.cpp d984f1af772b
 bigint-constructor-repro.ts.cpp b64c33cb0d71
-bigint-native.ts.cpp 2583d5033e07
+bigint-native.ts.cpp 0e9b236cb9ea
 binding-carrier-repro.ts.cpp 212b3bf28bfa
 boxed-identity-round-trip.ts.cpp 47b28599856c
 branded-primitive.ts.cpp c79ac4d7f2d6
@@ -42,7 +42,7 @@ drift.txt c3f4533cb10a
 dynamic-assertion-store.ts.cpp 6cd631a4a3f2
 dynamic-instanceof-constructor-family.ts.cpp 7f7d1f03e4fa
 dynamic-json.ts.cpp 87a4d1f9cf54
-dynamic-optional-absence.ts.cpp 2df5538ad718
+dynamic-optional-absence.ts.cpp a0276de6e60b
 dynamic-to-discriminated-repro.ts.cpp 6d2ff867a266
 embedded-null-string.ts.cpp f7f5d62a0e55
 explicit-void-this.ts.cpp 9b9a6b7db59a
@@ -72,7 +72,7 @@ index-signature-only.ts.cpp 6d2ff867a266
 initializer-write-attribution-repro.js.cpp 67851e40f6d8
 instanceof-constructor-family-repro.ts.cpp 489410d681d7
 intersection-conditional-member.ts.cpp 0bfecd20e00e
-iterable-return-carrier.ts.cpp 8f6761d0ee2d
+iterable-return-carrier.ts.cpp dcb921fb33f1
 json-stringify-fill-aliasing.ts.cpp 712ce240c3a9
 jsx-class-component.tsx.cpp 682aff9672c8
 jsx-class-map.tsx.cpp beef6223dc75
@@ -160,7 +160,7 @@ typed-array-pcm-map.ts.cpp 6be973175056
 typeof-narrowed-union-field-store.js.cpp d6d1bc7773b9
 typeof-narrowed-union-field-store.ts.cpp eb4a9368fa4c
 uncertified.txt 48aa7816f45b
-uniform-value-union.ts.cpp aad84d3a4a42
+uniform-value-union.ts.cpp 2db3bc2b80d3
 uninhabited-intersection-branch.ts.cpp 0eb4281ae240
 uninstantiated-generic.ts.cpp 1621e1aebca3
 union-absent-class-arm.js.cpp 7b18a0bcb92b
