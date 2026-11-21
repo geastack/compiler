@@ -1221,6 +1221,7 @@ set-foreach-callback.runtime.ts.cpp d819ebe6cf91
 set-literal-membership-mutable-static-fields.runtime.ts.cpp 2708aff84ed8
 set-literal-membership.runtime.ts.cpp bbaccd679639
 set-of-documents-membership-by-identity.runtime.ts.cpp fadae2cc6983
+shadowed-override-narrowing-a-root-parameter.runtime.ts.cpp 9de94df78fe9
 shared-empty-record-escapes.ts.cpp a91de3ee07d1
 shared-empty-record-read-only.ts.cpp 5aba05ebd706
 single-ref-capture-accessor-stays-untransient.runtime.ts.cpp 8218c0e2a171
