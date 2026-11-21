@@ -761,7 +761,7 @@ jump-threading.ts.cpp e91fd0d24489
 key-order-cases.ts.cpp 961f34c2a391
 key-order-unobserved-record-copies-values-and-observed-chain-keeps-order.runtime.ts.cpp 27ed1a9bae4a
 keyed-collection-seeded-from-map-and-iterator.ts.cpp ec45bf09f48d
-keyed-table-and-union-array-reads-answer-once.runtime.ts.cpp 4da37034429c
+keyed-table-and-union-array-reads-answer-once.runtime.ts.cpp e8b063b0f32a
 last-transferring-use-moves-after-in-place-reads.runtime.ts.cpp 602083111415
 layout-copied-spread-of-a-live-view-copies-its-originals-fields.runtime.js.cpp ce18d3061140
 lazy-map-in-logical-or-assignment.ts.cpp 4c3cb932cc75
@@ -967,6 +967,7 @@ nullable-json-and-non-null-asserted-date.runtime.ts.cpp 1b47ad0da5d6
 nullish-assignment-constant-proves-the-cell-present.runtime.ts.cpp 5b75f9c1d5af
 nullish-iterable-parameter-default-array.runtime.ts.cpp d4ed9762b52b
 nullish-union.ts.cpp b208230d1908
+number-key-reads-a-string-index-signature.runtime.ts.cpp 2a95f7659291
 number-keyed-index-signature-with-any-key.runtime.ts.cpp b17bf98adbfd
 number-of-class-with-value-of.runtime.ts.cpp 25713a7a7bac
 number-predicates-over-a-dynamic-argument.runtime.ts.cpp f7c30578b103
@@ -1197,7 +1198,7 @@ repeated-union-selection-reuses-the-dominating-one.runtime.ts.cpp a5e5d879a11b
 rest-array-of-any-spread-into-a-null-absent-parameter.runtime.ts.cpp dc577b078473
 rest-forwarding-spread-argument.ts.cpp 314777777637
 rest-parameter-rebase.ts.cpp 749eb8d7d071
-rest-parameter-union-of-tuples-mixed.ts.cpp f213c18b2ff1
+rest-parameter-union-of-tuples-mixed.ts.cpp 64ee2f9267fd
 rest-parameter-union-of-tuples.ts.cpp 311f88b55805
 rest-tuple-element-union-keeps-every-member.ts.cpp dc31120d68c7
 rest-tuple-spread.ts.cpp 5a759a51e29e
@@ -1387,6 +1388,8 @@ typed-shared-view-preserves-numeric-field-writes.runtime.ts.cpp 8cf83a8d7336
 typed-shared-view-preserves-primitive-sidecar-aliases.runtime.ts.cpp d08063850b01
 typeof-runtime-string.ts.cpp a1cd939b5d70
 typeof-then-discriminates-a-union.ts.cpp 95b96f1f5dc0
+unannotated-local-index-read-flows-into-undefined-home.runtime.ts.cpp 3326170f5c0a
+unannotated-local-index-read-keeps-bare-carrier.runtime.ts.cpp 4eda017b13c2
 unbound-native-method-absence-transport.runtime.ts.cpp d11107879fc8
 unbound-native-method-receiver-observations.runtime.ts.cpp d087ffd7b6c1
 unbox-nullable-union.ts.cpp 28f62c3d4062
