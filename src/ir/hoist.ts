@@ -425,6 +425,15 @@ export const loopInvariantHoistsOf = (
   const relocated = new Set<IrValueId>()
   const into = new Map<IrBlockId, IrNonTerminatorOperation[]>()
 
+  const quietLoops = new Map<ReadonlySet<IrBlockId>, boolean>()
+  const runsNoOtherCodeOnce = (blocks: ReadonlySet<IrBlockId>): boolean => {
+    const known = quietLoops.get(blocks)
+    if (known !== undefined) return known
+    const quiet = runsNoOtherCode(blocks)
+    quietLoops.set(blocks, quiet)
+    return quiet
+  }
+
   /** Whether this operation reads only, and reads only things that cannot move. */
   const isPureRead = (operation: IrNonTerminatorOperation, blocks: ReadonlySet<IrBlockId>): boolean => {
     if (operation.kind === 'constant') return true
@@ -438,7 +447,12 @@ export const loopInvariantHoistsOf = (
     }
     if (operation.kind === 'binding-read') {
       if (isProgramConstant(operation.declaration)) return true
-      if (mayCaptureLocals) return false
+      // A closure that captured the cell writes it only when it runs, and a
+      // loop that runs no other code runs none. Refusing regardless kept every
+      // bound in a module body that declares any function re-read from its
+      // global each turn, and with the bound unnamed at the preheader
+      // `dense-loops.ts` refused every window.
+      if (mayCaptureLocals && !runsNoOtherCodeOnce(blocks)) return false
       // Invariant only while the loop writes the cell nowhere.
       return (cellWrites.get(operation.declaration) ?? []).every((write) => !blocks.has(write.block))
     }
