@@ -1389,7 +1389,7 @@ typed-shared-view-preserves-primitive-sidecar-aliases.runtime.ts.cpp d08063850b0
 typeof-runtime-string.ts.cpp a1cd939b5d70
 typeof-then-discriminates-a-union.ts.cpp 95b96f1f5dc0
 unannotated-local-index-read-flows-into-undefined-home.runtime.ts.cpp 3326170f5c0a
-unannotated-local-index-read-keeps-bare-carrier.runtime.ts.cpp 4af852dab835
+unannotated-local-index-read-keeps-bare-carrier.runtime.ts.cpp 4eda017b13c2
 unbound-native-method-absence-transport.runtime.ts.cpp d11107879fc8
 unbound-native-method-receiver-observations.runtime.ts.cpp d087ffd7b6c1
 unbox-nullable-union.ts.cpp 28f62c3d4062

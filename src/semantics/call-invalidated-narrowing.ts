@@ -1,4 +1,5 @@
 import ts from '#typescript'
+import { type Flow, FlowFlags, flowOf } from './flow-graph.js'
 import { NullableMemo } from './normalize/nullable-memo.js'
 
 /**
@@ -27,23 +28,6 @@ import { NullableMemo } from './normalize/nullable-memo.js'
  * narrowing the checker made.
  */
 
-// TypeScript exports its flow-graph flags at runtime but not in its
-// declarations; the graph itself (`flowNode`) is likewise internal.
-const FlowFlags = (
-  ts as unknown as {
-    readonly FlowFlags: Readonly<
-      Record<'Unreachable' | 'Start' | 'Label' | 'Assignment' | 'TrueCondition' | 'Condition' | 'SwitchClause', number>
-    >
-  }
-).FlowFlags
-
-type Flow = {
-  readonly flags: number
-  readonly antecedent?: Flow
-  readonly antecedents?: readonly Flow[]
-  readonly node?: ts.Node
-}
-
 type Target =
   | { readonly kind: 'property'; readonly name: string; readonly unknownWriters: boolean }
   | { readonly kind: 'binding'; readonly symbol: ts.Symbol }
@@ -54,8 +38,6 @@ type Contribution =
   | { readonly kind: 'declared' }
   | { readonly kind: 'condition'; readonly condition: ts.Expression; readonly assumeTrue: boolean; readonly inner: ts.Node | null }
   | { readonly kind: 'assignment'; readonly target: ts.Node }
-
-const flowOf = (node: ts.Node): Flow | undefined => (node as unknown as { readonly flowNode?: Flow }).flowNode
 
 const skipOuter = (node: ts.Node): ts.Node => {
   let current = node

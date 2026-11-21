@@ -1,4 +1,5 @@
 import ts from '#typescript'
+import { type Flow, FlowFlags, flowOf } from '../../flow-graph.js'
 import type { ValueFlowIndex } from '../flow/model.js'
 
 /**
@@ -117,7 +118,7 @@ export const dictionaryReadHeldBy = (
   const inner = withoutParentheses(expression)
   if (isDictionaryRead(checker, inner)) return inner
   const local = untypedLocalNamed(checker, inner)
-  if (local === null || visited.has(local)) return null
+  if (local === null || visited.has(local) || presentOnEveryPath(checker, inner)) return null
   const value = soleWriteOf(flow, local)
   return value === null ? null : dictionaryReadHeldBy(checker, flow, value, new Set([...visited, local]))
 }
@@ -140,6 +141,63 @@ export const flowsIntoUndefinedHome = (checker: ts.TypeChecker, node: ts.Express
   const contextual = checker.getContextualType(node)
   if (contextual === undefined) return false
   return includesUndefined(contextual) || (holdsUndefined(contextual) && untypedLocalWrittenBy(checker, node) === null)
+}
+
+const conditionExcludesUndefined = (checker: ts.TypeChecker, condition: ts.Expression, symbol: ts.Symbol, assumeTrue: boolean): boolean => {
+  const names = (node: ts.Expression): boolean => {
+    const inner = withoutParentheses(node)
+    return ts.isIdentifier(inner) && checker.getSymbolAtLocation(inner) === symbol
+  }
+  const tested = withoutParentheses(condition)
+  if (names(tested)) return assumeTrue
+  if (!ts.isBinaryExpression(tested)) return false
+  const operator = tested.operatorToken.kind
+  const strict = operator === ts.SyntaxKind.EqualsEqualsEqualsToken || operator === ts.SyntaxKind.ExclamationEqualsEqualsToken
+  const loose = operator === ts.SyntaxKind.EqualsEqualsToken || operator === ts.SyntaxKind.ExclamationEqualsToken
+  if (!strict && !loose) return false
+  const negated = operator === ts.SyntaxKind.ExclamationEqualsEqualsToken || operator === ts.SyntaxKind.ExclamationEqualsToken
+  const left = withoutParentheses(tested.left)
+  const right = withoutParentheses(tested.right)
+  const typeofUndefined = (operand: ts.Expression, other: ts.Expression): boolean =>
+    ts.isTypeOfExpression(operand) && names(operand.expression) && ts.isStringLiteralLike(other) && other.text === 'undefined'
+  const absentValue = (other: ts.Expression): boolean => {
+    const flags = checker.getTypeAtLocation(other).flags
+    return (flags & ts.TypeFlags.Undefined) !== 0 || (loose && (flags & ts.TypeFlags.Null) !== 0)
+  }
+  const comparesAbsence =
+    typeofUndefined(left, right) ||
+    typeofUndefined(right, left) ||
+    (names(left) && absentValue(right)) ||
+    (names(right) && absentValue(left))
+  return comparesAbsence && negated === assumeTrue
+}
+
+export const presentOnEveryPath = (checker: ts.TypeChecker, reference: ts.Expression): boolean => {
+  const symbol = ts.isIdentifier(reference) ? checker.getSymbolAtLocation(reference) : undefined
+  const start = flowOf(reference)
+  if (symbol === undefined || start === undefined) return false
+  const writes = (node: ts.Node): boolean =>
+    checker.getSymbolAtLocation(ts.isVariableDeclaration(node) || ts.isBindingElement(node) ? node.name : node) === symbol
+  const seen = new Set<Flow>()
+  const pending: Flow[] = [start]
+  while (pending.length > 0) {
+    const flow = pending.pop()!
+    if (seen.has(flow)) continue
+    seen.add(flow)
+    if ((flow.flags & FlowFlags.Unreachable) !== 0) continue
+    if ((flow.flags & FlowFlags.Start) !== 0) return false
+    if ((flow.flags & FlowFlags.Assignment) !== 0 && flow.node && writes(flow.node)) return false
+    const assumeTrue = (flow.flags & FlowFlags.TrueCondition) !== 0
+    if (
+      (flow.flags & FlowFlags.Condition) !== 0 &&
+      flow.node &&
+      conditionExcludesUndefined(checker, flow.node as ts.Expression, symbol, assumeTrue)
+    )
+      continue
+    if ((flow.flags & FlowFlags.Label) !== 0) pending.push(...(flow.antecedents ?? []))
+    else if (flow.antecedent) pending.push(flow.antecedent)
+  }
+  return true
 }
 
 /** Whether `typeof` takes this expression as its operand: it answers `"undefined"` for an absent read without consuming the value (ECMA-262 13.5.3). */
