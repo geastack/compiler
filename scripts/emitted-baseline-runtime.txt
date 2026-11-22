@@ -772,12 +772,14 @@ literal-into-record-or-class-union-slot-is-the-record.runtime.ts.cpp 8f902458f94
 literal-method-result-instantiates-generic-member.runtime.ts.cpp 6e94c82cd970
 literal-read-miss-cache-rechecks-the-expando.runtime.ts.cpp c75defa1ee80
 literal-reads-of-arrays-and-documents-keep-their-answers.runtime.ts.cpp e3ea78f03e01
+literal-table-of-short-rows-in-one-body.runtime.ts.cpp 52163adefcbf
 live-view-enumeration-matches-the-original.runtime.js.cpp d48b06e933eb
 live-view-nested-record-field-read.runtime.ts.cpp d0cac59454be
 live-view-open-key-writes-reach-the-original.runtime.js.cpp 9849eaff04c5
 live-view-value-walks-read-the-original.runtime.js.cpp 812ded003375
 local-iteration.ts.cpp edce49b62945
 logical-and-object-left-falsy-arm.ts.cpp 4115125872c2
+logical-and-over-an-assertion-out-of-a-box.runtime.ts.cpp 7de93dc59446
 logical-merge-of-mixed-operands-tested-without-building-it.runtime.ts.cpp f7a509091b46
 logical-native-merge.ts.cpp 0ef439c3eea9
 logical-object-union-falsy-absence.ts.cpp 5540183785bc
@@ -1010,6 +1012,7 @@ object-literal-beside-class-in-or-keeps-its-own-layout.runtime.ts.cpp e9a6387841
 object-literal-empty-array-filled-through-untyped-computed-read.runtime.js.cpp a80b8cb338a7
 object-literal-es5-method-receiver.runtime.js.cpp d4a72a609036
 object-literal-getter-capture.ts.cpp f63f14f03eef
+object-literal-into-a-union-whose-arm-depends-on-a-runtime-field.runtime.ts.cpp d1aa2599e0ef
 object-literal-into-data-only-class-slot-is-a-plain-object.ts.cpp 033e213aee34
 object-literal-into-intersection-or-array-union.runtime.ts.cpp 502d562cf16b
 object-literal-into-union-with-tuple-and-array-arms.runtime.ts.cpp d72502a10ef5
@@ -1098,7 +1101,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp 2a67d2df0367
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 1274df4e8af2
-printer-drift.txt e0fb90c27fc2
+printer-drift.txt 03ee8c0867dd
 private-names-are-not-own-properties.ts.cpp 862d394b5f45
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp 3a9f81f60107
@@ -1266,6 +1269,7 @@ stated-iterable-field-narrowed-to-writer-array.runtime.ts.cpp bfe7ec2cb355
 stated-map-field-keyed-by-an-any-expression-keeps-its-stated-key.runtime.ts.cpp fd005a397441
 stated-open-union-preserves-closed-arms.ts.cpp c293510d112b
 stated-return-is-not-evidence-for-a-consumed-local.runtime.ts.cpp 41c86d05f2a5
+stated-unknown-array-parameter-refused-in-a-later-round.runtime.ts.cpp ed661ddafd5a
 statement-splice-erases-without-a-removed-array.runtime.ts.cpp 6e75f9341c4c
 static-assignment-read-through-this-constructor-view.runtime.ts.cpp d8423a89680d
 static-factory-read-through-constructor-type-union.runtime.ts.cpp 3c11f95ccbd8

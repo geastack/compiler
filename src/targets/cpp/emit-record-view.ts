@@ -379,6 +379,27 @@ const recordViewText = (ctx: RecordViewSite, plan: RecordViewPlan, text: string)
         `return ${source}${arrow}${cppRecordFieldName('done')} ? ${returned} : ${yielded}; }())`
       )
     }
+    case 'present-field': {
+      const source = 'gea_present_field'
+      const targetType = cppTypeOf(plan.target)
+      const home = (planned: IteratorResultHome): string | null => {
+        const arm = plan.target.arms[planned.index]
+        if (arm === undefined) return null
+        const built =
+          planned.payload === null
+            ? alignedValueText(ctx, 'emit-record-view.ts:present-field', plan.source, arm.value, source)
+            : recordViewText(ctx, planned.payload, source)
+        return built === null ? null : `${targetType}::ofArm<${planned.index}>(${built})`
+      }
+      const present = home(plan.presentHome)
+      const absent = home(plan.absentHome)
+      if (present === null || absent === null) return null
+      const arrow = plan.source.ownership !== 'shared-refcount' ? '.' : '->'
+      return (
+        `([&]() -> ${targetType} { const auto& ${source} = ${text}; ` +
+        `return ${source}${arrow}${cppRecordFieldName(plan.key)}.has_value() ? ${present} : ${absent}; }())`
+      )
+    }
     case 'fields':
       return recordFieldsViewText(ctx, plan, text)
   }

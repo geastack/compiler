@@ -438,6 +438,49 @@ export const registryManifest = (json: string): Manifest => {
   return object(Array.isArray(parsed) && parsed.length === 1 ? parsed[0] : parsed)
 }
 
+/**
+ * The project file (`tsconfig.json`) of every package whose TypeScript this
+ * program compiles: each acquired checkout in `sources`, and each installed
+ * package that already maps its runtime output back to its own `.ts`
+ * (`installedSourceMapped`). A library's sources are written against its own
+ * checker settings -- a driver built with `useUnknownInCatchVariables: false`
+ * reads `error.message` off an untyped catch variable -- so a build that checks
+ * them must know those settings; the application's own project cannot state
+ * them. Packages without a project file contribute nothing.
+ */
+export const packageSourceProjects = (
+  root: string,
+  sources: readonly PackageSource[],
+  files: SourceFileSystem = disk
+): readonly string[] => {
+  const projects = new Set<string>()
+  const add = (directory: string): void => {
+    const project = join(directory, 'tsconfig.json')
+    if (files.exists(project)) projects.add(project)
+  }
+  for (const source of sources) add(source.root)
+  const visited = new Set<string>()
+  const compiler = ownPackageName()
+  const pending = [resolve(root)]
+  while (pending.length > 0) {
+    const directory = pending.shift()!
+    if (visited.has(directory) || !files.exists(join(directory, 'package.json'))) continue
+    visited.add(directory)
+    const manifest = manifestAt(directory, files)
+    if (compiler !== undefined && manifest.name === compiler) continue
+    for (const name of Object.keys({
+      ...object(manifest.dependencies),
+      ...object(manifest.optionalDependencies),
+      ...object(manifest.peerDependencies)
+    })) {
+      const installed = installedPackage(name, directory, files)
+      if (installed) pending.push(installed)
+    }
+    if (directory !== resolve(root) && installedSourceMapped(directory, manifest, files)) add(directory)
+  }
+  return [...projects]
+}
+
 /** Acquire missing typed sources at the installed version; plain JS remains usable. */
 export const preparePackageSources = async (root: string, options: PreparationOptions = {}): Promise<readonly PackageSource[]> => {
   const files = options.files ?? disk

@@ -140,6 +140,7 @@ const planKeepsNativeIdentity = (certified: CertifiedRecordViewPlan | undefined,
           })
         )
       case 'iterator-result':
+      case 'present-field':
         return false
     }
   }
