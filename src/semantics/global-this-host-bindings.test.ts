@@ -2857,6 +2857,53 @@ test('source subclass construction retains uncertainty from an external base', (
   }
 })
 
+test('an imported registry symbol key keeps an opaque defineProperty out of the host bindings', () => {
+  // mongodb's utils.ts: `Object.defineProperty(decrypted, kDecoratedKeys, ...)`
+  // on an `any` document, the key imported from constants.ts. A program symbol
+  // names no host binding wherever the const that holds it is declared.
+  const source = (key: string) => `import { kDecoratedKeys, kOther } from './global-host-import-source.js';
+    declare var hostProcess: object;
+    declare function unknownValue(): any;
+    ${globalReachesDataQuietly}
+    const decrypted = unknownValue();
+    Object.defineProperty(decrypted, ${key}, { value: [], configurable: true, enumerable: false, writable: false });`
+  const audit = (key: string) =>
+    globalHostMutationAuditOf(
+      source(key),
+      ['hostProcess'],
+      [],
+      undefined,
+      true,
+      new Map([
+        [
+          resolve('test/fixtures/global-host-import-source.ts'),
+          `export const kDecoratedKeys = Symbol.for('@@mdb.decryptedKeys');
+          declare const unknownSymbol: symbol;
+          export const kOther = unknownSymbol;`
+        ]
+      ])
+    ).taint
+  const local = globalHostMutationAuditOf(
+    `declare var hostProcess: object;
+    declare function unknownValue(): any;
+    ${globalReachesDataQuietly}
+    const kLocal = Symbol.for('@@mdb.decryptedKeys');
+    const decrypted = unknownValue();
+    Object.defineProperty(decrypted, kLocal, { value: [], configurable: true, enumerable: false, writable: false });`,
+    ['hostProcess'],
+    [],
+    undefined,
+    true
+  ).taint
+  assert.equal(local.has('*'), false, `local ${[...local].join(',')}`)
+  const imported = audit('kDecoratedKeys')
+  assert.equal(imported.has('*'), false, [...imported].join(','))
+  assert.equal(imported.surfaceKeys.every, false)
+  assert.equal(imported.surfaceKeys.programSymbols, true)
+  // A symbol with no stock factory provenance can be any symbol: still every key.
+  assert.ok(audit('kOther').has('*'))
+})
+
 test('imported source callable origins preserve body effects through live export bindings', () => {
   const source = `import { invoke } from './global-host-import-source.js';
     declare var hostProcess: object;

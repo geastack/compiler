@@ -9,6 +9,7 @@ import {
   isBooleanShapedMergeTarget,
   isDeadMergeContribution,
   mergesAsTruthiness,
+  objectCarrierWithOnlyNativeUndefined,
   partialDeadMergeArms,
   representationKey,
   type Representation
@@ -493,6 +494,26 @@ export const mergeIncoming = (
       const dead = { value: ctx.builder.constant(block, lineage, 'undefined', 'undefined', absent), representation: absent }
       return convertOrDrift(ctx, block, lineage, operation.id, role, operand.ordinal, dead, representation)
     }
+  }
+  // The `&&` left is an Object carrier whose only falsy state is the native
+  // undefined lane (a shared record reference), and the merge has nowhere to
+  // put an `undefined`: `api && api.version` over `const api = typeof v ===
+  // 'string' ? { version: v } as ServerApi : v as ServerApi`. The lane is
+  // filled only by a strict unbound receiver, so whether this arm can run is a
+  // question about where the left value came from -- a fresh allocation or a
+  // checked assertion out of a box never fills it. That proof is taken over
+  // the finished body by certification (`dead-logical-merge.ts`'s
+  // `objectValued`), and a left it cannot prove refuses there by name.
+  // Asked last, so it only ever replaces this refusal.
+  if (
+    role === 'kept' &&
+    operation.family === 'computation' &&
+    operation.form === 'logical' &&
+    operation.operator === '&&' &&
+    objectCarrierWithOnlyNativeUndefined(incoming.representation) &&
+    !carriesMergeAbsence(representation)
+  ) {
+    return { value: ctx.builder.deadLogicalMergeValue(block, lineage, incoming, representation), representation }
   }
   throw blockedMergeArm(operation, role, incoming.representation, representation)
 }

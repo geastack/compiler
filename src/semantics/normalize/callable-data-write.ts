@@ -10,14 +10,18 @@ type CallableDataWriteContext = Pick<ProducerContext, 'checker' | 'identities' |
 
 /** A lexical const cannot acquire a different value through an erased type
  * assertion. Only initializer aliases are followed, never readonly object
- * properties, formal parameters, or the unique-symbol type alone. */
+ * properties, formal parameters, or the unique-symbol type alone. An imported
+ * name is followed to the exporting module's declaration: an import binding is
+ * an immutable live view of that binding, so a `const` there is a `const` here
+ * (`import { kDecoratedKeys } from './constants'`). */
 const readonlySourceOf = (checker: ts.TypeChecker, expression: ts.Expression): ts.Expression | null => {
   const seen = new Set<ts.Node>()
   let current = unwrapErasedExpression(expression)
   while (ts.isIdentifier(current)) {
     if (seen.has(current)) return null
     seen.add(current)
-    const symbol = checker.getSymbolAtLocation(current)
+    const local = checker.getSymbolAtLocation(current)
+    const symbol = local && local.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(local) : local
     const declaration = symbol?.valueDeclaration
     if (!declaration || !ts.isVariableDeclaration(declaration) || !declaration.initializer) return current
     if (

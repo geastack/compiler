@@ -182,3 +182,90 @@ test('the truthy edge and an operation outside its authenticated body are refuse
   assert.equal(deadLogicalMergeValueMatches(operation, semantic, body, semanticOperationOf), false)
   assert.equal(deadLogicalMergeValueMatches({ ...operation }, semantic, body, semanticOperationOf), false)
 })
+
+/** The left cell `previous`, written once in the entry block from `origin`,
+ * read back as the && left -- the shape `const api = v as Api; api && api.x`
+ * lowers to. */
+const writtenCell = (origin: 'assertion' | 'parameter', order: 'write-first' | 'read-first' = 'write-first') => {
+  const dynamic: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+  const builder = createIrBodyBuilder('cell-body' as PhysicalBodyId, owner, {
+    receiver: null,
+    restFrom: null,
+    result: number,
+    parameters: [
+      { value: origin === 'assertion' ? dynamic : reference, passing: 'by-value' as const, ownership: 'shared-refcount' as const }
+    ]
+  })
+  const entry = builder.openBlock(),
+    yes = builder.openBlock(),
+    no = builder.openBlock(),
+    join = builder.openBlock()
+  const write = (): void => {
+    const argument = builder.parameter(entry, 'argument' as SemanticResultId, 0, origin === 'assertion' ? dynamic : reference)
+    const value =
+      origin === 'assertion'
+        ? builder.convert(
+            entry,
+            'asserted' as SemanticResultId,
+            'dynamic-to-record',
+            { value: argument, representation: dynamic },
+            reference
+          )
+        : argument
+    builder.bindingWrite(entry, 'asserted' as SemanticResultId, 'previous' as DeclarationId, { value, representation: reference })
+  }
+  if (order === 'write-first') write()
+  const read = builder.bindingRead(entry, left, 'previous' as DeclarationId, reference)
+  if (order === 'read-first') write()
+  const incoming = { value: read, representation: reference }
+  const condition = builder.test(entry, left, incoming, 'to-boolean')
+  builder.branch(entry, left, { value: condition, representation: { kind: 'scalar', domain: 'boolean' } }, yes, no)
+  const dead = builder.deadLogicalMergeValue(no, lineage, incoming, number)
+  const evaluated = builder.constant(yes, lineage, '4', 'number', number)
+  builder.jump(yes, lineage, join)
+  builder.jump(no, lineage, join)
+  const result = builder.phi(
+    join,
+    lineage,
+    [
+      { block: no, value: { value: dead, representation: number } },
+      { block: yes, value: { value: evaluated, representation: number } }
+    ],
+    number
+  )
+  builder.return(join, lineage, { value: result, representation: number })
+  const sealed = builder.seal()
+  const facts = (boxed: readonly string[]) => ({
+    capturedDeclarations: [],
+    capturedReceiver: null,
+    allocatedAsValue: false,
+    readsReceiver: false,
+    boxed: new Set(boxed as DeclarationId[]),
+    requiresEarlyBox: new Set<DeclarationId>()
+  })
+  const operation = [...sealed.blocks.values()]
+    .flatMap(allOperationsOf)
+    .find((value): value is DeadLogicalMergeValueOperation => value.kind === 'dead-logical-merge-value')!
+  return {
+    operation,
+    body: (boxed: readonly string[] = []) => ({ ...sealed, facts: facts(boxed) }) as IrBody
+  }
+}
+
+test('a cell written only from a checked assertion out of a box proves the && left an object without a source fact', () => {
+  const { logicalLeftObjectTruthy: _proof, ...unproven } = semantic
+  const { body, operation } = writtenCell('assertion')
+  assert.equal(deadLogicalMergeValueMatches(operation, unproven, body(), semanticOperationOf), true)
+})
+test('a cell written from a parameter, shared with a closure, or read before its write keeps the refusal', () => {
+  const { logicalLeftObjectTruthy: _proof, ...unproven } = semantic
+  const parameter = writtenCell('parameter')
+  assert.equal(deadLogicalMergeValueMatches(parameter.operation, unproven, parameter.body(), semanticOperationOf), false)
+  const shared = writtenCell('assertion')
+  assert.equal(deadLogicalMergeValueMatches(shared.operation, unproven, shared.body(['previous']), semanticOperationOf), false)
+  const early = writtenCell('assertion', 'read-first')
+  assert.equal(deadLogicalMergeValueMatches(early.operation, unproven, early.body(), semanticOperationOf), false)
+  const { operation, body } = writtenCell('assertion')
+  const factless = ({ facts: _facts, ...rest }: IrBody): IrBody => rest
+  assert.equal(deadLogicalMergeValueMatches(operation, unproven, factless(body()), semanticOperationOf), false)
+})

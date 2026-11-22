@@ -88,8 +88,9 @@ const formatDiagnostic = (diagnostic: Diagnostic): string => {
 const usage =
   'usage: geatsc [--dynamic-fallback] [--debug] [--emit-only] [--verbose] [--translation-units single|per-file|balanced] (build the current Node project)\n' +
   'usage: geatsc <file.ts...> [--project <tsconfig.json>] [--no-project] [--preflight] [--emit] [--dynamic-fallback]\n' +
-  '       geatsc compile <input> --out-dir <dir> [--project <tsconfig.json>] [--target cpp] [--entry-symbol <symbol>] [--translation-units single|per-file|balanced] [--dynamic-fallback] [--closed-script-scope]\n' +
+  '       geatsc compile <input> --out-dir <dir> [--project <tsconfig.json>] [--target cpp] [--entry-symbol <symbol>] [--translation-units single|per-file|balanced] [--dynamic-fallback] [--isolate-symbols] [--closed-script-scope]\n' +
   '       geatsc compile-module-graph <manifest> --entry <file> --out-dir <dir> [compile options, including --closed-script-scope]\n' +
+  '       --isolate-symbols gives every definition internal linkage, for builds that link several programs into one binary; a unit that cannot be isolated is refused\n' +
   '       --closed-script-scope asserts this compile is the complete classic-script lexical realm; it does not close globalThis or object mutation\n' +
   '       compile options include [--plugin <module>]... [--plugin-option <key>=<value>]...\n' +
   '       geatsc analyze <entry> --plugin <module>\n' +
