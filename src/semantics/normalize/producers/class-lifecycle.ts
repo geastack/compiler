@@ -880,7 +880,9 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
         callsUserCode: false
       }
     )
-    operations.push(defineOperation)
+    const abstractMember =
+      node.body === undefined && (ts.getModifiers(node)?.some((modifier) => modifier.kind === ts.SyntaxKind.AbstractKeyword) ?? false)
+    operations.push(abstractMember ? { ...defineOperation, abstractMember: true } : defineOperation)
     if (methodValue) edges.push({ kind: 'value', result: methodValue.id, to: defineId, role: 'method', ordinal: 0 })
     if (keySource) {
       const keyEdge = resultEdge(keySource, defineId, 'key', 0)

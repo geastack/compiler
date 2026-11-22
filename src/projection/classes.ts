@@ -69,6 +69,8 @@ export interface ClassFieldOwnership {
 export interface ClassMethod {
   readonly key: string
   readonly callable: FunctionId | null
+  /** Declared `abstract`: the key is stated for subclasses and nothing is installed (`callable` is null). */
+  readonly abstract?: true
   /**
    * The census copy of a generic class whose evaluation installed this body
    * (`decl|f0|36@2`), absent for a class that was never copied. A generic
@@ -969,6 +971,7 @@ export const projectClasses = (input: ClassProjectionInput): ReadonlyMap<Declara
       bucket.push({
         key: key.source.text,
         callable: method?.source.kind === 'result' ? allocatedCallableOf(allocatedCallables, method.source.result) : null,
+        ...(operation.abstractMember ? { abstract: true as const } : {}),
         ...(operation.placement !== 'static' && genericRootOf(operation.classDeclaration) !== operation.classDeclaration
           ? { publishedBy: operation.classDeclaration }
           : {}),

@@ -2,7 +2,7 @@ import type { DeclarationId, FunctionId, StructuralTypeId } from '../identity/id
 import type { RepresentationDeriver } from '../representation/derive.js'
 import type { CallableAbi, RecordAccessor, RecordField, RecordIndexSidecar, Representation } from '../representation/model.js'
 import { walkRepresentation } from '../representation/model.js'
-import { classMethodValueArmsOf, methodCopyHeldBy } from './dispatch.js'
+import { classPresentMethodArmsOf, methodCopyHeldBy } from './dispatch.js'
 import { abiOfCallee } from './callee.js'
 import type { RecordLayoutPolicy } from '../representation/policies.js'
 import { dynamicFieldAbsencePolicy } from '../representation/field-descriptor-policy.js'
@@ -523,7 +523,7 @@ export const nativeClassMethodValueSourcesOf = (
         : site.method.representation === undefined
           ? null
           : abiOfCallee(site.method.representation)
-  const arms = classMethodValueArmsOf(classes, declaration, key)
+  const arms = classPresentMethodArmsOf(classes, declaration, key)
   if (held === null || arms === null) return null
   const sources: Representation[] = []
   for (const arm of arms) {

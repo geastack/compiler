@@ -4,7 +4,7 @@ import { abiOfCallee } from '../projection/callee.js'
 import {
   classDynamicMethodShadowOf,
   classFamilyOverridesOf,
-  classMethodValueArmsOf,
+  classPresentMethodArmsOf,
   classPrototypeMethodKeysOf,
   classPrototypeMethodValueArmsOf
 } from '../projection/dispatch.js'
@@ -128,7 +128,7 @@ export const nativeMethodSourceInputsOf = (
       if (member?.kind !== 'method') continue
       const overridden = !staticDispatch && classFamilyOverridesOf(classes, receiver.declaration, key).length > 0
       const methods: readonly ClassMethod[] = overridden
-        ? (classMethodValueArmsOf(classes, receiver.declaration, key)?.map((arm) => arm.method) ?? [])
+        ? (classPresentMethodArmsOf(classes, receiver.declaration, key)?.map((arm) => arm.method) ?? [])
         : [member.method]
       for (const method of methods) {
         const selected = union

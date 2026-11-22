@@ -595,6 +595,13 @@ export interface ClassLifecycleOperation extends SemanticOperationBase {
   readonly placement: 'own' | 'prototype' | 'static' | null
   /** True only for a field synthesized onto an ancestor by the subclass-member overlay. */
   readonly syntheticSubclassMemberOverlay?: boolean
+  /**
+   * An `abstract` method or accessor: the class states the key for its
+   * subclasses and installs nothing. A lookup on an instance of this very
+   * class (reachable by reflection: an abstract constructor runs at run time)
+   * misses it and continues to the base.
+   */
+  readonly abstractMember?: true
   /** A layout demand, not evaluation or allocation of this class's constructor. */
   readonly classLayoutOnly?: boolean
   /** Definition effects remain; constructor/instance initializer execution is absent. */
