@@ -1749,6 +1749,13 @@ export interface EmitContext {
    * ts`) through `ctx` directly -- same follow-up as `formalCells`.
    */
   readonly capacityHints: ReadonlyMap<IrValueId, CapacitySource>
+  /**
+   * The array literals whose element stores are spelled as calls rather than
+   * inlined `push`es, because their body holds too many of them for the C++
+   * compiler's per-function passes; see `collectOutOfLineLiteralPushes`
+   * (`emit-arrays.ts`).
+   */
+  readonly outOfLineLiteralPushes: ReadonlySet<IrValueId>
   /** The local arrays proved to be nothing but a `String.fromCharCode` argument list; see `char-code-buffers.ts`. */
   readonly charCodeBuffers: CharCodeBufferFacts
   /**
@@ -2086,6 +2093,7 @@ export interface EmitBodyPrepassFacts {
   readonly directBindingSinks: Map<IrValueId, DeclarationId>
   readonly forwardedBindings: Map<DeclarationId, ForwardedBinding>
   readonly capacityHints: Map<IrValueId, CapacitySource>
+  readonly outOfLineLiteralPushes: Set<IrValueId>
   readonly charCodeBuffers: CharCodeBufferFacts
   readonly fillLoops: Map<IrBlockId, FillLoop>
   readonly denseArrays: DenseArray[]
@@ -2238,6 +2246,7 @@ export const createEmitContext = (
   const directBindingSinks = new Map<IrValueId, DeclarationId>()
   const forwardedBindings = new Map<DeclarationId, ForwardedBinding>()
   const capacityHints = new Map<IrValueId, CapacitySource>()
+  const outOfLineLiteralPushes = new Set<IrValueId>()
   const charCodeBuffers = createCharCodeBufferFacts()
   const fillLoops = new Map<IrBlockId, FillLoop>()
   const denseArrays: DenseArray[] = []
@@ -2374,6 +2383,7 @@ export const createEmitContext = (
     deferredTexts: new Map(),
     pendingPacks: new Map(),
     capacityHints,
+    outOfLineLiteralPushes,
     charCodeBuffers,
     fillLoops,
     narrowedFormals,
@@ -2465,6 +2475,7 @@ export const createEmitContext = (
       directBindingSinks,
       forwardedBindings,
       capacityHints,
+      outOfLineLiteralPushes,
       charCodeBuffers,
       fillLoops,
       denseArrays,

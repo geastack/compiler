@@ -142,6 +142,7 @@ import { collectCharCodeBuffers } from './char-code-buffers.js'
 import {
   admitDenseWindows,
   collectCapacityHints,
+  collectOutOfLineLiteralPushes,
   emitAllocateArrayObject,
   emitDenseSetup,
   emitFillLoop,
@@ -3606,6 +3607,7 @@ export const emitBody = (
   // After the hoists: a fill loop's bound is as often a relocated invariant
   // (`n * n`, re-read from its cells in the loop's own test) as a plain cell.
   collectCapacityHints(ctx, prepass, body, hoists)
+  collectOutOfLineLiteralPushes(prepass, body)
   collectDirectBindingSinks(prepass, body, hoists.relocated)
   // After the hoists, because a window's own bound is often the loop-invariant
   // read they relocate, and a relocated value is one this may name.

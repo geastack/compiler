@@ -69,6 +69,42 @@ import { arrayBulkAppendMethodName } from './prototype/emit-prototype-array.js'
  */
 const constantTableThreshold = 8
 
+/**
+ * How many inlined literal `push`es one body may hold before they are spelled
+ * as calls instead.
+ *
+ * `ArrayObject::push` is always-inline, and every inlined copy brings its
+ * capacity branch and an unwind edge that releases every handle live in the
+ * body. A level table written as nested short literals -- thousands of
+ * `[x, y, z]` rows, each under the constant-table threshold -- puts all of
+ * those in one module body: 15,861 pushes made a 217,743 instruction function
+ * that clang's GVN (`addDeadBlock`, quadratic in the folded capacity branches)
+ * had not finished after 214 CPU minutes. The same body through
+ * `gea::runtime::array::pushOutOfLine` compiles in under nine minutes.
+ *
+ * A body below the bound keeps the inlined form, where a handful of stores
+ * fold; one at or past it is a data table, built once, and gains nothing from
+ * inlining.
+ */
+const outOfLineLiteralPushThreshold = 512
+
+/**
+ * Marks every array literal of a body whose literals together hold
+ * `outOfLineLiteralPushThreshold` or more ordinary elements.
+ */
+export const collectOutOfLineLiteralPushes = (prepass: EmitBodyPrepassFacts, body: IrBody): void => {
+  let count = 0
+  const literals: IrValueId[] = []
+  for (const block of body.blocks.values())
+    for (const operation of block.operations) {
+      if (operation.kind !== 'allocate-array-object') continue
+      literals.push(operation.result.id)
+      for (const slot of operation.elements) if (slot.kind === 'element') count += 1
+    }
+  if (count < outOfLineLiteralPushThreshold) return
+  for (const literal of literals) prepass.outOfLineLiteralPushes.add(literal)
+}
+
 /** How many values one line of a static table's initializer carries. A table of 87,210 doubles is otherwise a single 700 KB line. */
 const constantTableRowWidth = 16
 
@@ -286,6 +322,7 @@ export const emitAllocateArrayObject = (ctx: EmitContext, lines: string[], opera
     lines.push(`gea::runtime::array::appendTable(${name}, ${table.name}, ${table.count});`)
     return
   }
+  const outOfLine = ctx.outOfLineLiteralPushes.has(operation.result.id)
   for (const slot of operation.elements) {
     if (slot.kind === 'hole') {
       lines.push(`${name}->pushHole();`)
@@ -450,7 +487,8 @@ export const emitAllocateArrayObject = (ctx: EmitContext, lines: string[], opera
     // and a concrete value has to be boxed on the way in. Without it the push
     // assigned an `NSObject` straight into a `gea::Value` slot, which is the
     // one thing the box's storage-only design cannot do implicitly.
-    lines.push(`${name}->push(${alignedText(ctx, representation.element, slot.value, 'allocate-array-object')});`)
+    const stored = alignedText(ctx, representation.element, slot.value, 'allocate-array-object')
+    lines.push(outOfLine ? `gea::runtime::array::pushOutOfLine(${name}, ${stored});` : `${name}->push(${stored});`)
   }
 }
 

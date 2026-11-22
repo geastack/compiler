@@ -42463,6 +42463,17 @@ inline double bulkAppend(const gea::Ref<ArrayObject<Element>>& receiver, const V
 }
 
 /**
+ * One element of an array literal stored through a call rather than an inlined
+ * `push`: a body that builds thousands of literals is a table built once, and
+ * the inlined capacity branches and unwind edges only cost the C++ compiler
+ * time (`emit-arrays.ts`, `outOfLineLiteralPushThreshold`).
+ */
+template <typename Receiver, typename Value>
+[[gnu::noinline]] void pushOutOfLine(const Receiver& receiver, Value&& value) {
+  receiver->push(std::forward<Value>(value));
+}
+
+/**
  * One array literal made entirely of constants, installed from a static table.
  *
  * A literal renders one `push` statement per element, which is right until the
