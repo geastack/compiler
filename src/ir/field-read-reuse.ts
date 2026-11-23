@@ -7,7 +7,7 @@ import { representationKey, type Representation } from '../representation/model.
 import { stringConstantsOf } from './dead-values.js'
 import { controlFlowGraphOf } from './dominance.js'
 import type { GetOperation, IrBlock, IrBlockId, IrBody, IrNonTerminatorOperation, IrPhiIncoming, PhiOperation } from './model.js'
-import { arrayAllocationDrainsDynamicIterator, operandsOfIrOperation } from './queries.js'
+import { arrayAllocationDrainsDynamicIterator, operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import { verifyIrBody } from './verify.js'
 import { inertArgument, nativeData, primitive } from './write-effects.js'
 
@@ -171,14 +171,38 @@ export const fieldReadFactsOf = (body: IrBody, codeFree: CodeFreeFieldRead): Fie
   // A standard-prototype absence fact is authenticated by tracing its
   // receiver back to the source operand it was proved for; a reused read
   // traces to the other read's source, so a read such a fact consumes stays.
+  //
+  // The trace does not stop at the consumer's own operand: it walks back
+  // through the transports between the read and the consumer (`a.b?.c` reads
+  // `c` off the unwrapped `a.b`, a convert away from the read), so every value
+  // on that walk is pinned, not only the first.
+  const definitions = new Map<IrValueId, IrNonTerminatorOperation>()
+  for (const block of body.blocks.values())
+    for (const operation of block.operations) {
+      const result = resultOfIrOperation(operation)
+      if (result) definitions.set(result.id, operation)
+    }
   const pinned = new Set<IrValueId>()
+  const pin = (start: IrValueId): void => {
+    let value: IrValueId | undefined = start
+    while (value !== undefined && !pinned.has(value)) {
+      pinned.add(value)
+      const producer = definitions.get(value)
+      value =
+        producer?.kind === 'convert' || producer?.kind === 'merge-live-arm-rebuild'
+          ? producer.source.value
+          : producer?.kind === 'proxy-part'
+            ? producer.proxy.value
+            : undefined
+    }
+  }
   for (const block of body.blocks.values())
     for (const operation of block.operations)
       if (
         ((operation.kind === 'get' || operation.kind === 'has-property') && operation.ordinaryObjectPrototypeKeyAbsent === true) ||
         (operation.kind === 'set' && operation.ordinaryObjectDataWriteAbsent === true)
       )
-        for (const operand of operandsOfIrOperation(operation)) pinned.add(operand.value)
+        for (const operand of operandsOfIrOperation(operation)) pin(operand.value)
   const candidates = new Map<GetOperation, { readonly key: string; readonly shape: string }>()
   for (const block of body.blocks.values())
     for (const operation of block.operations) {

@@ -433,6 +433,17 @@ export const windowStableFieldReadsOf = (
     for (const [index, operation] of block.operations.entries()) {
       if (operation.kind !== 'get' || !receivers.has(operation.receiver.value)) continue
       if (dying.has(operation.result.id) || dying.has(operation.receiver.value)) continue
+      // Only a plain member load can be named in place of its value: a
+      // reactive cell, a host member, a class's own prototype and a typed
+      // computed read each spell the read as something other than the member,
+      // and naming the member handed its consumers the cell itself.
+      if (
+        operation.reactive === true ||
+        operation.hostMethod !== undefined ||
+        operation.callableOwnPrototype === true ||
+        operation.typedComputedRead !== undefined
+      )
+        continue
       const key = keys.get(operation.key.value)
       const receiver = operation.receiver.representation
       if (

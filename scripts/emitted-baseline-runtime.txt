@@ -76,7 +76,7 @@ asserted-union-arm-is-checked-not-read-unchecked.runtime.ts.cpp f3253891fe5b
 asserted-union-of-classes-into-interface-view.runtime.ts.cpp ba4566e5de33
 assign-copies-only-keys-the-sources-hold.runtime.ts.cpp 2f6983d74c40
 assign-defaults-target-passed-to-untyped-helper.runtime.js.cpp 54e0c0872c71
-assign-defaults-target-reads-keys-only-the-source-states.runtime.js.cpp 910f92c556ee
+assign-defaults-target-reads-keys-only-the-source-states.runtime.js.cpp c69c349451f0
 assign-for-in-generic.ts.cpp 06f1ce7152dc
 async-catch-handler-builds-ref-local.ts.cpp b20d58c403ad
 async-dropped-promise-reactions.runtime.ts.cpp fb5d8446c7d7
@@ -553,7 +553,7 @@ generic-derived-class-with-defaults-reads-base-private-method.ts.cpp 9d028bcd685
 generic-field-initializer.ts.cpp d5e489924a6d
 generic-filled-through-as-any-argument.runtime.ts.cpp e3aef657914d
 generic-folded-subclass-of-a-split-base-upcasts-to-its-base-copy.runtime.ts.cpp 94a0e1c93f7e
-generic-function-choice.ts.cpp eaeda3b674d2
+generic-function-choice.ts.cpp f9b7f55880ad
 generic-function-composite-filling-in-class-copy.ts.cpp c1f9b051dae9
 generic-function-composite-filling-through-heritage.ts.cpp c3b222e769cd
 generic-function-value-into-instantiation-slot.ts.cpp 3041c5637519
@@ -1049,6 +1049,7 @@ optional-boolean-param-strict-equals-true.runtime.js.cpp 7a0bb4d3ea5d
 optional-chain-array-find.ts.cpp 5db4126e1c61
 optional-chain-method-through-abstract-middle-copy.runtime.ts.cpp a880858d1129
 optional-chain-on-function-narrowed-prototype-field.runtime.ts.cpp ec3bee52772e
+optional-chain-read-twice-keeps-each-absence-proof.runtime.ts.cpp 432b40ebccc4
 optional-class-field-initializer.ts.cpp 24835df3679e
 optional-dependency-any-into-proxy-module-union.runtime.ts.cpp 12b13ab0f72b
 optional-dictionary-or-object-create-null-stays-a-dictionary.runtime.ts.cpp 709b37b07575
@@ -1065,7 +1066,7 @@ optional-union-argument-into-nullable-wider-union-parameter.runtime.ts.cpp 8533f
 optional-union-narrowed-to-record-beside-class-arm.runtime.ts.cpp 6b67d58a303e
 optional-void-call-abi.ts.cpp baec9dae12bf
 options-record-nested-interface-field-written-by-string-key.runtime.ts.cpp de8520496fd7
-options-view-reads-an-absent-union-field-as-undefined.runtime.js.cpp 9a7625103888
+options-view-reads-an-absent-union-field-as-undefined.runtime.js.cpp b8f9225a4101
 or-chain-over-object-create-null-bag.runtime.ts.cpp cdc6760abbf4
 overload-any-implementation-returns-null.runtime.ts.cpp 8e30ed03c95d
 overload-omitted-argument-of-required-implementation-parameter.runtime.ts.cpp b3ff06d1a1ac
@@ -1255,7 +1256,7 @@ spread-narrowed-unknown-into-literal-in-option-table.runtime.ts.cpp 872d8f0648ee
 spread-narrowed-unknown-record-cast-any-into-options.runtime.ts.cpp 48155e3bf43b
 spread-of-null-class-reference-copies-nothing.runtime.ts.cpp 9af9c0d25e95
 spread-of-unreflected-record-keeps-creation-order.runtime.ts.cpp 458647004b0b
-spread-open-document-into-closed-options.ts.cpp cba022b67884
+spread-open-document-into-closed-options.ts.cpp 543d95f20d77
 spread-open-headers-returned-in-literal.ts.cpp ddf4cb3def2d
 spread-pended-source-ranks-and-prefix-dedupe.runtime.ts.cpp 8d7236bcfe26
 spread-read-only-copy-elided-semantics.runtime.ts.cpp c6f464e18ec1
@@ -1305,7 +1306,7 @@ string-of-symbol.runtime.js.cpp 234cbfea9b0d
 string-raw-tagged-template-into-regexp.runtime.ts.cpp fba85e2e0fef
 string-shared-layout.ts.cpp 645b4b7ef4b6
 string-store-reads-its-own-target.runtime.js.cpp fcfbbc7843be
-subclass-default-options-view-reads-assigned-default.runtime.js.cpp 8c9d5701c6ec
+subclass-default-options-view-reads-assigned-default.runtime.js.cpp 2a3fe12ae7c3
 subclass-member-overlay-layout.runtime.js.cpp 20f89ac53e87
 subclass-overlay-presence-storage.js.cpp 2916cc0c76f6
 subclass-overlay-receiver-storage.js.cpp 5f3b956e7e36
