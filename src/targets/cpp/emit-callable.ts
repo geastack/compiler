@@ -87,7 +87,7 @@ import {
   typedArrayTargetSpelling
 } from './emit-buffers.js'
 import { armAt, armIs } from './emit-union-properties.js'
-import { constructorStateText, genericStaticOwnerOf } from './class-properties/emit-class-properties.js'
+import { abstractMissReadKeyOf, constructorStateText, genericStaticOwnerOf } from './class-properties/emit-class-properties.js'
 import {
   cppAbiType,
   cppBodyName,
@@ -561,6 +561,26 @@ const emitNullishInvocation = (ctx: EmitContext, lines: string[], operation: Cal
   const call = `gea::host::throwNullishInvocation<${target}>("${kind === 'null' ? 'null' : 'undefined'}", "${operation.kind === 'construct' ? 'constructor' : 'function'}")`
   lines.push(result && target !== 'void' ? `${defineValue(ctx, result)} = ${call};` : `${call};`)
   if (result?.representation.kind === 'void') defineValueAlias(ctx, result, '(void)0')
+  return true
+}
+
+/** A call of a method read that always misses (`abstractMissReadKeyOf`) is a call of `undefined`. */
+const emitAbstractMissInvocation = (ctx: EmitContext, lines: string[], operation: CallOperation): boolean => {
+  const read = ctx.propertyReadOrigins.get(operation.callee.value)
+  const key = read === undefined ? null : abstractMissReadKeyOf(ctx, read)
+  if (key === null) return false
+  // A single-use argument may still be a deferred expression: it runs here,
+  // before the callee is found not callable (13.3.6.2 EvaluateCall).
+  for (const argument of operation.arguments) lines.push(`(void)(${operandText(ctx, argument)});`)
+  const failure = `gea::host::throwRuntimeError("TypeError", ${JSON.stringify(`${key} is not a function`)})`
+  const result = operation.result
+  if (result && result.representation.kind !== 'void') {
+    const target = cppTypeOf(result.representation)
+    lines.push(`${defineValue(ctx, result)} = (${failure}, gea::host::unreachableValue<${target}>());`)
+  } else {
+    lines.push(`${failure};`)
+    if (result) defineValueAlias(ctx, result, '(void)0')
+  }
   return true
 }
 
@@ -1159,6 +1179,7 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   }
   if (emitCharCodeBufferPush(ctx, lines, operation)) return
   if (emitNullishInvocation(ctx, lines, operation)) return
+  if (emitAbstractMissInvocation(ctx, lines, operation)) return
   if (operation.callee.representation.kind === 'native-handle' && operation.callee.representation.protocol === 'FunctionConstructor') {
     if (!ctx.deriver.dynamicFallback)
       throw createCppEmitBlockedError('call-abi:function-constructor', 'Function construction requires --dynamic-fallback')

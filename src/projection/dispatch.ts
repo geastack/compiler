@@ -183,6 +183,19 @@ export const classAbstractMemberMissesAt = (
   return declared?.kind === 'method' && declared.method.abstract === true && runtimeClassMemberOf(classes, allocation, key) === null
 }
 
+/** Whether some allocation a read of `key` on `receiver` may meet misses it on
+ * an abstract declaration (`classAbstractMemberMissesAt`): the read is then
+ * `undefined` there, which only a carrier with an empty callable can hold.
+ */
+export const classMethodReadMayMissAbstractly = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  receiver: DeclarationId,
+  key: string
+): boolean =>
+  classPrototypeMethodValueArmsOf(classes, receiver, key)?.some(
+    (arm) => arm.method === null && classAbstractMemberMissesAt(classes, arm.allocation, key)
+  ) === true
+
 /**
  * The class-hierarchy topology behind method dispatch: which key belongs to
  * which override family, and who redeclares what.

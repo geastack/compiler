@@ -52,6 +52,8 @@ import { nativePrototypeMethodFallbackText } from './native-prototype.js'
 import {
   classDynamicMethodShadowOf,
   classFamilyMayAllocate,
+  classMethodFamilyHasNativeBody,
+  classMethodReadMayMissAbstractly,
   classMethodValueArmsOf,
   classPrototypeMethodKeysOf,
   classPrototypeMethodValueArmsOf,
@@ -568,6 +570,28 @@ export const reactiveClassFieldClaim = (ctx: EmitContext, operation: GetOperatio
   }
 }
 
+/**
+ * The key of a method read that always misses: the receiver's family has no
+ * override and only an abstract declaration under the key, so an instance
+ * (constructed by reflection) has no own or inherited member there and the
+ * read is `undefined`. `emit-callable.ts` asks this of a callee so the call
+ * raises its TypeError itself, after the arguments are evaluated.
+ */
+export const abstractMissReadKeyOf = (ctx: EmitContext, operation: GetOperation): string | null => {
+  const receiver = operation.receiver.representation
+  if (receiver.kind !== 'class-ref' || operation.result.representation.kind !== 'function-value-dispatch') return null
+  const key = ctx.staticKeyTexts.get(operation.key.value)
+  if (key === undefined) return null
+  const site = classMemberOf(ctx.classes, receiver.declaration, key)
+  if (site?.kind !== 'method' || site.method.callable !== null || dispatchesStatically(ctx, operation.receiver)) return null
+  if (classFamilyOverridesOf(ctx.classes, receiver.declaration, key).length > 0) return null
+  if (!classFamilyMayAllocate(ctx.classes, receiver.declaration)) return null
+  return classMethodFamilyHasNativeBody(ctx.classes, receiver.declaration, key) &&
+    classMethodReadMayMissAbstractly(ctx.classes, receiver.declaration, key)
+    ? key
+    : null
+}
+
 export const classMemberText = (ctx: EmitContext, operation: GetOperation): ClassMemberValue | null => {
   const receiver = operation.receiver.representation
   if (receiver.kind !== 'class-ref') return null
@@ -726,6 +750,16 @@ export const classMemberText = (ctx: EmitContext, operation: GetOperation): Clas
       `std::fprintf(stderr, "gea: \\"${key}\\" of class ${String(site.owner)} is abstract and no instance of its class family exists\\n"); ` +
       'std::abort();'
     return { text: `[]() -> ${carrier} { ${failure} }()`, spelling: carrier }
+  }
+  // An instance of the abstract class itself (constructed by reflection, with
+  // nothing below it redeclaring the key) misses the lookup: the read is
+  // `undefined`, which the dispatch carrier's empty callable stands for. A
+  // call of it raises the TypeError JS raises for calling `undefined`, after
+  // the arguments are evaluated (`emitCall`). Certification refuses any other
+  // carrier.
+  if (abstractMissReadKeyOf(ctx, operation) !== null) {
+    const carrier = cppTypeOf(operation.result.representation)
+    return { text: `${carrier}()`, spelling: carrier }
   }
   // Certification requires a native implementation family for an evaluated
   // method read. A declaration without a body cannot provide a callable:

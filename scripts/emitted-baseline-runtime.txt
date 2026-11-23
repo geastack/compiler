@@ -2,6 +2,7 @@ absent-argument-forwarded-to-stated-parameter.runtime.js.cpp 180b8b2380c7
 absent-argument-forwarded-to-unread-parameter.runtime.js.cpp 4baef586c2ef
 absent-optional-peer-stub-keeps-intrinsics-intact.runtime.ts.cpp c118eb74dd62
 abstract-getter-implemented-by-a-subclass-field.runtime.ts.cpp de2484e76d12
+abstract-member-called-on-its-own-reflected-base-throws-type-error.runtime.ts.cpp b4c1b30062ca
 abstract-method-call-on-a-family-exposed-to-a-dynamic-observer.runtime.ts.cpp adc75ca447ef
 abstract-method-first-override-omits-parameters.runtime.ts.cpp b557a62453b6
 abstract-method-implementors-declaring-fewer-parameters.runtime.ts.cpp e71bc4c59d16
