@@ -27,9 +27,19 @@ import { nativeMergePayloadTransportMatches } from './native-merge-transport.js'
 import { nativeArrayTransportOf } from './native-array-transport.js'
 import { nativeArrayInsertionOf, type NativeArrayInsertion } from './native-array-insertion.js'
 import { nativeDictionaryTransportOf } from './native-dictionary-transport.js'
-import { nativeFieldViewIdentityTransportOf, nativeFieldViewLiveLeavesOf, nativeFieldViewPlansOf } from '../conversion/native-field-view.js'
+import {
+  nativeFieldViewIdentityTransportOf,
+  nativeFieldViewLiveLeavesOf,
+  nativeFieldViewPlansOf,
+  nativeFieldViewInstalledPlansOf,
+  type NativeFieldViewPlan
+} from '../conversion/native-field-view.js'
 import { nativeRecordProductsOf } from '../conversion/native-record-products.js'
-import { nativeFieldViewCarrierNeedsReceipt, nativeFieldViewBodyCitationsOf } from './native-field-view-facts.js'
+import {
+  nativeFieldViewCarrierNeedsReceipt,
+  nativeFieldViewBodyCitationsOf,
+  nativeFieldViewCitationsOf
+} from './native-field-view-facts.js'
 import {
   nativeFieldViewDomainsOf,
   type NativeFieldViewDomains,
@@ -1695,8 +1705,143 @@ const solveNativeCallableFlow = (
     } else if (representation.kind === 'function-family' || representation.kind === 'function-value-family')
       for (const id of representation.members) if (instanceMethods.has(id)) addFunction(cell, id)
   }
+  // The live views a `convert` installs over the converted value itself: the
+  // conversion when it is the view, or else each identity-transporting node
+  // of its recipe from a part of the operand to a part of the result -- an
+  // optional's payload, a borrowed referent, a union's arm. `options = {}`
+  // parameters receive their argument as `optional(view target)`, and a
+  // record passed where a union is declared becomes a view in one arm: the
+  // value can still be that view, and a reader must see its routes.
+  const convertViews = new Map<IrOperation, readonly ConversionNode[]>()
+  const valuePartsOf = (representation: Representation, into: Set<string>): Set<string> => {
+    const key = representationKey(representation)
+    if (into.has(key)) return into
+    into.add(key)
+    if (representation.kind === 'optional') valuePartsOf(representation.payload, into)
+    else if (representation.kind === 'borrowed-ref') valuePartsOf(representation.referent, into)
+    else if (representation.kind === 'tagged-union') for (const arm of representation.arms) valuePartsOf(arm.value, into)
+    return into
+  }
+  // The views a convert installs over the whole converted value (or the
+  // payload an optional or borrow wraps). Only these mark a cell as holding a
+  // view whose origin may be an allocation of another layout; a view over one
+  // arm of a union, or one a field access adapts, does not widen which heaps
+  // the cell's transports carry.
+  const wholeValueViews = new Set<ConversionNodeId>()
+  const convertViewsOf = (operation: Extract<IrOperation, { kind: 'convert' }>): readonly ConversionNode[] => {
+    let held = convertViews.get(operation)
+    if (held !== undefined) return held
+    const found: ConversionNode[] = []
+    const node = conversions?.nodeById(operation.conversionUse)
+    const from = operation.source.representation
+    const to = operation.result.representation
+    if (node && conversions) {
+      if (
+        nativeFieldViewIdentityTransportOf(node) &&
+        representationKey(node.source) === representationKey(from) &&
+        representationKey(node.target) === representationKey(to)
+      )
+        wholeValueViews.add(node.id)
+      // An exact transport into a union still installs each arm's view as its
+      // own node (`WriteConcern.fromOptions(client.s.options)` lands the
+      // options record as the union's record arm): that child is installed over
+      // this operand too, not somewhere this solve does not track.
+      const sources = valuePartsOf(from, new Set())
+      const targets = valuePartsOf(to, new Set())
+      const payload = to.kind === 'optional' ? to.payload : to.kind === 'borrowed-ref' ? to.referent : null
+      const unwrapped = from.kind === 'optional' ? from.payload : from.kind === 'borrowed-ref' ? from.referent : null
+      for (const child of recipeClosureOf([node], conversions.nodeById).values())
+        if (
+          nativeFieldViewIdentityTransportOf(child) &&
+          sources.has(representationKey(child.source)) &&
+          targets.has(representationKey(child.target))
+        ) {
+          found.push(child)
+          const source = representationKey(child.source)
+          if (
+            payload !== null &&
+            representationKey(child.target) === representationKey(payload) &&
+            (source === representationKey(from) || (unwrapped !== null && source === representationKey(unwrapped)))
+          )
+            wholeValueViews.add(child.id)
+        }
+    }
+    convertViews.set(operation, (held = found))
+    return held
+  }
+  // The live views an access's own adaptation installs, by the value each is
+  // installed over: an identity-transporting node, in the closure of a read's
+  // field- or index-read recipe or a store's field- or dynamic-write recipe,
+  // that installs a plan over the converted value itself. A recipe from the
+  // receiver's carrier adapts the receiver for this access alone -- the view
+  // is consumed by the access and never stored; one from a store's value
+  // carrier is what lands in the slot; one into a read's result carrier is
+  // the read's result. A recipe matching none of those is not classified.
+  type AccessView = { readonly node: ConversionNode; readonly over: 'receiver' | 'stored' | 'result' | 'unclassified' }
+  const accessViews = new Map<IrOperation, readonly AccessView[]>()
+  const accessRecipeViewsOf = (operation: IrOperation): readonly AccessView[] => {
+    let held = accessViews.get(operation)
+    if (held !== undefined) return held
+    const found: AccessView[] = []
+    if (conversions && (operation.kind === 'get' || operation.kind === 'set'))
+      for (const recipe of operation.conversionRecipes ?? []) {
+        const roles = operation.kind === 'get' ? ['field-read', 'index-read'] : ['field-write', 'dynamic-write']
+        if (!roles.includes(recipe.role)) continue
+        const node = conversions.nodeById(recipe.conversion)
+        if (!node) continue
+        const source = representationKey(recipe.source)
+        const overs: AccessView['over'][] = []
+        if (source === representationKey(operation.receiver.representation)) overs.push('receiver')
+        if (operation.kind === 'set' && source === representationKey(operation.value.representation)) overs.push('stored')
+        if (operation.kind === 'get' && representationKey(recipe.target) === representationKey(operation.result.representation))
+          overs.push('result')
+        if (overs.length === 0) overs.push('unclassified')
+        for (const child of recipeClosureOf([node], conversions.nodeById).values())
+          if (nativeFieldViewInstalledPlansOf(child).length > 0)
+            for (const over of overs)
+              if (!found.some((entry) => entry.node === child && entry.over === over)) found.push({ node: child, over })
+      }
+    // A store through a live view converts the value into each slot carrier
+    // it may land in: those views are stored, exactly as a recipe's.
+    if (conversions && operation.kind === 'set')
+      for (const target of operation.nativeFieldViewWrite?.targets ?? []) {
+        const node = target.conversion === null ? null : conversions.nodeById(target.conversion)
+        if (!node) continue
+        for (const child of recipeClosureOf([node], conversions.nodeById).values())
+          if (nativeFieldViewInstalledPlansOf(child).length > 0 && !found.some((entry) => entry.node === child && entry.over === 'stored'))
+            found.push({ node: child, over: 'stored' })
+      }
+    accessViews.set(operation, (held = found))
+    return held
+  }
+  // The stores whose stored views the solve placed on every slot they
+  // reached, or whose value escaped to storage no reader follows.
+  const coveredStores = new Set<IrOperation>()
+  const storeViews = (operation: IrOperation, targets: readonly OriginCell[]): void => {
+    coveredStores.add(operation)
+    for (const { node, over } of accessRecipeViewsOf(operation))
+      if (over === 'stored')
+        for (const cell of targets)
+          if (!cell.fieldViews.has(node.id)) {
+            ownSet(cell.fieldViews, (own) => (cell.fieldViews = own)).add(node.id)
+            changed(cell)
+          }
+  }
   const processOperation = (operation: IrOperation): void => {
     const result = resultOfIrOperation(operation)
+    // A read whose result adaptation installs a live view (a class instance
+    // read into a union's `{}` arm) produces that view, exactly as a
+    // `convert` does: its node rides the result's cell, on every path, so a
+    // later view over the value sees it among its possible sources.
+    if (operation.kind === 'get')
+      for (const { node, over } of accessRecipeViewsOf(operation)) {
+        if (over !== 'result') continue
+        const cell = value(operation.result.id)
+        if (!cell.fieldViews.has(node.id)) {
+          ownSet(cell.fieldViews, (own) => (cell.fieldViews = own)).add(node.id)
+          changed(cell)
+        }
+      }
     // A method identity in a carrier describes the value, not an invocation.
     // Publish it when that value is produced/used so ordinary escape edges also
     // cover detached methods without rooting every method in every layout.
@@ -1866,6 +2011,7 @@ const solveNativeCallableFlow = (
           linkPayload(slot.cell, value(operation.result.id), [operation.result.representation])
         } else {
           linkPayload(value(operation.value.value), slot.cell, [slot.representation])
+          storeViews(operation, [slot.cell])
           if (operation.result) link(value(operation.receiver.value), value(operation.result.id))
         }
         for (const operand of operandsOfIrOperation(operation))
@@ -2236,9 +2382,11 @@ const solveNativeCallableFlow = (
                 const targets = slotsOf(operation.receiver, '')
                 if (targets === null) {
                   untrusted(operation)
+                  storeViews(operation, [])
                   return true
                 }
                 for (const target of targets) link(value(operation.value.value), target)
+                storeViews(operation, targets)
                 return targets.length > 0
               },
               undefined,
@@ -2255,9 +2403,11 @@ const solveNativeCallableFlow = (
               const targets = slotsOf(operation.receiver, key, operation)
               if (targets === null) {
                 untrusted(operation)
+                storeViews(operation, [])
                 return true
               }
               for (const target of targets) link(value(operation.value.value), target)
+              storeViews(operation, targets)
               return targets.length > 0
             },
             undefined,
@@ -2269,7 +2419,10 @@ const solveNativeCallableFlow = (
               representationKey(operation.kind === 'set' ? operation.value.representation : operation.receiver.representation)
           )
             link(value(operation.kind === 'set' ? operation.value.value : operation.receiver.value), value(operation.result.id))
-        } else untrusted(operation)
+        } else {
+          untrusted(operation)
+          storeViews(operation, [])
+        }
         break
       }
       case 'dead-logical-merge-value':
@@ -2309,42 +2462,12 @@ const solveNativeCallableFlow = (
           node.capability.materializer.id === NATIVE_SUM_MATERIALIZER &&
           to.arms.some((arm) => representationKey(arm.value) === representationKey(from))
         if (dynamicArm) documentNeutralCells.add(value(operation.result.id))
-        if (
-          node &&
-          nativeFieldViewIdentityTransportOf(node) &&
-          representationKey(node.source) === representationKey(from) &&
-          representationKey(node.target) === representationKey(to)
-        ) {
+        for (const view of convertViewsOf(operation)) {
           const cell = value(operation.result.id)
-          if (!cell.fieldViews.has(node.id)) {
-            ownSet(cell.fieldViews, (own) => (cell.fieldViews = own)).add(node.id)
+          if (!cell.fieldViews.has(view.id)) {
+            ownSet(cell.fieldViews, (own) => (cell.fieldViews = own)).add(view.id)
             changed(cell)
           }
-        } else if (node && (to.kind === 'optional' || to.kind === 'borrowed-ref')) {
-          // A live view installed for the payload of an optional (or borrowed)
-          // carrier: `options = {}` parameters receive their argument as
-          // `optional(view target)`, so the view node is a child of the
-          // wrapper conversion rather than the conversion itself. The value
-          // can still be that view, and a reader must see its routes; without
-          // this, the source allocations reached the parameter as if they were
-          // plain allocations of the target, and a key only the view answers
-          // (three's `_setTextureOptions( options )` reading `options.mapping`
-          // through WebGLCubeRenderTarget's `{}`) had no certified route.
-          const payload = to.kind === 'optional' ? to.payload : to.referent
-          const sources = new Set([representationKey(from)])
-          if (from.kind === 'optional') sources.add(representationKey(from.payload))
-          if (from.kind === 'borrowed-ref') sources.add(representationKey(from.referent))
-          const cell = value(operation.result.id)
-          for (const child of recipeClosureOf([node], conversions?.nodeById).values())
-            if (
-              nativeFieldViewIdentityTransportOf(child) &&
-              sources.has(representationKey(child.source)) &&
-              representationKey(child.target) === representationKey(payload) &&
-              !cell.fieldViews.has(child.id)
-            ) {
-              ownSet(cell.fieldViews, (own) => (cell.fieldViews = own)).add(child.id)
-              changed(cell)
-            }
         }
         const document = node === null || node === undefined ? null : nativeDocumentEntryViewOf(node, conversions?.nodeById)
         if (
@@ -2698,13 +2821,12 @@ const solveNativeCallableFlow = (
           // A target with no allocation of its own that takes every one of
           // this cell's holds the very same set until either writes it: most
           // multi-allocation cells hold exactly the set of a cell before them.
-          if (target.heaps === emptyCellSet && target !== cell && cell.heaps.size > 0 && (allowed === null || cell.fieldViews.size > 0)) {
+          const viewed = allowed !== null && [...cell.fieldViews].some((id) => wholeValueViews.has(id))
+          if (target.heaps === emptyCellSet && target !== cell && cell.heaps.size > 0 && (allowed === null || viewed)) {
             cell.heaps.shared = true
             target.heaps = cell.heaps
             changed(target)
-          } else
-            for (const heap of cell.heaps)
-              if (allowed === null || cell.fieldViews.size > 0 || heapAdmitted(heap, allowed)) addHeap(target, heap)
+          } else for (const heap of cell.heaps) if (allowed === null || viewed || heapAdmitted(heap, allowed)) addHeap(target, heap)
           if (cell.unknown) {
             const admitted =
               cell.unknownHeaps === null
@@ -3106,12 +3228,114 @@ const solveNativeCallableFlow = (
   // a `{ type: 'dispose' }` literal viewed as an event with `target`): the
   // descriptor's `sourceAbsent` route. Its readers already read that
   // source's expando, and now meet the carrier stored there.
+  // Which views can be the very value each live plan is installed over
+  // (`nativeFieldViewDomainsOf`'s `sourcePlansOf`). A view a `convert`
+  // installs records its node on the result's cell, exactly as the solve
+  // above transports it, so a plan whose every installation is such a convert
+  // is installed over its operands' cells: their recorded views, and every
+  // plan installed anywhere this solve does not track on a cell. One operand
+  // with unknown origins leaves the plan unbounded.
+  const plansOfNode = new Map<ConversionNode, readonly NativeFieldViewPlan[]>()
+  const nodePlans = (node: ConversionNode): readonly NativeFieldViewPlan[] => {
+    let held = plansOfNode.get(node)
+    if (held === undefined) plansOfNode.set(node, (held = nativeFieldViewPlansOf([node])))
+    return held
+  }
+  const installedPlans = new Map<ConversionNode, ReadonlySet<NativeFieldViewPlan>>()
+  const isOwnPlan = (plan: NativeFieldViewPlan, node: ConversionNode): boolean => {
+    let held = installedPlans.get(node)
+    if (held === undefined) installedPlans.set(node, (held = new Set(nativeFieldViewInstalledPlansOf(node))))
+    return held.has(plan)
+  }
+  const installedOver = new Map<NativeFieldViewPlan, Set<NativeFieldViewPlan> | null>()
+  const untrackedPlans = new Set<NativeFieldViewPlan>()
+  const trackedNodes = new Set<ConversionNode>()
+  for (const operation of operations) {
+    const own = new Set<ConversionNode>()
+    if (operation.kind === 'convert' && conversions) {
+      for (const view of convertViewsOf(operation)) own.add(view)
+      const operand = value(operation.source.value)
+      for (const node of own)
+        for (const plan of nodePlans(node)) {
+          if (!isOwnPlan(plan, node) || installedOver.get(plan) === null) continue
+          if (operand.unknown) {
+            installedOver.set(plan, null)
+            continue
+          }
+          const reaching = installedOver.get(plan) ?? new Set<NativeFieldViewPlan>()
+          for (const id of operand.fieldViews) {
+            const view = conversions.nodeById(id)
+            if (view === null) {
+              installedOver.set(plan, null)
+              break
+            }
+            for (const held of nodePlans(view)) reaching.add(held)
+          }
+          if (installedOver.get(plan) !== null) installedOver.set(plan, reaching)
+        }
+    }
+    // What each access view is installed over, and whether the value it makes
+    // rides a cell: a read's result views ride its result cell and a covered
+    // store's stored views the slots it reached (the solve's `get`, `set`), so a
+    // view over either value sees them; a receiver adaptation is consumed by
+    // its access. A read's result view is installed over the slot's value,
+    // which this does not follow; the others over an operand's cell.
+    for (const { node, over } of operation.kind === 'get' || operation.kind === 'set' ? accessRecipeViewsOf(operation) : []) {
+      if (operation.kind !== 'get' && operation.kind !== 'set') break
+      if (over === 'unclassified' || (over === 'stored' && !coveredStores.has(operation))) continue
+      own.add(node)
+      const operand =
+        over === 'receiver'
+          ? value(operation.receiver.value)
+          : over === 'stored' && operation.kind === 'set'
+            ? value(operation.value.value)
+            : null
+      for (const plan of nodePlans(node)) {
+        if (!isOwnPlan(plan, node) || installedOver.get(plan) === null) continue
+        if (operand === null || operand.unknown) {
+          installedOver.set(plan, null)
+          continue
+        }
+        const reaching = installedOver.get(plan) ?? new Set<NativeFieldViewPlan>()
+        for (const id of operand.fieldViews) {
+          const view = conversions?.nodeById(id)
+          if (!view) {
+            installedOver.set(plan, null)
+            break
+          }
+          for (const held of nodePlans(view)) reaching.add(held)
+        }
+        if (installedOver.get(plan) !== null) installedOver.set(plan, reaching)
+      }
+    }
+    for (const id of nativeFieldViewCitationsOf(operation)) {
+      const cited = conversions?.nodeById(id)
+      if (!cited) continue
+      for (const node of recipeClosureOf([cited], conversions?.nodeById).values()) {
+        trackedNodes.add(node)
+        for (const plan of nodePlans(node)) if (!(own.has(node) && isOwnPlan(plan, node))) untrackedPlans.add(plan)
+      }
+    }
+  }
+  for (const node of viewNodes) if (!trackedNodes.has(node)) for (const plan of nodePlans(node)) untrackedPlans.add(plan)
+  const sourcePlansOf = (plan: NativeFieldViewPlan): ReadonlySet<NativeFieldViewPlan> | null => {
+    if (untrackedPlans.has(plan)) return null
+    const reaching = installedOver.get(plan)
+    return reaching === undefined || reaching === null ? null : new Set([...reaching, ...untrackedPlans])
+  }
   const openWritePlans = nativeFieldViewPlansByTargetOf(viewNodes)
   const nativeFieldViewOpenWriteValues = new Set<IrValueId>()
   const nativeFieldViewForwardedWrites = new Set<string>()
   let forwardDomains: ReturnType<typeof nativeFieldViewDomainsOf> | undefined
   const forwardedAbsentKeysOf = (receiver: Representation): ReadonlySet<string> => {
-    forwardDomains ??= nativeFieldViewDomainsOf(viewNodes, deriver, (id) => bodyById.get(id)?.abi ?? null, classes)
+    forwardDomains ??= nativeFieldViewDomainsOf(
+      viewNodes,
+      deriver,
+      (id) => bodyById.get(id)?.abi ?? null,
+      classes,
+      undefined,
+      sourcePlansOf
+    )
     const keys = new Set<string>()
     for (const [key, routes] of forwardDomains(receiver) ?? []) if (routes.some((route) => route.sourceAbsent === true)) keys.add(key)
     return keys
@@ -3119,7 +3343,7 @@ const solveNativeCallableFlow = (
   if (openWritePlans.size > 0)
     for (const operation of operations) {
       if (operation.kind !== 'set') continue
-      const open = nativeFieldViewOpenWriteHomesOf(operation.receiver.representation, openWritePlans, deriver)
+      const open = nativeFieldViewOpenWriteHomesOf(operation.receiver.representation, openWritePlans, deriver, sourcePlansOf)
       if (open === null) continue
       const constant = keyOf(operation.key)
       const forwarded = forwardedAbsentKeysOf(operation.receiver.representation)
@@ -3139,7 +3363,7 @@ const solveNativeCallableFlow = (
     }
   const expandoStoredOf = expandoStoredReaderOf(expandoStored)
   const nativeFieldViewStorageValues = new Map<IrValueId, ReadonlyMap<string, readonly NativeFieldStorageDomain[]>>()
-  const descriptorDomainsOf = descriptorDomainsOver(viewNodes, deriver, bodyById, classes, expandoStored)
+  const descriptorDomainsOf = descriptorDomainsOver(viewNodes, deriver, bodyById, classes, expandoStored, sourcePlansOf)
   for (const [id, carrier] of valueCarriers) {
     const fields = descriptorDomainsOf(carrier)
     if (fields !== null) nativeFieldViewStorageValues.set(id, fields)
@@ -3235,7 +3459,7 @@ const solveNativeCallableFlow = (
             return node && nativeFieldViewIdentityTransportOf(node) ? [node] : []
           })
         )
-        installed = nativeFieldViewDomainsOf(nodes, deriver, (id) => bodyById.get(id)?.abi ?? null, classes, expandoStoredOf)
+        installed = nativeFieldViewDomainsOf(nodes, deriver, (id) => bodyById.get(id)?.abi ?? null, classes, expandoStoredOf, sourcePlansOf)
         originDomains.set(identity, installed)
       }
       // The retained allocation's C++ slot is behind this installed reader.
@@ -3576,14 +3800,22 @@ const descriptorDomainsOver = (
   deriver: Pick<RepresentationDeriver, 'layoutOf'> | null | undefined,
   bodyById: ReadonlyMap<FunctionId, IrBody | null>,
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
-  expandoStored: ReadonlyMap<string, ReadonlyMap<string | null, readonly Representation[]>>
+  expandoStored: ReadonlyMap<string, ReadonlyMap<string | null, readonly Representation[]>>,
+  sourcePlansOf: (plan: NativeFieldViewPlan) => ReadonlySet<NativeFieldViewPlan> | null
 ): NativeFieldViewDomains => {
   // The domains outlive the solve inside every remembered and re-pointed
   // reader, so they keep the ABIs rather than `bodyById`, which held the
   // solved body generation for as long as any reader did.
   const abis = new Map<FunctionId, CallableAbi | null>()
   for (const [id, body] of bodyById) abis.set(id, body?.abi ?? null)
-  return nativeFieldViewDomainsOf(viewNodes, deriver, (id) => abis.get(id) ?? null, classes, expandoStoredReaderOf(expandoStored))
+  return nativeFieldViewDomainsOf(
+    viewNodes,
+    deriver,
+    (id) => abis.get(id) ?? null,
+    classes,
+    expandoStoredReaderOf(expandoStored),
+    sourcePlansOf
+  )
 }
 
 interface ValueCarriers extends Iterable<readonly [IrValueId, Representation]> {

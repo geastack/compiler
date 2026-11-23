@@ -29,7 +29,7 @@
 # concurrent mirrors serialize and readers never see a half-replaced tree.
 set -euo pipefail
 
-HOST=dashwin-geastack
+HOST=${WSL_HOST:-dashwin-geastack}
 BUILD_CPUS=${BUILD_CPUS:-0-19}
 WSL_RSYNC='wsl -d Ubuntu-24.04 -- flock -x /home/dashersw/geastack-tree.lock rsync'
 here=$(cd "$(dirname "$0")/.." && pwd)

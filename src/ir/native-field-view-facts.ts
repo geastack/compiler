@@ -317,10 +317,13 @@ export const nativeFieldViewReadFor = (
     // converts that carrier (a Document entry's checked read): one source, one
     // conversion, so the arm and the entry route cannot disagree.
     if (dynamicGet === true && sources.has(representationKey(source))) continue
+    // A route whose carrier can never be the narrowed target (a `number` slot
+    // read where a guard on an earlier [[Get]] proved a class instance) is the
+    // property-read context `fieldReadFor` already answers: that route throws.
     const node =
       abiOfCallee(source) !== null && abiOfCallee(target) !== null
         ? (conversions.nativeMethodFor(source, target) ?? conversions.nodeFor(source, target))
-        : conversions.nodeFor(source, target)
+        : conversions.fieldReadFor(source, target)
     const unguarded =
       (checkedRead === undefined
         ? null
@@ -336,7 +339,7 @@ export const nativeFieldViewReadFor = (
     // guard proved, a TypeError for any other -- never an unchecked `get<k>`.
     const selected = recipeIsMaterializableWithoutPriorSourceGuard(unguarded, conversions.nodeById)
       ? unguarded
-      : conversions.assertedUnionFor(source, target, false)
+      : (conversions.assertedUnionFor(source, target, false) ?? conversions.checkedClassFieldReadFor(source, target))
     if (selected === null || !recipeIsMaterializableWithoutPriorSourceGuard(selected, conversions.nodeById)) return null
     const previous = sources.get(representationKey(source))
     if (previous !== undefined && previous.conversion !== selected.id) {

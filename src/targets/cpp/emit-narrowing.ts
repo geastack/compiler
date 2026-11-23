@@ -5606,6 +5606,19 @@ const renderedRecipeText = (ctx: ConversionSite, node: ConversionNode, text: str
     node.target.kind === 'class-ref'
   )
     return `gea::host::assertedDowncastClassRef<${cppClassName(node.target.declaration)}>(${text})`
+  // The same check over a present payload (`nodes.ts`'s `checkedClassFieldReadFor`).
+  if (
+    node.capability.kind === 'static' &&
+    node.capability.materializer.id === ASSERTED_CLASS_DOWNCAST_MATERIALIZER &&
+    node.target.kind === 'optional' &&
+    node.target.payload.kind === 'class-ref'
+  ) {
+    const optionalType = cppTypeOf(node.target)
+    return (
+      `[](const auto& gea_present) -> ${optionalType} { return gea_present.has_value() ? ${optionalType}(` +
+      `gea::host::assertedDowncastClassRef<${cppClassName(node.target.payload.declaration)}>(*gea_present)) : ${optionalType}(); }(${text})`
+    )
+  }
   // The census's caught-value handoff (`nodes.ts`'s `caughtHandoffFor`).
   if (
     node.capability.kind === 'static' &&

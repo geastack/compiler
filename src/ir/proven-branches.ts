@@ -146,9 +146,16 @@ export const provenResultTruthiness = (
     seen.add(type)
     const shape = graph.structuralTypes?.get(type)?.shape
     let tags: ReadonlySet<string> | null = null
+    // A declared integer (`int32`, `int64`) is a JS number: tagged apart from
+    // `number`, `kind === KIND_ROCK` over an `i32` field was proved false and
+    // every `&&` arm built on it was pruned (a game drew none of its props).
     if (shape?.kind === 'primitive')
       tags =
-        shape.primitive === 'never' ? new Set() : ['void', 'unknown', 'any'].includes(shape.primitive) ? null : new Set([shape.primitive])
+        shape.primitive === 'never'
+          ? new Set()
+          : ['void', 'unknown', 'any'].includes(shape.primitive)
+            ? null
+            : new Set([shape.primitive === 'int32' || shape.primitive === 'int64' ? 'number' : shape.primitive])
     else if (shape?.kind === 'literal') tags = new Set([shape.primitive])
     else if (shape?.kind === 'unique-symbol') tags = new Set(['symbol'])
     // Only shapes no primitive can satisfy: TypeScript's object and class

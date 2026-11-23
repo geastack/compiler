@@ -238,8 +238,13 @@ const deriveAt = (target: Representation, context: ConversionDerivationContext, 
       // boxed round trip this compiler declines to build. The one exception
       // is the all-dynamic Map, which needs no per-entry check at all -- see
       // `dynamicMapViewMaterializer`.
+      // The round trip, exactly as `dictionary` takes it: a typed Map or Set
+      // THIS program boxed comes back as itself, recognized by the payload
+      // type `Value::box` recorded -- a tag check, an address check and a
+      // handle copy, never a rebuilt collection.
       return (
         maybeAtom(context.registry.dynamicMapViewMaterializer(target)) ??
+        maybeAtom(context.registry.boxedIdentityMaterializer(target)) ??
         never(
           'no checked Map/Set materializer is installed; recovering a keyed collection from a dynamic value needs a runtime ' +
             'brand check plus a per-entry checked conversion of both key and value'

@@ -648,9 +648,12 @@ export const strictEqualityText = (
         nested.push(`(${unionText}.is<${nestedIndex}>() && (${unionText}.get<${nestedIndex}>() == ${other.text}))`)
         continue
       }
+      // A `dynamic` arm (a `{}` member of the sum) may hold any object,
+      // this class instance or callable included: its box's own tag answers.
       if (
         arm.value.kind !== 'tagged-union' &&
         arm.value.kind !== 'optional' &&
+        arm.value.kind !== 'dynamic' &&
         !(arm.value.kind === 'class-ref' && other.representation.kind === 'class-ref') &&
         !(callableIdentityCarrier(arm.value) && callableIdentityCarrier(other.representation))
       )

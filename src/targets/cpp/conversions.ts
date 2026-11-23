@@ -1009,6 +1009,7 @@ const cppConversionTables = (
         (target.kind === 'dictionary' ||
           target.kind === 'record-with-index' ||
           target.kind === 'typed-array' ||
+          (target.kind === 'keyed-collection' && target.recursive === undefined) ||
           (target.kind === 'record' && target.accessors.length > 0)) &&
         target.ownership === 'shared-refcount'
       if (!eligible && target.kind !== 'array-buffer' && target.kind !== 'shared-array-buffer' && target.kind !== 'data-view') return null

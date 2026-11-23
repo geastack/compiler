@@ -188,3 +188,45 @@ export const nativeFieldViewPlansOf = (nodes: Iterable<ConversionNode>): readonl
   }
   return [...plans]
 }
+
+/**
+ * The plans a node installs over the converted value itself -- through its
+ * optional, assert, arm and union wrappers, which select a part of that same
+ * value -- as opposed to the plans its field reads install later, over
+ * whatever the field holds when it is read.
+ */
+export const nativeFieldViewInstalledPlansOf = (node: ConversionNode): readonly NativeFieldViewPlan[] => {
+  if (!nativeFieldViewIdentityTransportOf(node) || !('materializer' in node.capability)) return []
+  const materializer = node.capability.materializer
+  const plans = new Set<NativeFieldViewPlan>()
+  for (const fields of materializer.documentRecordView?.nativeFields ?? []) plans.add(fields)
+  if (materializer.nativeDescriptorSnapshot) plans.add(materializer.nativeDescriptorSnapshot.nativeFields)
+  const certified = materializer.recordView
+  if (certified === undefined) return [...plans]
+  const visit = (plan: RecordViewPlan): void => {
+    switch (plan.kind) {
+      case 'owned':
+        return
+      case 'optional':
+      case 'assert':
+        visit(plan.payload)
+        return
+      case 'arm':
+        if (plan.payload) visit(plan.payload)
+        return
+      case 'dispatch':
+      case 'recast-union':
+        for (const arm of plan.arms) if (typeof arm.via === 'object') visit(arm.via)
+        return
+      case 'iterator-result':
+      case 'present-field':
+        return
+      case 'fields': {
+        const fields = certified.fieldViews?.get(plan)
+        if (fields) plans.add(fields)
+      }
+    }
+  }
+  visit(certified.view)
+  return [...plans]
+}
