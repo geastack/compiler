@@ -817,6 +817,7 @@ merge-arm-dictionary-into-header-union.ts.cpp aec077a768b9
 merge-arm-empty-array-into-native-array.ts.cpp f1b520762837
 merge-arm-nullish-fallback-is-dead.ts.cpp f8cbb9c04b1f
 merged-interface-emit-dispatch.runtime.ts.cpp cba8b1dd354e
+method-shadow-call-through-a-slot-wider-than-the-override.runtime.ts.cpp 8d983fb6eb36
 method-shadowed-through-an-any-parameter.runtime.ts.cpp 56b50d6d170e
 method-slot-widened-parameter-narrowed-in-frame.ts.cpp fb27f756b9ea
 method-with-tagged-view-parameter-into-wider-view-union-slot.runtime.ts.cpp 9bb5ab8fa72d

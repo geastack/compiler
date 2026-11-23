@@ -1796,9 +1796,14 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   const shadowedInvocation = (
     receiverText: string,
     argumentTexts: readonly string[],
-    normal: (self: string, args: readonly string[]) => string
+    normal: (self: string, args: readonly string[]) => string,
+    // The convention the arguments were converted to. A virtual call converts
+    // them to the slot's own, which a family widens past the resolved
+    // method's (`removeListener(event: string)` under a base taking
+    // `string | symbol`), and the shadow is handed those same arguments.
+    convention: CallableAbi | null = abiOfCallee(operation.callee.representation)
   ): string => {
-    const held = abiOfCallee(operation.callee.representation)
+    const held = convention
     if (shadowGuard === undefined || held === null || held.receiver === null)
       throw createCppEmitBlockedError(
         'call-abi:expando-shadow',
@@ -1826,7 +1831,12 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   const invocation =
     dispatched !== undefined
       ? shadowGuard !== undefined
-        ? shadowedInvocation(virtualPadded[0]!, virtualPadded.slice(1), (self, args) => `${self}->${dispatched.member}(${args.join(', ')})`)
+        ? shadowedInvocation(
+            virtualPadded[0]!,
+            virtualPadded.slice(1),
+            (self, args) => `${self}->${dispatched.member}(${args.join(', ')})`,
+            dispatched.abi
+          )
         : `${virtualPadded[0]}->${dispatched.member}(${virtualPadded.slice(1).join(', ')})`
       : direct !== undefined
         ? shadowGuard !== undefined
