@@ -1,0 +1,9 @@
+#!/bin/sh
+# Format what is being committed, then hold the commit to the source rules a
+# build enforces: a tree that fails either cannot be built by anyone who pulls it.
+files=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx|mts|mjs|js|json|md)$')
+if [ -n "$files" ]; then
+  echo "$files" | xargs npx --no-install prettier --write --log-level warn --ignore-unknown || exit 1
+  echo "$files" | xargs git add
+fi
+node scripts/architecture.mjs > /dev/null || exit 1
