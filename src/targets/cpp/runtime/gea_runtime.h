@@ -40821,6 +40821,99 @@ inline std::string formatDouble(const char *fmt, int precision, double value) {
   return std::string(buf.data(), static_cast<std::size_t>(written));
 }
 
+// How many digits follow the point in the exact decimal expansion of a finite
+// non-negative double: one per binary fraction bit, since 2^-n has exactly n.
+inline int binaryFractionDigits(double magnitude) {
+  if (magnitude == 0.0) return 0;
+  int exponent = 0;
+  const double fraction = std::frexp(magnitude, &exponent);
+  const auto mantissa = static_cast<std::uint64_t>(std::ldexp(fraction, 53));
+  const int digits = 53 - exponent - std::countr_zero(mantissa);
+  return digits > 0 ? digits : 0;
+}
+
+/**
+ * `formatDouble` of a finite non-negative `magnitude`, except that an exact tie
+ * rounds up. `toFixed`, `toExponential` and `toPrecision` each say "if there
+ * are two such n, pick the larger n"; printf (and the compact formatter, which
+ * matches it) breaks that tie to even, so `(2.5).toPrecision(1)` would read "2".
+ *
+ * Nothing else may be adjusted: printf already rounds the exact binary value
+ * once. Pre-scaling (`round(x * 10^d) / 10^d`) rounds the product as well and
+ * manufactures ties that are not there -- 260042689.0618805 is below the
+ * midpoint by 9e-10, its product with 1e6 lands on .5, and toFixed(6) read
+ * "...881" where the clause gives "...880".
+ *
+ * The rounding digit sits at 10^-(fractionPlace) and a tie means the exact
+ * expansion ends there, on a 5. Only a value with exactly that many binary
+ * fraction bits can (or none, when the place is integral), so almost every
+ * call returns after one print. A real tie is rounded up on the exact digits
+ * themselves. Printing the next double up instead would be wrong: above 2^40 or
+ * so its distance is itself a kept digit, and 1143989562988.28125 read ".2815".
+ */
+inline bool incrementDecimal(std::string &digits) {
+  for (std::size_t at = digits.size(); at-- > 0;) {
+    if (digits[at] == '.') continue;
+    if (digits[at] != '9') {
+      ++digits[at];
+      return false;
+    }
+    digits[at] = '0';
+  }
+  return true;
+}
+
+inline std::string formatMagnitudeTiesUp(bool scientific, int precision, double magnitude) {
+  const char *fmt = scientific ? "%.*e" : "%.*f";
+  std::string out = formatDouble(fmt, precision, magnitude);
+  if (magnitude == 0.0) return out;
+  const int fractionDigits = binaryFractionDigits(magnitude);
+  if (!scientific) {
+    if (fractionDigits != precision + 1) return out;
+    // Exactly as many digits as the expansion has, so this print is exact.
+    std::string kept = formatDouble(fmt, precision + 1, magnitude);
+    if (kept.back() != '5') return out;
+    kept.pop_back();
+    if (kept.back() == '.') kept.pop_back();
+    if (incrementDecimal(kept)) kept.insert(kept.begin(), '1');
+    return kept;
+  }
+  // Digit p+1 of d.ddd x 10^E sits at fraction place p+1-E. `out`'s exponent
+  // is E, or E+1 when its rounding carried out of the first digit.
+  const int printed = std::atoi(out.c_str() + out.find('e') + 1);
+  const auto tiePossible = [&](int exponent) {
+    const int place = precision + 1 - exponent;
+    return place > 0 ? fractionDigits == place : fractionDigits == 0;
+  };
+  if (!tiePossible(printed) && !tiePossible(printed - 1)) return out;
+  std::string mantissa;
+  int exponent = 0;
+  if (fractionDigits > 0) {
+    // Exact (it carries the whole expansion), so its exponent is the true E.
+    const std::string wider = formatDouble(fmt, precision + 1, magnitude);
+    const std::size_t marker = wider.find('e');
+    exponent = std::atoi(wider.c_str() + marker + 1);
+    if (wider[marker - 1] != '5' || precision + 1 - exponent != fractionDigits) return out;
+    mantissa = wider.substr(0, marker - 1);
+  } else {
+    // An integer: its full digits decide, the rounding digit at index p+1.
+    const std::string whole = formatDouble("%.*f", 0, magnitude);
+    const std::size_t at = static_cast<std::size_t>(precision) + 1;
+    if (at >= whole.size() || whole[at] != '5' || whole.find_first_not_of('0', at + 1) != std::string::npos) return out;
+    exponent = static_cast<int>(whole.size()) - 1;
+    mantissa = whole.substr(0, 1);
+    if (precision > 0) mantissa += "." + whole.substr(1, static_cast<std::size_t>(precision));
+  }
+  if (mantissa.back() == '.') mantissa.pop_back();
+  if (incrementDecimal(mantissa)) {
+    // "9.99" carried out to "0.00": it is 1.00 one decade up.
+    mantissa[0] = '1';
+    ++exponent;
+  }
+  const int absolute = exponent < 0 ? -exponent : exponent;
+  return mantissa + (exponent < 0 ? "e-" : "e+") + (absolute < 10 ? "0" : "") + std::to_string(absolute);
+}
+
 /**
  * Whether `std::to_chars(char*, char*, double, std::chars_format)` may be NAMED.
  *
@@ -41149,12 +41242,14 @@ inline std::string toFixed(double value, double digits) {
   // Taking the sign off before the comparison is the specification's own
   // order, and it matters: `(-1e21).toFixed(2)` is "-1e+21", not the fixed
   // expansion a `value >= 1e21` test would leave it with.
+  //
+  // `fabs` rather than `-value`: -0 is not < 0, so it prints "0.00", and its
+  // sign bit must not reach printf.
   const bool negative = value < 0;
-  const double magnitude = negative ? -value : value;
+  const double magnitude = std::fabs(value);
   if (magnitude >= 1e21) return negative ? std::string("-") + toString(magnitude) : toString(magnitude);
-  double scale = std::pow(10.0, d);
-  double rounded = std::round(value * scale) / scale;
-  return internal::formatDouble("%.*f", d, rounded);
+  const std::string out = internal::formatMagnitudeTiesUp(false, d, magnitude);
+  return negative ? "-" + out : out;
 }
 
 inline std::string toExponential(double value, double digits) {
@@ -41163,7 +41258,9 @@ inline std::string toExponential(double value, double digits) {
   int d = static_cast<int>(digits);
   if (d < 0) d = 0;
   if (d > 100) d = 100;
-  std::string out = internal::formatDouble("%.*e", d, value);
+  // Sign handled as in `toFixed`: (-0).toExponential(1) is "0.0e+0".
+  std::string out = internal::formatMagnitudeTiesUp(true, d, std::fabs(value));
+  if (value < 0) out.insert(out.begin(), '-');
   internal::normalizeExponent(out);
   return out;
 }
@@ -41205,7 +41302,7 @@ inline std::string toPrecision(double value, double digits) {
   } else {
     // "%.*e" with p-1 fractional digits is exactly step 7's n and e: p
     // significant digits, correctly rounded once, plus the decimal exponent.
-    const std::string scientific = internal::formatDouble("%.*e", p - 1, magnitude);
+    const std::string scientific = internal::formatMagnitudeTiesUp(true, p - 1, magnitude);
     const std::size_t marker = scientific.find('e');
     if (marker == std::string::npos) return negative ? std::string("-") + scientific : scientific;
     exponent = std::atoi(scientific.c_str() + marker + 1);
