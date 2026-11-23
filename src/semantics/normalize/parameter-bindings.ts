@@ -31,7 +31,7 @@ import {
   impliedPatternPositionPresentEverywhere
 } from './parameter-slot.js'
 import { iteratorYieldTypesOf } from './producers/iteration-yield.js'
-import { holdsUndefined } from './producers/nullish.js'
+import { dictionaryReadHeldBy, flowsIntoUndefinedHome, holdsUndefined } from './producers/nullish.js'
 import {
   type AliasEvidence,
   annotationStatesNothing,
@@ -2608,23 +2608,8 @@ export const censusParameterBindings = (
    * (`properties.ts`'s `observablyAbsentElementTypeOf`), because a missing key
    * is `undefined`, not `T`; the parameter must hold that absence too.
    */
-  const passesAbsentIndexRead = (argument: ts.Expression, resolved: ts.Type): boolean => {
-    let read: ts.Expression = argument
-    while (ts.isParenthesizedExpression(read)) read = read.expression
-    if (!ts.isElementAccessExpression(read) && !ts.isPropertyAccessExpression(read)) return false
-    if (holdsUndefined(resolved)) return false
-    const contextual = checker.getContextualType(argument)
-    if (contextual === undefined || !holdsUndefined(contextual)) return false
-    const receiver = checker.getTypeAtLocation(read.expression)
-    if (checker.isArrayType(receiver) || checker.isTupleType(receiver)) return false
-    if (checker.getIndexInfosOfType(receiver).length === 0) return false
-    const key = ts.isPropertyAccessExpression(read)
-      ? read.name.text
-      : ts.isStringLiteralLike(read.argumentExpression) || ts.isNumericLiteral(read.argumentExpression)
-        ? read.argumentExpression.text
-        : null
-    return key === null || checker.getPropertyOfType(receiver, key) === undefined
-  }
+  const passesAbsentIndexRead = (argument: ts.Expression, resolved: ts.Type): boolean =>
+    !holdsUndefined(resolved) && flowsIntoUndefinedHome(checker, argument) && dictionaryReadHeldBy(checker, valueFlow, argument) !== null
 
   const collectPassedArguments = (
     calls: readonly (ts.CallExpression | ts.NewExpression)[],
