@@ -784,7 +784,7 @@ const emitUnionMethodCall = (ctx: EmitContext, lines: string[], operation: CallO
     const shadowCall = `gea_shadow_callable.callWithReceiver(${['gea::NativeCallReceiver::object(' + self + ')', ...padded.slice(1)].join(', ')})`
     const invocation = !shadowed
       ? direct
-      : `[&](const auto& ${self}) -> decltype(auto) { using gea_shadow_result = decltype(${direct}); ` +
+      : `[&](const auto& ${self}) { using gea_shadow_result = std::remove_cvref_t<decltype(${direct})>; ` +
         `if (gea::detail::nativeExpandoPresent(${self})) [[unlikely]] { if (const auto gea_shadow = gea::detail::nativeExpandoOwnValue(${self}, ${cppStringLiteral(memberKey!)})) { ` +
         `auto gea_shadow_callable = gea::detail::DynamicCarrier<${cppTypeOf({ kind: 'function-value-dispatch', abi: { ...abi, receiver: null } })}>::in(*gea_shadow, 0); ` +
         `if constexpr (std::is_void_v<gea_shadow_result>) { ${shadowCall}; return; } else return static_cast<gea_shadow_result>(${shadowCall}); } } ` +
@@ -1836,9 +1836,9 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
     const shadow = cppTypeOf({ kind: 'function-value-dispatch', abi: { ...held, receiver: null } })
     const shadowCall = `gea_shadow_callable.callWithReceiver(${['gea::NativeCallReceiver::object(' + self + ')', ...forwarded].join(', ')})`
     return (
-      `[&](const auto& ${self}${names.map((name) => `, auto&& ${name}`).join('')}) -> decltype(auto) { ` +
+      `[&](const auto& ${self}${names.map((name) => `, auto&& ${name}`).join('')}) { ` +
       `auto gea_shadow_normal = [&]() -> decltype(auto) { return ${normal(self, forwarded)}; }; ` +
-      'using gea_shadow_result = decltype(gea_shadow_normal()); ' +
+      'using gea_shadow_result = std::remove_cvref_t<decltype(gea_shadow_normal())>; ' +
       `if (gea::detail::nativeExpandoPresent(${self})) [[unlikely]] { ` +
       `if (const auto gea_shadow = gea::detail::nativeExpandoOwnValue(${self}, ${cppStringLiteral(shadowGuard.key)})) { ` +
       `auto gea_shadow_callable = gea::detail::DynamicCarrier<${shadow}>::in(*gea_shadow, 0); ` +

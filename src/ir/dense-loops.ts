@@ -732,6 +732,12 @@ export const denseLoopsOf = (
     const fold = folds.get(index)
     const host = fold === undefined ? undefined : found[fold.host]
     for (const [at, candidate] of loop.candidates.entries()) {
+      // A checked window pays a compare per access, so it must not take an
+      // access a nested loop already bounds with its own counter: loops are
+      // decided innermost-first, and `a[i * n + k]` in a `k` loop inside a
+      // `j` loop is unbounded for `j` but a plain window for `k`.
+      const operations = candidate.checked ? candidate.operations.filter((operation) => !accesses.has(operation)) : candidate.operations
+      if (operations.length === 0) continue
       const ordinal = arrays.length
       const blocks = loops[index]?.blocks
       if (blocks) blocksOfArray.set(ordinal, blocks)
@@ -762,7 +768,7 @@ export const denseLoopsOf = (
         ...(rows ? { rows } : {}),
         ...(candidate.checked ? { checked: true as const } : {})
       })
-      for (const operation of candidate.operations) {
+      for (const operation of operations) {
         const flag = flagAt(blockOfOperation.get(operation) ?? loop.preheader)
         if (flag === null) continue
         accesses.set(operation, { array: ordinal, flag, signed: candidate.signed.includes(operation) })
