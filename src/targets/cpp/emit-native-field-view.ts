@@ -5,11 +5,20 @@ import { createCppEmitBlockedError, operandText, type EmitContext } from './emit
 import { recipeText } from './emit-narrowing.js'
 import { nativeFieldPolicyType, staticKeyOrderText } from './records.js'
 import { tracksKeyOrder } from './key-order-tracking.js'
-import { cppTypeOf, cppStringLiteral, cppRecordFieldKeyIsSymbol, fieldPropertyKeyText, unitFunctionName } from './types.js'
+import {
+  cppTypeOf,
+  cppStringLiteral,
+  cppRecordFieldAttributesName,
+  cppRecordFieldKeyIsSymbol,
+  cppRecordFieldPresenceName,
+  fieldPropertyKeyText,
+  unitFunctionName
+} from './types.js'
 import { propertyKeyText } from './emit-dynamic-properties.js'
 import { nativeDataPropertyText } from './emit-buffers.js'
 import { nativeDataPropertyOf } from '../../representation/native-data-properties.js'
 import { staticOwnFieldsOf } from '../../representation/record-fields.js'
+import type { StructuralTypeId } from '../../identity/ids.js'
 
 const tokenOf = (type: string): string => `gea::detail::payloadTypeTagFor<${type}>()`
 const routeTokenOf = (value: Representation): string =>
@@ -96,6 +105,23 @@ export const nativeFieldViewOperandContext = (ctx: EmitContext, operation: GetOp
   return { ...ctx, valueNames, deferredTexts, pendingPacks }
 }
 
+/**
+ * Whether `key` is an optional, non-accessor field of a plain record's own
+ * layout (the record itself, or the shared allocation of one): a member whose
+ * presence bit says whether it holds the property. A class is left out -- its
+ * own accessors may shadow an inherited slot -- as is a host record, whose
+ * fields a host layout owns.
+ */
+const optionalRecordMember = (ctx: EmitContext, carrier: Representation, key: string): boolean => {
+  const layout =
+    carrier.kind === 'native-record-ref' && carrier.native === null ? ctx.deriver.layoutOf(carrier.shapeId as StructuralTypeId) : carrier
+  return (
+    layout.kind === 'record' &&
+    !layout.accessors.some((accessor) => accessor.key === key) &&
+    layout.fields.some((field) => field.key === key && !field.required)
+  )
+}
+
 export const nativeFieldViewReadForText = (
   ctx: EmitContext,
   receiver: IrOperand,
@@ -158,6 +184,16 @@ export const nativeFieldViewReadForText = (
           ordinary && actual && (actual.source.kind === 'optional' || actual.absentReadsUndefined === true)
             ? `return ${renderedLeaf(ctx, ordinary.conversion, concrete)};`
             : 'gea::host::throwRuntimeError("TypeError", "a native view receiver has no admitted plain allocation");'
+        // An optional declared member of a plain record that is present holds
+        // its own value: the own-field protocol would find that same member by
+        // comparing the key against every field name. Only an absent key (an
+        // original allocation's answer, or undefined) needs the protocol.
+        // three's uniform `needsUpdate` is one, read for every uniform every
+        // frame.
+        const presentMember =
+          ordinary && actual && actual.accessor !== true && memberAnswer === null && optionalRecordMember(ctx, carrier, key)
+            ? `if (gea_field_receiver->${cppRecordFieldPresenceName(key)}) return ${renderedLeaf(ctx, ordinary.conversion, concrete)}; `
+            : ''
         const property = `${viewKeyText(key)}`
         const native =
           `std::optional<${result}> gea_plain_answer; auto gea_plain_adapter = ${adapter}; ` +
@@ -179,7 +215,7 @@ export const nativeFieldViewReadForText = (
           'gea::host::throwRuntimeError("TypeError", "a native allocation read has no certified carrier route"); '
         return (
           `return gea::record::readLiveField<${result}>(gea_field_receiver, ${liveKeyText(key)}, ` +
-          `${adapter}, ${accepted}, [&]() -> ${result} { ${getterAnswer ?? `${native}${plain}`} });`
+          `${adapter}, ${accepted}, [&]() -> ${result} { ${getterAnswer ?? `${presentMember}${native}${plain}`} });`
         )
       },
       dynamicRead(key),
@@ -239,6 +275,61 @@ export const nativeFieldViewReadForText = (
   )
 }
 
+/**
+ * A field-view read whose one use is the receiver of the next member read
+ * (`gull.pos.x` on a view-target record): spelled as a reference instead of a
+ * copied handle, so the plain allocation's answer costs no retain and no
+ * release. A live view's answer is held by `gea_field_slot`, a temporary of
+ * the caller's full expression, so the reference outlives the member load
+ * that consumes it (`readLiveFieldBorrowed`). Only the exact shape the plain
+ * read answers with its own member: a plain shared receiver, a declared,
+ * always-present, getter-free field already carried as the result; anything
+ * else keeps `nativeFieldViewReadText`.
+ */
+export const nativeFieldViewBorrowedReadText = (
+  ctx: EmitContext,
+  operation: GetOperation,
+  ordinaryReadOf: (
+    carrier: Representation,
+    key: string
+  ) => { readonly source: Representation; readonly text: string; readonly accessor?: true; readonly absentReadsUndefined?: true } | null,
+  /**
+   * A frame slot a live view's answer is moved into, so the reference outlives
+   * the expression (`EmitContext.fieldPointerValues`). Without one the slot is
+   * a temporary of the full expression, which only a consumer in that same
+   * expression may read through.
+   */
+  slot?: string
+): string | null => {
+  const receipt = operation.nativeFieldViewRead
+  if (receipt === undefined || receipt.keyDomain !== undefined || receipt.originalAbsent === true) return null
+  const carrier = operation.receiver.representation
+  if (
+    (carrier.kind !== 'record' && carrier.kind !== 'class-ref' && carrier.kind !== 'native-record-ref') ||
+    carrier.ownership !== 'shared-refcount'
+  )
+    return null
+  const target = operation.result.representation
+  if (
+    (target.kind !== 'record' && target.kind !== 'class-ref' && target.kind !== 'native-record-ref') ||
+    target.ownership !== 'shared-refcount'
+  )
+    return null
+  const actual = ordinaryReadOf(carrier, receipt.key)
+  if (actual === null || actual.accessor === true || actual.source.kind === 'optional' || actual.absentReadsUndefined === true) return null
+  const ordinary = receipt.sources.find((entry) => representationKey(entry.source) === representationKey(actual.source))
+  const result = cppTypeOf(target)
+  if (ordinary === undefined || cppTypeOf(actual.source) !== result) return null
+  const concrete = `static_cast<const ${result}&>(${actual.text})`
+  if (renderedLeaf(ctx, ordinary.conversion, concrete) !== concrete) return null
+  const { adapter, accepted } = fieldViewRoutesText(ctx, receipt, result)
+  return (
+    `([&](const auto& gea_field_receiver, ${result}${slot === undefined ? '&&' : '&'} gea_field_slot) -> const ${result}& { ` +
+    `return gea::record::readLiveFieldBorrowed<${result}>(gea_field_receiver, ${liveKeyText(receipt.key)}, ${adapter}, ${accepted}, ` +
+    `gea_field_slot, [&]() -> const ${result}& { return ${concrete}; }); })(${operandText(ctx, operation.receiver)}, ${slot ?? `${result}()`})`
+  )
+}
+
 export const nativeFieldViewReadText = (
   ctx: EmitContext,
   operation: GetOperation,
@@ -284,15 +375,20 @@ export const nativeFieldViewWriteText = (
   // a dynamic writer may store a view into, such as three's uniform
   // `{ value }` -- otherwise sends every plain store of the type, every
   // frame, through `gea_writeOwnFieldNative`.
-  const memberStore = (carrier: Representation, key: string): boolean => {
+  // An optional member takes the same store while it is present and writable;
+  // creating it, or refusing a read-only one, stays with the protocol.
+  const memberStore = (carrier: Representation, key: string): 'required' | 'optional' | null => {
     // The receiver as `withFieldReceiver` binds it: presence and borrowing
     // peeled, never a union arm (an arm's member store is that arm's own).
     let held = operation.receiver.representation
     while (held.kind === 'optional' || held.kind === 'borrowed-ref') held = held.kind === 'optional' ? held.payload : held.referent
-    if (ordinaryStore === undefined || representationKey(carrier) !== representationKey(held)) return false
-    if (carrier.kind !== 'record' && carrier.kind !== 'native-record-ref') return false
-    if (carrier.kind === 'record' && carrier.accessors.some((accessor) => accessor.key === key)) return false
-    return (staticOwnFieldsOf(ctx.deriver, carrier) ?? []).some((field) => field.key === key && field.required)
+    if (ordinaryStore === undefined || representationKey(carrier) !== representationKey(held)) return null
+    if (carrier.kind !== 'record' && carrier.kind !== 'native-record-ref') return null
+    if (carrier.kind === 'record' && carrier.accessors.some((accessor) => accessor.key === key)) return null
+    const field = (staticOwnFieldsOf(ctx.deriver, carrier) ?? []).find((entry) => entry.key === key)
+    if (field === undefined) return null
+    if (field.required) return 'required'
+    return optionalRecordMember(ctx, carrier, key) ? 'optional' : null
   }
   const forKey = (key: string): string =>
     withFieldReceiver(operation.receiver.representation, 'gea_field_input', (carrier) => {
@@ -305,7 +401,8 @@ export const nativeFieldViewWriteText = (
           `gea_field_value, ${adapter}, ${openMaterializer(receipt.open)}, [&](const gea::NativeFieldWrite& gea_open_write) -> bool { ` +
           `return gea_field_receiver->gea_writeOwnFieldNative(${viewKeyText(key)}, gea_open_write, gea::nativeIsExtensible(gea_field_receiver)); });`
         )
-      if (receipt.keyDomain === undefined && memberStore(carrier, key))
+      const member = receipt.keyDomain === undefined ? memberStore(carrier, key) : null
+      if (member === 'required')
         return (
           `return gea::record::writeLiveField(gea_field_receiver, ${liveKeyText(key)}, ` +
           `gea_field_value, ${adapter}, [&]() -> bool { ` +
@@ -318,9 +415,14 @@ export const nativeFieldViewWriteText = (
         'return (*static_cast<const decltype(gea_plain_adapter)*>(slot))(type, policy, answer); }; ' +
         `return gea_field_receiver->gea_writeOwnFieldNative(${viewKeyText(key)}, ` +
         'gea_plain_write, gea::nativeIsExtensible(gea_field_receiver));'
+      const presentStore =
+        member === 'optional'
+          ? `if (gea_field_receiver->${cppRecordFieldPresenceName(key)} && gea_field_receiver->${cppRecordFieldAttributesName(key)}.writable) { ` +
+            `${ordinaryStore!(bound, { value: operation.receiver.value, representation: carrier }).join(' ')} return true; } `
+          : ''
       return (
         `return gea::record::writeLiveField(gea_field_receiver, ${liveKeyText(key)}, ` +
-        `gea_field_value, ${adapter}, [&]() -> bool { ${plain} });`
+        `gea_field_value, ${adapter}, [&]() -> bool { ${presentStore}${plain} });`
       )
     })
   // A fresh record's out-of-layout-order store states the order its literal

@@ -44,6 +44,7 @@ const units = [
   'cycle-self-loop-reclaim',
   'cycle-dead-candidate-forgotten',
   'cycle-dip-cache',
+  'cycle-edgeless-holder-leaves-the-young-filter',
   'proxy-reference-cycles',
   'cycle-graph-chunk-refusal',
   'cycle-trace-leaf-record',

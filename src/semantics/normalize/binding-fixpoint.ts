@@ -1,5 +1,6 @@
 import type ts from '#typescript'
 import type { ParameterBindingCensus } from './parameter-bindings.js'
+import { progress, progressed } from '../frontend-timing.js'
 import { sameImplicitArgumentsTuple, type ImplicitArgumentsTuple } from './implicit-arguments-tuple.js'
 
 type CensusFact = ts.Type | ts.Node | readonly (ts.Type | ts.Node)[] | ImplicitArgumentsTuple | null
@@ -77,7 +78,8 @@ export const settleBindingCensus = <Facts>(
   // a ~2.1GB fixpoint peak. Only `.parameters` is ever read back out of
   // a settled round (to seed the next round's `observed` view and to compare
   // `boundCount`), so only `.parameters` needs to survive the boundary.
-  let previousCensus = compose().parameters
+  let previousCensus = progressed('census round 1', () => compose()).parameters
+  if (process.env['GEA_STOP_AFTER_ROUND_ONE'] === '1') process.exit(0)
   let unsettled: string[] = []
   const identities = new Map<ts.Type, number>()
   const factLabel = (fact: CensusFact): string => {
@@ -134,11 +136,12 @@ export const settleBindingCensus = <Facts>(
     // `compose` is called with nothing in this function's own scope naming the
     // previous round's `facts` -- `observed` closes over `previousCensus`
     // (a `ParameterBindingCensus`), never over the `RoundCensus` it came from.
-    const next = compose(observed)
+    const next = progressed(`census round ${rounds}`, () => compose(observed))
     let changed = next.parameters.boundCount !== previousBoundCount
     unsettled = changed ? [`boundCount ${previousBoundCount} -> ${next.parameters.boundCount}`] : []
     // Reads may lazily consult earlier views. Snapshot before querying `next`
     // so forwarding to `observed` cannot extend the map during iteration.
+    progress(`census round ${rounds} convergence check over ${[...(reads ?? [])].reduce((sum, [, nodes]) => sum + nodes.size, 0)} queries`)
     const pending = [...(reads ?? [])].map(([name, nodes]) => [name, [...nodes]] as const)
     reads = null
     for (const [name, nodes] of pending) {
@@ -173,6 +176,9 @@ export const settleBindingCensus = <Facts>(
     // this round's `facts` and the round's index/session graph is free the
     // moment `next` goes out of scope, unlike the old flow where the outer
     // `round` binding kept it reachable until being overwritten one line later.
+    progress(
+      `census round ${rounds} ${changed ? 'changed' : 'settled'}: boundCount ${next.parameters.boundCount}${unsettled.length ? ` -- ${unsettled[0]?.slice(0, 200)}` : ''}`
+    )
     if (!changed) return { ...next, round: rounds }
     previousCensus = next.parameters
   }

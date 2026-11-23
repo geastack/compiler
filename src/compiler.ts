@@ -1,5 +1,6 @@
 import { mergeNativeIterableProviders } from './plugins/native-iterable-providers.js'
 import type { NativeDebugInfo } from './targets/cpp/native-debug-source.js'
+import { progress } from './semantics/frontend-timing.js'
 import { nodeOfOperation, operationOfResult } from './identity/ids.js'
 import { readFileSync } from 'fs'
 import { join } from 'path'
@@ -10,6 +11,7 @@ import { publishConversionRecipes } from './ir/publish-conversion-recipes.js'
 import { discardUnreadCallResults } from './ir/dead-values.js'
 import { programConversionKey, publishProgramConversionRecipes, type ProgramConversionRecipe } from './ir/program-conversions.js'
 import { publishDenseLoopPlan } from './ir/dense-loops.js'
+import { plainFieldReadOf } from './ir/plain-field-read.js'
 import { publishLogicalReceivers } from './ir/logical-receivers.js'
 import { publishNativeHostMethodReads } from './ir/native-host-method-reads.js'
 import { publishNativeCallablePrivateSlots } from './ir/native-callable-own-property.js'
@@ -90,6 +92,7 @@ import { splitGeneratorBodies } from './ir/generator-split.js'
 import { shakeProgram } from './ir/shake.js'
 import { pruneProvenBranches } from './ir/proven-branches.js'
 import { threadShortCircuitJoins } from './ir/short-circuit-threading.js'
+import { codeFreeFieldReadOf, reuseFieldReads } from './ir/field-read-reuse.js'
 import { dropUnreadPureConversions } from './ir/pure-conversion-reuse.js'
 import { publishEmissionRepresentationsOf, type EmissionRepresentationPublication } from './ir/emission-representations.js'
 import { finalizeTypedComputedReads, reflectionExposureOf, type ReflectionExposure } from './ir/reflection-demand.js'
@@ -469,6 +472,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // profile is written on exit).
   const stopAfterStage = process.env['GEA_STOP_AFTER_STAGE']
   const stage = (name: string): void => {
+    progress(`stage ${name} finished`)
     if (stageStartedAt) {
       const now = performance.now()
       // Heap beside time: a compile that runs out of memory names the stage
@@ -1200,7 +1204,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
         publishNativeCallableDataSlots({
           bodies: publishNativeCallablePrivateSlots({
             bodies: elideReadOnlySpreadCopies(
-              rewriteLiteralSetMembership(threadShortCircuitJoins(provenPruned!.bodies)),
+              rewriteLiteralSetMembership(reuseFieldReads(threadShortCircuitJoins(provenPruned!.bodies), classes, representations.deriver)),
               splitPlacements,
               representations.deriver
             ),
@@ -1696,7 +1700,11 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   const denseLoopPlannedOf = (): Map<PhysicalBodyId, IrBody> => {
     const taken = finalRecipeBodies!
     finalRecipeBodies = null
-    return new Map([...taken].map(([id, body]) => [id, publishDenseLoopPlan(body, splitPlacements, conversionCensus)]))
+    const plainFieldRead = plainFieldReadOf(executableClasses, representations.deriver)
+    const codeFreeFieldRead = codeFreeFieldReadOf(taken.values(), executableClasses, representations.deriver)
+    return new Map(
+      [...taken].map(([id, body]) => [id, publishDenseLoopPlan(body, splitPlacements, conversionCensus, plainFieldRead, codeFreeFieldRead)])
+    )
   }
   const certifiedBodies = finalRecipeBodies ? denseLoopPlannedOf() : null
   finalRecipeBodies = null

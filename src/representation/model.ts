@@ -1339,6 +1339,11 @@ const alwaysTruthyKinds: ReadonlySet<Representation['kind']> = new Set([
 export const carriesNoAbsence = (representation: Representation): boolean =>
   alwaysTruthyKinds.has(representation.kind) && !carriesNativeUndefined(representation)
 
+/** An Object carrier whose one falsy state is that undefined lane -- a shared
+ * record reference, which `carriesNoAbsence` refuses for exactly the lane. */
+export const objectCarrierWithOnlyNativeUndefined = (representation: Representation): boolean =>
+  alwaysTruthyKinds.has(representation.kind) && carriesNativeUndefined(representation)
+
 /** Native object references reserve an undefined lane for strict unbound method receivers, separate from null. */
 export const carriesNativeUndefined = (representation: Representation): boolean =>
   ((representation.kind === 'class-ref' || representation.kind === 'record' || representation.kind === 'record-with-index') &&

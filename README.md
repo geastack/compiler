@@ -45,13 +45,31 @@ The Gea and Apple plugins are peer dependencies. Other plugins are loaded with
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the pipeline, the
 layering and the constraints. `CLAUDE.md` has the code conventions.
 
+## Installing
+
+```bash
+npm install -D @geastack/compiler
+npx geatsc --help
+```
+
+The package installs the `geatsc` command. Generated programs are built with a
+C++ toolchain you supply (clang++ by default for Node projects).
+
+The examples below use `node dist/cli.js`, the same command run from a checkout
+of this repository after `npm ci` and `npm run build`. With the published
+package, write `npx geatsc` instead. `npm run build` also runs the post-build
+checks against `dist/`, which take about six minutes on a 20-thread machine.
+[docs/TESTING.md](docs/TESTING.md) covers the test suite.
+
 ## Layering
 
 ```
 identity/        canonical IDs
 semantics/       target-neutral frontend: regions, structural types,
                  operations, edges, coverage
+plugins/         compiler plugin contract, loader and the built-in plugins
 representation/  physical carriers, the sealed plan, fail-closed guards
+projection/      physical calling conventions, binding cells, class layouts
 conversion/      the closed dynamic-conversion capability algebra
 preflight/       whole-pipeline capability census and certificate
 ir/              typed IR: verified operations and SSA values
@@ -59,8 +77,8 @@ targets/cpp/     C++ emission; consumes typed IR only
 diagnostics/     authority-component sweep, deterministic ordering
 ```
 
-`semantics/` is the frontend/backend boundary. Nothing after it may import
-`typescript` or touch a TypeScript AST.
+`semantics/` is the frontend/backend boundary. Outside `semantics/` and
+`plugins/`, nothing may import `typescript` or touch a TypeScript AST.
 
 ## Constraints
 
@@ -70,8 +88,8 @@ diagnostics/     authority-component sweep, deterministic ordering
    C++ text. Identity is a checker symbol/declaration, a sealed semantic ID,
    or a versioned protocol identity.
 2. **No boxing.** A value with a static type never gets the dynamic carrier.
-   `Representation.dynamic` is allowed only for the four `DynamicReason`
-   values declared in `src/representation/model.ts`.
+   `Representation.dynamic` is allowed only for the `DynamicReason` values
+   declared in `dynamicReasons` in `src/representation/model.ts`.
 3. **Fail closed.** When a guard fires, the defect is upstream. Do not relax a
    guard, downgrade an `unresolved`, or substitute a default for a missing
    fact. `unresolved` is lattice bottom, not an answer.
@@ -80,32 +98,47 @@ diagnostics/     authority-component sweep, deterministic ordering
 
 `scripts/architecture.mjs` checks `src/**/*.ts` for:
 
-- file and directory size limits
+- lines longer than 300 columns
 - RegExp literals under `src/targets/cpp/`
 - source-position literal comparisons
-- `typescript` imports outside `src/semantics/`
+- `typescript` imports outside `src/semantics/` and `src/plugins/`
 - source-shaped discriminants
 - unclassified `Authority`/`Admission`/`Proof` contracts
 - class declarations under `src/targets/`
 - `any`
+- diagnostic severity classified outside `diagnostics/sweep.ts`
+- conversion calls that bypass the recipe dispatcher, and other single-owner
+  rules it names in its summary line
+- private copies of the compiler build beside `dist/`
 
-It reports every violation in one run.
+It reports every violation in one run. `npm run architecture` also runs
+`scripts/refusal-keys.mjs`, which checks that every refusal kind the C++
+target can throw is a capability key.
 
 ## Diagnostics
 
 ```bash
-node dist/cli.js test/fixtures/spread.ts
+node dist/cli.js test/fixtures/spread.ts --no-project
 ```
 
 Runs the full pipeline and prints every diagnostic. Exits non-zero when no
 capability certificate was minted. `--preflight` prints the obligation census
 as canonical NDJSON.
 
+Without `--no-project` or `--project`, a file is compiled under the nearest
+`tsconfig.json`. For the fixtures in this repository that is the compiler's
+own, which pulls the whole compiler source into the program and takes minutes
+instead of seconds.
+
 ### Coverage
 
 ```bash
-node dist/cli.js coverage app/index.ts --plugin ../node-compat/plugin/v2.mjs
+node dist/cli.js coverage app/index.ts --plugin node_modules/@geastack/node-compat/plugin/index.mjs
 ```
+
+`coverage` loads `--plugin` as a file path relative to the working directory.
+The example loads the Node.js plugin from `@geastack/node-compat`, which this
+package installs as a dependency.
 
 Prints one row per statement with a code, a status and a one-line reason,
 followed by a summary and a count per code. Boxed carriers are reported as
@@ -137,7 +170,7 @@ node scripts/probe-carriers.mjs test/fixtures/language.ts
 ```
 
 Prints the carrier and C++ spelling chosen for every declaration, and counts
-unresolved and boxed carriers.
+unresolved and boxed carriers. Exits non-zero when either count is not zero.
 
 ## Emitting C++
 
@@ -157,7 +190,7 @@ through `--geatsc-bin`). It writes to `--out-dir`:
 | Option                                               | Meaning                                                                                                                                                                                                                           |
 | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--project <tsconfig.json>`                          | Project to compile the input under. Default: the nearest one. A `.js` bundle has none.                                                                                                                                            |
-| `--entry-symbol <name>`                              | C++ function the program starts at. Default `__gea_top_level`, called by `core/gea_app_entry.cpp`.                                                                                                                                |
+| `--entry-symbol <name>`                              | C++ function the program starts at. Default `__gea_top_level`, called by `packages/core/gea_app_entry.cpp` in the `core` repository.                                                                                              |
 | `--dynamic-fallback`                                 | Allow boxed C++ runtime dispatch for supported dynamic features. No JavaScript engine is involved. See [docs/DYNAMIC-FALLBACK.md](docs/DYNAMIC-FALLBACK.md).                                                                      |
 | `--isolate-symbols`                                  | Make every definition private to this program, for builds that link several programs into one binary. Programs that cannot be isolated are refused.                                                                               |
 | `--translation-units single \| per-file \| balanced` | `single` (default): one C++ file. `per-file`: one file per source file, plus a shared `<stem>.hpp` and a program unit. `balanced`: per-file with small units grouped. See [docs/TRANSLATION-UNITS.md](docs/TRANSLATION-UNITS.md). |
@@ -170,14 +203,19 @@ form. It takes the same options.
 
 ## npm scripts
 
-| Script         | Purpose                                       |
-| -------------- | --------------------------------------------- |
-| `architecture` | Run the architecture gate                     |
-| `typecheck`    | `tsc -p tsconfig.json --noEmit`               |
-| `build`        | Architecture gate, then compile to `dist/`    |
-| `format`       | `prettier --write .`                          |
-| `format:check` | `prettier --check .`                          |
-| `check`        | Architecture gate, typecheck and format check |
+| Script            | Purpose                                                                                                         |
+| ----------------- | --------------------------------------------------------------------------------------------------------------- |
+| `architecture`    | Run the architecture gate and the refusal-key check                                                             |
+| `typecheck`       | `tsc -p tsconfig.json --noEmit`                                                                                 |
+| `build`           | Architecture gate, compile to `dist/`, mark the bins executable, then run the post-build checks against `dist/` |
+| `gate`            | Emitted-set gate: emit the corpus and runtime programs and diff them against the tracked baselines              |
+| `test`            | Build, then run the test suite (`test/run.mjs`)                                                                 |
+| `test:release`    | Release-mode suite (`scripts/release-suite.mjs`)                                                                |
+| `release:check`   | `check`, `build`, `gate` and `test:release`, in that order                                                      |
+| `check:contracts` | Build, then run `test/contracts.mjs`                                                                            |
+| `format`          | `prettier --write .`                                                                                            |
+| `format:check`    | `prettier --check .`                                                                                            |
+| `check`           | Architecture gate, typecheck and format check                                                                   |
 
 ## License
 

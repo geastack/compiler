@@ -178,7 +178,10 @@ const symbolIteratorClass = (keyType: string) => `
   for (const item of v) console.log(item);
 `
 
-test('a runtime string key reserves own slots for string-keyed methods only, never a symbol-keyed one', () => {
+// A computed key no proof bounds runs the dynamic own-property protocol, so
+// the shadow it can create lives in the instance's expando table
+// (`dynamicMethodShadows`) and takes no slot.
+test('a runtime string key shadows string-keyed methods only, never a symbol-keyed one', () => {
   const result = compileFixture(symbolIteratorClass('string'))
   const layout = [...result.projection.classes.values()].find((item) => item.name === 'Vec')!
   assert.ok(layout)
@@ -186,8 +189,9 @@ test('a runtime string key reserves own slots for string-keyed methods only, nev
     layout.methods.some((method) => method.key.startsWith('sym(')),
     'the generator method is still a prototype method'
   )
-  const keys = (layout.methodOverrides ?? []).map((field) => field.key)
+  const keys = layout.dynamicMethodShadows ?? []
   assert.ok(keys.includes('scale'))
+  assert.deepEqual(layout.methodOverrides ?? [], [])
   assert.deepEqual(
     keys.filter((key) => key.startsWith('sym(')),
     []
@@ -198,11 +202,11 @@ test('a runtime string key reserves own slots for string-keyed methods only, nev
   )
 })
 
-test('a runtime key that may be a symbol keeps the symbol-keyed method slot', () => {
+test('a runtime key that may be a symbol shadows the symbol-keyed method too', () => {
   const result = compileFixture(symbolIteratorClass('PropertyKey'))
   const layout = [...result.projection.classes.values()].find((item) => item.name === 'Vec')!
   assert.ok(layout)
-  const keys = (layout.methodOverrides ?? []).map((field) => field.key)
+  const keys = layout.dynamicMethodShadows ?? []
   assert.ok(keys.includes('scale'))
   assert.ok(keys.some((key) => key.startsWith('sym(')))
 })

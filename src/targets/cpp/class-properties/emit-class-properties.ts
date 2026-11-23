@@ -50,7 +50,10 @@ import { nativeMethodValueRecipeText } from '../emit-native-method.js'
 import { computedOverriddenMethodValueText, heldMethodCopyOf } from './computed-method-value.js'
 import { nativePrototypeMethodFallbackText } from './native-prototype.js'
 import {
+  classDynamicMethodShadowOf,
   classFamilyMayAllocate,
+  classMethodFamilyHasNativeBody,
+  classMethodReadMayMissAbstractly,
   classMethodValueArmsOf,
   classPrototypeMethodKeysOf,
   classPrototypeMethodValueArmsOf,
@@ -189,7 +192,17 @@ export const classMethodValueText = (
     receiverRepresentation.kind === 'class-ref' && !dispatchesStatically(ctx, operation.receiver)
       ? classMethodOverrideOf(ctx.classes, receiverRepresentation.declaration, key)
       : null
-  const heldReceiver = override === null ? receiverText : 'gea_method_receiver'
+  // A shadow only a dynamic write installs has no slot: it is read from the
+  // instance's expando table (`ClassLayout.dynamicMethodShadows`).
+  // A read only a resolved call consumes is the callee of that call, which
+  // checks the expando table itself (`CallOperation.expandoShadowGuard`).
+  const shadowed =
+    override === null &&
+    !ctx.deferredMethodValues.has(operation.result.id) &&
+    receiverRepresentation.kind === 'class-ref' &&
+    !dispatchesStatically(ctx, operation.receiver) &&
+    classDynamicMethodShadowOf(ctx.classes, receiverRepresentation.declaration, key)
+  const heldReceiver = override === null && !shadowed ? receiverText : 'gea_method_receiver'
   const state = `${heldReceiver}->gea_method_state`
   const bodyValue = `gea::nativeClassMethodValue<${cppClassName(owner.declaration)}, &${cppCallableDeclarationTagName(method.callable)}>(${state}, ${payload})`
   const materialized =
@@ -218,6 +231,24 @@ export const classMethodValueText = (
     originalValue,
     dispatchesStatically(ctx, operation.receiver)
   )
+  if (shadowed) {
+    const slot: Representation = { kind: 'function-value-dispatch', abi: { ...bodyAbi, receiver: null } }
+    const stored = `gea::detail::DynamicCarrier<${cppTypeOf(slot)}>::in(*gea_method_shadow, 0)`
+    const owned =
+      nativeMethodValueRecipeText(ctx, operation, key, slot, valueRepresentation, stored, 'own', null) ??
+      operationConversionText(ctx, operation, 'method-frame', slot, valueRepresentation, stored)
+    if (owned === null) {
+      throw createCppEmitBlockedError(
+        `conversion:${representationKey(slot)}->${representationKey(valueRepresentation)}`,
+        `a dynamically shadowed method "${key}" cannot fill its published method-read convention`
+      )
+    }
+    const text =
+      `([&]() -> ${valueType} { const auto& ${heldReceiver} = ${receiverText}; ` +
+      `if (gea::detail::nativeExpandoPresent(${heldReceiver})) { if (const auto gea_method_shadow = gea::detail::nativeExpandoOwnValue(${heldReceiver}, ${JSON.stringify(key)})) return ${owned}; } ` +
+      `return ${fallback}; })()`
+    return { text, type: valueType, environment }
+  }
   if (override === null) return { text: fallback, type: valueType, environment }
   const ownedStorage = `${heldReceiver}->${cppRecordFieldName(key)}`
   const owned =
@@ -539,6 +570,28 @@ export const reactiveClassFieldClaim = (ctx: EmitContext, operation: GetOperatio
   }
 }
 
+/**
+ * The key of a method read that always misses: the receiver's family has no
+ * override and only an abstract declaration under the key, so an instance
+ * (constructed by reflection) has no own or inherited member there and the
+ * read is `undefined`. `emit-callable.ts` asks this of a callee so the call
+ * raises its TypeError itself, after the arguments are evaluated.
+ */
+export const abstractMissReadKeyOf = (ctx: EmitContext, operation: GetOperation): string | null => {
+  const receiver = operation.receiver.representation
+  if (receiver.kind !== 'class-ref' || operation.result.representation.kind !== 'function-value-dispatch') return null
+  const key = ctx.staticKeyTexts.get(operation.key.value)
+  if (key === undefined) return null
+  const site = classMemberOf(ctx.classes, receiver.declaration, key)
+  if (site?.kind !== 'method' || site.method.callable !== null || dispatchesStatically(ctx, operation.receiver)) return null
+  if (classFamilyOverridesOf(ctx.classes, receiver.declaration, key).length > 0) return null
+  if (!classFamilyMayAllocate(ctx.classes, receiver.declaration)) return null
+  return classMethodFamilyHasNativeBody(ctx.classes, receiver.declaration, key) &&
+    classMethodReadMayMissAbstractly(ctx.classes, receiver.declaration, key)
+    ? key
+    : null
+}
+
 export const classMemberText = (ctx: EmitContext, operation: GetOperation): ClassMemberValue | null => {
   const receiver = operation.receiver.representation
   if (receiver.kind !== 'class-ref') return null
@@ -698,6 +751,16 @@ export const classMemberText = (ctx: EmitContext, operation: GetOperation): Clas
       'std::abort();'
     return { text: `[]() -> ${carrier} { ${failure} }()`, spelling: carrier }
   }
+  // An instance of the abstract class itself (constructed by reflection, with
+  // nothing below it redeclaring the key) misses the lookup: the read is
+  // `undefined`, which the dispatch carrier's empty callable stands for. A
+  // call of it raises the TypeError JS raises for calling `undefined`, after
+  // the arguments are evaluated (`emitCall`). Certification refuses any other
+  // carrier.
+  if (abstractMissReadKeyOf(ctx, operation) !== null) {
+    const carrier = cppTypeOf(operation.result.representation)
+    return { text: `${carrier}()`, spelling: carrier }
+  }
   // Certification requires a native implementation family for an evaluated
   // method read. A declaration without a body cannot provide a callable:
   // JavaScript can still construct its class through an erased assertion.
@@ -754,6 +817,8 @@ export const virtualCalleeClaim = (
   if (classFamilyOverridesOf(ctx.classes, receiver.declaration, key).length === 0) return null
   if (dispatchesStatically(ctx, operation.receiver)) return null
   if (classPrototypeMethodMutableOf(ctx.classes, receiver.declaration, key)) return null
+  // A dynamic shadow (`ClassLayout.dynamicMethodShadows`) keeps the virtual call:
+  // the call checks the expando table before dispatching (`CallOperation.expandoShadowGuard`).
   if (classMethodOverrideOf(ctx.classes, receiver.declaration, key) !== null) return null
   // One copy of a generic method dispatches through that copy's own member
   // (`projection/dispatch.ts`'s `virtualCopyFamiliesOf`), named by its convention.

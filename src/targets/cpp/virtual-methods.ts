@@ -7,6 +7,7 @@ import { prototypeSetterValue, virtualConversionOwnerOf, type ProgramConversionR
 import {
   extendsClass,
   virtualDispatchKey,
+  classAbstractMemberMissesAt,
   virtualMethodFamiliesOf,
   type VirtualDispatchVerdict,
   type VirtualFamilyRefusal,
@@ -18,6 +19,7 @@ import {
 export {
   extendsClass,
   virtualDispatchKey,
+  classAbstractMemberMissesAt,
   virtualMethodFamiliesOf,
   type VirtualDispatchVerdict,
   type VirtualFamilyRefusal,
@@ -304,7 +306,16 @@ export const virtualMethodEmission = (
       // already proves every concrete subclass overrides this, so the
       // definition is unreachable and says so instead of returning a value it
       // would have to invent.
-      const failure = `std::fprintf(stderr, "gea: abstract method ${String(family.root)}.${family.key} has no implementation\\n"); std::abort();`
+      // A method, though, can be reached: an abstract constructor runs at run
+      // time, and an observer holding an instance can recover it from the
+      // prototype chain (`class-allocation-domain.ts`). Such an instance has
+      // no own or inherited member under the key, so the call is JavaScript's
+      // call of `undefined`. A root that does have a body, only not at this
+      // convention copy, is no such miss and stays unreachable.
+      const failure =
+        family.role === 'call' && classAbstractMemberMissesAt(classes, family.root, family.key)
+          ? `gea::host::throwRuntimeError("TypeError", "${family.key} is not a function");`
+          : `std::fprintf(stderr, "gea: abstract method ${String(family.root)}.${family.key} has no implementation\\n"); std::abort();`
       membersByStruct.set(cppClassName(family.root), [
         ...(membersByStruct.get(cppClassName(family.root)) ?? []),
         `  virtual ${result} ${cppVirtualMemberName(family.key, family.role, family.copy)}(${formals});`

@@ -57,7 +57,7 @@ import { nativeArrayDescriptorSnapshotMatches, nativeArrayDescriptorReinstallati
 import { operationOfResult } from '../identity/ids.js'
 import type { TargetRuntimeManifest } from '../preflight/obligations.js'
 import type { ClassLayout } from '../projection/classes.js'
-import { classFamilyMayAllocate, classMethodFamilyHasNativeBody } from '../projection/dispatch.js'
+import { classFamilyMayAllocate, classMethodFamilyHasNativeBody, classMethodReadMayMissAbstractly } from '../projection/dispatch.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import { forEachEmbeddedRepresentation } from '../representation/embedded-carriers.js'
 import { captureCapabilityOf, representationKey, type CallableAbi, type Representation } from '../representation/model.js'
@@ -1782,6 +1782,21 @@ const internalConversionDemandsOf = (operation: IrOperation, ctx: CertifyContext
         key: 'property-access:computed-class-method-virtual',
         verdict: 'missing',
         detail: 'an evaluated native method read has no executable source implementation or override family'
+      })
+    // A read that misses on an abstract declaration is `undefined` there; the
+    // empty callable of a dispatch carrier is that value, and calling it is
+    // the TypeError. No other carrier has one to stand for it.
+    else if (
+      keyText !== null &&
+      operation.receiver.representation.kind === 'class-ref' &&
+      operation.result.representation.kind !== 'function-value-dispatch' &&
+      classMethodReadMayMissAbstractly(ctx.classes, operation.receiver.representation.declaration, keyText) &&
+      classFamilyMayAllocate(ctx.classes, operation.receiver.representation.declaration)
+    )
+      demands.push({
+        key: 'property-access:computed-class-method-virtual',
+        verdict: 'missing',
+        detail: 'a native method read that misses on an abstract declaration has no carrier for undefined'
       })
     const abis =
       ctx.abis ??

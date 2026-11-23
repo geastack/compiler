@@ -490,6 +490,15 @@ inline const bool terminateFlushInstalled = [] {
 
 }  // namespace detail
 
+// A checked typed window's Number index (`DenseArray.checked`): a whole
+// number inside the element count the preheader took, so it names an element.
+// Anything else -- a fraction, a negative, NaN, past the end -- takes the
+// view's own path, which drops the write or answers the read.
+[[gnu::always_inline]] inline bool denseCheckedIndex(double key, std::size_t extent) {
+  std::uint32_t index;
+  return detail::doubleArrayIndex(key, index) && index < extent;
+}
+
 // A loop guard must validate Number operands before converting them to native
 // indices. Fractional/non-finite inputs keep the ordinary access path. Once
 // these inputs are safe integers, the endpoint sums fit in int64_t (at most
@@ -1607,6 +1616,26 @@ template <typename... Arms>
 class TaggedUnion;
 template <typename T>
 struct Ref;
+/**
+ * A run of constant-index reads of one array, taken once at its first read
+ * (`ir/dense-read-windows.ts`): the cells when every index the run reads is
+ * plain dense storage, else null, and every read of a null window takes
+ * `readElementAtIndex`. Null until taken, so a member rendered without the
+ * first read still reads correctly.
+ */
+template <typename ArrayRef>
+struct DenseReadWindow {
+  typename ArrayRef::element_type::Cell* cells = nullptr;
+};
+template <typename Array>
+[[gnu::always_inline]] inline typename Array::Cell* denseWindowCells(const gea::Ref<Array>& array, long long last) {
+  return array->plainDenseThrough(last) ? array->cells.data() : nullptr;
+}
+/** `denseWindowCells` for a run that also stores: the array must also accept writes (`requireMutable`). */
+template <typename Array>
+[[gnu::always_inline]] inline typename Array::Cell* denseWindowCellsMutable(const gea::Ref<Array>& array, long long last) {
+  return array->plainDenseThrough(last) && !array->hasFrozenIntegrity() ? array->cells.data() : nullptr;
+}
 class DynamicObject;
 class FunctionObjectIdentity;
 class Value;
@@ -3742,6 +3771,18 @@ inline void filterCycleCandidates(std::vector<CycleReference>& list, std::size_t
         ++allocationProfile().edgelessCandidates;
         if (reference.operations->profile != nullptr) ++reference.operations->profile().edgelessCandidates;
 #endif
+        // Keep the verdict. A long-lived holder of untraced objects -- three's
+        // material uniforms, a dictionary of `{ value }` view-target records --
+        // dips on every frame's borrow, and dropping it with its bit clear had
+        // the next dip buffer it and this probe walk every entry again: a
+        // sixth of Saltline's frame. Found edgeless twice, it is permanent,
+        // so its dips wait in `deferred` for the full collection (the one
+        // pass that would see an edge it gains later, as for any permanent
+        // object; see `deferredOverdue` for the bound). The first verdict
+        // only makes it mature, which a young pass may treat as a leaf: it has
+        // no traced edge to follow. An object that dies young never gets here
+        // twice, so its block is not held in `deferred`.
+        reference.counts->weak |= (reference.counts->weak & cycleMature) != 0 ? cyclePermanent : cycleMature;
         continue;
       }
       if (probe.selfEdges != 0 && probe.selfEdges == reference.counts->strong) {
@@ -6932,6 +6973,17 @@ inline Environment* unpackEnvironment(void* packed, void* slot) {
   }
 }
 
+namespace detail {
+// The environment struct a closure's borrowed body takes as its leading
+// `Environment*` formal (`callKnownBorrowedEnvironment`).
+template <typename Function>
+struct BorrowedEnvironmentOf;
+template <typename Result, typename Environment, typename... Rest>
+struct BorrowedEnvironmentOf<Result (*)(Environment*, Rest...)> {
+  using type = Environment;
+};
+}  // namespace detail
+
 /**
  * `unpackEnvironment`'s counterpart for a `packTransientEnvironment`-packed
  * environment: the same two cases, plus the one `packTransientEnvironment`
@@ -8521,6 +8573,40 @@ struct CallableObject<Result(Arguments...)> {
     return invoke(environment, std::forward<Actual>(arguments)...);
   }
 
+  // `callKnownBorrowed` for a closure's borrowed body, which takes its
+  // environment first: the guard's hit unpacks the environment exactly as the
+  // closure's thunk does (into a stack slot, unretained) and enters the body
+  // with the arguments bound by reference, where `callKnown` copied each one
+  // into the thunk's by-value formals and released it on return.
+  template <auto Known, auto Borrowed, typename... Actual>
+  [[gnu::always_inline]] Result callKnownBorrowedEnvironment(Actual&&... arguments) const {
+    requireCallable();
+    const auto keepAlive = environmentOwner;
+    if constexpr (std::is_same_v<decltype(Known), Invoke>) {
+      if (invoke == Known) {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        using Environment = typename detail::BorrowedEnvironmentOf<decltype(Borrowed)>::type;
+        return Borrowed(unpackTransientEnvironment<Environment>(environment, slot), std::forward<Actual>(arguments)...);
+      }
+    }
+    return invoke(environment, std::forward<Actual>(arguments)...);
+  }
+
+  // The same for a callee `callStable` may take: the caller's own slot keeps
+  // the environment alive, so neither branch retains it.
+  template <auto Known, auto Borrowed, typename... Actual>
+  [[gnu::always_inline]] Result callStableKnownBorrowedEnvironment(Actual&&... arguments) const {
+    requireCallable();
+    if constexpr (std::is_same_v<decltype(Known), Invoke>) {
+      if (invoke == Known) {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        using Environment = typename detail::BorrowedEnvironmentOf<decltype(Borrowed)>::type;
+        return Borrowed(unpackTransientEnvironment<Environment>(environment, slot), std::forward<Actual>(arguments)...);
+      }
+    }
+    return invoke(environment, std::forward<Actual>(arguments)...);
+  }
+
   // Two candidates behind one slot (`callableMemberAlternateSlot`): at most
   // one guard matches, so each branch forwards the arguments once.
   template <auto Known, auto Borrowed, auto Known2, auto Borrowed2, typename... Actual>
@@ -8882,6 +8968,40 @@ struct CallableConstructorObject<Result(Arguments...), Constructed(ConstructArgu
     const auto keepAlive = environmentOwner;
     if constexpr (std::is_same_v<decltype(Known), Invoke>) {
       if (invoke == Known) return Borrowed(std::forward<Actual>(arguments)...);
+    }
+    return invoke(environment, std::forward<Actual>(arguments)...);
+  }
+
+  // `callKnownBorrowed` for a closure's borrowed body, which takes its
+  // environment first: the guard's hit unpacks the environment exactly as the
+  // closure's thunk does (into a stack slot, unretained) and enters the body
+  // with the arguments bound by reference, where `callKnown` copied each one
+  // into the thunk's by-value formals and released it on return.
+  template <auto Known, auto Borrowed, typename... Actual>
+  [[gnu::always_inline]] Result callKnownBorrowedEnvironment(Actual&&... arguments) const {
+    requireCallable();
+    const auto keepAlive = environmentOwner;
+    if constexpr (std::is_same_v<decltype(Known), Invoke>) {
+      if (invoke == Known) {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        using Environment = typename detail::BorrowedEnvironmentOf<decltype(Borrowed)>::type;
+        return Borrowed(unpackTransientEnvironment<Environment>(environment, slot), std::forward<Actual>(arguments)...);
+      }
+    }
+    return invoke(environment, std::forward<Actual>(arguments)...);
+  }
+
+  // The same for a callee `callStable` may take: the caller's own slot keeps
+  // the environment alive, so neither branch retains it.
+  template <auto Known, auto Borrowed, typename... Actual>
+  [[gnu::always_inline]] Result callStableKnownBorrowedEnvironment(Actual&&... arguments) const {
+    requireCallable();
+    if constexpr (std::is_same_v<decltype(Known), Invoke>) {
+      if (invoke == Known) {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        using Environment = typename detail::BorrowedEnvironmentOf<decltype(Borrowed)>::type;
+        return Borrowed(unpackTransientEnvironment<Environment>(environment, slot), std::forward<Actual>(arguments)...);
+      }
     }
     return invoke(environment, std::forward<Actual>(arguments)...);
   }
@@ -10106,6 +10226,14 @@ struct ArrayObject {
   // `elementAtIndex`'s dense case first: ordinary storage, in range, no hole or
   // undefined bookkeeping answers the cell after one unsigned compare, so an
   // integer-keyed read keeps the shape the borrowed accessor had.
+  /**
+   * Whether `readElementAtIndex` answers every index up to `last` from `cells`
+   * alone: the checks it makes per read, asked once for a run of reads
+   * (`gea::denseWindowCells`, `ir/dense-read-windows.ts`).
+   */
+  [[gnu::always_inline]] bool plainDenseThrough(long long last) const {
+    return !liveSource && !indexedDescriptors && static_cast<unsigned long long>(last) < cells.size() && holes.empty() && undefineds.empty();
+  }
   [[gnu::always_inline]] Element readElementAtIndex(long long index) const {
     if (!liveSource && !indexedDescriptors && static_cast<unsigned long long>(index) < cells.size() && holes.empty() &&
         undefineds.empty()) [[likely]]
@@ -10951,6 +11079,17 @@ class ArrayBuffer {
     size_ = heap_.size();
   }
 
+  /** Tag for the borrowing constructor below. */
+  struct Borrowed {};
+
+  /**
+   * Views a block the host owns and keeps alive for as long as any view of it
+   * can run -- a display's scanout framebuffer, which an app renders into in
+   * place instead of into a copy. The buffer never frees it; growing (which no
+   * view of a fixed block does) or transferring copies it out first.
+   */
+  ArrayBuffer(Borrowed, std::uint8_t* bytes, std::size_t byteLength) noexcept : data_(bytes), size_(byteLength) {}
+
   ArrayBuffer(const ArrayBuffer&) = delete;
   ArrayBuffer& operator=(const ArrayBuffer&) = delete;
   ArrayBuffer(ArrayBuffer&&) = delete;
@@ -10969,7 +11108,7 @@ class ArrayBuffer {
     requireAttached();
     std::vector<std::uint8_t> result;
     if (usingHeap_) result = std::move(heap_);
-    else result.assign(inline_, inline_ + size_);
+    else result.assign(data_, data_ + size_);
     size_ = 0;
     data_ = inline_;
     usingHeap_ = false;
@@ -10989,7 +11128,7 @@ class ArrayBuffer {
   /** `TextEncoder::encode`'s upfront sizing: grows capacity to at least `requested` in place while it still fits inline, else moves (once) to the `vector` fallback -- the one path an ArrayBuffer's byte count ever grows through; a `new ArrayBuffer(n)` itself never resizes (see the class comment above). */
   void reserve(std::size_t requested) {
     requireAttached();
-    if (!usingHeap_ && requested <= kInlineCapacity) return;
+    if (!usingHeap_ && data_ == inline_ && requested <= kInlineCapacity) return;
     migrateToHeap();
     heap_.reserve(requested);
     data_ = heap_.data();
@@ -11001,7 +11140,7 @@ class ArrayBuffer {
     requireAttached();
     const std::size_t offset = static_cast<std::size_t>(position - data_);
     const std::size_t count = static_cast<std::size_t>(last - first);
-    if (!usingHeap_ && size_ + count <= kInlineCapacity) {
+    if (!usingHeap_ && data_ == inline_ && size_ + count <= kInlineCapacity) {
       if (offset != size_) std::memmove(inline_ + offset + count, inline_ + offset, size_ - offset);
       for (std::size_t written = 0; written < count; ++written, ++first) inline_[offset + written] = static_cast<std::uint8_t>(*first);
       size_ += count;
@@ -11023,7 +11162,7 @@ class ArrayBuffer {
 
   void migrateToHeap() {
     if (usingHeap_) return;
-    heap_.assign(inline_, inline_ + size_);
+    heap_.assign(data_, data_ + size_);
     usingHeap_ = true;
   }
 
@@ -13848,6 +13987,28 @@ class StableEntryStore {
  * references to existing elements valid where a vector's reallocation would
  * dangle them.
  */
+namespace detail {
+/**
+ * The interned key sequence of a string-keyed table (`Dictionary::layoutId`):
+ * tables holding the same keys at the same positions -- three's uniform tables,
+ * cloned from one template per material -- share one id, so a read site that
+ * cached (id, slot) reads the slot of any of them without hashing or comparing
+ * the key. Ids are never reused; the table stops growing at a fixed bound, and
+ * a table whose sequence it cannot hold has no layout.
+ */
+inline std::uint32_t internDictionaryLayout(const std::string& encoded) {
+  static std::mutex lock;
+  static auto* const layouts = new std::unordered_map<std::string, std::uint32_t>();
+  const std::lock_guard<std::mutex> held(lock);
+  const auto found = layouts->find(encoded);
+  if (found != layouts->end()) return found->second;
+  if (layouts->size() >= (std::size_t{1} << 16)) return 0;
+  const auto id = static_cast<std::uint32_t>(layouts->size() + 1);
+  layouts->emplace(encoded, id);
+  return id;
+}
+}  // namespace detail
+
 template <typename V>
 class Dictionary {
  public:
@@ -13907,6 +14068,7 @@ class Dictionary {
    */
   void migrateTo(detail::DictionaryAliasHandle<V> alias) {
     static_assert(aliasable, "only a Dictionary<Value> can view another object");
+    invalidateLayout();
     first_.reset();
     entries_.clear();
     index_.clear();
@@ -13929,6 +14091,7 @@ class Dictionary {
     if (!first_ && entries_.empty()) {
       enumerableKeys_.reset();
       noteKey(key);
+      invalidateLayout();
       first_.emplace(detail::duplicateString(key), V{});
       if constexpr (aliasable) detail::noteDocumentDataKeyCreated(this, key);
       return first_->second;
@@ -13937,6 +14100,7 @@ class Dictionary {
     if (found != npos) return entries_[found].second;
     enumerableKeys_.reset();
     noteKey(key);
+    invalidateLayout();
     Entry& entry = entries_.emplace_back(detail::duplicateString(key), V{});
     GEA_EH_TRY_ANY(gea_eh_failed) {
       indexInsert(entries_.size() - 1);
@@ -14017,6 +14181,53 @@ class Dictionary {
     return readIfPresent<Carrier>(key);
   }
   /**
+   * The slot of a constant key read at one site, asked of the site's cached
+   * (layout, slot) pair first. A table with the cached layout holds the same
+   * keys at the same slots, so the slot is the answer -- absence included --
+   * with no hash and no key compare; it is what an inline cache keyed on a
+   * hidden class does. A table without a layout keeps the position hint in the
+   * low half. Relaxed: the pair is one word, so it never tears, and a stale one
+   * only sends the read to the lookup.
+   */
+  std::uint32_t layoutSlot(std::string_view key, std::atomic<std::uint64_t>& hint) const {
+    const std::uint64_t cached = hint.load(std::memory_order_relaxed);
+    const std::uint32_t layout = layoutId();
+    if (layout != 0 && static_cast<std::uint32_t>(cached >> 32) == layout) [[likely]] return static_cast<std::uint32_t>(cached);
+    std::uint32_t slot = kAbsentSlot;
+    if (first_ && first_->first == key) slot = 0;
+    else if (mayHoldKey(key)) {
+      const std::uint32_t at = layout == 0 && (cached >> 32) == 0 ? static_cast<std::uint32_t>(cached) : kAbsentSlot;
+      if (at != kAbsentSlot && at != 0 && at - 1 < entries_.size() && entries_[at - 1].first == key) slot = at;
+      else {
+        const std::size_t found = findPosition(key);
+        if (found != npos && found < kAbsentSlot - 1) slot = static_cast<std::uint32_t>(found + 1);
+      }
+    }
+    if (layout != 0 || slot != kAbsentSlot) hint.store((std::uint64_t{layout} << 32) | slot, std::memory_order_relaxed);
+    return slot;
+  }
+  /** `read` with a site's layout-keyed cache (`layoutSlot`). */
+  V readHinted(std::string_view key, std::atomic<std::uint64_t>& hint) const {
+    if constexpr (!aliasable) {
+      if (!view_) [[likely]] {
+        const std::uint32_t slot = layoutSlot(key, hint);
+        return slot == kAbsentSlot ? V{} : slot == 0 ? first_->second : entries_[slot - 1].second;
+      }
+    }
+    return read(key);
+  }
+  /** `readIfPresent` with a site's layout-keyed cache (`layoutSlot`). */
+  template <typename Carrier>
+  Carrier readIfPresentHinted(std::string_view key, std::atomic<std::uint64_t>& hint) const {
+    if constexpr (!aliasable) {
+      if (!view_) [[likely]] {
+        const std::uint32_t slot = layoutSlot(key, hint);
+        return slot == kAbsentSlot ? Carrier() : slot == 0 ? Carrier(first_->second) : Carrier(entries_[slot - 1].second);
+      }
+    }
+    return readIfPresent<Carrier>(key);
+  }
+  /**
    * `has(key) ? Carrier(read(key)) : Carrier()` with one lookup for a plain
    * table: no view and no Document alias or overlay, where `has` and `read`
    * both answer exactly the own entry. Every other table asks both, as before.
@@ -14075,13 +14286,14 @@ class Dictionary {
       }
     }
     if (first_ && first_->first == key) {
-      enumerableKeys_.reset(); first_.reset(); forgetAttributes(key);
+      enumerableKeys_.reset(); invalidateLayout(); first_.reset(); forgetAttributes(key);
       if constexpr (aliasable) detail::forgetDocumentDataKey(this, key);
       return;
     }
     const std::size_t found = findPosition(key);
     if (found == npos) return;
     enumerableKeys_.reset();
+    invalidateLayout();
     entries_.erase(found);
     if (entries_.size() <= kScanLimit) index_.clear();
     else rebuildIndex();
@@ -14523,6 +14735,7 @@ class Dictionary {
     if (view_) [[unlikely]] detail::refuseAliasedDictionaryStore();
     enumerableKeys_.reset();
     noteKey(key);
+    invalidateLayout();
     if (!first_ && entries_.empty()) {
       first_.emplace(detail::duplicateString(key), std::move(value));
       return;
@@ -14653,6 +14866,45 @@ class Dictionary {
    * an alias holds no entries of its own here.
    */
   std::uint64_t keyMask_ = 0;
+  // `layoutId`: 0 until asked after a change of the key sequence, kNoLayout
+  // once the table has changed under its readers too often to be worth naming.
+  // Read through `std::atomic_ref`: a const read computes it, and concurrent
+  // readers may race to store the same id. A copy holds the same keys, so it
+  // keeps the id.
+  static constexpr std::uint32_t kAbsentSlot = static_cast<std::uint32_t>(-1);
+  static constexpr std::uint32_t kNoLayout = static_cast<std::uint32_t>(-1);
+  mutable std::uint32_t layoutId_ = 0;
+  mutable std::uint32_t layoutComputations_ = 0;
+  void invalidateLayout() {
+    if (layoutId_ != kNoLayout) std::atomic_ref<std::uint32_t>(layoutId_).store(0, std::memory_order_relaxed);
+  }
+  /** The interned key sequence this table holds now (`detail::internDictionaryLayout`), or 0 when it has none. */
+  std::uint32_t layoutId() const {
+    const std::uint32_t id = std::atomic_ref<std::uint32_t>(layoutId_).load(std::memory_order_relaxed);
+    if (id != 0) [[likely]] return id == kNoLayout ? 0 : id;
+    return computeLayoutId();
+  }
+  [[gnu::noinline]] std::uint32_t computeLayoutId() const {
+    std::atomic_ref<std::uint32_t> id(layoutId_);
+    // A table rebuilt between reads -- one grown a key at a time while a site
+    // reads it -- would intern a sequence per step; it keeps the plain lookup.
+    if (std::atomic_ref<std::uint32_t>(layoutComputations_).fetch_add(1, std::memory_order_relaxed) >= 8 || entries_.size() > 1024) {
+      id.store(kNoLayout, std::memory_order_relaxed);
+      return 0;
+    }
+    std::string encoded;
+    const auto append = [&](std::string_view key) {
+      const auto size = static_cast<std::uint32_t>(key.size());
+      encoded.append(reinterpret_cast<const char*>(&size), sizeof size);
+      encoded.append(key);
+    };
+    encoded.push_back(first_ ? '\x01' : '\x00');
+    if (first_) append(first_->first);
+    for (std::size_t position = 0; position < entries_.size(); ++position) append(entries_[position].first);
+    const std::uint32_t interned = detail::internDictionaryLayout(encoded);
+    id.store(interned == 0 ? kNoLayout : interned, std::memory_order_relaxed);
+    return interned;
+  }
   static constexpr unsigned keyBit(std::string_view key) {
     const std::size_t size = key.size();
     const unsigned edges = size == 0 ? 0u : static_cast<unsigned>(static_cast<unsigned char>(key[0])) * 3u + static_cast<unsigned char>(key[size - 1]);
@@ -23352,30 +23604,43 @@ inline Value installOrdinaryConstructorPrototype(Value ctor) {
 
 namespace dictionary {
 /**
+ * A key as the view the tables compare. A constant key arrives as the string
+ * literal the emitter spelled, and the view takes its length from the array:
+ * converting it through `const char*` measured the literal on every read --
+ * three's uniform reads (`uniforms.diffuse`, `uniforms.projectionMatrix`) ran
+ * a strlen per lookup, per material, per frame -- and would have cut a key
+ * holding a NUL short.
+ */
+template <typename Key>
+[[gnu::always_inline]] inline std::string_view keyView(const Key& key) {
+  if constexpr (std::is_array_v<Key>) return std::string_view(key, std::extent_v<Key> - 1);
+  else return std::string_view(key);
+}
+/**
  * The present-or-absent read of a keyed table (`has(k) ? Carrier(read(k)) :
  * Carrier()`). A table with a single-lookup `readIfPresent` answers through
  * it; any other answers through its own `has` and `read`, unchanged.
  */
 template <typename Carrier, typename Table, typename Key>
 inline Carrier readIfPresent(const Table& table, const Key& key) {
-  if constexpr (requires { table.template readIfPresent<Carrier>(std::string_view(key)); })
-    return table.template readIfPresent<Carrier>(std::string_view(key));
+  if constexpr (requires { table.template readIfPresent<Carrier>(keyView(key)); })
+    return table.template readIfPresent<Carrier>(keyView(key));
   else
     return table.has(key) ? Carrier(table.read(key)) : Carrier();
 }
 /** `readIfPresent` for a constant key, with the emitting site's position hint (`Dictionary::hintedPosition`). */
 template <typename Carrier, typename Table, typename Key>
-inline Carrier readIfPresentHinted(const Table& table, const Key& key, std::atomic<std::uint32_t>& hint) {
-  if constexpr (requires { table.template readIfPresentHinted<Carrier>(std::string_view(key), hint); })
-    return table.template readIfPresentHinted<Carrier>(std::string_view(key), hint);
+inline Carrier readIfPresentHinted(const Table& table, const Key& key, std::atomic<std::uint64_t>& hint) {
+  if constexpr (requires { table.template readIfPresentHinted<Carrier>(keyView(key), hint); })
+    return table.template readIfPresentHinted<Carrier>(keyView(key), hint);
   else
     return readIfPresent<Carrier>(table, key);
 }
 /** `table.read(key)` for a constant key, with the emitting site's position hint. */
 template <typename Table, typename Key>
-inline auto readHinted(const Table& table, const Key& key, std::atomic<std::uint32_t>& hint) {
-  if constexpr (requires { table.readHinted(std::string_view(key), hint); })
-    return table.readHinted(std::string_view(key), hint);
+inline auto readHinted(const Table& table, const Key& key, std::atomic<std::uint64_t>& hint) {
+  if constexpr (requires { table.readHinted(keyView(key), hint); })
+    return table.readHinted(keyView(key), hint);
   else
     return table.read(key);
 }
@@ -28687,6 +28952,27 @@ Ref<void> nativePropertyAnchor(const Ref<T>& object) {
   return Ref<void>(object);
 }
 
+namespace detail {
+/**
+ * Whether a class instance owns a native expando table: the header's
+ * `expandoEntry` bit, one load. A method only a write through a dynamic
+ * receiver can shadow (`CallOperation.expandoShadowGuard`) is called directly
+ * while this is clear, which is every instance nothing such wrote to.
+ */
+template <typename T>
+[[gnu::always_inline]] inline bool nativeExpandoPresent(const Ref<T>& object) {
+  return object && (refCountsOf(const_cast<std::remove_const_t<T>*>(object.get()))->weak & expandoEntry) != 0;
+}
+/** The value an instance's expando table holds as its own `key`, reading an accessor as `[[Get]]` would; empty when it holds none. */
+template <typename T>
+inline std::optional<Value> nativeExpandoOwnValue(const Ref<T>& object, std::string_view key) {
+  const auto table = expandoFor(nativePropertyAnchor(object), false);
+  const PropertyKey property = PropertyKey::string(std::string(key));
+  if (!table || table->ownProperty(property) == nullptr) return std::nullopt;
+  return table->getWithNativeReceiver(property, NativeCallReceiver::object(object));
+}
+}  // namespace detail
+
 /**
  * Integrity state for a statically typed native object.
  *
@@ -31339,6 +31625,24 @@ Result readLiveField(
   if (!readFieldView(held, key, read) || !answer)
     host::throwRuntimeError("TypeError", "a native view read has no certified carrier route");
   return std::move(*answer);
+}
+
+/**
+ * `readLiveField` for a read whose only use is the receiver of the next member
+ * read in the same expression (`gull.pos.x`): the plain allocation answers a
+ * reference to its own member, so the handle is neither retained nor released;
+ * a live view's answer is moved into `slot`, a temporary the caller's full
+ * expression owns, and that is what is referenced. Nothing runs between this
+ * returning and the member load that consumes it.
+ */
+template <typename Result, typename Receiver, typename Key, typename Adapter, typename Fallback>
+const Result& readLiveFieldBorrowed(
+    const gea::Ref<Receiver>& receiver, const Key& fieldKey,
+    Adapter&& adapter, NativeFieldRead::AcceptFn accepts, Result& slot, Fallback&& fallback) {
+  if (!receiver) host::throwRuntimeError("TypeError", "Cannot read a property of a nullish native view");
+  if (!isLiveFieldViewReceiver(receiver)) [[likely]] return std::forward<Fallback>(fallback)();
+  slot = readLiveField<Result>(receiver, fieldKey, std::forward<Adapter>(adapter), accepts, [&]() -> Result { return std::forward<Fallback>(fallback)(); });
+  return slot;
 }
 
 template <typename Receiver, typename Key, typename Source, typename Adapter, typename Fallback>
@@ -40685,6 +40989,53 @@ inline std::string toString(double value) {
     auto result = std::to_chars(buf, buf + sizeof(buf), static_cast<long long>(value));
     return std::string(buf, result.ptr);
   }
+  // Short decimals -- chart coordinates, prices, anything rounded to a few
+  // places -- without the general path, which on targets without
+  // `to_chars(double)` raises a `%.*g` precision until `strtod` round-trips:
+  // up to 17 snprintf/strtod pairs, in software double arithmetic on parts
+  // with no double FPU (ESP32), for every number in a template string.
+  //
+  // Exact, not approximate. For the smallest k at which some integer c has
+  // c / 10^k == value, the k-decimal spelling of c is the shortest
+  // round-trip string: c and 10^k are exact doubles and IEEE division
+  // rounds the exact quotient c/10^k just as strtod rounds that decimal, so
+  // it parses back to `value`; no spelling with fewer decimals does, or a
+  // smaller k would have matched. Any integer that round-trips at k lies
+  // within one of value * 10^k, so testing the rounded product and its two
+  // neighbours misses none; when two of them qualify, ECMAScript's "closest
+  // to the value" tie-break applies and the general path answers instead.
+  // |value| in [1e-6, 1e15) is where ToString spells these in fixed notation.
+  {
+    const double magnitude = std::fabs(value);
+    if (magnitude >= 1e-6 && magnitude < 1e15) {
+      double scale = 1;
+      for (int places = 1; places <= 9; ++places) {
+        scale *= 10;
+        const double scaled = value * scale;
+        if (std::fabs(scaled) >= 9007199254740992.0) break;
+        const double nearest = std::nearbyint(scaled);
+        int matches = 0;
+        double digits = 0;
+        for (const double candidate : {nearest - 1, nearest, nearest + 1}) {
+          if (candidate / scale == value) {
+            ++matches;
+            digits = candidate;
+          }
+        }
+        if (matches > 1) break;
+        if (matches == 1) {
+          char buf[32];
+          const auto end = std::to_chars(buf, buf + sizeof(buf), static_cast<long long>(std::fabs(digits))).ptr;
+          std::string integer(buf, end);
+          if (static_cast<int>(integer.size()) <= places)
+            integer.insert(0, static_cast<std::size_t>(places + 1 - static_cast<int>(integer.size())), '0');
+          integer.insert(integer.size() - static_cast<std::size_t>(places), 1, '.');
+          if (value < 0) integer.insert(integer.begin(), '-');
+          return integer;
+        }
+      }
+    }
+  }
   // v1 has a third fast path here -- `snprintf("%.0f")` for integer-valued
   // doubles below 1e21 -- and it is wrong in exactly the band it covers. Above
   // 2^53 (the branch above) a double no longer represents every integer, and
@@ -42109,6 +42460,17 @@ inline double bulkAppend(const gea::Ref<ArrayObject<Element>>& receiver, const V
                            typename ArrayObject<Element>::Cell{value});
   }
   return receiver->length();
+}
+
+/**
+ * One element of an array literal stored through a call rather than an inlined
+ * `push`: a body that builds thousands of literals is a table built once, and
+ * the inlined capacity branches and unwind edges only cost the C++ compiler
+ * time (`emit-arrays.ts`, `outOfLineLiteralPushThreshold`).
+ */
+template <typename Receiver, typename Value>
+[[gnu::noinline]] void pushOutOfLine(const Receiver& receiver, Value&& value) {
+  receiver->push(std::forward<Value>(value));
 }
 
 /**
@@ -43603,24 +43965,41 @@ inline double round_invoke(void*, double x) {
   // never rounds to a neighboring double.
   return std::floor(x + 0.5);
 }
-#if defined(GEA_RUNTIME_FLOAT_MATH) && GEA_RUNTIME_FLOAT_MATH
-// Opt-in for targets whose FPU is single precision only (ESP32-S31): double
-// transcendentals there are soft-float ROM routines, ~15% of a game frame.
-// The argument is reduced in double first, so time-driven angles keep their
-// phase; the result carries float precision, which a renderer cannot see.
+// Trigonometry on a single-precision-only FPU (ESP32-S3 Xtensa LX7, ESP32-P4
+// RISC-V with F but no D): double sin/cos/atan2 there are software routines
+// whose every multiply is itself emulated, so they run in float on the FPU.
+// Automatic for those cores; trig results are never exact in JS anyway, and a
+// renderer cannot see float precision. The argument is reduced in double
+// first, so time-driven angles keep their phase.
+#if !defined(GEA_RUNTIME_FLOAT_TRIG)
+#if (defined(GEA_RUNTIME_FLOAT_MATH) && GEA_RUNTIME_FLOAT_MATH) || \
+    (defined(__XTENSA__) && defined(__XCHAL_HAVE_DFP) && __XCHAL_HAVE_FP && !__XCHAL_HAVE_DFP) || \
+    (defined(__riscv_flen) && __riscv_flen == 32)
+#define GEA_RUNTIME_FLOAT_TRIG 1
+#else
+#define GEA_RUNTIME_FLOAT_TRIG 0
+#endif
+#endif
+#if GEA_RUNTIME_FLOAT_TRIG
 inline float floatMathTurn(double x) {
   constexpr double twoPi = 6.283185307179586;
   return static_cast<float>(x - std::nearbyint(x * (1.0 / twoPi)) * twoPi);
 }
 inline double sin_invoke(void*, double x) { return x != 0 && std::isfinite(x) ? static_cast<double>(sinf(floatMathTurn(x))) : std::sin(x); }
 inline double cos_invoke(void*, double x) { return std::isfinite(x) ? static_cast<double>(cosf(floatMathTurn(x))) : std::cos(x); }
+#else
+inline double sin_invoke(void*, double x) { return std::sin(x); }
+inline double cos_invoke(void*, double x) { return std::cos(x); }
+#endif
+// sqrt is correctly rounded and programs rely on it being exact (an integer
+// square root through Math.floor(Math.sqrt(n))), so its float path stays an
+// explicit opt-in.
+#if defined(GEA_RUNTIME_FLOAT_MATH) && GEA_RUNTIME_FLOAT_MATH
 inline double sqrt_invoke(void*, double x) {
   // Doubles beyond float range keep the exact path.
   return (x >= 0 && x < 3.0e38) ? static_cast<double>(sqrtf(static_cast<float>(x))) : std::sqrt(x);
 }
 #else
-inline double sin_invoke(void*, double x) { return std::sin(x); }
-inline double cos_invoke(void*, double x) { return std::cos(x); }
 inline double sqrt_invoke(void*, double x) { return std::sqrt(x); }
 #endif
 inline double abs_invoke(void*, double x) { return std::fabs(x); }
@@ -43630,7 +44009,7 @@ inline double abs_invoke(void*, double x) { return std::fabs(x); }
 // ceil(+/-Infinity) is +/-Infinity).
 inline double ceil_invoke(void*, double x) { return std::ceil(x); }
 inline double pow_invoke(void*, double base, double exponent) { return std::pow(base, exponent); }
-#if defined(GEA_RUNTIME_FLOAT_MATH) && GEA_RUNTIME_FLOAT_MATH
+#if GEA_RUNTIME_FLOAT_TRIG
 inline double atan2_invoke(void*, double y, double x) {
   const float fy = static_cast<float>(y), fx = static_cast<float>(x);
   return (std::isfinite(fy) && std::isfinite(fx)) ? static_cast<double>(atan2f(fy, fx)) : std::atan2(y, x);

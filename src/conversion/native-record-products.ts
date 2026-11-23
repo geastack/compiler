@@ -71,6 +71,7 @@ export const nativeRecordProductsOf = (node: ConversionNode | null | undefined):
           })
         break
       case 'iterator-result':
+      case 'present-field':
         break
     }
   }

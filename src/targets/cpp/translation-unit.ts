@@ -145,6 +145,9 @@ import {
 import { buildHostMethodAliasIndex } from './host/host-method-aliases.js'
 import { constructionOnlyFieldsOf, reflectiveFieldWritesOf } from '../../ir/construction-only-fields.js'
 import { cppRecursiveContainerDeclarations, cppRecursiveContainerTraceEdges } from './recursive-containers.js'
+import { plainFieldReadOf } from '../../ir/plain-field-read.js'
+import { codeFreeFieldReadOf } from '../../ir/field-read-reuse.js'
+import { writeEffectsOf } from '../../ir/write-effects.js'
 
 /**
  * One C++ translation unit, assembled from what earlier stages sealed.
@@ -725,6 +728,39 @@ const borrowsReceiver = (body: IrBody): boolean =>
   body.abi?.receiver != null && cppRefcountedReceiver(body.abi.receiver) && !isCoroutineBody(body)
 
 /**
+ * Whether every return of this method hands back the receiver it was called
+ * on, so each of its entries returns the caller's own handle by reference.
+ *
+ * `v.set(x, y, z).add(w)` chains three's vector methods, and each returned
+ * `this` by value: a retain inside the callee and a release in the caller for
+ * a result that is the caller's own receiver, discarded or immediately called
+ * on. The receiver formal is a `const&` bound to an object the caller keeps
+ * alive past the call (`borrowsReceiver`), so a reference to it is valid for
+ * the caller's whole full-expression; a caller that keeps the result copies it
+ * as before, and a thunk returns by value.
+ *
+ * Constructible bodies are excluded (a constructor completes with its
+ * receiver too, through its own protocol), and so is a body with a try
+ * statement, whose returned value a finally clause may still read.
+ */
+const returnsOwnReceiver = (body: IrBody): boolean => {
+  const abi = body.abi
+  if (abi === null || abi.receiver === null || body.construct !== null || body.tryRegions.length > 0 || !borrowsReceiver(body)) return false
+  if (representationKey(abi.result) !== representationKey(abi.receiver)) return false
+  const receivers = new Set<IrValueId>()
+  for (const block of body.blocks.values())
+    for (const operation of allOperationsOf(block)) if (operation.kind === 'receiver') receivers.add(operation.result.id)
+  let returns = 0
+  for (const block of body.blocks.values()) {
+    const terminator = block.terminator
+    if (terminator.kind !== 'return') continue
+    if (terminator.value === null || terminator.value === undefined || !receivers.has(terminator.value.value)) return false
+    returns += 1
+  }
+  return returns > 0
+}
+
+/**
  * The struct one body's captured declarations share (`CaptureFrame`).
  *
  * Every field is declared at its carrier, with no box around it: the frame IS
@@ -1207,7 +1243,9 @@ const signatureOf = (
       ? `gea::Task<${cppResultTypeOf(effectiveAbi.result.value)}>`
       : narrowedResult
         ? cppNarrowedIntegerType
-        : cppResultTypeOf(effectiveAbi.result)
+        : returnsOwnReceiver(body)
+          ? `const ${cppResultTypeOf(effectiveAbi.result)}&`
+          : cppResultTypeOf(effectiveAbi.result)
   const formals = bodyFormalsOf(
     cppEnvironmentStructOf(captures, body.sourceOwner),
     effectiveAbi,
@@ -1291,7 +1329,8 @@ const thunkOf = (
   // can name, so they are stable actuals for the borrowed entry: entering it
   // directly binds them in place, where the owning entry moved each one into a
   // formal of its own and released the emptied shell on the way out.
-  const borrowedEntry = stableEntry !== undefined && !hasEnvironment && !isCoroutineBody(body) ? stableEntry : undefined
+  const borrowedEntry =
+    stableEntry !== undefined && (!hasEnvironment || stableEntry.environment) && !isCoroutineBody(body) ? stableEntry : undefined
   const call = `${borrowedEntry?.name ?? cppBodyName(body.sourceOwner)}(${[
     ...(hasEnvironment ? [isCoroutineBody(body) ? `*${cppEnvironmentLocalName}` : cppEnvironmentLocalName] : []),
     ...receiverActual,
@@ -2054,6 +2093,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   const storeSinkConstructors = new Set<string>()
   for (const [declaration, layout] of input.classes)
     if (layout.constructor !== null && !unsafeForStoreSink.has(declaration)) storeSinkConstructors.add(String(layout.constructor))
+  const plainFieldRead = plainFieldReadOf(input.classes, input.deriver)
+  const codeFreeFieldRead = codeFreeFieldReadOf(input.bodies, input.classes, input.deriver)
   const {
     callableMemberCandidates,
     callableFlowCandidates,
@@ -2065,7 +2106,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     nativeIntegrityRestricted,
     fixedFieldStateConstant,
     singleEvaluationClasses,
-    definitionCells
+    definitionCells,
+    allocationCells
   } = programFactsOf(input.bodies, directCallables, input.placements, {
     captureFree: (functionId) => captures.of(functionId).kind === 'none',
     isBoxed: (declaration) => captures.isBoxed(declaration),
@@ -2074,17 +2116,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     isStoreSinkConstructor: (body) => storeSinkConstructors.has(String(body.sourceOwner)),
     classInstanceOf: (declaration) => input.classes.get(declaration)?.instance ?? null,
     shapeLayoutOf: (shapeId) => input.deriver.layoutOf(shapeId as StructuralTypeId),
-    plainFieldRead: (receiver, key) => {
-      if (receiver.kind === 'class-ref') {
-        // A class over a host base reads its members through the host's
-        // protocol; only a wholly projected class has plain member loads.
-        if (input.classes.get(receiver.declaration)?.nativeBase !== null) return false
-        return classMemberOf(input.classes, receiver.declaration, key)?.kind === 'field'
-      }
-      if (receiver.kind === 'record')
-        return receiver.fields.some((field) => field.key === key) && !receiver.accessors.some((accessor) => accessor.key === key)
-      return false
-    },
+    plainFieldRead,
     isPrivateLocal: (body, declaration) => {
       const placement = input.placements.get(declaration)
       return (
@@ -2342,6 +2374,13 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // class whose reflection demand can write a field -- a boxed instance's
   // `obj[k] = v`, `Reflect.set`, `Object.assign` -- keeps that field's copy;
   // a missing census writes every field of every class.
+  // Field keys each body can store, through the bodies it calls (`ir/write-effects.ts`).
+  const writeEffects = writeEffectsOf(input.bodies, plainFieldRead, (receiver, key) => {
+    if (receiver.kind !== 'class-ref') return plainFieldRead(receiver, key)
+    if (input.classes.get(receiver.declaration)?.nativeBase !== null) return false
+    const member = classMemberOf(input.classes, receiver.declaration, key)?.kind
+    return member === 'field' || member === 'method'
+  })
   const constructionOnlyFields = constructionOnlyFieldsOf(
     input.bodies,
     classConstructions,
@@ -2652,6 +2691,15 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   const stableBorrowEntries = new Map<string, StableBorrowEntry>()
   const physicalCounts = new Map<string, number>()
   for (const body of input.bodies) physicalCounts.set(String(body.sourceOwner), (physicalCounts.get(String(body.sourceOwner)) ?? 0) + 1)
+  // A closure's environment is a plain pointer its thunk unpacks before entering
+  // the body, so its borrowed entry can take that pointer first the way the
+  // owning entry does. A captured receiver is forwarded out of the environment
+  // and an accessor's environment is unpacked differently; both keep their
+  // owning entry only.
+  const closesOverPlainEnvironment = (owner: FunctionId): boolean => {
+    const admission = captures.of(owner)
+    return admission.kind === 'ok' && admission.layout.receiver === null && !captures.isAccessorEnvironment(owner)
+  }
   const stableEntryOf = (body: IrBody, dying: ReadonlySet<IrValueId>): StableBorrowEntry | null =>
     isRegionId(body.sourceOwner) || constructorBodies.has(String(body.sourceOwner))
       ? null
@@ -2667,7 +2715,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
           formalsBorrowedIn(body.sourceOwner),
           dying,
           {
-            captureFree: captures.of(body.sourceOwner).kind === 'none',
+            captureFree: captures.of(body.sourceOwner).kind === 'none' || closesOverPlainEnvironment(body.sourceOwner),
+            environment: closesOverPlainEnvironment(body.sourceOwner),
             synchronous: !isCoroutineBody(body),
             singleBody: physicalCounts.get(String(body.sourceOwner)) === 1,
             narrowedNumericAbi: formalsNarrowedIn(body.sourceOwner).size > 0 || resultNarrowedIn(body.sourceOwner)
@@ -2893,7 +2942,11 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
         asyncResults.taskResults,
         programSite.conversionIsCertified,
         input.programConversionRecipes,
-        structs.classIndexProtocols
+        structs.classIndexProtocols,
+        writeEffects,
+        promiseView === null && returnsOwnReceiver(body),
+        allocationCells,
+        codeFreeFieldRead
       )
       const commonJsScope = [
         ...coroutineEnvironmentPrologueOf(promiseView ?? body, captures),
@@ -2943,6 +2996,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
                   // it forwards unchanged: never moved (the receiver formal
                   // above is never in `narrowed`/moved sets) and never boxed.
                   `return ${stableEntry.name}(${[
+                    ...(stableEntry.environment ? [cppEnvironmentLocalName] : []),
                     ...(stableEntry.abi.receiver !== null ? [cppReceiverName] : []),
                     ...stableEntry.abi.parameters.map((_, ordinal) =>
                       stableEntry.formals.has(ordinal) ? cppFormalName(ordinal) : `std::move(${cppFormalName(ordinal)})`

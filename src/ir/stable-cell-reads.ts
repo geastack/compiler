@@ -1,7 +1,7 @@
 import type { DeclarationId, IrValueId } from '../identity/ids.js'
 import { controlFlowGraphOf } from './dominance.js'
 import { finallyBlocksOf, implicitSuccessorsOf } from './exception-edges.js'
-import type { IrBlockId, IrBody } from './model.js'
+import type { IrBlockId, IrBody, IrNonTerminatorOperation } from './model.js'
 import { operandsOfIrOperation } from './queries.js'
 
 /**
@@ -42,52 +42,67 @@ import { operandsOfIrOperation } from './queries.js'
  * block of its loop and hands control to its dismiss targets.
  */
 export const stableCellReadsOf = (body: IrBody, admits: (declaration: DeclarationId) => boolean): ReadonlySet<IrValueId> => {
-  const stable = new Set<IrValueId>()
-  type Site = { readonly block: IrBlockId; readonly index: number }
-  const uses = new Map<IrValueId, Site[]>()
-  const record = (value: IrValueId, block: IrBlockId, index: number): void => {
-    const sites = uses.get(value)
-    if (sites) sites.push({ block, index })
-    else uses.set(value, [{ block, index }])
-  }
-  const writes = new Map<IrBlockId, { readonly index: number; readonly declaration: DeclarationId }[]>()
-  const reads: { readonly value: IrValueId; readonly declaration: DeclarationId; readonly block: IrBlockId; readonly index: number }[] = []
-  for (const [blockId, block] of body.blocks) {
-    const written: { readonly index: number; readonly declaration: DeclarationId }[] = []
-    for (const [index, operation] of block.operations.entries()) {
-      if (operation.kind === 'phi') {
-        for (const incoming of operation.incoming)
-          record(incoming.value.value, incoming.block, body.blocks.get(incoming.block)?.operations.length ?? 0)
-        continue
-      }
-      for (const operand of operandsOfIrOperation(operation)) record(operand.value, blockId, index)
-      if (operation.kind === 'binding-write' || operation.kind === 'binding-renew' || operation.kind === 'allocate-constructor') {
-        written.push({ index, declaration: operation.declaration })
-      }
+  const reads: WindowRead[] = []
+  for (const [blockId, block] of body.blocks)
+    for (const [index, operation] of block.operations.entries())
       if (operation.kind === 'binding-read' && admits(operation.declaration)) {
-        reads.push({ value: operation.result.id, declaration: operation.declaration, block: blockId, index })
+        const declaration = operation.declaration
+        reads.push({
+          value: operation.result.id,
+          block: blockId,
+          index,
+          clobbers: (candidate) =>
+            (candidate.kind === 'binding-write' || candidate.kind === 'binding-renew' || candidate.kind === 'allocate-constructor') &&
+            candidate.declaration === declaration
+        })
       }
-    }
-    for (const operand of operandsOfIrOperation(block.terminator)) record(operand.value, blockId, block.operations.length)
-    writes.set(blockId, written)
-  }
+  return cleanWindowReadsOf(body, reads, true)
+}
+
+/** A read `cleanWindowReadsOf` asks about: where it is, and which operations change what it saw. */
+export interface WindowRead {
+  readonly value: IrValueId
+  readonly block: IrBlockId
+  readonly index: number
+  readonly clobbers: (operation: IrNonTerminatorOperation) => boolean
+  /** Sites that must see what the read saw besides the uses of `value` itself (the reads of a cell it initializes). */
+  readonly extraUses?: readonly WindowSite[]
+}
+
+export interface WindowSite {
+  readonly block: IrBlockId
+  readonly index: number
+}
+
+/**
+ * The reads no clobbering operation separates from any of their uses, by the
+ * flood `stableCellReadsOf` describes. `useAtClobber` admits a use at the
+ * clobbering operation itself: right for a cell write, whose value operand is
+ * evaluated before the store, and wrong for a call that receives the read and
+ * may then overwrite what it names.
+ */
+export const cleanWindowReadsOf = (body: IrBody, reads: readonly WindowRead[], useAtClobber: boolean): ReadonlySet<IrValueId> => {
+  const stable = new Set<IrValueId>()
+  if (reads.length === 0) return stable
+  const uses = useSitesOf(body)
   const graph = controlFlowGraphOf(body)
   const implicit = implicitSuccessorsOf(body, graph)
-  const finallyWritten = new Set<DeclarationId>()
-  for (const block of finallyBlocksOf(body, graph)) for (const write of writes.get(block) ?? []) finallyWritten.add(write.declaration)
+  const finallyBlocks = [...finallyBlocksOf(body, graph)]
   const successorsOf = (block: IrBlockId): readonly IrBlockId[] => [...(graph.successors.get(block) ?? []), ...(implicit.get(block) ?? [])]
   for (const read of reads) {
-    const sites = uses.get(read.value)
-    if (sites === undefined || finallyWritten.has(read.declaration)) continue
-    const firstWriteFrom = (block: IrBlockId, from: number): number => {
-      for (const write of writes.get(block) ?? []) if (write.index >= from && write.declaration === read.declaration) return write.index
+    const sites = [...(uses.get(read.value) ?? []), ...(read.extraUses ?? [])]
+    if (sites.length === 0) continue
+    if (finallyBlocks.some((block) => body.blocks.get(block)?.operations.some(read.clobbers) === true)) continue
+    const firstClobberFrom = (block: IrBlockId, from: number): number => {
+      const operations = body.blocks.get(block)?.operations ?? []
+      for (let index = from; index < operations.length; index++) if (read.clobbers(operations[index]!)) return index
       return Number.POSITIVE_INFINITY
     }
     const limits = new Map<IrBlockId, number>()
     const poisoned = new Set<IrBlockId>()
     const pending: { readonly block: IrBlockId; readonly clean: boolean }[] = []
     const enter = (block: IrBlockId, from: number): void => {
-      const limit = firstWriteFrom(block, from)
+      const limit = firstClobberFrom(block, from)
       limits.set(block, limit)
       const clean = limit === Number.POSITIVE_INFINITY
       for (const successor of successorsOf(block)) pending.push({ block: successor, clean })
@@ -105,9 +120,33 @@ export const stableCellReadsOf = (body: IrBody, admits: (declaration: Declaratio
       poisoned.add(next.block)
       for (const successor of successorsOf(next.block)) pending.push({ block: successor, clean: false })
     }
-    if (sites.every((site) => !poisoned.has(site.block) && site.index <= (limits.get(site.block) ?? Number.NEGATIVE_INFINITY))) {
-      stable.add(read.value)
+    const before = (site: WindowSite): boolean => {
+      const limit = limits.get(site.block) ?? Number.NEGATIVE_INFINITY
+      return useAtClobber ? site.index <= limit : site.index < limit
     }
+    if (sites.every((site) => !poisoned.has(site.block) && before(site))) stable.add(read.value)
   }
   return stable
+}
+
+/** Where each value is used; a merge input (`phi`) at the end of its incoming block. */
+export const useSitesOf = (body: IrBody): ReadonlyMap<IrValueId, readonly WindowSite[]> => {
+  const uses = new Map<IrValueId, WindowSite[]>()
+  const record = (value: IrValueId, block: IrBlockId, index: number): void => {
+    const sites = uses.get(value)
+    if (sites) sites.push({ block, index })
+    else uses.set(value, [{ block, index }])
+  }
+  for (const [blockId, block] of body.blocks) {
+    for (const [index, operation] of block.operations.entries()) {
+      if (operation.kind === 'phi') {
+        for (const incoming of operation.incoming)
+          record(incoming.value.value, incoming.block, body.blocks.get(incoming.block)?.operations.length ?? 0)
+        continue
+      }
+      for (const operand of operandsOfIrOperation(operation)) record(operand.value, blockId, index)
+    }
+    for (const operand of operandsOfIrOperation(block.terminator)) record(operand.value, blockId, block.operations.length)
+  }
+  return uses
 }

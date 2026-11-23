@@ -2,6 +2,7 @@ import type { IrOperand, IrResult } from '../../ir/model.js'
 import { representationKey, type Representation } from '../../representation/model.js'
 import type { DeclarationId } from '../../identity/ids.js'
 import { classMethodOverrideOf } from '../../projection/fields.js'
+import { classDynamicMethodShadowOf } from '../../projection/dispatch.js'
 import { createCppEmitBlockedError, defineValue, operandText, type EmitContext } from './emit-context.js'
 import { cppBodyName, cppTypeOf } from './types.js'
 
@@ -115,7 +116,12 @@ export const classToPrimitiveOf = (
 ): { readonly call: (receiver: string) => string; readonly result: Representation } | null => {
   const layouts = ctx.layouts
   const direct = layouts.classDirectMethodFor?.(carrier.declaration, 'valueOf') ?? null
-  if (direct === null || classMethodOverrideOf(ctx.classes, carrier.declaration, 'valueOf') !== null) return null
+  if (
+    direct === null ||
+    classMethodOverrideOf(ctx.classes, carrier.declaration, 'valueOf') !== null ||
+    classDynamicMethodShadowOf(ctx.classes, carrier.declaration, 'valueOf')
+  )
+    return null
   const seen = new Set<DeclarationId>()
   for (let current: DeclarationId | null = carrier.declaration; current !== null && !seen.has(current);) {
     seen.add(current)

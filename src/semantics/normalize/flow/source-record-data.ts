@@ -659,8 +659,12 @@ export const sourceRecordSlotValuesOf = (
     return answered
   } finally {
     // The re-entry above hands out exactly one thing -- a refusal -- so a
-    // refusal here confirms it outright.
-    exitHypothesisGuard(access, true)
+    // refusal here confirms it outright. It also settles it as the truth, as
+    // `fieldValuesOf`'s guard does: without that, every refusal that leaned on
+    // a re-entry stayed ungrounded after this read closed, was never stored,
+    // and was derived again on every later ask -- millions of times for a
+    // recursive key function over a union, the self-compile never finishing.
+    exitHypothesisGuard(access, true, answered === null)
     activeSlotReads.delete(access)
   }
 }

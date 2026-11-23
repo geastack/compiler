@@ -1495,6 +1495,84 @@ export const censusFieldBindings = (
     return !jsDocType || jsDocTypeStatesNothing(checker, jsDocType)
   }
   const widenedFields = new Set<ts.Symbol>()
+  /*
+   * The walks below (untypedSource, writesDynamicValue and the parameters and
+   * callees they reach) ask whether a value nothing types can reach a slot.
+   * Every step is a disjunction -- a parameter is dynamic when one value it
+   * receives is, a callee when one of its returns is -- so the answer is
+   * reachability over that graph, the same whatever order it is walked in.
+   *
+   * It was a depth-bounded search whose re-entry guards were the current
+   * path. A parameter fans out to every call site, so that search was
+   * exponential, and it only finished when `.some` happened to meet a `true`
+   * early: one program took 28 minutes in one file order and did not finish
+   * in hours in another. The depth bound was also the only thing that made a
+   * node's answer depend on how it was reached, which defeated memoizing it.
+   *
+   * Each (kind, node) is answered once (Tarjan): a node met again while it is
+   * still open is a cycle, and adds nothing to a disjunction. The members of
+   * one strongly connected component reach each other, so they share one
+   * answer, settled when the component's root finishes.
+   * Widening a field adds `true`s (`readsWidenedField`), so it drops the
+   * settled `false`s and keeps the `true`s.
+   */
+  interface ReachFrame {
+    readonly kind: string
+    readonly node: ts.Node
+    readonly index: number
+    readonly position: number
+    low: number
+    dynamic: boolean
+  }
+  let reachSettled: Map<string, Map<ts.Node, boolean>> | null = null
+  const reachOpen = new Map<string, Map<ts.Node, ReachFrame>>()
+  const reachStack: ReachFrame[] = []
+  const reachCalls: ReachFrame[] = []
+  let reachIndex = 0
+  const reach = (kind: string, node: ts.Node, walk: () => boolean): boolean => {
+    if (!reachSettled) {
+      // A query outside the widening fixpoint settles against a memo of its own.
+      reachSettled = new Map()
+      try {
+        return reach(kind, node, walk)
+      } finally {
+        reachSettled = null
+        reachOpen.clear()
+        reachStack.length = 0
+        reachCalls.length = 0
+      }
+    }
+    const settled = reachSettled.get(kind)?.get(node)
+    if (settled !== undefined) return settled
+    const caller = reachCalls[reachCalls.length - 1]
+    const open = reachOpen.get(kind)?.get(node)
+    if (open) {
+      if (caller && open.index < caller.low) caller.low = open.index
+      return open.dynamic
+    }
+    const frame: ReachFrame = { kind, node, index: reachIndex, position: reachStack.length, low: reachIndex, dynamic: false }
+    reachIndex++
+    ;(reachOpen.get(kind) ?? reachOpen.set(kind, new Map()).get(kind)!).set(node, frame)
+    reachStack.push(frame)
+    reachCalls.push(frame)
+    try {
+      frame.dynamic = walk()
+    } finally {
+      reachCalls.pop()
+    }
+    if (caller && frame.low < caller.low) caller.low = frame.low
+    if (frame.low !== frame.index) return frame.dynamic
+    const members = reachStack.splice(frame.position)
+    const dynamic = members.some((member) => member.dynamic)
+    for (const member of members) {
+      reachOpen.get(member.kind)!.delete(member.node)
+      ;(reachSettled.get(member.kind) ?? reachSettled.set(member.kind, new Map()).get(member.kind)!).set(member.node, dynamic)
+    }
+    return dynamic
+  }
+  const forgetCleanVerdicts = (): void => {
+    for (const byNode of reachSettled?.values() ?? []) for (const [node, dynamic] of byNode) if (!dynamic) byNode.delete(node)
+  }
   /**
    * The candidate field a member read copies, by declaration: a read through a
    * receiver only the census typed names the instance type's own property
@@ -1548,28 +1626,30 @@ export const censusFieldBindings = (
    * literal -- leaves the read typed although the parameter itself is boxed.
    * A class instance is not taken to lack a member a subclass may declare.
    */
-  const untypedSource = (source: ts.Expression | ts.ParameterDeclaration, key: string | null, depth = 0): boolean => {
-    if (ts.isParameter(source)) return parameterSuppliesUntypedSource(source, key, depth)
+  const untypedSource = (source: ts.Expression | ts.ParameterDeclaration, key: string | null): boolean => {
+    if (ts.isParameter(source)) return parameterSuppliesUntypedSource(source, key)
+    return reach(key === null ? 'source' : `source:${key}`, source, () => expressionIsUntypedSource(source, key))
+  }
+  const expressionIsUntypedSource = (source: ts.Expression, key: string | null): boolean => {
     if (readsWidenedField(source)) return true
     if ((checker.getTypeAtLocation(source).flags & ts.TypeFlags.Any) === 0) return false
     if (parameters.statedTypeAt(source) || receiverTypeOf(source)) return false
     const unwrapped = unwrapParens(source)
     // An object the checker types `any` is only as untyped as where it came
     // from: a call's result, a member read, a `const` holding either.
-    if (ts.isCallExpression(unwrapped) || ts.isNewExpression(unwrapped)) return callReturnsDynamicValue(unwrapped, depth)
-    if (ts.isPropertyAccessExpression(unwrapped) || ts.isElementAccessExpression(unwrapped)) return writesDynamicValue(unwrapped, depth + 1)
+    if (ts.isCallExpression(unwrapped) || ts.isNewExpression(unwrapped)) return callReturnsDynamicValue(unwrapped)
+    if (ts.isPropertyAccessExpression(unwrapped) || ts.isElementAccessExpression(unwrapped)) return writesDynamicValue(unwrapped)
     if (!ts.isIdentifier(unwrapped)) return true
     const declaration = checker.getSymbolAtLocation(unwrapped)?.valueDeclaration
-    if (declaration && ts.isParameter(declaration)) return parameterSuppliesUntypedSource(declaration, key, depth)
+    if (declaration && ts.isParameter(declaration)) return parameterSuppliesUntypedSource(declaration, key)
     if (declaration && ts.isVariableDeclaration(declaration) && parameters.typeAt(declaration)) return false
     if (
       declaration &&
       ts.isVariableDeclaration(declaration) &&
       declaration.initializer &&
-      (ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) !== 0 &&
-      depth <= 8
+      (ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) !== 0
     )
-      return untypedSource(declaration.initializer, key, depth + 1)
+      return untypedSource(declaration.initializer, key)
     return true
   }
   /** The values a parameter receives: its default, its call sites' arguments, and its body's own assignments to it. */
@@ -1607,25 +1687,20 @@ export const censusFieldBindings = (
       return (checker.getTypeOfSymbolAtLocation(member, at).flags & ts.TypeFlags.Any) !== 0
     })
   }
-  const visitingSourceParameters = new Set<ts.ParameterDeclaration>()
-  const parameterSuppliesUntypedSource = (parameter: ts.ParameterDeclaration, key: string | null, depth: number): boolean => {
+  const parameterSuppliesUntypedSource = (parameter: ts.ParameterDeclaration, key: string | null): boolean => {
     if (parameters.typeAt(parameter)) return false
     // A destructured parameter names no slot the flow index files call-site
     // arguments against, so its callers cannot be asked: its own type is the
     // pattern's implied record of `any` members, and that is what it supplies.
     if (!ts.isIdentifier(parameter.name)) return true
-    if (depth > 8 || visitingSourceParameters.has(parameter)) return false
-    visitingSourceParameters.add(parameter)
-    try {
-      return valuesReceivedBy(parameter).some((value) => {
-        if (untypedSource(value, key, depth + 1)) return true
+    return reach(key === null ? 'supplies' : `supplies:${key}`, parameter, () =>
+      valuesReceivedBy(parameter).some((value) => {
+        if (untypedSource(value, key)) return true
         if (key === null) return false
         const type = knownOrResolve(value)
         return type !== null && typedSourceLeavesKeyUntyped(type, key, value)
       })
-    } finally {
-      visitingSourceParameters.delete(parameter)
-    }
+    )
   }
   /**
    * A member read off a receiver the census typed, whose own type for the
@@ -1635,7 +1710,7 @@ export const censusFieldBindings = (
    * the member holds. A member the receiver lacks is an absence, and a
    * literal's member holds what its initializer does.
    */
-  const readsDeclaredDynamicMember = (read: ts.PropertyAccessExpression | ts.ElementAccessExpression, depth: number): boolean => {
+  const readsDeclaredDynamicMember = (read: ts.PropertyAccessExpression | ts.ElementAccessExpression): boolean => {
     const receiver = receiverTypeOf(read.expression)
     if (!receiver) return false
     const holder = checker.getNonNullableType(receiver)
@@ -1649,8 +1724,8 @@ export const censusFieldBindings = (
     const member = checker.getPropertyOfType(holder, key)
     if (!member) return isAny(checker.getIndexTypeOfType(holder, ts.IndexKind.String) ?? undefined)
     const declaration = member.valueDeclaration
-    if (declaration && ts.isPropertyAssignment(declaration)) return writesDynamicValue(declaration.initializer, depth + 1)
-    if (declaration && ts.isShorthandPropertyAssignment(declaration)) return writesDynamicValue(declaration.name, depth + 1)
+    if (declaration && ts.isPropertyAssignment(declaration)) return writesDynamicValue(declaration.initializer)
+    if (declaration && ts.isShorthandPropertyAssignment(declaration)) return writesDynamicValue(declaration.name)
     if (declaration && ts.isBinaryExpression(declaration)) return false
     return isAny(checker.getTypeOfSymbolAtLocation(member, read))
   }
@@ -1662,8 +1737,8 @@ export const censusFieldBindings = (
     return ts.isVariableDeclaration(holder) && holder.initializer ? holder.initializer : null
   }
   /** Whether `value` reaches its field as an untyped dynamic value, whatever it holds. */
-  const writesDynamicValue = (value: ts.Expression, depth = 0): boolean => {
-    if (depth > 8) return false
+  const writesDynamicValue = (value: ts.Expression): boolean => reach('writes', value, () => valueIsDynamic(value))
+  const valueIsDynamic = (value: ts.Expression): boolean => {
     if (readsWidenedField(value)) return true
     if ((checker.getTypeAtLocation(value).flags & ts.TypeFlags.Any) === 0) return false
     const unwrapped = unwrapParens(value)
@@ -1675,8 +1750,7 @@ export const censusFieldBindings = (
     // dynamic as its operands: `opts ? opts.deduplicate : null` or
     // `opts.pageOffset || 0` over an `opts` the census typed stores that
     // record's member, an absence, or the literal.
-    if (ts.isConditionalExpression(unwrapped))
-      return writesDynamicValue(unwrapped.whenTrue, depth + 1) || writesDynamicValue(unwrapped.whenFalse, depth + 1)
+    if (ts.isConditionalExpression(unwrapped)) return writesDynamicValue(unwrapped.whenTrue) || writesDynamicValue(unwrapped.whenFalse)
     if (ts.isBinaryExpression(unwrapped)) {
       const operator = unwrapped.operatorToken.kind
       if (
@@ -1684,7 +1758,7 @@ export const censusFieldBindings = (
         operator === ts.SyntaxKind.BarBarToken ||
         operator === ts.SyntaxKind.AmpersandAmpersandToken
       )
-        return writesDynamicValue(unwrapped.left, depth + 1) || writesDynamicValue(unwrapped.right, depth + 1)
+        return writesDynamicValue(unwrapped.left) || writesDynamicValue(unwrapped.right)
     }
     // A member read out of an untyped object hands the field whatever the
     // object holds: `source.label`, `values[ key ]`, a binding destructured
@@ -1693,22 +1767,22 @@ export const censusFieldBindings = (
     if (ts.isPropertyAccessExpression(unwrapped) || ts.isElementAccessExpression(unwrapped)) {
       if (resolveExpr(value) !== null) return false
       const key = ts.isPropertyAccessExpression(unwrapped) ? unwrapped.name.text : literalMemberNameOf(unwrapped)
-      return untypedSource(unwrapped.expression, key, depth) || readsDeclaredDynamicMember(unwrapped, depth)
+      return untypedSource(unwrapped.expression, key) || readsDeclaredDynamicMember(unwrapped)
     }
-    if (ts.isCallExpression(unwrapped) || ts.isNewExpression(unwrapped)) return callReturnsDynamicValue(unwrapped, depth)
+    if (ts.isCallExpression(unwrapped) || ts.isNewExpression(unwrapped)) return callReturnsDynamicValue(unwrapped)
     if (!ts.isIdentifier(unwrapped)) return false
     const declaration = checker.getSymbolAtLocation(unwrapped)?.valueDeclaration
-    if (declaration && ts.isParameter(declaration)) return parameterReceivesDynamicValue(declaration, depth)
+    if (declaration && ts.isParameter(declaration)) return parameterReceivesDynamicValue(declaration)
     if (declaration && ts.isBindingElement(declaration)) {
       const source = destructuredSourceOf(declaration)
       const name = declaration.propertyName ?? declaration.name
       const key = ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name) ? name.text : null
-      return source !== null && untypedSource(source, key, depth)
+      return source !== null && untypedSource(source, key)
     }
     if (!declaration || !ts.isVariableDeclaration(declaration) || !declaration.initializer || !ts.isIdentifier(declaration.name))
       return false
     if ((ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) === 0) return false
-    return writesDynamicValue(declaration.initializer, depth + 1)
+    return writesDynamicValue(declaration.initializer)
   }
   /**
    * A parameter no census typed holds what its callers pass, and what its own
@@ -1718,25 +1792,22 @@ export const censusFieldBindings = (
    * the parameter itself is boxed. A parameter that reaches itself (a
    * recursive call forwarding it) adds nothing.
    */
-  const visitingParameters = new Set<ts.ParameterDeclaration>()
-  const parameterReceivesDynamicValue = (parameter: ts.ParameterDeclaration, depth: number): boolean => {
-    if (parameters.typeAt(parameter) || visitingParameters.has(parameter) || !ts.isIdentifier(parameter.name)) return false
-    const symbol = checker.getSymbolAtLocation(parameter.name)
+  const parameterReceivesDynamicValue = (parameter: ts.ParameterDeclaration): boolean => {
+    if (parameters.typeAt(parameter) || !ts.isIdentifier(parameter.name)) return false
+    const name = parameter.name
+    const symbol = checker.getSymbolAtLocation(name)
     if (!symbol) return false
-    visitingParameters.add(parameter)
-    try {
-      const dynamic = valuesReceivedBy(parameter).find((value) => writesDynamicValue(value, depth + 1))
+    return reach('receives', parameter, () => {
+      const dynamic = valuesReceivedBy(parameter).find((value) => writesDynamicValue(value))
       if (dynamic && WIDEN_DEBUG) {
         const file = dynamic.getSourceFile()
         const line = file.getLineAndCharacterOfPosition(dynamic.getStart()).line + 1
         process.stderr.write(
-          `[WIDEN-ARG] ${parameter.name.getText()} <- ${file.fileName}:${line} ${dynamic.getText().replace(/\s+/g, ' ').slice(0, 100)}\n`
+          `[WIDEN-ARG] ${name.getText()} <- ${file.fileName}:${line} ${dynamic.getText().replace(/\s+/g, ' ').slice(0, 100)}\n`
         )
       }
       return dynamic !== undefined
-    } finally {
-      visitingParameters.delete(parameter)
-    }
+    })
   }
   /**
    * A call the checker types `any` and no census resolved: a host function
@@ -1744,7 +1815,6 @@ export const censusFieldBindings = (
    * returns whatever it produces; a function of the program returns what its
    * `return` statements do.
    */
-  const visitingCallees = new Set<ts.Node>()
   const isGlobalObjectCreate = (call: ts.CallExpression | ts.NewExpression): boolean => {
     const target = call.expression
     return (
@@ -1763,34 +1833,30 @@ export const censusFieldBindings = (
    * census's own type for it, and one the census cannot type is no evidence.
    * A call that is not a method call returns whatever it produces.
    */
-  const methodOfUntypedReceiverReturnsDynamicValue = (call: ts.CallExpression | ts.NewExpression, depth: number): boolean => {
+  const methodOfUntypedReceiverReturnsDynamicValue = (call: ts.CallExpression | ts.NewExpression): boolean => {
     const target = unwrapParens(call.expression)
     if (!ts.isCallExpression(call) || !ts.isPropertyAccessExpression(target)) return true
     const receiver = unwrapParens(target.expression)
     const declaration = ts.isIdentifier(receiver) ? checker.getSymbolAtLocation(receiver)?.valueDeclaration : undefined
     const isUntypedParameter = declaration !== undefined && ts.isParameter(declaration) && !parameters.typeAt(declaration)
-    if (depth > 8) return false
     if (!isUntypedParameter) {
       // Any other receiver: the census's own type for it, when it has one.
-      if (untypedSource(receiver, null, depth + 1)) return true
+      if (untypedSource(receiver, null)) return true
       const type = knownOrResolve(receiver)
-      return type !== null && methodOfTypeReturnsDynamicValue(type, target.name.text, call, depth)
+      return type !== null && methodOfTypeReturnsDynamicValue(type, target.name.text, call)
     }
     const parameter = declaration as ts.ParameterDeclaration
-    if (visitingSourceParameters.has(parameter)) return false
-    visitingSourceParameters.add(parameter)
-    try {
-      return valuesReceivedBy(parameter).some((value) => {
-        if (untypedSource(value, null, depth + 1)) return true
+    const name = target.name.text
+    return reach(`method:${name}`, parameter, () =>
+      valuesReceivedBy(parameter).some((value) => {
+        if (untypedSource(value, null)) return true
         const type = knownOrResolve(value)
-        return type !== null && methodOfTypeReturnsDynamicValue(type, target.name.text, call, depth)
+        return type !== null && methodOfTypeReturnsDynamicValue(type, name, call)
       })
-    } finally {
-      visitingSourceParameters.delete(parameter)
-    }
+    )
   }
   /** Whether calling `name` on an object of `type` can return a value nothing types. */
-  const methodOfTypeReturnsDynamicValue = (type: ts.Type, name: string, call: ts.CallExpression, depth: number): boolean => {
+  const methodOfTypeReturnsDynamicValue = (type: ts.Type, name: string, call: ts.CallExpression): boolean => {
     const holder = checker.getNonNullableType(type)
     return (holder.isUnion() ? holder.types : [holder]).some((arm) => {
       const method = checker.getPropertyOfType(arm, name)
@@ -1800,28 +1866,24 @@ export const censusFieldBindings = (
         const signatures = checker.getTypeOfSymbolAtLocation(method, call).getCallSignatures()
         return signatures.some((signature) => (checker.getReturnTypeOfSignature(signature).flags & ts.TypeFlags.Any) !== 0)
       }
-      return ts.isFunctionLike(body) && functionReturnsDynamicValue(body, depth)
+      return ts.isFunctionLike(body) && functionReturnsDynamicValue(body)
     })
   }
   /** Whether one of a program function's own `return` statements hands back a value nothing types. */
-  const functionReturnsDynamicValue = (callee: ts.SignatureDeclaration, depth: number): boolean => {
+  const functionReturnsDynamicValue = (callee: ts.SignatureDeclaration): boolean => {
     if (!('body' in callee) || !callee.body) return true
-    if (visitingCallees.has(callee)) return false
-    visitingCallees.add(callee)
-    try {
-      const body = callee.body
-      if (!ts.isBlock(body)) return writesDynamicValue(body as ts.Expression, depth + 1)
+    const body = callee.body
+    return reach('returns', callee, () => {
+      if (!ts.isBlock(body)) return writesDynamicValue(body as ts.Expression)
       let dynamic = false
       const visit = (node: ts.Node): void => {
         if (dynamic || (node !== body && ts.isFunctionLike(node))) return
-        if (ts.isReturnStatement(node) && node.expression && writesDynamicValue(node.expression, depth + 1)) dynamic = true
+        if (ts.isReturnStatement(node) && node.expression && writesDynamicValue(node.expression)) dynamic = true
         else ts.forEachChild(node, visit)
       }
       visit(body)
       return dynamic
-    } finally {
-      visitingCallees.delete(callee)
-    }
+    })
   }
   /**
    * `entries.get( key )` on a Map or Set the program built without type
@@ -1829,7 +1891,7 @@ export const censusFieldBindings = (
    * program's own `set`/`add` calls put in it -- dynamic only where one of
    * those values is.
    */
-  const collectionReadIsTyped = (call: ts.CallExpression | ts.NewExpression, depth: number): boolean => {
+  const collectionReadIsTyped = (call: ts.CallExpression | ts.NewExpression): boolean => {
     const target = unwrapParens(call.expression)
     if (!ts.isCallExpression(call) || !ts.isPropertyAccessExpression(target) || target.name.text !== 'get') return false
     const receiver = unwrapParens(target.expression)
@@ -1840,17 +1902,17 @@ export const censusFieldBindings = (
         : null
     if (!symbol) return false
     const values = flow.writesToSymbol(symbol).filter((write) => write.edge === 'collection-value' && write.value !== null)
-    return values.length > 0 && !values.some((write) => writesDynamicValue(write.value!, depth + 1))
+    return values.length > 0 && !values.some((write) => writesDynamicValue(write.value!))
   }
-  const callReturnsDynamicValue = (call: ts.CallExpression | ts.NewExpression, depth: number): boolean => {
+  const callReturnsDynamicValue = (call: ts.CallExpression | ts.NewExpression): boolean => {
     if (resolveExpr(call) !== null) return false
     const callee = checker.getResolvedSignature(call)?.getDeclaration()
-    if (!callee) return methodOfUntypedReceiverReturnsDynamicValue(call, depth)
+    if (!callee) return methodOfUntypedReceiverReturnsDynamicValue(call)
     // `Object.create( proto )` is declared to return `any`, but it builds a
     // fresh object holding none of the program's values; storing it is the
     // ordinary conversion of an empty object into the field's carrier.
-    if (callee.getSourceFile().isDeclarationFile) return !isGlobalObjectCreate(call) && !collectionReadIsTyped(call, depth)
-    return !ts.isFunctionLike(callee) || functionReturnsDynamicValue(callee, depth)
+    if (callee.getSourceFile().isDeclarationFile) return !isGlobalObjectCreate(call) && !collectionReadIsTyped(call)
+    return !ts.isFunctionLike(callee) || functionReturnsDynamicValue(callee)
   }
   const dynamicWriteEvidence = (write: ValueWrite): boolean =>
     write.slot === 'whole' &&
@@ -1935,26 +1997,11 @@ export const censusFieldBindings = (
     // may have been silent only because the field it reads was still being
     // resolved -- `this.text = source.text` copying another instance's own.
     nodeMemo.clear()
-    for (let changed = true; changed;) {
-      changed = false
-      for (const symbol of unstated) {
-        if (widenedFields.has(symbol)) continue
-        const evidence = dynamicWriteInto(symbol)
-        if (!evidence) continue
-        widenedFields.add(symbol)
-        changed = true
-        // `GEA_WIDEN_DEBUG=1` names each widened field and the write that
-        // widened it -- the one fact a moved carrier needs to be judged by.
-        if (WIDEN_DEBUG) {
-          const file = evidence.getSourceFile()
-          const line = file.getLineAndCharacterOfPosition(evidence.getStart()).line + 1
-          const owner = ownersOf(symbol).values().next().value?.name?.text ?? '?'
-          const kind = statedFieldSymbols.has(symbol) ? 'stated' : 'inferred'
-          process.stderr.write(
-            `[WIDEN] ${owner}.${symbol.name} ${kind} <- ${file.fileName}:${line} ${evidence.getText().replace(/\s+/g, ' ').slice(0, 120)}\n`
-          )
-        }
-      }
+    reachSettled = new Map()
+    try {
+      settleWidenedFields(unstated)
+    } finally {
+      reachSettled = null
     }
     if (widenedFields.size === 0) return
     const dynamic = checker.getAnyType()
@@ -1978,6 +2025,30 @@ export const censusFieldBindings = (
       if (!alreadyDynamic) state(symbol, dynamic)
     }
     nodeMemo.clear()
+  }
+  const settleWidenedFields = (unstated: readonly ts.Symbol[]): void => {
+    for (let changed = true; changed;) {
+      changed = false
+      for (const symbol of unstated) {
+        if (widenedFields.has(symbol)) continue
+        const evidence = dynamicWriteInto(symbol)
+        if (!evidence) continue
+        widenedFields.add(symbol)
+        forgetCleanVerdicts()
+        changed = true
+        // `GEA_WIDEN_DEBUG=1` names each widened field and the write that
+        // widened it -- the one fact a moved carrier needs to be judged by.
+        if (WIDEN_DEBUG) {
+          const file = evidence.getSourceFile()
+          const line = file.getLineAndCharacterOfPosition(evidence.getStart()).line + 1
+          const owner = ownersOf(symbol).values().next().value?.name?.text ?? '?'
+          const kind = statedFieldSymbols.has(symbol) ? 'stated' : 'inferred'
+          process.stderr.write(
+            `[WIDEN] ${owner}.${symbol.name} ${kind} <- ${file.fileName}:${line} ${evidence.getText().replace(/\s+/g, ' ').slice(0, 120)}\n`
+          )
+        }
+      }
+    }
   }
 
   // Enumerate every candidate SYMBOL up front, from every `x.field = expr`

@@ -4025,6 +4025,13 @@ export const censusParameterBindings = (
   /** Answers for `statedTypeAt`, settled once the fixpoint above has stopped. */
   const statedTypes = new NullableMemo<ts.Node, ts.Type>()
 
+  const refusedParameterCell = (node: ts.Node): boolean => {
+    if (ts.isParameter(node)) return lastRefusal.has(node)
+    if (!ts.isIdentifier(node)) return false
+    const parameter = checker.getSymbolAtLocation(node)?.declarations?.find(ts.isParameter)
+    return parameter !== undefined && lastRefusal.has(parameter)
+  }
+
   const computeStatedTypeAt = (node: ts.Node): ts.Type | null => {
     // A PRIOR ROUND's stated narrowings are forwarded, the same way `known`
     // above forwards `upstream.typeAt`: round two exists precisely so a
@@ -4046,7 +4053,14 @@ export const censusParameterBindings = (
     } finally {
       inheritedStatedLookups.depth--
     }
-    if (inherited) return inherited
+    // ...except a parameter this round re-decided and refused. A prior round
+    // bound it from a smaller view (a field it reads was not yet widened to
+    // `any`, say), and this round's refusal is the settled fact: `typeAt`,
+    // which the ABI slot reads (`structural-parts.ts`'s `parameterOf`),
+    // answers only this round's bindings, so forwarding the stale narrowing
+    // to the body alone splits the cell into "parameter N is bound as
+    // `array-object(string)` but the ABI declares `array-object(dynamic)`".
+    if (inherited && !(lastRefusal.size !== 0 && refusedParameterCell(node))) return inherited
     if (ts.isParameter(node)) return statedBindings.size === 0 ? null : (statedBindings.get(node) ?? null)
     if (!ts.isIdentifier(node)) return null
     // Both branches below need the identifier's parameter declaration and

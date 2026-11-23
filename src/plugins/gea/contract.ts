@@ -156,7 +156,8 @@ export interface GeaElementFacts {
  * @semanticCategory framework-protocol
  */
 export interface GeaProviderAuthority {
-  readonly nativeDeclarationFileName: string
+  /** `null` when `@geastack/core` is not installed: then no declaration file is the native provider. */
+  readonly nativeDeclarationFileName: string | null
   readonly modulesOf: (containingFile: string) => readonly ts.SourceFile[]
 }
 
@@ -166,7 +167,7 @@ export interface GeaProviderAuthority {
  */
 export const createGeaProviderAuthority = (
   context: Pick<ProducerContext, 'runtimeModuleTargetOf' | 'sourceFileOf' | 'jsxRuntimeModuleOf'>,
-  nativeDeclarationFileName: string
+  nativeDeclarationFileName: string | null
 ): GeaProviderAuthority => ({
   nativeDeclarationFileName,
   modulesOf: (containingFile) => {
@@ -194,7 +195,12 @@ const derivesFromGeaBase = (checker: ts.TypeChecker, instance: ts.Type, baseName
       for (const provider of authority.modulesOf(file.fileName)) providers.add(provider)
       // A native-only module has no executable runtime target. Its installed
       // host declaration remains an exact owned witness, never ambient names.
-      if (file.isDeclarationFile && resolve(file.fileName) === resolve(authority.nativeDeclarationFileName)) providers.add(file)
+      if (
+        file.isDeclarationFile &&
+        authority.nativeDeclarationFileName !== null &&
+        resolve(file.fileName) === resolve(authority.nativeDeclarationFileName)
+      )
+        providers.add(file)
     }
   }
   for (const provider of providers) {

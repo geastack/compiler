@@ -1,6 +1,7 @@
 import type { NativeDebugSource } from './native-debug-source.js'
 import { nativeCallablePrototypeObservationText } from './emit-native-callable-data.js'
 import type { ProgramConversionRecipe } from '../../ir/program-conversions.js'
+import type { AllocationCell } from '../../ir/program-facts.js'
 import { objectTagExpression, objectTagCapability } from './emit-object-tag.js'
 import { restrictsEveryCarrier, type IntegrityRestrictions } from '../../ir/integrity-restrictions.js'
 import { emitAllocateProxy, emitProxyArmTest, emitProxyPart, emitProxyTrapCheck } from './emit-proxy.js'
@@ -22,6 +23,11 @@ import {
   stableReceiversOf,
   type ConstructionOnlyFields
 } from '../../ir/construction-only-fields.js'
+import { everyStoreEffects, type WriteEffects } from '../../ir/write-effects.js'
+import { codeFreeGetOf } from '../../ir/plain-field-read.js'
+import { borrowedWindowCellsOf } from '../../ir/borrowed-window-cells.js'
+import { borrowedFieldReadsOf } from '../../ir/borrowed-field-reads.js'
+import type { CodeFreeFieldRead } from '../../ir/field-read-reuse.js'
 import {
   DyingArgumentSet,
   dyingTransferUsesOf,
@@ -54,12 +60,14 @@ import type {
   ParameterOperation,
   ReceiverOperation,
   GlobalThisOperation,
+  SetOperation,
   UnresolvableReferenceOperation,
   YieldOperation
 } from '../../ir/model.js'
 import type { EmitReturnAtYield } from './emit-exceptions.js'
 import { allOperationsOf } from '../../ir/model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from '../../ir/queries.js'
+import { deferredMethodValuesOf } from '../../ir/native-method-frames.js'
 import { namesMoreThanOnce } from './evaluated-once.js'
 import type { CallableAbi, Representation } from '../../representation/model.js'
 import { carriesNativeUndefined, isOpenDocument, representationKey } from '../../representation/model.js'
@@ -73,6 +81,7 @@ import {
   cppReceiverName,
   createCppEmitBlockedError,
   createEmitContext,
+  defineFieldPointer,
   defineValue,
   defineValueAlias,
   nameOfValue,
@@ -133,6 +142,7 @@ import { collectCharCodeBuffers } from './char-code-buffers.js'
 import {
   admitDenseWindows,
   collectCapacityHints,
+  collectOutOfLineLiteralPushes,
   emitAllocateArrayObject,
   emitDenseSetup,
   emitFillLoop,
@@ -142,7 +152,7 @@ import type { IntegerStorageFacts } from '../../ir/integers.js'
 import { noInstantiationFacts, type InstantiationFacts } from '../../ir/instantiation.js'
 import { observesEveryCallableIdentity, type CallableIdentityDemand } from '../../ir/callable-identity-demand.js'
 import { stringConstantsOf } from '../../ir/dead-values.js'
-import type { HoistPlan } from '../../ir/hoist.js'
+import { arrayStorageMutationOf, type HoistPlan } from '../../ir/hoist.js'
 import type { DenseRegion } from '../../ir/dense-loops.js'
 import { bodyValueOriginsOf, irBodyCensusOf } from '../../ir/facts.js'
 import {
@@ -1185,6 +1195,25 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
   if (dynamicComparison !== null) {
     lines.push(`${defineValue(ctx, operation.result)} = ${dynamicComparison};`)
     return
+  }
+  // A host data struct crosses by value (`derive.ts`: data-only bound bodies are
+  // `owned`), so every assignment copies it and no copy keeps the object's
+  // identity. `===` between two of them has no answer to spell; comparing the
+  // fields would call two distinct objects equal.
+  const ownedHostStruct = (carrier: Representation): boolean => {
+    const value = carrier.kind === 'optional' ? carrier.payload : carrier
+    return value.kind === 'native-record-ref' && value.ownership === 'owned' && value.native !== null
+  }
+  if (
+    identitySpelling &&
+    representationKey(firstCarrier) !== representationKey(secondCarrier) &&
+    (ownedHostStruct(firstCarrier) || ownedHostStruct(secondCarrier))
+  ) {
+    throw createCppEmitBlockedError(
+      `conversion:${representationKey(first.representation)}->${representationKey(second.representation)}`,
+      `binary "${operation.operator}" compares a host struct held by value, which carries no object identity; ` +
+        'track which object is held another way (a flag or an index)'
+    )
   }
   if (representationKey(first.representation) !== representationKey(second.representation)) {
     throw createCppEmitBlockedError(
@@ -2985,7 +3014,11 @@ export const emitBody = (
   taskResults: ReadonlySet<IrValueId> = new Set(),
   conversionIsCertified?: (id: string) => boolean,
   programConversionRecipes?: readonly ProgramConversionRecipe[],
-  physicalIndexProtocols?: ReadonlyMap<DeclarationId, boolean>
+  physicalIndexProtocols?: ReadonlyMap<DeclarationId, boolean>,
+  writeEffects: WriteEffects = everyStoreEffects,
+  returnsOwnReceiver = false,
+  allocationCells: ReadonlyMap<DeclarationId, AllocationCell> = new Map(),
+  codeFreeFieldRead: CodeFreeFieldRead = () => false
 ): readonly CppArtifact[] => {
   // Every fact this body settles before a single line renders, computed here
   // -- from `body` and the plain, already-available inputs above -- and
@@ -3043,9 +3076,30 @@ export const emitBody = (
   // the read had already rendered.
   const receiverValues = new Set<IrValueId>()
   const bindingWriteCounts = new Map<DeclarationId, number>()
+  // Reads of a cell holding its one plain allocation (`ir/program-facts.ts`'s
+  // `allocationCells`): stable receivers, never a live view.
+  const plainAllocationValues = new Set<IrValueId>()
+  const allocationFieldKeys = new Map<IrValueId, ReadonlySet<string>>()
   let callsSuper = false
+  // A field read whose one use is the receiver of the next member read: its
+  // handle is consumed in the same expression, so it can be borrowed rather
+  // than retained and released (`nativeFieldViewBorrowedReadText`).
+  const fieldReadUses = new Map<IrValueId, number>()
+  const memberReceivers = new Set<IrValueId>()
+  const fieldReads = new Set<IrValueId>()
   for (const block of body.blocks.values()) {
     for (const operation of allOperationsOf(block)) {
+      const cell = operation.kind === 'binding-read' ? allocationCells.get(operation.declaration) : undefined
+      if (cell !== undefined && operation.kind === 'binding-read') {
+        plainAllocationValues.add(operation.result.id)
+        if (representationKey(operation.result.representation) === cell.representation)
+          allocationFieldKeys.set(operation.result.id, cell.keys)
+      }
+      for (const operand of operandsOfIrOperation(operation)) fieldReadUses.set(operand.value, (fieldReadUses.get(operand.value) ?? 0) + 1)
+      if (operation.kind === 'get') {
+        fieldReads.add(operation.result.id)
+        if (operation.key.value !== operation.receiver.value) memberReceivers.add(operation.receiver.value)
+      }
       // Censused in the same pass, for `EmitBodyFacts.receiverValues`: a
       // member access has to know whether its receiver came from `super`, and
       // the operation that defines it is the only place that says so.
@@ -3087,7 +3141,10 @@ export const emitBody = (
   // (string appends, array and JSON fills) that name its storage directly.
   const { reads: stableFieldReads, cells: stableFieldCells } = stableFieldReadsAndCellsOf(
     body,
-    stableReceiversOf(body, receiverValues, borrowedFormals, bindingWriteCounts, (declaration) => captures.isBoxed(declaration)),
+    new Set([
+      ...stableReceiversOf(body, receiverValues, borrowedFormals, bindingWriteCounts, (declaration) => captures.isBoxed(declaration)),
+      ...plainAllocationValues
+    ]),
     constructionOnlyFields,
     nativeIntegrityRestricted,
     bodyDyingArguments,
@@ -3097,12 +3154,18 @@ export const emitBody = (
       if (captures.isBoxed(declaration) || captures.isCaptured(declaration)) return false
       const held = placement.representation
       return held?.kind === 'class-ref' || (held?.kind === 'optional' && held.payload.kind === 'class-ref')
-    }
+    },
+    writeEffects
   )
   const bodyFacts: EmitBodyFacts = {
     generatorBody: body.generator === true,
     asyncCoroutineBody: isAsyncCoroutineBody(body),
     returnsUnderFinallyGuard: body.tryRegions.some((region) => region.finallyEntry !== null),
+    returnsOwnReceiver,
+    plainAllocationValues,
+    allocationFieldKeys,
+    deferredMethodValues: deferredMethodValuesOf(body),
+    borrowedFieldReads: new Set([...fieldReads].filter((value) => memberReceivers.has(value) && fieldReadUses.get(value) === 1)),
     receiverValues,
     bindingWriteCounts,
     stableCellReads: stableCellReadsOf(body, (declaration) => placements.get(declaration)?.storage.kind === 'local'),
@@ -3243,6 +3306,21 @@ export const emitBody = (
         if (capture.kind === 'ok') for (const slot of capture.layout.slots) capturedQueryCells.add(slot.declaration)
       }
   let entryPrologue: readonly string[] = []
+  // A view write runs the view's routine and a reactive cell notifies its
+  // subscribers; only a bare member store is code-free.
+  const codeFreeStore = (operation: SetOperation): boolean => {
+    const key = keyTexts.get(operation.key.value)
+    if (key === undefined || operation.nativeFieldViewWrite !== undefined || operation.nativeDocumentEntry !== undefined) return false
+    if (operation.typedComputedWrite !== undefined) return false
+    const receiver =
+      operation.receiver.representation.kind === 'optional' ? operation.receiver.representation.payload : operation.receiver.representation
+    if (!writeEffects.plainField(receiver, key)) return false
+    const declaring = receiver.kind === 'class-ref' ? (classMemberOf(classes, receiver.declaration, key)?.owner ?? null) : null
+    const struct = declaring !== null ? cppClassName(declaring) : structNameOfReceiver(receiver)
+    if (struct === null) return false
+    return ctx.hosts.reactive.celled.get(struct)?.has(key) !== true && ctx.hosts.reactive.revisions.get(struct)?.has(key) !== true
+  }
+  const codeFreeGet = codeFreeGetOf(body, writeEffects.plainField, codeFreeFieldRead)
   // Every per-body census, in the one order they depend on each other in --
   // `ir/facts.ts` owns that order now, and this backend supplies only the
   // questions about its own carriers plus the two storage steps that have to
@@ -3250,6 +3328,9 @@ export const emitBody = (
   const census = irBodyCensusOf(body, {
     integerStorage: narrowedStorage,
     copiedCapture: (declaration) => copiedCaptureName(ctx, declaration) !== null,
+    settledCapture: (declaration) => copiedCaptureName(ctx, declaration, true) !== null,
+    codeFreeStore,
+    codeFreeGet,
     // A read of a plain field defers like an Array's `length` does -- see
     // `deferrableValuesOf`. Not a read of a reactive CELL: `gea_this->count`
     // spells the `Signal<double>` itself, and only the temporary it used to be
@@ -3512,6 +3593,8 @@ export const emitBody = (
   })
   for (const value of census.loopInvariantValues) prepass.loopInvariantValues.add(value)
   for (const [value, layout] of census.sharedStringLayouts) prepass.sharedStringLayouts.set(value, layout)
+  for (const [value, window] of census.denseReadWindows) prepass.denseReadWindows.set(value, window)
+  for (const [operation, window] of census.denseWriteWindows) prepass.denseWriteWindows.set(operation, window)
   for (const value of census.hoistedResults) prepass.hoistedResults.add(value)
   for (const [declaration, forwarded] of census.forwardedBindings) prepass.forwardedBindings.set(declaration, forwarded)
   for (const [value, prior] of census.reusedStringLengths) prepass.reusedStringLengths.set(value, prior)
@@ -3524,10 +3607,67 @@ export const emitBody = (
   // After the hoists: a fill loop's bound is as often a relocated invariant
   // (`n * n`, re-read from its cells in the loop's own test) as a plain cell.
   collectCapacityHints(ctx, prepass, body, hoists)
+  collectOutOfLineLiteralPushes(prepass, body)
   collectDirectBindingSinks(prepass, body, hoists.relocated)
   // After the hoists, because a window's own bound is often the loop-invariant
   // read they relocate, and a relocated value is one this may name.
   admitDenseWindows(ctx, prepass, body)
+  // After the windows: a cell may point at the window cell it is written from
+  // only when that read renders as the cell itself -- an array of counted or
+  // struct elements read as its own carrier (`denseElementText`).
+  const windowReads = new Set<IrValueId>()
+  for (const operation of ctx.denseAccesses.keys()) {
+    if (operation.kind !== 'get' || operation.receiver.representation.kind !== 'array-object') continue
+    const element = operation.receiver.representation.element
+    if (element.kind !== 'scalar' && representationKey(element) === representationKey(operation.result.representation))
+      windowReads.add(operation.result.id)
+  }
+  if (windowReads.size > 0) {
+    for (const declaration of borrowedWindowCellsOf(
+      body,
+      windowReads,
+      arrayStorageMutationOf(body, codeFreeStore, codeFreeGet),
+      (declaration) => {
+        const placement = placements.get(declaration)
+        if (placement?.storage.kind !== 'local' || placement.storage.owner !== body.sourceOwner) return false
+        if (captures.isBoxed(declaration) || captures.isCaptured(declaration)) return false
+        return !ctx.forwardedBindings.has(declaration) && !ctx.typeQueryBindings.has(declaration)
+      }
+    ))
+      prepass.borrowedWindowCells.add(declaration)
+  }
+  // After the windows and the forwarded cells: a field read through a cell
+  // the body owns may name the field across the statements that reuse it, and
+  // so may the merges of such reads (`ir/borrowed-field-reads.ts`). Only a
+  // counted handle is worth it, and only a receiver the read renders straight
+  // off: an absent receiver is a presence test, a snapshot read a copy's.
+  for (const value of borrowedFieldReadsOf(
+    body,
+    codeFreeFieldRead,
+    (declaration) => {
+      const placement = placements.get(declaration)
+      if (placement?.storage.kind !== 'local' || placement.storage.owner !== body.sourceOwner) return false
+      if (captures.isBoxed(declaration) || captures.isCaptured(declaration)) return false
+      return !ctx.stableFieldCells.has(declaration) && !ctx.forwardedBindings.has(declaration) && !ctx.typeQueryBindings.has(declaration)
+    },
+    (operation) => {
+      const receiver = operation.receiver.representation.kind
+      const result = operation.result.representation
+      return (
+        (receiver === 'class-ref' || receiver === 'record' || receiver === 'native-record-ref') &&
+        (result.kind === 'class-ref' || result.kind === 'record' || result.kind === 'native-record-ref') &&
+        result.ownership === 'shared-refcount' &&
+        operation.spreadSnapshot !== true
+      )
+    },
+    // A stable field read already names the member (`EmitContext.stableFieldReads`).
+    (value) => ctx.deferrable.has(value) || ctx.stableFieldReads.has(value)
+  ))
+    prepass.fieldPointerValues.add(value)
+  for (const block of body.blocks.values())
+    for (const operation of block.operations)
+      if (operation.kind === 'phi' && prepass.fieldPointerValues.has(operation.result.id))
+        for (const incoming of operation.incoming) prepass.fieldPointerMergeInputs.add(incoming.value.value)
   const isSingleBlock = body.blockOrder.length === 1
   const orderLabels = isSingleBlock ? new Map<IrBlockId, string>() : blockLabelsOf(body.blockOrder)
   const owner = sectionOwnerOf(body)
@@ -3536,7 +3676,14 @@ export const emitBody = (
   // exist before any predecessor renders -- including a predecessor that comes
   // earlier in the block order than the merge itself. Minting every merge's
   // name up front is what makes that hold without depending on block order.
-  const mergeWrites = mergeWritesOf(ctx, body, (result) => defineValue(ctx, result))
+  // A merge of field pointers is a pointer too; its edges assign addresses.
+  const pointerMerges = new Set<string>()
+  const mergeWrites = mergeWritesOf(ctx, body, (result) => {
+    if (!ctx.fieldPointerValues.has(result.id)) return defineValue(ctx, result)
+    const name = defineFieldPointer(ctx, result)
+    pointerMerges.add(name)
+    return name
+  })
   // After the merges, because a block that writes one is not empty.
   const flow = threadedFlowOf(ctx, body, orderLabels, hoists, mergeWrites)
   const labels = flow.labels
@@ -3670,6 +3817,13 @@ export const emitBody = (
       // The writes belong after everything this block computed and before it
       // transfers control: that is exactly where the incoming value is live.
       for (const write of mergeWrites.get(blockId) ?? []) {
+        if (pointerMerges.has(write.name)) {
+          const pointer = ctx.fieldPointerTexts.get(write.value.value)
+          if (pointer === undefined)
+            throw new Error(`field pointer merge ${write.name} reads ${write.value.value}, which rendered no pointer`)
+          lines.push(`${write.name} = ${pointer};`)
+          continue
+        }
         const raw = operandText(ctx, write.value)
         const converted = alignedValueText(ctx, 'emit.ts:2111', write.value.representation, write.target, raw)
         if (converted === null) {

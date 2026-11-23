@@ -22,7 +22,7 @@ import type {
 import type { DeclarationId, FunctionId, IrValueId } from '../../identity/ids.js'
 import type { CallableAbi, Representation } from '../../representation/model.js'
 import { classLayoutsConstructedBy } from '../../projection/classes.js'
-import { classFamilyOverridesOf, virtualDispatchKey } from '../../projection/dispatch.js'
+import { classDynamicMethodShadowOf, classFamilyOverridesOf, virtualDispatchKey } from '../../projection/dispatch.js'
 import { cppVirtualMemberName } from './virtual-methods.js'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import { abiKey, representationKey } from '../../representation/model.js'
@@ -87,7 +87,7 @@ import {
   typedArrayTargetSpelling
 } from './emit-buffers.js'
 import { armAt, armIs } from './emit-union-properties.js'
-import { constructorStateText, genericStaticOwnerOf } from './class-properties/emit-class-properties.js'
+import { abstractMissReadKeyOf, constructorStateText, genericStaticOwnerOf } from './class-properties/emit-class-properties.js'
 import {
   cppAbiType,
   cppBodyName,
@@ -370,6 +370,24 @@ export const staticPrefixCallableText = (ctx: EmitContext, source: IrOperand, sl
   return cppStaticPrefixCallableText(ctx, direct, slotType, sourceType)
 }
 
+/** An entry a call without the callee's environment may enter: every borrowed entry but a closure's. */
+const environmentFreeEntry = (entry: StableBorrowEntry | undefined): StableBorrowEntry | undefined =>
+  entry === undefined || entry.environment ? undefined : entry
+
+/**
+ * The borrowed entry of the closure a flow-known call reaches through the
+ * callable that holds it, when the callee is that closure's own carrier (no
+ * prefix adapter between the two ABIs): the callable has the environment the
+ * entry takes first (`CallableObject::callKnownBorrowedEnvironment`).
+ */
+const flowClosureEntryOf = (ctx: EmitContext, callee: IrOperand): StableBorrowEntry | undefined => {
+  const candidate = ctx.callableFlowCandidates.get(callee.value)
+  if (candidate === undefined || !isCallableObject(callee.representation)) return undefined
+  if (cppTypeOf(callee.representation) !== cppTypeOf(candidate.allocated)) return undefined
+  const entry = ctx.stableBorrowEntries.get(cppBodyName(candidate.functionId))
+  return entry?.environment && !entry.narrowedNumericAbi ? entry : undefined
+}
+
 /**
  * The entry a callable parameter, capture or field was seen to hold
  * (`callableFlowCandidatesOf`), for `callKnown`'s identity guard: the
@@ -546,6 +564,26 @@ const emitNullishInvocation = (ctx: EmitContext, lines: string[], operation: Cal
   return true
 }
 
+/** A call of a method read that always misses (`abstractMissReadKeyOf`) is a call of `undefined`. */
+const emitAbstractMissInvocation = (ctx: EmitContext, lines: string[], operation: CallOperation): boolean => {
+  const read = ctx.propertyReadOrigins.get(operation.callee.value)
+  const key = read === undefined ? null : abstractMissReadKeyOf(ctx, read)
+  if (key === null) return false
+  // A single-use argument may still be a deferred expression: it runs here,
+  // before the callee is found not callable (13.3.6.2 EvaluateCall).
+  for (const argument of operation.arguments) lines.push(`(void)(${operandText(ctx, argument)});`)
+  const failure = `gea::host::throwRuntimeError("TypeError", ${JSON.stringify(`${key} is not a function`)})`
+  const result = operation.result
+  if (result && result.representation.kind !== 'void') {
+    const target = cppTypeOf(result.representation)
+    lines.push(`${defineValue(ctx, result)} = (${failure}, gea::host::unreachableValue<${target}>());`)
+  } else {
+    lines.push(`${failure};`)
+    if (result) defineValueAlias(ctx, result, '(void)0')
+  }
+  return true
+}
+
 const refusedPrimitiveValueOf = (primitive: Representation, result: Representation): never => {
   throw createCppEmitBlockedError(
     `conversion:${representationKey(primitive)}->${representationKey(result)}`,
@@ -671,6 +709,11 @@ const emitUnionMethodCall = (ctx: EmitContext, lines: string[], operation: CallO
   // turn them into text against a receiver that has a name by now.
   const receiverText = operandText(ctx, read.receiver)
   const evidence = borrowEvidenceOf(ctx, operation)
+  // The member key, for an arm whose class a dynamic write may shadow
+  // (`ClassLayout.dynamicMethodShadows`): that arm checks the instance's
+  // expando table before calling its body.
+  const memberRead = ctx.propertyReadOrigins.get(operation.callee.value)
+  const memberKey = memberRead === undefined ? undefined : ctx.staticKeyTexts.get(memberRead.key.value)
   const branches = arms.map((arm, index) => {
     const tests: string[] = []
     let armText = receiverText
@@ -722,15 +765,30 @@ const emitUnionMethodCall = (ctx: EmitContext, lines: string[], operation: CallO
     const padded = paddedArguments(abi, [...(receiver === null ? [] : [receiver]), ...supplied], 'union method call')
     // Each arm names its body, so it may enter that body's borrowed entry on the
     // same evidence a direct call does.
-    const entry = packed === null ? ctx.stableBorrowEntries.get(cppBodyName(arm.callable)) : undefined
+    const entry = packed === null ? environmentFreeEntry(ctx.stableBorrowEntries.get(cppBodyName(arm.callable))) : undefined
     const copies =
       entry === undefined
         ? null
         : stableBorrowEntryCopies(entry, operation.arguments, evidence.stableActuals, evidence.potentiallyMovingArguments)
-    const invocation =
+    const shadowed =
+      memberKey !== undefined &&
+      receiver !== null &&
+      arm.receiverRepresentation.kind === 'class-ref' &&
+      classDynamicMethodShadowOf(ctx.classes, arm.receiverRepresentation.declaration, memberKey)
+    const self = 'gea_shadow_receiver'
+    const called = shadowed ? [self, ...padded.slice(1)] : padded
+    const direct =
       entry === undefined || copies === null
-        ? `${cppBodyName(arm.callable)}(${padded.join(', ')})`
-        : `${entry.name}(${copiedBorrowArguments(padded, receiver === null ? 0 : 1, entry, copies).join(', ')})`
+        ? `${cppBodyName(arm.callable)}(${called.join(', ')})`
+        : `${entry.name}(${copiedBorrowArguments(called, receiver === null ? 0 : 1, entry, copies).join(', ')})`
+    const shadowCall = `gea_shadow_callable.callWithReceiver(${['gea::NativeCallReceiver::object(' + self + ')', ...padded.slice(1)].join(', ')})`
+    const invocation = !shadowed
+      ? direct
+      : `[&](const auto& ${self}) -> decltype(auto) { using gea_shadow_result = decltype(${direct}); ` +
+        `if (gea::detail::nativeExpandoPresent(${self})) [[unlikely]] { if (const auto gea_shadow = gea::detail::nativeExpandoOwnValue(${self}, ${cppStringLiteral(memberKey!)})) { ` +
+        `auto gea_shadow_callable = gea::detail::DynamicCarrier<${cppTypeOf({ kind: 'function-value-dispatch', abi: { ...abi, receiver: null } })}>::in(*gea_shadow, 0); ` +
+        `if constexpr (std::is_void_v<gea_shadow_result>) { ${shadowCall}; return; } else return static_cast<gea_shadow_result>(${shadowCall}); } } ` +
+        `return ${direct}; }(${receiver})`
     let body: string
     if (operation.result === null || operation.result.representation.kind === 'void') {
       body = `${invocation}; return;`
@@ -1121,6 +1179,7 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   }
   if (emitCharCodeBufferPush(ctx, lines, operation)) return
   if (emitNullishInvocation(ctx, lines, operation)) return
+  if (emitAbstractMissInvocation(ctx, lines, operation)) return
   if (operation.callee.representation.kind === 'native-handle' && operation.callee.representation.protocol === 'FunctionConstructor') {
     if (!ctx.deriver.dynamicFallback)
       throw createCppEmitBlockedError('call-abi:function-constructor', 'Function construction requires --dynamic-fallback')
@@ -1608,7 +1667,9 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   const candidate = memberSlot === undefined ? undefined : ctx.callableMemberCandidates.get(memberSlot)
   const alternate = memberSlot === undefined ? undefined : ctx.callableMemberCandidates.get(callableMemberAlternateSlot(memberSlot))
 
-  const stableCandidate = ctx.stableBorrowEntries.get(direct ?? (candidate === undefined ? '' : cppBodyName(candidate)))
+  const stableCandidate = environmentFreeEntry(
+    ctx.stableBorrowEntries.get(direct ?? (candidate === undefined ? '' : cppBodyName(candidate)))
+  )
   const { potentiallyMovingArguments, stableActuals } = borrowEvidenceOf(ctx, operation)
   // A narrowed integer formal is spelled alike by both entries only for a call
   // that names the body; a carrier adapter passes the unnarrowed ABI.
@@ -1621,7 +1682,7 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   // A candidate's borrowed entry for this call, when it has one: the stable
   // entry its arguments are accepted by, or its borrowable body.
   const borrowedEntryOf = (target: FunctionId): string | undefined => {
-    const stable = ctx.stableBorrowEntries.get(cppBodyName(target))
+    const stable = environmentFreeEntry(ctx.stableBorrowEntries.get(cppBodyName(target)))
     if (
       stable !== undefined &&
       !stable.narrowedNumericAbi &&
@@ -1649,6 +1710,11 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
     candidate === undefined && direct === undefined && dispatched === undefined && calleeOperand.value === operation.callee.value
       ? flowKnownText(ctx, operation.callee)
       : null
+  const flowEntry = flowKnown === null ? undefined : flowClosureEntryOf(ctx, operation.callee)
+  const flowCopies =
+    flowEntry === undefined ? null : stableBorrowEntryCopies(flowEntry, operation.arguments, stableActuals, potentiallyMovingArguments)
+  const flowBorrowed = flowCopies === null ? undefined : flowEntry
+  const flowArguments = copiedBorrowArguments(padded, declaredReceiverOperand ? 1 : 0, flowBorrowed, flowCopies)
   const candidateEntersStableEntry =
     candidate !== undefined &&
     !(firstEntry !== undefined && alternate !== undefined && alternateEntry !== undefined) &&
@@ -1657,7 +1723,9 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   const callMember =
     candidate === undefined
       ? flowKnown !== null
-        ? `${stableCallee ? 'callStableKnown' : 'callKnown'}<${flowKnown}>`
+        ? flowBorrowed !== undefined
+          ? `${stableCallee ? 'callStableKnownBorrowedEnvironment' : 'callKnownBorrowedEnvironment'}<${flowKnown}, &${flowBorrowed.name}>`
+          : `${stableCallee ? 'callStableKnown' : 'callKnown'}<${flowKnown}>`
         : stableCallee
           ? 'callStable'
           : 'call'
@@ -1705,13 +1773,26 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   const guardedInvocation = (): string => {
     const [receiverArgument, ...rest] = padded
     const self = 'gea_guard_receiver'
+    const receiverType = cppTypeOf(abi.receiver!)
+    // The receiver is taken by reference and handed to the prototype body as
+    // its direct call would hand it (a body that borrows its receiver gets no
+    // retain at all), where a by-value parameter copied it on every call of a
+    // guarded method -- every Vector3 call, once a dynamic write may shadow
+    // its methods. The body's borrowed entry is used when it admits these
+    // arguments, exactly as a direct call admits it. Only the shadowed path,
+    // which calls through the own property, takes a handle of its own.
     // A typed (non-generic) parameter: a generic lambda would make every
     // member template the callee names a dependent name needing `template`.
-    const forwarded = `std::move(${self})`
+    const borrowed = environmentFreeEntry(ctx.stableBorrowEntries.get(cppBodyName(guard!.functionId)))
+    const borrowedCopies =
+      borrowed === undefined ? null : stableBorrowEntryCopies(borrowed, operation.arguments, stableActuals, potentiallyMovingArguments)
+    const body =
+      borrowed !== undefined && borrowedCopies !== null
+        ? `${borrowed.name}(${copiedBorrowArguments([self, ...rest], 1, borrowed, borrowedCopies).join(', ')})`
+        : `${cppBodyName(guard!.functionId)}(${[self, ...rest].join(', ')})`
     return (
-      `[&](${cppTypeOf(abi.receiver!)} ${self}) -> decltype(auto) { return (static_cast<bool>(${self}) && !${self}->${cppRecordFieldPresenceName(guard!.key)}) ` +
-      `? ${cppBodyName(guard!.functionId)}(${[self, ...rest].join(', ')}) ` +
-      `: ${operandText(ctx, calleeOperand)}.${callMember}(${[forwarded, ...rest].join(', ')}); }(${receiverArgument})`
+      `[&](const ${receiverType}& ${self}) -> decltype(auto) { return (static_cast<bool>(${self}) && !${self}->${cppRecordFieldPresenceName(guard!.key)}) ` +
+      `? ${body} : ${operandText(ctx, calleeOperand)}.${callMember}(${[`${receiverType}(${self})`, ...rest].join(', ')}); }(${receiverArgument})`
     )
   }
   // A logical receiver that is a value this frame already holds (not withheld
@@ -1726,18 +1807,79 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
     !isDeferredValue(ctx, logical.value) &&
     calleeOperand.value === operation.callee.value &&
     isCallableObject(calleeOperand.representation)
+  // `CallOperation.expandoShadowGuard`: a write through a dynamic receiver may
+  // have installed an own function over this method, and such a shadow lives
+  // in the instance's expando table rather than in a slot. The call runs as
+  // resolved unless the instance has a table holding the key; the receiver
+  // and the converted arguments are the lambda's arguments, so each is
+  // evaluated once whichever path runs.
+  const shadowGuard = operation.expandoShadowGuard
+  const shadowedInvocation = (
+    receiverText: string,
+    argumentTexts: readonly string[],
+    normal: (self: string, args: readonly string[]) => string,
+    // The convention the arguments were converted to. A virtual call converts
+    // them to the slot's own, which a family widens past the resolved
+    // method's (`removeListener(event: string)` under a base taking
+    // `string | symbol`), and the shadow is handed those same arguments.
+    convention: CallableAbi | null = abiOfCallee(operation.callee.representation)
+  ): string => {
+    const held = convention
+    if (shadowGuard === undefined || held === null || held.receiver === null)
+      throw createCppEmitBlockedError(
+        'call-abi:expando-shadow',
+        'a call a dynamic write may shadow has no receiver-taking method convention'
+      )
+    const self = 'gea_shadow_receiver'
+    const names = argumentTexts.map((_, index) => `gea_shadow_argument_${index}`)
+    const forwarded = names.map((name) => `std::forward<decltype(${name})>(${name})`)
+    const shadow = cppTypeOf({ kind: 'function-value-dispatch', abi: { ...held, receiver: null } })
+    const shadowCall = `gea_shadow_callable.callWithReceiver(${['gea::NativeCallReceiver::object(' + self + ')', ...forwarded].join(', ')})`
+    return (
+      `[&](const auto& ${self}${names.map((name) => `, auto&& ${name}`).join('')}) -> decltype(auto) { ` +
+      `auto gea_shadow_normal = [&]() -> decltype(auto) { return ${normal(self, forwarded)}; }; ` +
+      'using gea_shadow_result = decltype(gea_shadow_normal()); ' +
+      `if (gea::detail::nativeExpandoPresent(${self})) [[unlikely]] { ` +
+      `if (const auto gea_shadow = gea::detail::nativeExpandoOwnValue(${self}, ${cppStringLiteral(shadowGuard.key)})) { ` +
+      `auto gea_shadow_callable = gea::detail::DynamicCarrier<${shadow}>::in(*gea_shadow, 0); ` +
+      `if constexpr (std::is_void_v<gea_shadow_result>) { ${shadowCall}; return; } else return static_cast<gea_shadow_result>(${shadowCall}); } } ` +
+      `return gea_shadow_normal(); }(${[receiverText, ...argumentTexts].join(', ')})`
+    )
+  }
+  const genericArguments = candidateEntersStableEntry ? stableArguments : flowBorrowed !== undefined ? flowArguments : padded
+  if (shadowGuard !== undefined && ((dispatched === undefined && direct === undefined && abi.receiver === null) || guardable))
+    throw createCppEmitBlockedError('call-abi:expando-shadow', 'a call a dynamic write may shadow is spelled without its receiver')
   const invocation =
     dispatched !== undefined
-      ? `${virtualPadded[0]}->${dispatched.member}(${virtualPadded.slice(1).join(', ')})`
+      ? shadowGuard !== undefined
+        ? shadowedInvocation(
+            virtualPadded[0]!,
+            virtualPadded.slice(1),
+            (self, args) => `${self}->${dispatched.member}(${args.join(', ')})`,
+            dispatched.abi
+          )
+        : `${virtualPadded[0]}->${dispatched.member}(${virtualPadded.slice(1).join(', ')})`
       : direct !== undefined
-        ? `${stableEntry?.name ?? direct}(${stableArguments.join(', ')})`
+        ? shadowGuard !== undefined
+          ? shadowedInvocation(
+              stableArguments[0]!,
+              stableArguments.slice(1),
+              (self, args) => `${stableEntry?.name ?? direct}(${[self, ...args].join(', ')})`
+            )
+          : `${stableEntry?.name ?? direct}(${stableArguments.join(', ')})`
         : abi.receiver === null && logicalThis !== null
           ? lazyLogicalReceiver(logicalThis)
             ? `${operandText(ctx, calleeOperand)}.callWithLazyReceiver(${[`[&]() -> gea::NativeCallReceiver { return ${operationNativeCallReceiverText(ctx, operation, logicalThis.representation, operandText(ctx, logicalThis))}; }`, ...padded].join(', ')})`
             : `${operandText(ctx, calleeOperand)}.callWithReceiver(${[operationNativeCallReceiverText(ctx, operation, logicalThis.representation, operandText(ctx, logicalThis)), ...padded].join(', ')})`
           : guardable
             ? guardedInvocation()
-            : `${operandText(ctx, calleeOperand)}.${callMember}(${(candidateEntersStableEntry ? stableArguments : padded).join(', ')})`
+            : shadowGuard !== undefined
+              ? shadowedInvocation(
+                  genericArguments[0]!,
+                  genericArguments.slice(1),
+                  (self, args) => `${operandText(ctx, calleeOperand)}.${callMember}(${[self, ...args].join(', ')})`
+                )
+              : `${operandText(ctx, calleeOperand)}.${callMember}(${genericArguments.join(', ')})`
   // A result the integer census narrowed from the candidate body's returns is
   // checked where it lands, on every path the call can take: the guard above
   // may miss and run whatever callable the member holds.

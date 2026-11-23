@@ -82,10 +82,16 @@ export const nativeFieldViewPlansByTargetOf = (nodes: Iterable<ConversionNode>):
 export const nativeFieldViewOpenWriteHomesOf = (
   receiver: Representation,
   plans: ReadonlyMap<string, readonly NativeFieldViewPlan[]>,
-  layoutOf: Pick<RepresentationDeriver, 'layoutOf'> | null | undefined
+  layoutOf: Pick<RepresentationDeriver, 'layoutOf'> | null | undefined,
+  sourcePlansOf: (plan: NativeFieldViewPlan) => ReadonlySet<NativeFieldViewPlan> | null = () => null
 ): { readonly homes: readonly Representation[]; readonly named: ReadonlySet<string> } | null => {
   if (receiver.kind === 'optional' || receiver.kind === 'borrowed-ref')
-    return nativeFieldViewOpenWriteHomesOf(receiver.kind === 'optional' ? receiver.payload : receiver.referent, plans, layoutOf)
+    return nativeFieldViewOpenWriteHomesOf(
+      receiver.kind === 'optional' ? receiver.payload : receiver.referent,
+      plans,
+      layoutOf,
+      sourcePlansOf
+    )
   if (receiver.kind !== 'record' && receiver.kind !== 'record-with-index' && receiver.kind !== 'native-record-ref') return null
   if (receiver.ownership !== 'shared-refcount') return null
   const installed = plans.get(receiver.shapeId)
@@ -101,13 +107,20 @@ export const nativeFieldViewOpenWriteHomesOf = (
     return { homes: [], named }
   }
   const homes: Representation[] = []
-  const pending: Representation[] = [receiver]
+  // Each carrier is walked under the plan whose source it is: only the views
+  // that can be the very value that plan is installed over lead further
+  // (`nativeFieldViewDomainsOf`'s `sourcePlansOf`).
+  const pending: { readonly carrier: Representation; readonly via: NativeFieldViewPlan | null }[] = [{ carrier: receiver, via: null }]
   const seen = new Set<string>()
+  const numbers = new Map<NativeFieldViewPlan, number>()
   while (pending.length > 0) {
-    const carrier = pending.pop()!
+    const { carrier, via } = pending.pop()!
+    const reaching = via === null ? null : sourcePlansOf(via)
+    let number = via === null || reaching === null ? -1 : numbers.get(via)
+    if (number === undefined) numbers.set(via!, (number = numbers.size))
     const identity = representationKey(carrier)
-    if (seen.has(identity)) continue
-    seen.add(identity)
+    if (seen.has(`${number} ${identity}`)) continue
+    seen.add(`${number} ${identity}`)
     if ((carrier.kind !== 'record' && carrier.kind !== 'native-record-ref') || carrier.ownership !== 'shared-refcount') return null
     const ordinary =
       carrier.kind === 'native-record-ref'
@@ -116,12 +129,13 @@ export const nativeFieldViewOpenWriteHomesOf = (
           : null
         : carrier
     if (ordinary?.kind !== 'record') return null
-    homes.push(carrier)
+    if (!homes.some((home) => representationKey(home) === identity)) homes.push(carrier)
     name(ordinary.fields)
     name(ordinary.accessors)
     for (const plan of plans.get(carrier.shapeId) ?? []) {
+      if (reaching !== null && !reaching.has(plan)) continue
       name(plan.fields)
-      if (!isDocumentPlan(plan)) pending.push(plan.source)
+      if (!isDocumentPlan(plan)) pending.push({ carrier: plan.source, via: plan })
     }
   }
   return { homes, named }
@@ -140,7 +154,17 @@ export const nativeFieldViewDomainsOf = (
   classes: ReadonlyMap<DeclarationId, ClassLayout> = new Map(),
   /** The native carriers copies store under `key` in the expando of an
    * allocation carried as `shapeId` (`spread-conversions.ts`'s `expandoData`). */
-  expandoStoredOf: (shapeId: string, key: string | null) => readonly Representation[] = () => []
+  expandoStoredOf: (shapeId: string, key: string | null) => readonly Representation[] = () => [],
+  /**
+   * The installed plans whose views can be the very value `plan` is
+   * installed over, or `null` when the program does not bound them. A plan's
+   * target names a SHAPE, and every value carried at that shape -- the empty
+   * `{}` above all -- is a source of each plan from it; following a plan's
+   * source only through the views that actually reach its conversions keeps
+   * an unrelated view of the same shape (an all-string deny list declared at
+   * a keyless mapped type) out of every options bag a `{}` default fills.
+   */
+  sourcePlansOf: (plan: NativeFieldViewPlan) => ReadonlySet<NativeFieldViewPlan> | null = () => null
 ): NativeFieldViewDomains => {
   const plans = new Map<string, NativeFieldViewPlan[]>()
   for (const plan of nativeFieldViewPlansOf(nodes)) {
@@ -149,6 +173,19 @@ export const nativeFieldViewDomainsOf = (
     plans.set(plan.target.shapeId, entries)
   }
   const cache = new Map<string, ReadonlyMap<string, readonly NativeFieldStorageDomain[]> | null>()
+  const planNumbers = new Map<NativeFieldViewPlan, number>()
+  const planNumberOf = (plan: NativeFieldViewPlan): number => {
+    let number = planNumbers.get(plan)
+    if (number === undefined) planNumbers.set(plan, (number = planNumbers.size))
+    return number
+  }
+  /** The plans installed at `shapeId` that a value reached through `via`'s source can carry. */
+  const installedFor = (shapeId: string, via: NativeFieldViewPlan | null): readonly NativeFieldViewPlan[] | undefined => {
+    const all = plans.get(shapeId)
+    if (via === null || all === undefined) return all
+    const reaching = sourcePlansOf(via)
+    return reaching === null ? all : all.filter((plan) => reaching.has(plan))
+  }
   /**
    * Whether no allocation this carrier can hold has `key` as an own slot,
    * accessor, class member, or descriptor route -- so its ordinary [[Get]]
@@ -217,11 +254,15 @@ export const nativeFieldViewDomainsOf = (
       (ordinary.kind === 'record' && ordinary.accessors.some((accessor) => accessor.key === key))
     )
   }
-  const domainsOf = (receiver: Representation, ordinaryArm = false): ReadonlyMap<string, readonly NativeFieldStorageDomain[]> | null => {
-    const identity = `${representationKey(receiver)}:${ordinaryArm ? 'ordinary' : 'live'}`
+  const domainsOf = (
+    receiver: Representation,
+    ordinaryArm = false,
+    via: NativeFieldViewPlan | null = null
+  ): ReadonlyMap<string, readonly NativeFieldStorageDomain[]> | null => {
+    const identity = `${representationKey(receiver)}:${ordinaryArm ? 'ordinary' : 'live'}:${via === null ? '*' : planNumberOf(via)}`
     if (cache.has(identity)) return cache.get(identity) ?? null
     if (receiver.kind === 'optional' || receiver.kind === 'borrowed-ref')
-      return domainsOf(receiver.kind === 'optional' ? receiver.payload : receiver.referent, ordinaryArm)
+      return domainsOf(receiver.kind === 'optional' ? receiver.payload : receiver.referent, ordinaryArm, via)
     if (receiver.kind === 'tagged-union') {
       // A `dynamic` arm is already a `gea::Value` (`decorate(decrypted[k], ...)`
       // recursing with an `any` entry): its read is that Value's own [[Get]],
@@ -231,7 +272,7 @@ export const nativeFieldViewDomainsOf = (
         (arm) => arm.value.kind !== 'undefined' && arm.value.kind !== 'null' && arm.value.kind !== 'dynamic'
       )
       if (!ordinaryArm && !objectArms.some((arm) => domainsOf(arm.value) !== null)) return null
-      const arms = objectArms.map((arm) => domainsOf(arm.value, true))
+      const arms = objectArms.map((arm) => domainsOf(arm.value, true, via))
       if (!arms.length || arms.some((arm) => arm === null)) return null
       // A per-arm union, not an intersection: a key only one arm stores (a
       // computed read, or a constant key some view-target arm declares --
@@ -342,7 +383,7 @@ export const nativeFieldViewDomainsOf = (
       receiver.ownership !== 'shared-refcount'
     )
       return null
-    const installed = plans.get(receiver.shapeId)
+    const installed = installedFor(receiver.shapeId, via)
     if (!ordinaryArm && !installed?.length) return null
     // Install the accumulator before following a recursive view's source.
     // The physical leaf route itself is still present on each cycle edge.
@@ -407,7 +448,7 @@ export const nativeFieldViewDomainsOf = (
       // The public intermediate view may omit a key. Its native descriptor
       // still delegates that key to the immediate source, including a getter
       // whose Function identity has escaped.
-      const inherited = domainsOf(plan.source, true)
+      const inherited = domainsOf(plan.source, true, plan)
       for (const [key, domains] of inherited ?? []) {
         const checked = plan.fields.find((field) => field.key === key)?.checkedRead
         for (const domain of domains) add(key, checked ? { ...domain, checkedRead: checked } : domain)

@@ -7,8 +7,8 @@ import { fixedFieldDeletionsOf, integrityRestrictionsOf, type IntegrityRestricti
 import { singleEvaluationClassesOf } from './class-evaluation.js'
 import { callableMemberCandidatesOf } from './callable-member-candidates.js'
 import { callableFlowCandidatesOf, type CallableFlowCandidate } from './callable-flow-candidates.js'
-import { cyclicBlocksOf } from './dominance.js'
-import { allOperationsOf, type IrBody, type IrNonTerminatorOperation } from './model.js'
+import { cyclicBlocksOf, dominatorTreeOf } from './dominance.js'
+import { allOperationsOf, type IrBlockId, type IrBody, type IrNonTerminatorOperation } from './model.js'
 import { operandsOfIrOperation } from './queries.js'
 import { buildDyingArgumentIndex } from './transfer.js'
 
@@ -87,6 +87,8 @@ export interface ProgramFacts {
   readonly singleEvaluationClasses: ReadonlySet<DeclarationId>
   /** Cells the whole program writes once, with a function or class it allocates there -- see `definitionCellsOf`. */
   readonly definitionCells: ReadonlySet<DeclarationId>
+  /** Cells the whole program writes once, with a record it allocates there -- see `allocationCellsOf`. */
+  readonly allocationCells: ReadonlyMap<DeclarationId, AllocationCell>
 }
 
 /**
@@ -177,6 +179,100 @@ const definitionCellsOf = (bodies: readonly IrBody[]): ReadonlySet<DeclarationId
   }
   for (const declaration of definitions) if (writeCounts.get(declaration) !== 1) definitions.delete(declaration)
   return definitions
+}
+
+/** The one allocation an `allocationCells` cell holds. */
+export interface AllocationCell {
+  /** The carrier the allocation was written into the cell as. */
+  readonly representation: string
+  /**
+   * The keys the allocation itself defined before it was written: its
+   * `allocate-record` fields and every default data definition on the chain of
+   * values the literal threads (`define-own-property` answers the same
+   * object). Each set its field's presence bit, and only a `delete` clears one.
+   */
+  readonly keys: ReadonlySet<string>
+}
+
+/**
+ * Cells the whole program writes exactly once, and with a record or object it
+ * allocates at that write: `const gull: Gull = { ... }`, a closure's own state
+ * captured by every method it hands out.
+ *
+ * A field read through such a cell needs no copy of the cell: the cell holds
+ * that one allocation from its write on (a read before the write is of
+ * `undefined`, which no field read gets past). And the allocation is plain, never
+ * a live view a dynamic writer stored, so its declared members are its own.
+ * Writes are counted from every body, renewals included, so a cell written
+ * anywhere else is not one.
+ */
+const allocationCellsOf = (bodies: readonly IrBody[]): ReadonlyMap<DeclarationId, AllocationCell> => {
+  // Each allocated value, by the allocation it answers.
+  const rootOf = new Map<IrValueId, IrValueId>()
+  const writeCounts = new Map<DeclarationId, number>()
+  const allocations = new Map<DeclarationId, AllocationCell>()
+  for (const body of bodies) {
+    const constants = new Map<IrValueId, string>()
+    for (const block of body.blocks.values())
+      for (const operation of allOperationsOf(block))
+        if (operation.kind === 'constant' && operation.literal === 'string') constants.set(operation.result.id, operation.text)
+    interface Site {
+      readonly block: IrBlockId
+      readonly index: number
+    }
+    const definitions = new Map<IrValueId, { readonly key: string; readonly at: Site }[]>()
+    const writes: { readonly declaration: DeclarationId; readonly root: IrValueId; readonly representation: string; readonly at: Site }[] =
+      []
+    const initial = new Map<IrValueId, readonly string[]>()
+    for (const block of body.blocks.values()) {
+      allOperationsOf(block).forEach((operation, index) => {
+        if (operation.kind === 'allocate-record' || operation.kind === 'allocate-ordinary-object') {
+          rootOf.set(operation.result.id, operation.result.id)
+          initial.set(operation.result.id, operation.kind === 'allocate-record' ? operation.fields.map((field) => field.key) : [])
+        }
+        // A literal's own properties are defined one by one, each answering the same object.
+        if (operation.kind === 'define-own-property') {
+          const root = rootOf.get(operation.receiver.value)
+          if (root !== undefined) {
+            if (operation.result !== null) rootOf.set(operation.result.id, root)
+            const key = constants.get(operation.key.value)
+            const { writable, enumerable, configurable } = operation.attributes
+            if (key !== undefined && writable && enumerable && configurable && operation.typedComputedWrite === undefined)
+              definitions.set(root, [...(definitions.get(root) ?? []), { key, at: { block: block.id, index } }])
+          }
+        }
+        if (operation.kind === 'binding-renew') writeCounts.set(operation.declaration, 2)
+        if (operation.kind !== 'binding-write') return
+        writeCounts.set(operation.declaration, (writeCounts.get(operation.declaration) ?? 0) + 1)
+        const root = rootOf.get(operation.value.value)
+        if (root !== undefined)
+          writes.push({
+            declaration: operation.declaration,
+            root,
+            representation: representationKey(operation.value.representation),
+            at: { block: block.id, index }
+          })
+      })
+    }
+    // A definition counts only where every path to the write ran it after
+    // the allocation the write stores: earlier in the write's block, or in a
+    // block dominating it (the allocation dominates the definition, so no path
+    // re-allocates between the two without passing the definition again).
+    let dominance: ReturnType<typeof dominatorTreeOf> | null = null
+    for (const write of writes) {
+      const keys = new Set(initial.get(write.root) ?? [])
+      for (const definition of definitions.get(write.root) ?? []) {
+        const before =
+          definition.at.block === write.at.block
+            ? definition.at.index < write.at.index
+            : (dominance ??= dominatorTreeOf(body)).dominates(definition.at.block, write.at.block)
+        if (before) keys.add(definition.key)
+      }
+      allocations.set(write.declaration, { representation: write.representation, keys })
+    }
+  }
+  for (const declaration of allocations.keys()) if (writeCounts.get(declaration) !== 1) allocations.delete(declaration)
+  return allocations
 }
 
 const buildRepeatedConstructorIndex = (
@@ -483,6 +579,7 @@ export const programFactsOf = (
   const fixedFieldStateConstant = !nativeIntegrityRestricted.any && !fixedFieldDeletionsOf(bodies)
   const singleEvaluationClasses = singleEvaluationClassesOf(bodies)
   const definitionCells = definitionCellsOf(bodies)
+  const allocationCells = allocationCellsOf(bodies)
 
   return {
     callableMemberCandidates,
@@ -495,6 +592,7 @@ export const programFactsOf = (
     nativeIntegrityRestricted,
     fixedFieldStateConstant,
     singleEvaluationClasses,
-    definitionCells
+    definitionCells,
+    allocationCells
   }
 }

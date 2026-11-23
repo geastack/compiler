@@ -283,10 +283,19 @@ export const arrayAccessText = (ctx: EmitContext, receiver: IrOperand, key: IrOp
     // and proved it canonical again on every read, which on a core without a
     // double FPU is a chain of soft-float calls per `m.elements[k]`.
     if (index !== null) {
-      return (
-        absentCapableElementText(ctx, receiverText, 'elementAtIndex', index, receiver.representation.element, result) ??
-        reconciledElementText(ctx, receiver.representation.element, result, `${receiverText}->readElementAtIndex(${index})`)
-      )
+      const absentCapable = absentCapableElementText(ctx, receiverText, 'elementAtIndex', index, receiver.representation.element, result)
+      if (absentCapable !== null) return absentCapable
+      const plain = `${receiverText}->readElementAtIndex(${index})`
+      // One of a run of constant-index reads of this array (`ir/dense-read-windows.ts`):
+      // the first takes the window for the run's highest index, and every
+      // member reads the cells while it holds, the plain read otherwise.
+      const window = result === null ? undefined : ctx.denseReadWindows.get(result.id)
+      if (window === undefined) return reconciledElementText(ctx, receiver.representation.element, result, plain)
+      const name = `gea_read_window_${window.ordinal}`
+      declareDenseWindow(ctx, name, receiver.representation)
+      const take = window.mutable ? 'gea::denseWindowCellsMutable' : 'gea::denseWindowCells'
+      const cells = window.initialize ? `(${name}.cells = ${take}(${receiverText}, ${window.last}))` : `${name}.cells`
+      return reconciledElementText(ctx, receiver.representation.element, result, `(${cells} ? ${name}.cells[${index}].value : ${plain})`)
     }
     if (deferredArrayMethodClaim(ctx.staticKeyTexts, receiver, key) !== null) {
       if (result === null) {
@@ -1532,4 +1541,14 @@ export const positionalRecordArityText = (
 ): string | null => {
   const accessor = memberAccessOperator(representation.ownership)
   return positionalArityText(representation.fields, (key) => `${receiverText()}${accessor}${cppRecordFieldPresenceName(key)}`)
+}
+
+/**
+ * Declares a run's window (`ir/dense-read-windows.ts`) at whichever member
+ * renders first. The run's first access takes it; a member that renders on
+ * another path leaves it null, and a null window reads and stores the plain way.
+ */
+export const declareDenseWindow = (ctx: EmitContext, name: string, array: Representation): void => {
+  if (!ctx.declarations.some((declaration) => declaration.name === name))
+    ctx.declarations.push({ name, type: `gea::DenseReadWindow<${cppTypeOf(array)}>` })
 }

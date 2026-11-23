@@ -3,16 +3,23 @@ import { errorConstructorGetText, errorConstructorMemberText } from './emit-erro
 import { dictionaryKeyDomainOf, isOpenDocument, ownershipOf, representationKey } from '../../representation/model.js'
 import { carrierDifference, shortCarrierText } from '../../representation/difference.js'
 import { nativeFieldOwnerReadText } from './emit-field-owner.js'
-import { nativeFieldViewOperandContext, nativeFieldViewReadText, nativeFieldViewWriteText } from './emit-native-field-view.js'
+import {
+  nativeFieldViewBorrowedReadText,
+  nativeFieldViewOperandContext,
+  nativeFieldViewReadText,
+  nativeFieldViewWriteText
+} from './emit-native-field-view.js'
 import { nativeObjectDataGetText, nativeObjectDataSetText } from './emit-native-object-data.js'
 import { nativeDocumentEntryText } from './emit-native-document-entry.js'
 import { nativeCallableOptionalDataReadText } from './emit-native-callable-data.js'
 import type { DefineOwnPropertyOperation, GetOperation, IrOperand, SetOperation } from '../../ir/model.js'
 import type { DeclarationId, FunctionId, IrValueId } from '../../identity/ids.js'
 import {
+  cppDenseExtentName,
   cppDenseFlagName,
   cppDensePointerName,
   createCppEmitBlockedError,
+  defineFieldPointer,
   defineValue,
   defineValueAlias,
   nameOfValue,
@@ -23,6 +30,7 @@ import {
   type ReactiveRevisionOrigin,
   isIntegerKeyValue,
   isIntegerStorageValue,
+  storageTypeOf,
   storedEnvironmentText
 } from './emit-context.js'
 import { declaredHostMethodRead, emitNativeHostStore, nativeHostMemberText } from './host/emit-host-properties.js'
@@ -173,7 +181,8 @@ import {
   stringMemberText,
   symbolMemberText,
   typedArrayAccessText,
-  integerTypedArrayElements
+  integerTypedArrayElements,
+  declareDenseWindow
 } from './emit-carrier-members.js'
 import { arrayBufferAccessText, dataViewAccessText, nativeBufferMethodValueText, sharedArrayBufferAccessText } from './emit-buffers.js'
 import { functionSourceReadClaimOf } from './function-source-reads.js'
@@ -271,7 +280,7 @@ const dictionaryReadText = (ctx: EmitContext, operation: GetOperation): string |
   // site, so each read site remembers where it last found its key.
   const hinted = operation.receiver.representation.key === 'string' && ctx.staticKeyTexts.get(operation.key.value) !== undefined
   const withHint = (text: string): string =>
-    `([&]() -> decltype(auto) { static constinit std::atomic<std::uint32_t> gea_key_hint{0}; return ${text}; }())`
+    `([&]() -> decltype(auto) { static constinit std::atomic<std::uint64_t> gea_key_hint{0}; return ${text}; }())`
   const raw = hinted
     ? withHint(`gea::dictionary::readHinted(${table.table}, ${table.key}, gea_key_hint)`)
     : `${table.member}read(${table.key})`
@@ -536,11 +545,19 @@ const denseCellText = (
   const key = ctx.denseIndices.get(operation.key.value) ?? operandText(ctx, operation.key)
   const flag = cppDenseFlagName(access.flag)
   const integral = ctx.denseIndices.has(operation.key.value) || ctx.integerValues.has(operation.key.value)
-  const guarded = !access.signed
-    ? flag
-    : integral
-      ? `${flag} && (${key}) >= 0`
-      : `${flag} && (${key}) >= 0 && static_cast<double>(static_cast<long long>(${key})) == (${key})`
+  // A checked window's index is not bounded by the loop: it is compared with
+  // the view's length the preheader took, unsigned so a negative one fails too.
+  // A Number index is asked whether it is a whole one as well.
+  const checked = ctx.denseArrays.find((array) => array.ordinal === access.array)?.checked === true
+  const guarded = checked
+    ? integral
+      ? `${flag} && static_cast<std::size_t>(${key}) < ${cppDenseExtentName(access.array)}`
+      : `${flag} && gea::denseCheckedIndex(${key}, ${cppDenseExtentName(access.array)})`
+    : !access.signed
+      ? flag
+      : integral
+        ? `${flag} && (${key}) >= 0`
+        : `${flag} && (${key}) >= 0 && static_cast<double>(static_cast<long long>(${key})) == (${key})`
   return {
     pointer: cppDensePointerName(access.array),
     index: `static_cast<std::size_t>(${key})`,
@@ -599,12 +616,31 @@ const denseElementText = (ctx: EmitContext, operation: GetOperation): string | n
   ) {
     const slot = `gea_dense_read_${ctx.declarations.length}`
     ctx.declarations.push({ name: slot, type: `std::optional<${cppTypeOf(element)}>` })
+    ctx.denseCellReads.add(operation.result.id)
     return `(${dense.flag} ? ${dense.text} : std::as_const(${slot}.emplace(${general})))`
   }
   return `(${dense.flag} ? ${fast ?? dense.text} : ${general})`
 }
 
 export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperation): void => {
+  emitGetRendering(ctx, lines, operation)
+  // A field pointer a pointer merge takes whose read rendered as a value of its
+  // own: the copy goes to a frame slot whose address the merge takes. Any
+  // other read that could not borrow keeps its value as it was.
+  if (ctx.fieldPointerMergeInputs.has(operation.result.id) && !ctx.fieldPointerTexts.has(operation.result.id)) {
+    const value = ctx.valueNames.get(operation.result.id)
+    if (value === undefined) throw new Error(`field pointer ${operation.result.id} rendered no value`)
+    const slot = `gea_field_slot_${ctx.declarations.length}`
+    ctx.declarations.push({
+      name: slot,
+      type: `std::optional<${storageTypeOf(ctx, operation.result.id, operation.result.representation)}>`
+    })
+    lines.push(`${slot}.emplace(${value});`)
+    ctx.fieldPointerTexts.set(operation.result.id, `&*${slot}`)
+  }
+}
+
+const emitGetRendering = (ctx: EmitContext, lines: string[], operation: GetOperation): void => {
   const objectData = nativeObjectDataGetText(ctx, operation)
   if (objectData !== null) {
     lines.push(`${defineValue(ctx, operation.result)} = ${objectData};`)
@@ -644,8 +680,16 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
     lines.push(`${defineValue(ctx, operation.result)} = ${rendered};`)
     return
   }
-  if (operation.nativeFieldViewRead) {
-    const rendered = nativeFieldViewReadText(ctx, operation, (carrier, key) => {
+  if (operation.nativeFieldViewRead && !plainAllocationMemberRead(ctx, operation)) {
+    const ordinaryReadOf = (
+      carrier: Representation,
+      key: string
+    ): {
+      readonly source: Representation
+      readonly text: string
+      readonly accessor?: true
+      readonly absentReadsUndefined?: true
+    } | null => {
       // A class arm answering the key from a getter has no own field to
       // read natively: the plain allocation's answer is the getter's body
       // (`parent?.options` over `A | B | ...`, each a getter).
@@ -665,6 +709,11 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
       let read = plainFieldReadText(plain, plainOperation, key)
       if (source.value.kind === 'scalar') read = `static_cast<${cppTypeOf(source.value)}>(${read})`
       if (source.required) return { source: source.value, text: read }
+      if (
+        representationKey(carrier) === representationKey(operation.receiver.representation) &&
+        allocationKeepsField(ctx, operation.receiver, key)
+      )
+        return { source: source.value, text: read }
       // An absent own key reads undefined. A union spells it as its undefined
       // arm and a Value or a reference as its own; their default does not.
       const undefinedText = cppUndefinedIn(source.value)
@@ -675,7 +724,21 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
         text: `(gea_field_receiver->${cppRecordFieldPresenceName(key)} ? ${read} : ${absent})`,
         ...(undefinedText === null ? {} : { absentReadsUndefined: true as const })
       }
-    })
+    }
+    // A field pointer names the view's answer in a slot of the frame, or the
+    // plain allocation's own member.
+    if (ctx.fieldPointerValues.has(operation.result.id)) {
+      const slot = `gea_field_slot_${ctx.declarations.length}`
+      const borrowed = nativeFieldViewBorrowedReadText(ctx, operation, ordinaryReadOf, slot)
+      if (borrowed !== null) {
+        ctx.declarations.push({ name: slot, type: cppTypeOf(operation.result.representation) })
+        lines.push(`${defineFieldPointer(ctx, operation.result)} = &${borrowed};`)
+        return
+      }
+    }
+    const rendered =
+      (ctx.borrowedFieldReads.has(operation.result.id) ? nativeFieldViewBorrowedReadText(ctx, operation, ordinaryReadOf) : null) ??
+      nativeFieldViewReadText(ctx, operation, ordinaryReadOf)
     if (rendered === null) throw new Error('a published field-view read lost its receipt')
     lines.push(`${defineValue(ctx, operation.result)} = ${rendered};`)
     return
@@ -1169,6 +1232,11 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
     return
   }
   const read = accessorShadowedFieldReadText(ctx, operation, fieldName) ?? fixedFieldReadText(ctx, operation, fieldName)
+  // A field pointer names the member itself, when the read is the bare load.
+  if (ctx.fieldPointerValues.has(operation.result.id) && read === plainFieldReadText(ctx, operation, fieldName)) {
+    lines.push(`${defineFieldPointer(ctx, operation.result)} = &(${read});`)
+    return
+  }
   // A construction-only field of this body's own receiver holds one value
   // from the read to every use (`ctx.stableFieldReads`), so the read names
   // the member. Only the plain member load qualifies: a presence test or a
@@ -1334,6 +1402,51 @@ const fieldMemberText = (ctx: EmitContext, representation: Representation, field
 const fieldReadText = (ctx: EmitContext, representation: Representation, fieldName: string, prefix: string): string => {
   const fields = recordFieldsForTailLookup(ctx, representation)
   return fields === null ? `${prefix}${cppRecordFieldName(fieldName)}` : tailAwareFieldReadText(fields, fieldName, prefix)
+}
+
+/**
+ * A field-view read whose receiver is a cell's one plain allocation
+ * (`EmitContext.plainAllocationValues`) and whose key is a declared member
+ * carried as the read's own result: the view protocol would only ever take its
+ * plain branch, which is this member (an absent optional one reads undefined,
+ * as its presence test says), so the read is the member's ordinary load --
+ * and, across a window nothing stores it in, an alias of it.
+ */
+const plainAllocationMemberRead = (ctx: EmitContext, operation: GetOperation): boolean => {
+  const receipt = operation.nativeFieldViewRead
+  const carrier = operation.receiver.representation
+  if (receipt === undefined || receipt.keyDomain !== undefined || receipt.originalAbsent === true) return false
+  if (!ctx.plainAllocationValues.has(operation.receiver.value)) return false
+  const accessors =
+    carrier.kind === 'record'
+      ? carrier.accessors
+      : carrier.kind === 'native-record-ref' && carrier.native === null
+        ? recordAccessorsOfShape(ctx.deriver, carrier.shapeId)
+        : null
+  if (accessors === null || accessors.some((accessor) => accessor.key === receipt.key)) return false
+  const source = declaredRecordFieldOf(ctx.deriver, carrier, receipt.key, ctx.classes)
+  return source !== null && representationKey(source.value) === representationKey(operation.result.representation)
+}
+
+/**
+ * A field-view store into a cell's one plain allocation, of a declared member:
+ * the view protocol's plain branch is the ordinary member store
+ * (`emitFieldStoreLines`, which keeps its own writability guard), so that is
+ * the whole store.
+ */
+const plainAllocationMemberWrite = (ctx: EmitContext, operation: SetOperation): boolean => {
+  const receipt = operation.nativeFieldViewWrite
+  const carrier = operation.receiver.representation
+  if (receipt === undefined || receipt.keyDomain !== undefined || receipt.openKeys === true) return false
+  if (!ctx.plainAllocationValues.has(operation.receiver.value)) return false
+  const accessors =
+    carrier.kind === 'record'
+      ? carrier.accessors
+      : carrier.kind === 'native-record-ref' && carrier.native === null
+        ? recordAccessorsOfShape(ctx.deriver, carrier.shapeId)
+        : null
+  if (accessors === null || accessors.some((accessor) => accessor.key === receipt.key)) return false
+  return declaredRecordFieldOf(ctx.deriver, carrier, receipt.key, ctx.classes) !== null
 }
 
 /** `receiver->field` with nothing around it: the rendering a stable field read may alias. */
@@ -1507,8 +1620,23 @@ const fixedFieldPresenceText = (ctx: EmitContext, receiver: IrOperand, fieldName
   // proof is not enough here: its bit is an instance member a decoder may
   // leave unset.
   if (field.required && ctx.fixedFieldStateConstant) return null
+  if (allocationKeepsField(ctx, receiver, fieldName)) return null
   return `${constructorViewReceiverText(ctx, receiver, fieldName, operandText(ctx, receiver))}${memberAccessOperator(representation.ownership)}${cppRecordFieldPresenceName(fieldName)}`
 }
+
+/**
+ * Whether `receiver` holds a cell's one allocation (`ctx.allocationFieldKeys`)
+ * that defined `fieldName`, a key nothing in the program can delete from its
+ * carrier (`fixedFieldState`): the allocation raised the field's presence bit
+ * and nothing lowers it, so the field is present for the object's whole life
+ * however few family members declare it required. A Gull-only field of an
+ * interface family is optional in the family's one layout because a Hound
+ * never has it, yet the gull's own methods read it through `gull`, the cell
+ * holding the literal that wrote it.
+ */
+const allocationKeepsField = (ctx: EmitContext, receiver: IrOperand, fieldName: string): boolean =>
+  ctx.allocationFieldKeys.get(receiver.value)?.has(fieldName) === true &&
+  ctx.nativeIntegrityRestricted.fixedFieldState(receiver.representation, fieldName)
 
 /** A native slot is read through the exact conversion lowering certified. */
 const narrowedFieldReadText = (
@@ -1707,7 +1835,7 @@ export const emitFieldStore = (
     if (operation.result) defineValueAlias(ctx, operation.result, operandText(ctx, operation.receiver))
     return
   }
-  if (operation.kind === 'set' && operation.nativeFieldViewWrite) {
+  if (operation.kind === 'set' && operation.nativeFieldViewWrite && !plainAllocationMemberWrite(ctx, operation)) {
     let viewContext = ctx
     if (operation.result) {
       lines.push(`${defineValue(ctx, operation.result)} = ${operandText(ctx, operation.receiver)};`)
@@ -2030,7 +2158,21 @@ const emitFieldStoreLines = (
             `"${representationKey(operation.receiver.representation.element)}"`
         )
       }
-      lines.push(`${arrayReceiver}->setElementAtIndex(${index}, ${storedValue});`)
+      // A store of a run of constant-index accesses (`ir/dense-read-windows.ts`):
+      // while the run's window holds -- dense, in range, writable -- the store
+      // is the cell's own assignment.
+      const window = operation.kind === 'set' ? ctx.denseWriteWindows.get(operation) : undefined
+      if (window === undefined) lines.push(`${arrayReceiver}->setElementAtIndex(${index}, ${storedValue});`)
+      else {
+        const name = `gea_read_window_${window.ordinal}`
+        declareDenseWindow(ctx, name, operation.receiver.representation)
+        const cells = window.initialize
+          ? `(${name}.cells = gea::denseWindowCellsMutable(${arrayReceiver}, ${window.last}))`
+          : `${name}.cells`
+        lines.push(
+          `if (${cells}) ${name}.cells[${index}].value = ${storedValue}; else ${arrayReceiver}->setElementAtIndex(${index}, ${storedValue});`
+        )
+      }
       finishArrayStore()
       return
     }
@@ -2377,8 +2519,9 @@ const emitFieldStoreLines = (
     // itself stays an instance member there that allocation set to `true`.
     const fieldStatePinned =
       field &&
-      field.required &&
-      (ctx.fixedFieldStateConstant || ctx.nativeIntegrityRestricted.fixedFieldState(operation.receiver.representation, fieldName))
+      ((field.required &&
+        (ctx.fixedFieldStateConstant || ctx.nativeIntegrityRestricted.fixedFieldState(operation.receiver.representation, fieldName))) ||
+        allocationKeepsField(ctx, operation.receiver, fieldName))
     if (field && !fieldStatePinned) stores.push(`${receiverText}${accessor}${cppRecordFieldPresenceName(fieldName)} = true;`)
     // A fresh record's keys are known statically, so only a store the IR
     // proved out of layout order speaks to the runtime; a required field is

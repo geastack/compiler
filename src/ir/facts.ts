@@ -26,6 +26,8 @@ import {
 import { numericIntrinsicsOf, type NumericIntrinsic } from './numeric-intrinsics.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import { sharedStringLayoutsOf, straightLineStringLayoutsOf, type SharedStringLayout } from './string-layout-reuse.js'
+import { straightLineArrayWindowsOf, type DenseReadWindow } from './dense-read-windows.js'
+import type { SetOperation } from './model.js'
 import { stableStringReceiversOf, stringLengthReuseOf } from './string-length-reuse.js'
 import { typeQueryResultsOf, type TypeQueryComparison } from './type-query-results.js'
 
@@ -110,6 +112,10 @@ export interface IrBodyCensus {
   readonly hoists: HoistPlan
   readonly hoistedResults: ReadonlySet<IrValueId>
   readonly sharedStringLayouts: ReadonlyMap<IrValueId, SharedStringLayout>
+  /** Constant-index element reads that share one dense window -- see `ir/dense-read-windows.ts`. */
+  readonly denseReadWindows: ReadonlyMap<IrValueId, DenseReadWindow>
+  /** The stores of those runs, keyed by operation since a store has no result. */
+  readonly denseWriteWindows: ReadonlyMap<SetOperation, DenseReadWindow>
   readonly reusedStringLengths: ReadonlyMap<IrValueId, IrOperand>
 }
 
@@ -160,6 +166,12 @@ export interface IrBodyCensusPolicy {
   readonly formalStorage: (settled: IrBodyCensusBeforeHoists) => ReadonlySet<DeclarationId>
   /** Whether this body reads the declaration through its own by-value copy, which no call it makes can change. */
   readonly copiedCapture: (declaration: DeclarationId) => boolean
+  /** Whether it reads a box written exactly once (`IrBodyFacts.settledBoxes`), which code the loop calls may still write. */
+  readonly settledCapture?: (declaration: DeclarationId) => boolean
+  /** Whether this store writes a data field and runs nothing: no setter, no view routine, no reactive cell. */
+  readonly codeFreeStore?: (operation: SetOperation) => boolean
+  /** Whether this property read runs none of the program's code (`ir/plain-field-read.ts`'s `codeFreeGetOf`); absent, only native data and host methods do. */
+  readonly codeFreeGet?: (operation: GetOperation) => boolean
 }
 
 /** What is known when `formalStorage` runs: everything except the hoists and the two censuses that read them. */
@@ -253,7 +265,14 @@ export const irBodyCensusOf = (body: IrBody, policy: IrBodyCensusPolicy): IrBody
   const stableFormals = policy.formalStorage(settled)
 
   const loopInvariantValues = loopInvariantValuesOf(body)
-  const hoists = loopInvariantHoistsOf(body, policy.integerStorage.cellConstants, policy.copiedCapture)
+  const hoists = loopInvariantHoistsOf(
+    body,
+    policy.integerStorage.cellConstants,
+    policy.copiedCapture,
+    policy.settledCapture,
+    policy.codeFreeStore,
+    policy.codeFreeGet
+  )
   const hoistedStringLayouts = sharedStringLayoutsOf(body, hoists, dead)
   const stringReceivers = stableStringReceiversOf(body, stableFormals, policy.stringQueryCell)
   const straightLineStringLayouts = straightLineStringLayoutsOf(
@@ -273,6 +292,11 @@ export const irBodyCensusOf = (body: IrBody, policy: IrBodyCensusPolicy): IrBody
   // A shared layout is initialized where its first read is defined and read
   // by every later member from there, so none of them may render at its use.
   for (const value of straightLineStringLayouts.keys()) deferrable.delete(value)
+  // Likewise a window: its first read takes it, so every member renders in order.
+  const denseWindows = straightLineArrayWindowsOf(body, new Set([...dead, ...hoists.relocated]))
+  const denseReadWindows = denseWindows.reads
+  const denseWriteWindows = denseWindows.writes
+  for (const value of denseReadWindows.keys()) deferrable.delete(value)
 
   const reusedStringLengths = stringLengthReuseOf(
     body,
@@ -291,7 +315,16 @@ export const irBodyCensusOf = (body: IrBody, policy: IrBodyCensusPolicy): IrBody
     if ((!deferrable.has(forwarded.value.value) && forwarded.stepped !== true) || !deferrable.has(forwarded.read))
       forwardedBindings.delete(declaration)
   }
-  return { ...settled, loopInvariantValues, hoists, hoistedResults, sharedStringLayouts, reusedStringLengths }
+  return {
+    ...settled,
+    loopInvariantValues,
+    hoists,
+    hoistedResults,
+    sharedStringLayouts,
+    denseReadWindows,
+    denseWriteWindows,
+    reusedStringLengths
+  }
 }
 
 /**

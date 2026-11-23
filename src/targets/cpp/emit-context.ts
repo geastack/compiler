@@ -6,6 +6,7 @@ import { restrictsEveryCarrier, type IntegrityRestrictions } from '../../ir/inte
 import type { BorrowedArmProjection } from './borrowed-arm-projections.js'
 import type { StableBorrowEntry } from './borrowed-call-entry.js'
 import type { SharedStringLayout } from '../../ir/string-layout-reuse.js'
+import type { DenseReadWindow } from '../../ir/dense-read-windows.js'
 import type { LazySplit } from '../../ir/lazy-splits.js'
 import type { CapabilityKey } from '../../ir/certify.js'
 import type { DeclarationId, FunctionId, IrValueId, RegionId, SemanticResultId } from '../../identity/ids.js'
@@ -22,6 +23,7 @@ import type {
   CallOperation,
   ComputeOperation,
   GetOperation,
+  SetOperation,
   IrBlockId,
   IrBody,
   IrCaptureGroup,
@@ -260,6 +262,8 @@ export interface CaptureIndex {
    * to render first leaves the other branch dereferencing an empty handle.
    */
   readonly requiresEarlyBox: (declaration: DeclarationId) => boolean
+  /** Whether a boxed declaration is written exactly once (`IrBodyFacts.settledBoxes`). */
+  readonly isSettledBox: (declaration: DeclarationId) => boolean
   /**
    * Whether this body reads `this` -- in its own operations, or in a closure
    * it allocates that has no receiver of its own and so reads this one.
@@ -327,6 +331,7 @@ export const emptyCaptureIndex: CaptureIndex = {
   isBoxed: () => false,
   isCaptured: () => false,
   requiresEarlyBox: () => false,
+  isSettledBox: () => false,
   readsReceiver: () => false,
   groupOf: () => null,
   isAccessorEnvironment: () => false,
@@ -755,6 +760,16 @@ export interface EmitBodyFacts {
   readonly asyncCoroutineBody: boolean
   /** See `EmitContext.returnsUnderFinallyGuard`. */
   readonly returnsUnderFinallyGuard: boolean
+  /** See `EmitContext.returnsOwnReceiver`. */
+  readonly returnsOwnReceiver: boolean
+  /** See `EmitContext.plainAllocationValues`. */
+  readonly plainAllocationValues: ReadonlySet<IrValueId>
+  /** See `EmitContext.allocationFieldKeys`. */
+  readonly allocationFieldKeys: ReadonlyMap<IrValueId, ReadonlySet<string>>
+  /** See `EmitContext.borrowedFieldReads`. */
+  readonly borrowedFieldReads: ReadonlySet<IrValueId>
+  /** See `EmitContext.deferredMethodValues`. */
+  readonly deferredMethodValues: ReadonlySet<IrValueId>
   /** See `EmitContext.receiverValues`. */
   readonly receiverValues: ReadonlySet<IrValueId>
   /** See `EmitContext.bindingWriteCounts`. */
@@ -924,6 +939,36 @@ export interface EmitContext {
    * still reads it (`runtime/gea_runtime.h`'s `detail::returnCopy`).
    */
   readonly returnsUnderFinallyGuard: boolean
+  /**
+   * Whether every return hands back the receiver, which the signature then
+   * returns by reference (`translation-unit.ts`'s `returnsOwnReceiver`): each
+   * return names the receiver formal itself, never a copy or a temporary.
+   */
+  readonly returnsOwnReceiver: boolean
+  /**
+   * Values read from a cell that holds one plain allocation for the whole
+   * program (`ir/program-facts.ts`'s `allocationCells`). A field-view read off
+   * one is the allocation's own member: no live view can stand in for it.
+   */
+  readonly plainAllocationValues: ReadonlySet<IrValueId>
+  /**
+   * For each of those reads held in the very carrier its allocation was
+   * written as, the keys that allocation defined (`AllocationCell.keys`): each
+   * field's presence bit was raised there, so it stays up wherever nothing can
+   * delete that key (`emit-properties.ts`'s `allocationKeepsField`).
+   */
+  readonly allocationFieldKeys: ReadonlyMap<IrValueId, ReadonlySet<string>>
+  /**
+   * Field reads whose one use is the receiver of another member read: the
+   * read can hand that read a reference instead of a retained handle.
+   */
+  readonly borrowedFieldReads: ReadonlySet<IrValueId>
+  /**
+   * Method reads consumed only as the callee of a resolved call
+   * (`ir/native-method-frames.ts`'s `deferredMethodValuesOf`): no Function
+   * object is published for them, and the call settles any shadow itself.
+   */
+  readonly deferredMethodValues: ReadonlySet<IrValueId>
   /** The conventions of emitted bodies, shared with their signature renderer. */
   readonly abiOfCallable: (callable: FunctionId) => CallableAbi | null
   readonly methodEnvironment: (callable: FunctionId, what: string) => string
@@ -1501,6 +1546,10 @@ export interface EmitContext {
   readonly hoistedResults: ReadonlySet<IrValueId>
   /** See `hoistedResults`'s doc for why this is settled the same way. */
   readonly sharedStringLayouts: ReadonlyMap<IrValueId, SharedStringLayout>
+  /** Constant-index element reads sharing one dense window (`ir/dense-read-windows.ts`), settled like `sharedStringLayouts`. */
+  readonly denseReadWindows: ReadonlyMap<IrValueId, DenseReadWindow>
+  /** The stores of those runs (`denseReadWindows`), keyed by operation. */
+  readonly denseWriteWindows: ReadonlyMap<SetOperation, DenseReadWindow>
   readonly prototypeMethodReads: ReadonlyMap<IrValueId, PrototypeMethodRead>
   /**
    * Lazy-arrow-field GETs whose one reader is the call that reads them as its
@@ -1601,6 +1650,21 @@ export interface EmitContext {
   readonly aliasedStableFieldReads: Set<IrValueId>
   /** The field text each admitted cell names, set by its one write before any read renders. */
   readonly stableFieldCellTexts: Map<DeclarationId, string>
+  /** Dense window reads that rendered as the window's cell itself, an lvalue (`denseElementText`). Filled as the body renders. */
+  readonly denseCellReads: Set<IrValueId>
+  /**
+   * The pointer each borrowed window cell (`borrowedWindowCells`) was declared
+   * as, set by its one write when that write's read rendered as the cell, before
+   * any read of it renders.
+   */
+  readonly borrowedWindowCellNames: Map<DeclarationId, string>
+  /**
+   * The pointer expression each field pointer (`fieldPointerValues`) rendered
+   * as: its own `const T*` for a borrowed read or merge, or the address of the
+   * frame slot a read that could not borrow was copied into. Filled as the body
+   * renders; a merge's edge writes read it.
+   */
+  readonly fieldPointerTexts: Map<IrValueId, string>
   /** Dominating native length results, selected by the IR reuse proof. Settled the same way as `hoistedResults`. */
   readonly reusedStringLengths: ReadonlyMap<IrValueId, IrOperand>
   /** Withheld values whose single reader is a call, and which therefore reach exactly one operand position -- see `emit.ts`'s `consumedByCall`. Settled the same way as `hoistedResults`. */
@@ -1685,6 +1749,13 @@ export interface EmitContext {
    * ts`) through `ctx` directly -- same follow-up as `formalCells`.
    */
   readonly capacityHints: ReadonlyMap<IrValueId, CapacitySource>
+  /**
+   * The array literals whose element stores are spelled as calls rather than
+   * inlined `push`es, because their body holds too many of them for the C++
+   * compiler's per-function passes; see `collectOutOfLineLiteralPushes`
+   * (`emit-arrays.ts`).
+   */
+  readonly outOfLineLiteralPushes: ReadonlySet<IrValueId>
   /** The local arrays proved to be nothing but a `String.fromCharCode` argument list; see `char-code-buffers.ts`. */
   readonly charCodeBuffers: CharCodeBufferFacts
   /**
@@ -1783,6 +1854,19 @@ export interface EmitContext {
    * distinct objects. Decided once the scope plan exists, before rendering.
    */
   readonly denseOutlined: ReadonlyMap<number, DenseRegion>
+  /**
+   * Cells that hold the address of the window cell they are written from
+   * (`ir/borrowed-window-cells.ts`), decided by `emitBody` once the windows
+   * are admitted.
+   */
+  readonly borrowedWindowCells: ReadonlySet<DeclarationId>
+  /**
+   * Field reads, and the merges of them, that render as a pointer to the field
+   * (`ir/borrowed-field-reads.ts`), decided by `emitBody` before rendering.
+   */
+  readonly fieldPointerValues: ReadonlySet<IrValueId>
+  /** The field pointers some pointer merge takes on an edge: each needs a pointer even when its read could not borrow. */
+  readonly fieldPointerMergeInputs: ReadonlySet<IrValueId>
   /** Reads of a wrapped window's `length` that the preheader already took, by the window's ordinal. */
   readonly denseLengths: ReadonlyMap<IrValueId, number>
   /** Subscripts a wrapped window may take in the integers -- see `denseRemainderCompanion`. */
@@ -1971,6 +2055,8 @@ export const effectiveAbiOf = (abi: CallableAbi | null, admission: CaptureAdmiss
 export interface EmitBodyPrepassFacts {
   readonly hoistedResults: Set<IrValueId>
   readonly sharedStringLayouts: Map<IrValueId, SharedStringLayout>
+  readonly denseReadWindows: Map<IrValueId, DenseReadWindow>
+  readonly denseWriteWindows: Map<SetOperation, DenseReadWindow>
   readonly reusedStringLengths: Map<IrValueId, IrOperand>
   readonly loopInvariantValues: Set<IrValueId>
   readonly numericCalls: Map<CallOperation, NumericIntrinsic>
@@ -2007,6 +2093,7 @@ export interface EmitBodyPrepassFacts {
   readonly directBindingSinks: Map<IrValueId, DeclarationId>
   readonly forwardedBindings: Map<DeclarationId, ForwardedBinding>
   readonly capacityHints: Map<IrValueId, CapacitySource>
+  readonly outOfLineLiteralPushes: Set<IrValueId>
   readonly charCodeBuffers: CharCodeBufferFacts
   readonly fillLoops: Map<IrBlockId, FillLoop>
   readonly denseArrays: DenseArray[]
@@ -2014,6 +2101,9 @@ export interface EmitBodyPrepassFacts {
   readonly denseGroups: Map<number, DenseGroup>
   readonly denseRegions: DenseRegion[]
   readonly denseOutlined: Map<number, DenseRegion>
+  readonly borrowedWindowCells: Set<DeclarationId>
+  readonly fieldPointerValues: Set<IrValueId>
+  readonly fieldPointerMergeInputs: Set<IrValueId>
   readonly denseLengths: Map<IrValueId, number>
   readonly deferrable: Set<IrValueId>
 }
@@ -2117,6 +2207,8 @@ export const createEmitContext = (
   // still needs a mutable handle at all.
   const hoistedResults = new Set<IrValueId>()
   const sharedStringLayouts = new Map<IrValueId, SharedStringLayout>()
+  const denseReadWindows = new Map<IrValueId, DenseReadWindow>()
+  const denseWriteWindows = new Map<SetOperation, DenseReadWindow>()
   const reusedStringLengths = new Map<IrValueId, IrOperand>()
   const loopInvariantValues = new Set<IrValueId>()
   const numericCalls = new Map<CallOperation, NumericIntrinsic>()
@@ -2154,6 +2246,7 @@ export const createEmitContext = (
   const directBindingSinks = new Map<IrValueId, DeclarationId>()
   const forwardedBindings = new Map<DeclarationId, ForwardedBinding>()
   const capacityHints = new Map<IrValueId, CapacitySource>()
+  const outOfLineLiteralPushes = new Set<IrValueId>()
   const charCodeBuffers = createCharCodeBufferFacts()
   const fillLoops = new Map<IrBlockId, FillLoop>()
   const denseArrays: DenseArray[] = []
@@ -2161,6 +2254,9 @@ export const createEmitContext = (
   const denseGroups = new Map<number, DenseGroup>()
   const denseRegions: DenseRegion[] = []
   const denseOutlined = new Map<number, DenseRegion>()
+  const borrowedWindowCells = new Set<DeclarationId>()
+  const fieldPointerValues = new Set<IrValueId>()
+  const fieldPointerMergeInputs = new Set<IrValueId>()
   const denseLengths = new Map<IrValueId, number>()
   const deferrable = new Set<IrValueId>()
   const ctx: EmitContext = {
@@ -2217,6 +2313,11 @@ export const createEmitContext = (
     generatorBody: bodyFacts.generatorBody,
     asyncCoroutineBody: bodyFacts.asyncCoroutineBody,
     returnsUnderFinallyGuard: bodyFacts.returnsUnderFinallyGuard,
+    returnsOwnReceiver: bodyFacts.returnsOwnReceiver,
+    plainAllocationValues: bodyFacts.plainAllocationValues,
+    allocationFieldKeys: bodyFacts.allocationFieldKeys,
+    borrowedFieldReads: bodyFacts.borrowedFieldReads,
+    deferredMethodValues: bodyFacts.deferredMethodValues,
     virtualDispatch,
     directCallableBindings,
     callableMemberCandidates,
@@ -2253,6 +2354,8 @@ export const createEmitContext = (
     hostNamespaceDefinitelyPresent: bodyFacts.hostNamespaceDefinitelyPresent,
     hoistedResults,
     sharedStringLayouts,
+    denseReadWindows,
+    denseWriteWindows,
     prototypeMethodReads,
     lazyCalleeReads,
     bindingNames: new Map(),
@@ -2270,6 +2373,9 @@ export const createEmitContext = (
     stableFieldCells: bodyFacts.stableFieldCells,
     aliasedStableFieldReads: new Set(),
     stableFieldCellTexts: new Map(),
+    denseCellReads: new Set(),
+    borrowedWindowCellNames: new Map(),
+    fieldPointerTexts: new Map(),
     reusedStringLengths,
     callArgumentOnly,
     classTableRoots: bodyFacts.classTableRoots,
@@ -2277,6 +2383,7 @@ export const createEmitContext = (
     deferredTexts: new Map(),
     pendingPacks: new Map(),
     capacityHints,
+    outOfLineLiteralPushes,
     charCodeBuffers,
     fillLoops,
     narrowedFormals,
@@ -2305,6 +2412,9 @@ export const createEmitContext = (
     denseIndices: new Map(),
     denseGroups,
     denseOutlined,
+    borrowedWindowCells,
+    fieldPointerValues,
+    fieldPointerMergeInputs,
     computeOrigins: bodyFacts.computeOrigins,
     freshReceiverStores: bodyFacts.freshReceiverStores,
     outOfOrderFreshStores: bodyFacts.outOfOrderFreshStores,
@@ -2327,6 +2437,8 @@ export const createEmitContext = (
     prepass: {
       hoistedResults,
       sharedStringLayouts,
+      denseReadWindows,
+      denseWriteWindows,
       reusedStringLengths,
       loopInvariantValues,
       numericCalls,
@@ -2363,6 +2475,7 @@ export const createEmitContext = (
       directBindingSinks,
       forwardedBindings,
       capacityHints,
+      outOfLineLiteralPushes,
       charCodeBuffers,
       fillLoops,
       denseArrays,
@@ -2370,6 +2483,9 @@ export const createEmitContext = (
       denseGroups,
       denseRegions,
       denseOutlined,
+      borrowedWindowCells,
+      fieldPointerValues,
+      fieldPointerMergeInputs,
       denseLengths,
       deferrable
     }
@@ -2474,6 +2590,21 @@ export const defineValue = (ctx: EmitContext, result: IrResult, spelling?: strin
   ctx.valueNames.set(result.id, name)
   ctx.declarations.push({ name, type: spelling ?? storageTypeOf(ctx, result.id, result.representation) })
   if (spelling === undefined) ctx.ownedValues.add(result.id)
+  return name
+}
+
+/**
+ * Declares this result as a `const T*` and publishes it as the value it points
+ * at, read-only (`EmitContext.fieldPointerValues`): a consumer that moves
+ * copies. Returns the pointer's own name, which a merge's edge writes assign.
+ */
+export const defineFieldPointer = (ctx: EmitContext, result: IrResult): string => {
+  if (ctx.valueNames.has(result.id)) throw new Error(`ir value ${result.id} is defined twice in one body, which SSA form forbids`)
+  const name = `v${ctx.nextValueOrdinal}`
+  ctx.nextValueOrdinal += 1
+  ctx.declarations.push({ name, type: `const ${storageTypeOf(ctx, result.id, result.representation)}*` })
+  ctx.valueNames.set(result.id, `std::as_const(*${name})`)
+  ctx.fieldPointerTexts.set(result.id, name)
   return name
 }
 
@@ -2717,6 +2848,9 @@ export const cppDenseRowsName = (ordinal: number): string => `gea_dense_rows_${o
 
 /** One loop's dense-window condition. Loop-invariant by construction, which is what lets the backend version the loop on it. */
 export const cppDenseFlagName = (group: number): string => `gea_dense_ok_${group}`
+
+/** A checked typed window's element count, read once at the preheader -- see `DenseArray.checked`. */
+export const cppDenseExtentName = (ordinal: number): string => `gea_dense_extent_${ordinal}`
 
 /** A wrapped window's own length, read once at the preheader -- see `DenseLoopPlan.lengths`. */
 export const cppDenseLengthName = (ordinal: number): string => `gea_dense_len_${ordinal}`
@@ -3220,6 +3354,14 @@ const renderMutableEmitContextFields: ReadonlySet<string> = new Set([
   // that, and the field text its later reads print in place of the cell.
   'aliasedStableFieldReads',
   'stableFieldCellTexts',
+  // The same test for window cells: WHICH cells may hold a window cell's
+  // address is the prepass's `borrowedWindowCells`; whether the one write's
+  // read printed as the cell is decided where `emitGet` spells it.
+  'denseCellReads',
+  'borrowedWindowCellNames',
+  // And for field pointers: WHICH values are pointers is the prepass's
+  // `fieldPointerValues`; this is the pointer each one was declared as.
+  'fieldPointerTexts',
   // A wrapped dense window's subscript companion, minted and declared beside
   // the read that needed it (`denseRemainderCompanion`). WHICH accesses a
   // window admits is `admitDenseWindows`' prepass answer; this is only what

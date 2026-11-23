@@ -9,6 +9,22 @@ import { classMemberOf } from './fields.js'
  * Selection happens when the property is read, before a later call supplies
  * its receiver. A virtual call adapter would select at the wrong time.
  */
+/** What a run-time lookup finds: an `abstract` declaration installs nothing, so it continues to the base. */
+const runtimeClassMemberOf = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  allocation: DeclarationId,
+  key: string
+): ReturnType<typeof classMemberOf> => {
+  const walked = new Set<DeclarationId>()
+  let site = classMemberOf(classes, allocation, key)
+  while (site?.kind === 'method' && site.method.abstract === true && !walked.has(site.owner)) {
+    walked.add(site.owner)
+    const base = classes.get(site.owner)?.base ?? null
+    site = base === null ? null : classMemberOf(classes, base, key)
+  }
+  return site
+}
+
 export const classPrototypeMethodValueArmsOf = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   receiver: DeclarationId,
@@ -26,7 +42,7 @@ export const classPrototypeMethodValueArmsOf = (
     if (allocation !== receiver && !extendsClass(classes, allocation, receiver)) continue
     if (layout.uninstantiable === true || layout.allocationAbsent === true) continue
     if (layout.nativeBase !== null) return null
-    const site = classMemberOf(classes, allocation, key)
+    const site = runtimeClassMemberOf(classes, allocation, key)
     // Absence belongs to the language's undefined result. An accessor is an
     // invocation, not a method value, and must keep its separate proof path.
     if (site === null) arms.push({ allocation, method: null, owner: null })
@@ -115,6 +131,26 @@ export const classMethodValueArmsOf = (
   return arms.map((arm) => ({ allocation: arm.allocation, method: arm.method!, owner: arm.owner! }))
 }
 
+/** The method-bearing arms of a family whose every other allocation misses
+ * `key` on an abstract declaration (`classAbstractMemberMissesAt`). Those
+ * allocations read the empty callable, so only these arms publish a method
+ * frame; any other absence keeps the family incomplete (`null`).
+ */
+export const classPresentMethodArmsOf = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  receiver: DeclarationId,
+  key: string
+): ReturnType<typeof classMethodValueArmsOf> => {
+  const arms = classPrototypeMethodValueArmsOf(classes, receiver, key)
+  if (arms === null) return null
+  const present: { allocation: DeclarationId; method: ClassMethod & { readonly callable: FunctionId }; owner: DeclarationId }[] = []
+  for (const arm of arms) {
+    if (arm.method !== null && arm.owner !== null) present.push({ allocation: arm.allocation, method: arm.method, owner: arm.owner })
+    else if (!classAbstractMemberMissesAt(classes, arm.allocation, key)) return null
+  }
+  return present.length === 0 ? null : present
+}
+
 /** A declared method frame does not supply an executable body. A bodyless
  * method read needs the existing complete allocation/prototype selection,
  * including a callable on every normal allocation. One unused override does
@@ -127,8 +163,38 @@ export const classMethodFamilyHasNativeBody = (
 ): boolean => {
   const site = classMemberOf(classes, receiver, key)
   if (site?.kind !== 'method' || site.method.callable !== null) return true
-  return classMethodValueArmsOf(classes, receiver, key) !== null
+  // An instance of the abstract class itself (constructed by reflection) has
+  // no such method: calling it is the TypeError the abstract root's dispatch
+  // member raises, exactly as calling `undefined` does.
+  const arms = classPrototypeMethodValueArmsOf(classes, receiver, key)
+  return arms !== null && arms.every((arm) => arm.method !== null || classAbstractMemberMissesAt(classes, arm.allocation, key))
 }
+
+/** An allocation whose own class declares `key` abstract and inherits no
+ * body for it: its lookup misses, so the read is `undefined` and a call of it
+ * is JS's TypeError for calling `undefined` -- not an unproved family.
+ */
+export const classAbstractMemberMissesAt = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  allocation: DeclarationId,
+  key: string
+): boolean => {
+  const declared = classMemberOf(classes, allocation, key)
+  return declared?.kind === 'method' && declared.method.abstract === true && runtimeClassMemberOf(classes, allocation, key) === null
+}
+
+/** Whether some allocation a read of `key` on `receiver` may meet misses it on
+ * an abstract declaration (`classAbstractMemberMissesAt`): the read is then
+ * `undefined` there, which only a carrier with an empty callable can hold.
+ */
+export const classMethodReadMayMissAbstractly = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  receiver: DeclarationId,
+  key: string
+): boolean =>
+  classPrototypeMethodValueArmsOf(classes, receiver, key)?.some(
+    (arm) => arm.method === null && classAbstractMemberMissesAt(classes, arm.allocation, key)
+  ) === true
 
 /**
  * The class-hierarchy topology behind method dispatch: which key belongs to
@@ -999,4 +1065,29 @@ export const virtualDispatchVerdictOf = (
   }
 
   return { families, refused, dispatched }
+}
+
+/**
+ * Whether an instance carried as `declaration` may hold an own `key` that a
+ * write through a dynamic receiver installed over a method
+ * (`ClassLayout.dynamicMethodShadows`): on its own chain, or on a subclass it
+ * may really be. Such a shadow lives in the instance's native expando table,
+ * so a call checks that table before it dispatches.
+ */
+export const classDynamicMethodShadowOf = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  declaration: DeclarationId,
+  key: string
+): boolean => {
+  const seen = new Set<DeclarationId>()
+  for (let current: DeclarationId | null = declaration; current !== null && !seen.has(current);) {
+    seen.add(current)
+    const layout = classes.get(current)
+    if (!layout) break
+    if (layout.dynamicMethodShadows?.includes(key)) return true
+    current = layout.base
+  }
+  for (const [candidate, layout] of classes)
+    if (layout.dynamicMethodShadows?.includes(key) && extendsClass(classes, candidate, declaration)) return true
+  return false
 }

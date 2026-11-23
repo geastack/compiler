@@ -21,6 +21,13 @@ export interface StableBorrowEntry {
    * must keep the thunk, which converts at that boundary.
    */
   readonly narrowedNumericAbi: boolean
+  /**
+   * Whether the body is a closure, whose entry takes its environment pointer
+   * first (as its owning entry does). Only a call that has the environment to
+   * pass may enter it: the closure's own thunk, its owning wrapper, and a call
+   * through the callable that holds it (`callKnownBorrowedEnvironment`).
+   */
+  readonly environment: boolean
 }
 
 export const stableBorrowEntryOf = (
@@ -30,7 +37,9 @@ export const stableBorrowEntryOf = (
   originalBorrowed: ReadonlySet<number>,
   dyingArguments: ReadonlySet<IrValueId>,
   admission: {
+    /** Capture-free, or a closure whose plain environment the borrowed body takes first (`environment`). */
     readonly captureFree: boolean
+    readonly environment: boolean
     readonly synchronous: boolean
     readonly singleBody: boolean
     readonly narrowedNumericAbi: boolean
@@ -73,7 +82,14 @@ export const stableBorrowEntryOf = (
   if (![...formals].some((ordinal) => !originalBorrowed.has(ordinal))) return null
   // Never revoke an established, stronger effect-based borrow proof.
   for (const ordinal of originalBorrowed) formals.add(ordinal)
-  return { owner, name: `${cppBodyName(owner)}_stable_borrow`, abi, formals, narrowedNumericAbi: admission.narrowedNumericAbi }
+  return {
+    owner,
+    name: `${cppBodyName(owner)}_stable_borrow`,
+    abi,
+    formals,
+    narrowedNumericAbi: admission.narrowedNumericAbi,
+    environment: admission.environment
+  }
 }
 
 /** A private caller slot survives arbitrary program re-entry. All extra
@@ -172,7 +188,10 @@ export const borrowForwardedArgumentsOf = (
         const target = operation.target
         const targets =
           target?.kind === 'direct' ? [target.functionId] : target?.kind === 'union-arm' ? target.arms.map((arm) => arm.functionId) : []
-        const callees = targets.map((functionId) => entries.get(cppBodyName(functionId)))
+        const callees = targets.map((functionId) => {
+          const entry = entries.get(cppBodyName(functionId))
+          return entry?.environment ? undefined : entry
+        })
         if (callees.length === 0) continue
         // A union dispatch enters one arm's body, so every arm must take the position by reference.
         operation.arguments.forEach((argument, ordinal) => {

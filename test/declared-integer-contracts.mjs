@@ -146,6 +146,21 @@ const scenarios = [
     signature: /CallableObject<long long\(long long\)>/
   },
   {
+    // An i32 counter advances through a widening view of its cell; the loop
+    // must still be recognized as dense, with int32 index math.
+    name: 'narrow-counter-keeps-dense-window',
+    source: `function scale(source: Uint16Array, target: Uint32Array, count: i32) {
+        for (let x: i32 = 0; x < count; x++) { const c: i32 = source[x]; target[x] = c * 3; }
+      }
+      const source = new Uint16Array(4); const target = new Uint32Array(4);
+      for (let i = 0; i < 4; i++) source[i] = i + 1;
+      scale(source, target, 4);
+      console.log(target[0], target[3]);`,
+    expected: '3 12\n',
+    signature: /gea_dense_ok_0 = gea::denseIndexWindow[\s\S]*wrappingMultiply<std::int32_t>/,
+    noBoxing: true
+  },
+  {
     name: 'ordinary-brand',
     source:
       'declare const ordinaryBrand: unique symbol; type Label = number & { readonly [ordinaryBrand]?: never }; function hold(value: Label): Label { return value; } console.log(hold(3.75));',

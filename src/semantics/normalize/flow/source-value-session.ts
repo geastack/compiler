@@ -126,6 +126,13 @@ class QueryState extends FactState<Query, Value, Cause> {
   get root(): FrameSubject | Value | undefined {
     return typeof this.first === 'object' ? undefined : this.second
   }
+  /**
+   * The computed writes whose receiver this query is. Held on the state
+   * rather than in a session map: `hasUnnamedWrite` and `computedWriteNames`
+   * ask it of every holder of a root, often thousands, and almost every
+   * answer is none -- a field read where a map lookup was most of their time.
+   */
+  computedWriteEdges: WriteEdge[] | undefined = undefined
 }
 
 interface Cause {
@@ -133,16 +140,14 @@ interface Cause {
   readonly node: ts.Node
 }
 
+interface WriteEdge {
+  readonly access: Access
+  readonly receiver: Query
+  readonly key: string | null
+  readonly write: ValueFlowIndex['allWrites'][number]
+}
+
 type Read = (query: Query) => ReadonlySet<Value>
-/**
- * Walk two lists as one without building a third.
- *
- * Every caller is inside a transfer, and a transfer runs once per
- * re-evaluation of its node -- so a spread that reads as a convenience is an
- * allocation and a copy priced per transfer, not per program.
- */
-const both = <T>(first: readonly T[] | undefined, second: readonly T[]): readonly T[] =>
-  first === undefined || first.length === 0 ? second : second.length === 0 ? first : [...first, ...second]
 const refusalDebug = process.env['GEA_SESSION_REFUSALS'] !== undefined
 
 /** The query kinds whose facts are values and therefore need a grounding witness. */
@@ -173,6 +178,8 @@ const VALUE_ORIGIN = 'source-value-origin'
 const VALUE_ORIGIN_DOMAIN: readonly string[] = [VALUE_ORIGIN]
 const NO_DOMAINS: readonly string[] = []
 const NO_CAUSES: readonly never[] = []
+const NO_ITERATION_WRITES: readonly never[] = []
+const WIP_SOLVER_BASE = process.env['GEA_SOLVER_AB'] === 'base' // WIP-SOLVER-TIMING: not for commit
 const CARRIES_VALUE = 1
 const SEEDED = 2
 /**
@@ -503,6 +510,14 @@ const internIn = <O, K, Q extends object>(outer: Map<O, InternLevel<K, Q>>, owne
 }
 const frameSubjectOf = (query: { readonly subject: FrameSubject }): FrameSubject => query.subject
 const keyedQueryKey = (query: Query): string => (query as { readonly key: string }).key
+/** How many entries a holder answer has: its length or size when it carries one, which nearly every answer does. */
+const iterableCount = (entries: Iterable<unknown>): number => {
+  if (Array.isArray(entries)) return entries.length
+  if (entries instanceof Set) return entries.size
+  let count = 0
+  for (const _entry of entries) count++
+  return count
+}
 const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceValueSession => {
   const isFreshOrdinaryObject = (node: ts.Node): boolean => sourceFreshOrdinaryObjectOf(checker, node)
   const isObjectRoot = (node: ts.Node): node is ObjectRoot => isSpelledObjectRoot(node) || isFreshOrdinaryObject(node)
@@ -697,12 +712,15 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     kind: K,
     node: Extract<Query, { kind: K }>['node'] | ts.Node
   ): Query => {
-    let nodes = unary.get(kind)
+    let nodes = kind === 'value' ? valueQueries : unary.get(kind)
     if (!nodes) unary.set(kind, (nodes = new Map()))
     let query = nodes.get(node)
     if (!query) nodes.set(node, (query = new QueryState(kind, node, undefined, undefined) as Query))
     return query
   }
+  // The `value` table held apart from the others: it is asked for far more
+  // than every other kind together, and this skips the lookup that finds it.
+  const valueQueries = new Map<ts.Node, Query>()
   const value = (expression: ts.Expression): Query => nodeQuery('value', unwrapErasedExpression(expression))
   const frameQuery = (
     kind:
@@ -1098,12 +1116,6 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    * millions of times. Resolving it with the index costs one pass over the
    * writes and leaves the observation itself as the only per-edge work.
    */
-  interface WriteEdge {
-    readonly access: Access
-    readonly receiver: Query
-    readonly key: string | null
-    readonly write: ValueFlowIndex['allWrites'][number]
-  }
   const namedWriteReceivers = new Map<string, WriteEdge[]>()
   /** The receiver queries of every computed write, for `hasUnnamedWrite`'s reverse lookup. */
   const computedWriteReceiverQueries = new Set<Query>()
@@ -1121,6 +1133,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       const edges = computedWriteEdgesByReceiver.get(edge.receiver) ?? []
       edges.push(edge)
       computedWriteEdgesByReceiver.set(edge.receiver, edges)
+      edge.receiver.computedWriteEdges = edges
     } else {
       let entries = namedWrites.get(key)
       if (!entries) namedWrites.set(key, (entries = []))
@@ -1336,6 +1349,43 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     return query
   }
   /** The cell holding the object a binding element takes apart, as a query. */
+  /**
+   * Each pattern read of a list beside its binding container, worked out once
+   * per list: `key-uses` walks these lists on every re-evaluation of every
+   * container, and re-deriving the same container per element per walk was a
+   * measurable share of the solve.
+   */
+  const patternContainers = new Map<readonly ts.BindingElement[], readonly (readonly [ts.BindingElement, Query | null])[]>()
+  const patternContainersOf = (reads: readonly ts.BindingElement[]): readonly (readonly [ts.BindingElement, Query | null])[] => {
+    let paired = patternContainers.get(reads)
+    if (paired === undefined) patternContainers.set(reads, (paired = reads.map((element) => [element, bindingContainer(element)] as const)))
+    return paired
+  }
+  /**
+   * The same pairs filed under their binding container: `key-uses` asks
+   * `holdersOf` for the containers that hold the object, as `key-reads` does
+   * for named reads, instead of `observe`-ing the container of every
+   * destructuring read of the key in the program on every re-evaluation of
+   * every object it can hold. Positions keep the list's order, which is the
+   * order the scan this replaces visited them in.
+   */
+  const patternReadsByContainer = new Map<readonly ts.BindingElement[], Map<Query, number[]>>()
+  const patternReadsByContainerOf = (reads: readonly ts.BindingElement[]): Map<Query, number[]> => {
+    let byContainer = patternReadsByContainer.get(reads)
+    if (byContainer !== undefined) return byContainer
+    patternReadsByContainer.set(reads, (byContainer = new Map()))
+    const paired = patternContainersOf(reads)
+    for (let position = 0; position < paired.length; position++) {
+      const holder = paired[position]![1]
+      if (holder === null) continue
+      let positions = byContainer.get(holder)
+      if (positions === undefined) byContainer.set(holder, (positions = []))
+      positions.push(position)
+      // Found by `holdersOf` only once it exists, as `key-reads` seeds its receivers.
+      seed(holder)
+    }
+    return byContainer
+  }
   const bindingContainer = (element: ts.BindingElement): Query | null => {
     const holder = element.parent.parent
     if (ts.isParameter(holder)) return holder.dotDotDotToken ? null : nodeQuery('parameter', holder)
@@ -1907,7 +1957,41 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   // the discovered calls alone would be complete over an open caller set.
   const callersOf = (owner: ts.SignatureDeclaration): Query => nodeQuery('callers', owner)
   /** The writes a `for...of` binding receives from, out of every write the program makes; asked by each array literal's element publication on every re-evaluation. */
-  let valueIterationWrites: readonly (typeof flow.allWrites)[number][] | null = null
+  // Each held beside its source's interned value query: the loop that reads
+  // them runs once per array-literal re-evaluation over every such write, and
+  // unwrapping and interning the same source again each time was most of it.
+  let valueIterationWrites: readonly (readonly [(typeof flow.allWrites)[number], Query])[] | null = null
+  /**
+   * The same writes filed under their source's value query, so an array
+   * literal asks `holdersOf` for the sources that hold it instead of
+   * `observe`-ing every `for...of` source in the program. Positions keep
+   * `valueIterationWrites`' order, the order the scan this replaces used.
+   */
+  let valueIterationsBySource: Map<Query, number[]> | null = null
+  const valueIterationsHolding = (
+    container: Value,
+    holdersOf: (fact: Value) => Iterable<Query>
+  ): readonly (readonly [(typeof flow.allWrites)[number], Query])[] => {
+    const writes = (valueIterationWrites ??= flow.allWrites
+      .filter((write) => write.iterationOrigin?.mode === 'values')
+      .map((write) => [write, value(write.iterationOrigin!.source)] as const))
+    if (valueIterationsBySource === null) {
+      valueIterationsBySource = new Map()
+      for (let position = 0; position < writes.length; position++) {
+        const source = writes[position]![1]
+        let positions = valueIterationsBySource.get(source)
+        if (positions === undefined) valueIterationsBySource.set(source, (positions = []))
+        positions.push(position)
+        seed(source)
+      }
+    }
+    const found: number[] = []
+    for (const holder of holdersOf(container))
+      for (const position of valueIterationsBySource.get(holder) ?? NO_POSITIONS) found.push(position)
+    if (found.length === 0) return NO_ITERATION_WRITES
+    found.sort((a, b) => a - b)
+    return found.map((position) => writes[position]!)
+  }
   /**
    * The part of `case 'callers'` that no fact can move: which candidate sites
    * are syntax-and-checker matches for `owner`. `new Factory( state )` on a
@@ -2260,13 +2344,16 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       const observe: Read = (dependency) => tested(observeFrom(dependency))
       const holdersOf: DependencyFactHoldersOf<Query, Value> = (fact) => {
         const found = holdersOfFrom(fact)
-        if (inputs === null) return found
-        const list = Array.isArray(found) ? (found as readonly Query[]) : [...found]
-        inputs.holders.push([fact, list.length])
-        return list
+        // Counted, not copied: a holder collection only grows in the solver's
+        // `index`, after the transfer asking has returned (the solver hands out
+        // the live set on that same footing), so its size now is what this
+        // transfer iterates. Copying every holder set to take its length was a
+        // quarter of everything the solve allocated.
+        if (inputs !== null) inputs.holders.push([fact, iterableCount(found)])
+        return found
       }
       const causes: Cause[] = []
-      const grounding = new Set<Query>()
+      let grounding = null as Set<Query> | null
       const fail = (reason: string, node: ts.Node = query.node): void => {
         causes.push(causeOf(reason, node))
         if (refusalDebug) {
@@ -2286,7 +2373,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       /** A required edge whose facts this transfer does not look at: an input of its answer's completeness only. */
       const need = (dependency: Query): void => void required(dependency)
       const carry = (dependency: Query): ReadonlySet<Value> => {
-        grounding.add(dependency)
+        ;(grounding ??= new Set()).add(dependency)
         return read(dependency)
       }
       /**
@@ -2304,7 +2391,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         add(held)
       }
       const joinCarried = (dependency: Query): void => {
-        grounding.add(dependency)
+        ;(grounding ??= new Set()).add(dependency)
         join(dependency)
       }
       /** `join(use(root, reference))`, without minting the node for a use that does nothing (`inertUse`). */
@@ -2444,24 +2531,27 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
        * subscribes this node to the root's future holders exactly as the
        * observe edges did, and the receivers are seeded below so each exists.
        */
-      const unknownKeys = new Map<ObjectRoot, boolean>()
+      // Created on first use, like the other per-transfer tables below: most
+      // transfers never ask, and an empty table still allocates its buckets.
+      let unknownKeys: Map<ObjectRoot, boolean> | null = null
       const holderStampLists: (readonly [Value, number])[][] = []
       const hasUnnamedWrite = (root: ObjectRoot): boolean => {
-        const known = unknownKeys.get(root)
+        const known = unknownKeys?.get(root)
         if (known !== undefined) return known
         let found = false
         let count = 0
         for (const holder of holdersOf(root)) {
           count++
-          for (const write of computedWriteEdgesByReceiver.get(holder) ?? []) if (keysOf(write.access).length === 0) found = true
+          const edges = holder.computedWriteEdges
+          if (edges !== undefined) for (const write of edges) if (keysOf(write.access).length === 0) found = true
         }
         for (const stamps of holderStampLists) stamps.push([root, count])
-        unknownKeys.set(root, found)
+        ;(unknownKeys ??= new Map()).set(root, found)
         return found
       }
       /** Every cell a root has: what it spells, plus what was written into it. */
-      const ownKeys = new Map<Value, readonly string[] | null>()
-      const activeOwnKeys = new Set<Value>()
+      let ownKeys: Map<Value, readonly string[] | null> | null = null
+      let activeOwnKeys: Set<Value> | null = null
       const stampLists: (readonly [ReadonlySet<Value>, number])[][] = []
       const watched = (dependency: Query): ReadonlySet<Value> => {
         const held = observe(dependency)
@@ -2469,20 +2559,16 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         return held
       }
       const holdersUnchanged = (stamps: readonly (readonly [Value, number])[]): boolean => {
-        for (const [root, count] of stamps) {
-          let now = 0
-          for (const _holder of holdersOf(root)) now++
-          if (now !== count) return false
-        }
+        for (const [root, count] of stamps) if (iterableCount(holdersOf(root)) !== count) return false
         return true
       }
       const ownKeysOf = (root: Value): readonly string[] | null => {
-        const known = ownKeys.get(root)
+        const known = ownKeys?.get(root)
         if (known !== undefined) return known
         // A bulk assign whose source's keys come back to this root -- two
         // records merged into each other -- names no finite set on the way
         // round; the re-entry is unknown, and only the outer answer is kept.
-        if (activeOwnKeys.has(root)) return null
+        if (activeOwnKeys?.has(root)) return null
         const kept = ownKeysAnswers?.get(root)
         if (kept !== undefined && kept.stamps.every(([held, size]) => held.size === size) && holdersUnchanged(kept.holderStamps)) {
           for (const stamps of stampLists) stamps.push(...kept.stamps)
@@ -2491,24 +2577,24 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           // from are this transfer's inputs too (the holders are asked again in
           // `holdersUnchanged`).
           for (const [held] of kept.stamps) tested(held)
-          ownKeys.set(root, kept.keys)
+          ;(ownKeys ??= new Map()).set(root, kept.keys)
           return kept.keys
         }
-        activeOwnKeys.add(root)
+        ;(activeOwnKeys ??= new Set()).add(root)
         const stamps: (readonly [ReadonlySet<Value>, number])[] = []
         const holderStamps: (readonly [Value, number])[] = []
         stampLists.push(stamps)
         holderStampLists.push(holderStamps)
         try {
           const answer = ownKeysUncached(root)
-          ownKeys.set(root, answer)
+          ;(ownKeys ??= new Map()).set(root, answer)
           if (ownKeysAnswers === null) ownKeysAnswersByQuery.set(query, (ownKeysAnswers = new Map()))
           ownKeysAnswers.set(root, { keys: answer, stamps, holderStamps })
           return answer
         } finally {
           stampLists.pop()
           holderStampLists.pop()
-          activeOwnKeys.delete(root)
+          activeOwnKeys?.delete(root)
         }
       }
       const ownKeysUncached = (root: Value): readonly string[] | null => {
@@ -2543,11 +2629,17 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         descriptor(root, key) ||
         (isSourceCallableObject(root) && sourceCallableOwnDataWriteOf(checker, flow, root, key) !== null) ||
         ((ts.isObjectLiteralExpression(root) || isFreshOrdinaryObject(root)) && writesTo(root, namedWriteReceivers.get(key) ?? [])) ||
-        ((ts.isObjectLiteralExpression(root) || isFreshOrdinaryObject(root)) &&
-          [...holdersOf(root)].some((holder) =>
-            (computedWriteEdgesByReceiver.get(holder) ?? []).some((edge) => keysOf(edge.access).includes(key))
-          )) ||
+        ((ts.isObjectLiteralExpression(root) || isFreshOrdinaryObject(root)) && computedWriteNames(root, key)) ||
         writesTo(root, definitionReceivers.get(key) ?? [])
+      /** Whether a computed write into a holder of `root` can name `key`; holders do not grow during a transfer (see `holdersOf`). */
+      const computedWriteNames = (root: ObjectRoot, key: string): boolean => {
+        for (const holder of holdersOf(root)) {
+          const edges = holder.computedWriteEdges
+          if (edges === undefined) continue
+          for (const edge of edges) if (keysOf(edge.access).includes(key)) return true
+        }
+        return false
+      }
       /**
        * Whether `descriptorOf` of a construction would ask which roots a
        * `defineProperty` targets -- the one part of it that is not a fact of
@@ -2673,7 +2765,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         return [...keys]
       }
       /** The families whose slots this evaluation has read whole (`readSlotsOf`). */
-      const familiesRead = new Set<Value>()
+      let familiesRead: Set<Value> | null = null
       /** The family whose every construction `receivers` holds, when `root` is one of them: its slots can be read whole. */
       const coveringFamilyOf = (root: Value, receivers: ReadonlySet<Value>): Value | null => {
         if (!isFamilyMember(root)) return null
@@ -2717,8 +2809,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         }
         const family = coveringFamilyOf(root, receivers)
         if (family === null) for (const key of keys) joinCarried(slot(root, key))
-        else if (!familiesRead.has(family)) {
-          familiesRead.add(family)
+        else if (!familiesRead?.has(family)) {
+          ;(familiesRead ??= new Set()).add(family)
           for (const key of keys) joinCarried(familySlot(family as ObjectRoot, key))
         }
       }
@@ -2880,12 +2972,12 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       // facts of the program, but this runs inside every re-evaluation of every
       // query on a class member: recomputing them was a walk of the construction
       // index and of every opaque `new` each time. Only `fail` is per-evaluation.
-      const familyInstances = new Map<
+      let familyInstances: Map<
         SourceClass,
         { readonly instances: readonly ts.NewExpression[]; readonly opaque: readonly ts.NewExpression[] } | null
-      >()
+      > | null = null
       const familyInstancesOf = (holder: SourceClass, reason: string): readonly ts.NewExpression[] | null => {
-        let known = familyInstances.get(holder)
+        let known = familyInstances?.get(holder)
         if (known === undefined) {
           const family = sourceClassFamilyOf(checker, flow, new Set([holder]))
           if (family === null) known = null
@@ -2899,7 +2991,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             }
             known = { instances: [...instances], opaque }
           }
-          familyInstances.set(holder, known)
+          ;(familyInstances ??= new Map()).set(holder, known)
         }
         if (known === null) {
           fail(reason, holder)
@@ -4685,16 +4777,33 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           // of this container declares. Enumerating only `propertyAccesses`
           // left `const { app } = p; sink(app)` out of the inventory, which is
           // a hole in a closure proof, not a missing capability.
-          for (const element of both(patternReadsByKey.get(key), unknownPatternReads)) {
-            const holder = bindingContainer(element)
-            if (holder === null || !observe(holder).has(container)) continue
-            if (element.dotDotDotToken || bindingElementKey(element) === null) fail('unmodelled-container-read', element)
-            else for (const reference of referencesOf(element)) facts.add(reference)
-          }
+          for (const reads of [patternReadsByKey.get(key), unknownPatternReads])
+            if (reads !== undefined && WIP_SOLVER_BASE)
+              for (const [element, holder] of patternContainersOf(reads)) {
+                if (holder === null || !observe(holder).has(container)) continue
+                if (element.dotDotDotToken || bindingElementKey(element) === null) fail('unmodelled-container-read', element)
+                else for (const reference of referencesOf(element)) facts.add(reference)
+              }
+            else if (reads !== undefined && reads.length > 0) {
+              const byContainer = patternReadsByContainerOf(reads)
+              const found: number[] = []
+              for (const holder of holdersOf(container))
+                for (const position of byContainer.get(holder) ?? NO_POSITIONS) found.push(position)
+              found.sort((a, b) => a - b)
+              for (const position of found) {
+                const element = reads[position]!
+                if (element.dotDotDotToken || bindingElementKey(element) === null) fail('unmodelled-container-read', element)
+                else for (const reference of referencesOf(element)) facts.add(reference)
+              }
+            }
           if (ts.isArrayLiteralExpression(container) && (key === ELEMENT_KEY || isCanonicalIndex(key)))
-            for (const write of (valueIterationWrites ??= flow.allWrites.filter((write) => write.iterationOrigin?.mode === 'values'))) {
+            for (const [write, source] of WIP_SOLVER_BASE
+              ? (valueIterationWrites ??= flow.allWrites
+                  .filter((write) => write.iterationOrigin?.mode === 'values')
+                  .map((write) => [write, value(write.iterationOrigin!.source)] as const))
+              : valueIterationsHolding(container, holdersOf)) {
               const origin = write.iterationOrigin!
-              if (!observe(value(origin.source)).has(container)) continue
+              if (WIP_SOLVER_BASE && !observe(source).has(container)) continue
               if (origin.asynchronous || deferredIntrinsicProtocolLedgerOf(flow)?.require('Array', origin.source) !== true) {
                 fail('unproven-array-iteration', write.site)
                 continue
@@ -4718,7 +4827,11 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         // The dependencies alone, all in `VALUE_ORIGIN` (`DependencyGroundingKeys`):
         // a lone one as itself, ~88K of a 48K-line app's seals keeping exactly one.
         outcome.grounding =
-          grounding.size === 0 ? NO_GROUNDING : grounding.size === 1 ? grounding.values().next().value! : exactListOf(grounding)
+          grounding === null || grounding.size === 0
+            ? NO_GROUNDING
+            : grounding.size === 1
+              ? grounding.values().next().value!
+              : exactListOf(grounding)
         outcome.seeded = seeded
       }
       // A node answering gates for its root keeps a gate log across its
@@ -4746,11 +4859,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       const inputs = transferInputs.get(query)
       if (inputs === undefined) return null
       for (let index = 0; index < inputs.tested.length; index++) if (inputs.tested[index]!.size !== inputs.testedSizes[index]) return null
-      for (const [fact, count] of inputs.holders) {
-        let now = 0
-        for (const _holder of holdersOf(fact)) now++
-        if (now !== count) return null
-      }
+      for (const [fact, count] of inputs.holders) if (iterableCount(holdersOf(fact)) !== count) return null
       const facts = new Set<Value>()
       let through = addedThrough.get(query)
       for (let index = 0; index < inputs.joined.length; index++) {
@@ -4806,7 +4915,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       // needed is merely a stricter refusal, while a needed one gone missing
       // is a wrong answer -- so if this invariant is ever broken again by a
       // NEW transfer, union (not overwrite) is the direction that cannot lie:
-      // `both(requirements.get(query), captured.requirements)`.
+      // the union of `requirements.get(query)` and `captured.requirements`.
       // Absent reads as empty (`?? []` below); one entry per state was a map of
       // mostly empty arrays.
       // Copied to its exact length (the ledger builds it by `filter`, which

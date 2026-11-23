@@ -4,7 +4,13 @@ import type { RecordLayoutPolicy } from '../representation/policies.js'
 import { carriesUndefined, containsUnresolved, representationKey, type RecordField, type Representation } from '../representation/model.js'
 import { containsOpenDocument } from './document-record-view.js'
 import type { DeclarationId } from '../identity/ids.js'
-import { optionalMethodPayloadOf, structuralRecordViewPlan, type FamilyMemberKeys, type RecordViewPlan } from './record-view.js'
+import {
+  dispatchedHomesOf,
+  optionalMethodPayloadOf,
+  structuralRecordViewPlan,
+  type FamilyMemberKeys,
+  type RecordViewPlan
+} from './record-view.js'
 import { recipeIsMaterializableWithoutPriorSourceGuard } from './recipe-closure.js'
 import { nativeFieldViewPlanOf, type NativeFieldViewPlan } from './native-field-view.js'
 import { nativeLogicalReceiverRecipeOf, type NativeLogicalReceiverRecipe } from './native-logical-receiver.js'
@@ -281,7 +287,8 @@ export const certifiedRecordViewPlan = (
         })
       }
       case 'iterator-result':
-        return [plan.yieldHome, plan.returnHome].every((home) => {
+      case 'present-field':
+        return dispatchedHomesOf(plan).every((home) => {
           const arm = plan.target.arms[home.index]
           return arm !== undefined && (home.payload === null ? add(plan.source, arm.value) : walk(home.payload))
         })
@@ -367,8 +374,8 @@ export const certifiedRecordViewPlan = (
         for (const arm of plan.arms) if (typeof arm.via === 'object') collect(arm.via)
         return
       case 'iterator-result':
-        if (plan.yieldHome.payload) collect(plan.yieldHome.payload)
-        if (plan.returnHome.payload) collect(plan.returnHome.payload)
+      case 'present-field':
+        for (const home of dispatchedHomesOf(plan)) if (home.payload) collect(home.payload)
         return
       case 'fields': {
         const fields = nativeFieldViewPlanOf(plan, layouts, (source, target) => leaves.get(structuralConversionKey(source, target)) ?? null)

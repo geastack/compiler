@@ -27,6 +27,7 @@ import {
   cppDenseDivisorName,
   cppDenseFlagName,
   cppDenseLengthName,
+  cppDenseExtentName,
   cppDensePointerName,
   cppDenseRowName,
   cppDenseRowsName,
@@ -67,6 +68,42 @@ import { arrayBulkAppendMethodName } from './prototype/emit-prototype-array.js'
  * being a handful, not at the size where the statement form stops compiling.
  */
 const constantTableThreshold = 8
+
+/**
+ * How many inlined literal `push`es one body may hold before they are spelled
+ * as calls instead.
+ *
+ * `ArrayObject::push` is always-inline, and every inlined copy brings its
+ * capacity branch and an unwind edge that releases every handle live in the
+ * body. A level table written as nested short literals -- thousands of
+ * `[x, y, z]` rows, each under the constant-table threshold -- puts all of
+ * those in one module body: 15,861 pushes made a 217,743 instruction function
+ * that clang's GVN (`addDeadBlock`, quadratic in the folded capacity branches)
+ * had not finished after 214 CPU minutes. The same body through
+ * `gea::runtime::array::pushOutOfLine` compiles in under nine minutes.
+ *
+ * A body below the bound keeps the inlined form, where a handful of stores
+ * fold; one at or past it is a data table, built once, and gains nothing from
+ * inlining.
+ */
+const outOfLineLiteralPushThreshold = 512
+
+/**
+ * Marks every array literal of a body whose literals together hold
+ * `outOfLineLiteralPushThreshold` or more ordinary elements.
+ */
+export const collectOutOfLineLiteralPushes = (prepass: EmitBodyPrepassFacts, body: IrBody): void => {
+  let count = 0
+  const literals: IrValueId[] = []
+  for (const block of body.blocks.values())
+    for (const operation of block.operations) {
+      if (operation.kind !== 'allocate-array-object') continue
+      literals.push(operation.result.id)
+      for (const slot of operation.elements) if (slot.kind === 'element') count += 1
+    }
+  if (count < outOfLineLiteralPushThreshold) return
+  for (const literal of literals) prepass.outOfLineLiteralPushes.add(literal)
+}
 
 /** How many values one line of a static table's initializer carries. A table of 87,210 doubles is otherwise a single 700 KB line. */
 const constantTableRowWidth = 16
@@ -285,6 +322,7 @@ export const emitAllocateArrayObject = (ctx: EmitContext, lines: string[], opera
     lines.push(`gea::runtime::array::appendTable(${name}, ${table.name}, ${table.count});`)
     return
   }
+  const outOfLine = ctx.outOfLineLiteralPushes.has(operation.result.id)
   for (const slot of operation.elements) {
     if (slot.kind === 'hole') {
       lines.push(`${name}->pushHole();`)
@@ -449,7 +487,8 @@ export const emitAllocateArrayObject = (ctx: EmitContext, lines: string[], opera
     // and a concrete value has to be boxed on the way in. Without it the push
     // assigned an `NSObject` straight into a `gea::Value` slot, which is the
     // one thing the box's storage-only design cannot do implicitly.
-    lines.push(`${name}->push(${alignedText(ctx, representation.element, slot.value, 'allocate-array-object')});`)
+    const stored = alignedText(ctx, representation.element, slot.value, 'allocate-array-object')
+    lines.push(outOfLine ? `gea::runtime::array::pushOutOfLine(${name}, ${stored});` : `${name}->push(${stored});`)
   }
 }
 
@@ -953,19 +992,21 @@ const advancesByOne = (loop: NaturalLoop, facts: FillFacts): boolean => {
 }
 
 /** The plain C++ name a dense window may read its array or its counter through, or `null` when this body has no such name for the cell. */
-const denseCellName = (ctx: EmitContext, declaration: DeclarationId): string | null => {
+const denseCellName = (ctx: EmitContext, declaration: DeclarationId, boundsTheLoop = false): string | null => {
   const placement = ctx.placements.get(declaration)
   if (!placement) return null
   // A buffer cell is a string, not an array a dense window or a fill loop could address.
   if (ctx.charCodeBuffers.cells.has(declaration)) return null
   if (placement.storage.kind === 'region') return realmBindingName(ctx.placements, declaration)
   if (placement.storage.kind !== 'local') return null
-  if (ctx.captures.isBoxed(declaration)) return null
-  if (placement.storage.owner === ctx.owner) return bindingReference(ctx, declaration, 'a dense Array window').name
+  if (placement.storage.owner === ctx.owner)
+    return ctx.captures.isBoxed(declaration) ? null : bindingReference(ctx, declaration, 'a dense Array window').name
   // A parallel region's row callback reads every array it indexes as a
   // capture, and without this each element read paid the bounds and view
-  // checks the window hoists.
-  return copiedCaptureName(ctx, declaration)
+  // checks the window hoists. A settled box qualifies only as the array whose
+  // length bounds the loop: the hoist that moved that read out proved the loop
+  // changes no storage, so nothing it runs can write the box either.
+  return copiedCaptureName(ctx, declaration, boundsTheLoop)
 }
 
 /** One dense-window operand as a `long long`; the census already narrowed most of them, and the rest are ordinary `number` cells. */
@@ -1002,7 +1043,7 @@ export const admitDenseWindows = (ctx: EmitContext, prepass: EmitBodyPrepassFact
   const admitted = admittedDenseLoopPlanOf(
     plan,
     ctx.integerValues,
-    (declaration) => denseCellName(ctx, declaration) !== null,
+    (declaration, boundsTheLoop) => denseCellName(ctx, declaration, boundsTheLoop) !== null,
     ctx.hoistedResults
   )
   for (const [operation, access] of admitted.accesses) prepass.denseAccesses.set(operation, access)
@@ -1038,7 +1079,7 @@ interface DenseHolder {
  */
 const denseHolderOf = (ctx: EmitContext, lines: string[], reference: DenseReference, array: DenseArray): DenseHolder | null => {
   if (reference.kind === 'cell') {
-    const name = denseCellName(ctx, reference.declaration)
+    const name = denseCellName(ctx, reference.declaration, reference.declaration === array.lengthCell)
     if (name === null) return null
     if (reference.conversion === undefined) throw new Error(`dense cell ${reference.declaration} has no certified conversion`)
     const converted = namedConversionText(ctx, 'emit-arrays.ts:dense-cell', reference.conversion, name)
@@ -1106,6 +1147,15 @@ export const emitDenseSetup = (ctx: EmitContext, lines: string[], blockId: IrBlo
       const holder = denseHolderOf(ctx, lines, array.reference, array)
       if (holder === null) continue
       const pointer = cppDensePointerName(array.ordinal)
+      // A checked window bounds each access itself (`DenseArray.checked`):
+      // the preheader only names the view's elements and how many there are.
+      // A detached buffer has none, and `data()` would abort on it.
+      if (array.checked === true && array.typed !== null) {
+        const extent = cppDenseExtentName(array.ordinal)
+        ctx.declarations.push({ name: pointer, type: `${cppScalarType(array.typed)}*` }, { name: extent, type: 'std::size_t' })
+        lines.push(`${extent} = ${holder.text}->size();`, `${pointer} = ${extent} > 0 ? ${holder.text}->data() : nullptr;`)
+        continue
+      }
       const cells = `${holder.text}->cells`
       const data = array.typed === null ? `${cells}.data()` : `${holder.text}->data()`
       const size = array.typed === null ? `${cells}.size()` : `${holder.text}->size()`

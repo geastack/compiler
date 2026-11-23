@@ -1001,12 +1001,26 @@ const buildPackageIndex = (
   root: string,
   read: DeclarerReader,
   neverSkip: ReadonlySet<string>,
-  graph: ReadonlySet<string>
+  graph: ReadonlySet<string>,
+  compiled: string
 ): PackageIndex => {
   const found = collectSourceFiles(root, neverSkip)
   // a confined file is the program's own or not indexed at all (see `ancestryBetween`)
   const confined = found.confined.filter((filePath) => graph.has(resolve(filePath)))
-  const key = confined.length === 0 ? indexKey(root, neverSkip) : `${indexKey(root, neverSkip)}\n${confined.join('\n')}`
+  // A program that itself lives in a skipped directory is not the package it
+  // sits in: the package's other files are its scenery exactly as its
+  // directory's neighbours are, so they too are indexed only from its graph.
+  // Without this, any `.js` elsewhere under the root -- an untracked fixture,
+  // a vendored suite -- declaring a class of the same name dropped the
+  // program's own class as a duplicate, and a checkout holding such files
+  // emitted different text and identities than a clean one.
+  const programIsConfined = found.confined.some((filePath) => resolve(filePath) === compiled)
+  const files = programIsConfined ? found.files.filter((filePath) => graph.has(resolve(filePath))) : found.files
+  const key = programIsConfined
+    ? `${indexKey(root, neverSkip)}\n\n${[...files, ...confined].join('\n')}`
+    : confined.length === 0
+      ? indexKey(root, neverSkip)
+      : `${indexKey(root, neverSkip)}\n${confined.join('\n')}`
   const cached = cachesFor(read).index.get(key)
   if (cached) return cached
 
@@ -1018,7 +1032,7 @@ const buildPackageIndex = (
   const constantDomainsByName = new Map<string, string>()
   const duplicateConstants = new Set<string>()
 
-  for (const filePath of [...found.files, ...confined]) {
+  for (const filePath of [...files, ...confined]) {
     let text: string
     try {
       text = read(filePath)
@@ -1374,7 +1388,7 @@ export const createSubclassMemberOverlayTransform = (read: DeclarerReader, roots
     // read nowhere else. Building it reads and transforms every source file of
     // the package, so a file declaring no class does not pay for it.
     if (!file.statements.some((statement) => ts.isClassDeclaration(statement) && statement.name !== undefined)) return null
-    const index = buildPackageIndex(root, read, ancestryBetween(root, input.fileName), graphFor(input.fileName))
+    const index = buildPackageIndex(root, read, ancestryBetween(root, input.fileName), graphFor(input.fileName), here)
 
     const boundHere = new Set<string>()
     let leadingImportEnd = 0

@@ -379,6 +379,27 @@ const recordViewText = (ctx: RecordViewSite, plan: RecordViewPlan, text: string)
         `return ${source}${arrow}${cppRecordFieldName('done')} ? ${returned} : ${yielded}; }())`
       )
     }
+    case 'present-field': {
+      const source = 'gea_present_field'
+      const targetType = cppTypeOf(plan.target)
+      const home = (planned: IteratorResultHome): string | null => {
+        const arm = plan.target.arms[planned.index]
+        if (arm === undefined) return null
+        const built =
+          planned.payload === null
+            ? alignedValueText(ctx, 'emit-record-view.ts:present-field', plan.source, arm.value, source)
+            : recordViewText(ctx, planned.payload, source)
+        return built === null ? null : `${targetType}::ofArm<${planned.index}>(${built})`
+      }
+      const present = home(plan.presentHome)
+      const absent = home(plan.absentHome)
+      if (present === null || absent === null) return null
+      const arrow = plan.source.ownership !== 'shared-refcount' ? '.' : '->'
+      return (
+        `([&]() -> ${targetType} { const auto& ${source} = ${text}; ` +
+        `return ${source}${arrow}${cppRecordFieldName(plan.key)}.has_value() ? ${present} : ${absent}; }())`
+      )
+    }
     case 'fields':
       return recordFieldsViewText(ctx, plan, text)
   }
@@ -478,6 +499,25 @@ const recordFieldsBuiltText = (
   // `recastedRecordText`). Left alone a bit keeps its declared default.
   const presences: (readonly [string, string])[] = []
   const structName = cppRecordStructName(target.shapeId)
+  // Inside braces [dcl.init.list]/7 forbids the narrowing every other
+  // position allows: a field the integer census holds in a `long long`
+  // (`{ kind, type }` with `kind: 1 | 2`) is a hard error written into a
+  // `double` member of the layout it is viewed as, though both carriers say
+  // `scalar(number)`. `static_cast` spells the same conversion explicitly --
+  // `emit-narrowing.ts`'s `recastFieldText` answers the identical rule this
+  // way -- and is a no-op where the two already agree. The cast names the
+  // member's OWN declared type, `decltype(Struct::member)`, because the
+  // census's answer lives in the struct declaration `records.ts` emitted
+  // and nowhere this emitter can ask: the representation says `double` for
+  // both sides, and casting to that spelling is the same narrowing error
+  // in the other direction whenever the TARGET member is the narrowed one
+  // (a `Leaf { value: number }` read through a `Branch | Leaf` arm).
+  // A getter's answer obeys the same rule: its body's return is narrowed by the
+  // same census, so `get min() { return 5 }` hands back a `long long`.
+  const memberCast = (field: { readonly key: string; readonly value: Representation }, from: Representation, converted: string): string =>
+    field.value.kind === 'scalar' && field.value.domain !== 'bigint' && from.kind === 'scalar'
+      ? `static_cast<decltype(${structName}::${cppRecordFieldName(field.key)})>(${converted})`
+      : converted
   // An authenticated source allocation is a traced edge of the new view's
   // own allocation. Value-record copies have no source handle to retain.
   const allocate = (argumentsText: string): string =>
@@ -538,7 +578,7 @@ const recordFieldsBuiltText = (
       const got = classAccessorReadText(ctx, source, field.value, field.key, read.value, text)
       if (got === null) return null
       orderSensitive = true
-      reads.push(got)
+      reads.push(memberCast(field, read.value, got))
       if (!field.required) presences.push([field.key, 'true'])
       continue
     }
@@ -550,7 +590,7 @@ const recordFieldsBuiltText = (
       const got = `${cppBodyName(read.getter)}(${argumentsOf.join(', ')})`
       const converted = structuralLeafText(ctx, read.value, field.value, got)
       if (converted === null) return null
-      reads.push(converted)
+      reads.push(memberCast(field, read.value, converted))
       orderSensitive = true
       if (!field.required) presences.push([field.key, 'true'])
       continue
@@ -616,25 +656,7 @@ const recordFieldsBuiltText = (
     if (read.kind === 'view' && ['gea_sidecar', 'gea_vget_', 'gea_body_fn_decl_'].some((mark) => converted.includes(mark))) {
       orderSensitive = true
     }
-    // Inside braces [dcl.init.list]/7 forbids the narrowing every other
-    // position allows: a field the integer census holds in a `long long`
-    // (`{ kind, type }` with `kind: 1 | 2`) is a hard error written into a
-    // `double` member of the layout it is viewed as, though both carriers say
-    // `scalar(number)`. `static_cast` spells the same conversion explicitly --
-    // `emit-narrowing.ts`'s `recastFieldText` answers the identical rule this
-    // way -- and is a no-op where the two already agree. The cast names the
-    // member's OWN declared type, `decltype(Struct::member)`, because the
-    // census's answer lives in the struct declaration `records.ts` emitted
-    // and nowhere this emitter can ask: the representation says `double` for
-    // both sides, and casting to that spelling is the same narrowing error
-    // in the other direction whenever the TARGET member is the narrowed one
-    // (a `Leaf { value: number }` read through a `Branch | Leaf` arm).
-    const arithmetic = field.value.kind === 'scalar' && field.value.domain !== 'bigint'
-    reads.push(
-      arithmetic && held.value.kind === 'scalar'
-        ? `static_cast<decltype(${structName}::${cppRecordFieldName(field.key)})>(${converted})`
-        : converted
-    )
+    reads.push(memberCast(field, held.value, converted))
     if (!field.required) {
       presences.push([field.key, held.required ? 'true' : `${text}${arrow}${cppRecordFieldPresenceName(field.key)}`])
     }
@@ -716,6 +738,12 @@ const liveRecordFieldsText = (
   const environment = (key: string, body: FunctionId, half: 'getter' | 'setter'): readonly string[] =>
     ctx.captures.of(body).kind === 'ok' ? [storedEnvironmentText(body, `${actual}->${cppRecordAccessorEnvironmentName(key, half)}`)] : []
   const accesses: LiveFieldViewAccess[] = []
+  // A getter's body is narrowed by the integer census, so `get min() { return
+  // 5 }` answers a `long long` where the route accepts a `double`; the route's
+  // `assign` deduces the stored type from its argument and refuses the
+  // mismatch, so the answer is converted to the route's own carrier first.
+  const getterAnswer = (carrier: Representation, call: string): string =>
+    carrier.kind === 'scalar' && carrier.domain !== 'bigint' ? `static_cast<${cppTypeOf(carrier)}>(${call})` : call
   for (const { field, read } of plan.fields) {
     const route = live.fields.find((entry) => entry.key === field.key)
     if (!route) throw new Error(`a live view has no route for ${field.key}`)
@@ -760,7 +788,10 @@ const liveRecordFieldsText = (
         }
       }
     } else if (read.kind === 'record-accessor') {
-      got = `${cppBodyName(read.getter)}(${[...environment(field.key, read.getter, 'getter'), actual].join(', ')})`
+      got = getterAnswer(
+        route.read,
+        `${cppBodyName(read.getter)}(${[...environment(field.key, read.getter, 'getter'), actual].join(', ')})`
+      )
       if (read.setter !== null && route.write !== null)
         write = {
           value: route.write,
@@ -776,9 +807,12 @@ const liveRecordFieldsText = (
       const getter = member.accessor.getter
       const dispatch = ctx.virtualDispatch?.get(virtualDispatchKey(source.declaration, field.key, 'get'))
       if (dispatch && representationKey(dispatch.result) !== representationKey(route.read)) return null
-      got = dispatch
-        ? `${actual}->${cppVirtualMemberName(field.key, 'get')}()`
-        : `${cppBodyName(getter)}(${[...environment(field.key, getter, 'getter'), actual].join(', ')})`
+      got = getterAnswer(
+        route.read,
+        dispatch
+          ? `${actual}->${cppVirtualMemberName(field.key, 'get')}()`
+          : `${cppBodyName(getter)}(${[...environment(field.key, getter, 'getter'), actual].join(', ')})`
+      )
       if (route.write !== null && member.accessor.setter !== null) {
         const setter = member.accessor.setter
         const dispatch = ctx.virtualDispatch?.get(virtualDispatchKey(source.declaration, field.key, 'set'))

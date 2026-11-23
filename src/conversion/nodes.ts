@@ -89,6 +89,15 @@ export interface ConversionCensus {
   readonly fieldReadFor: (source: Representation, target: Representation) => ConversionNode
   /** The selected live view's checked primitive reader, replayed on its original native storage. */
   readonly checkedFieldReadFor: (source: Representation, target: Representation, checked: ConversionNode) => ConversionNode | null
+  /**
+   * A live view's slot declared at a base class, read into the descendant the
+   * view's own field declares (a merged options record's `TimeoutContext`
+   * slot behind a `FindOptions` view's `CursorTimeoutContext`): the checked
+   * class downcast (`assertedClassDowncastFor`), lifted over a shared absence.
+   * The ordinary downcast trusts an `instanceof` guard a second [[Get]]
+   * through the view never ran. `null` for any other pair.
+   */
+  readonly checkedClassFieldReadFor: (source: Representation, target: Representation) => ConversionNode | null
   readonly absentIndexReadFor: (source: Representation, target: Representation) => ConversionNode
   readonly nativeMethodFor: (source: Representation, target: Representation) => ConversionNode | null
   readonly nativeBufferMethodFor: (source: Representation, target: Representation) => ConversionNode | null
@@ -816,6 +825,20 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
       checkedNativeFieldRead: { checked }
     })
   }
+  const checkedClassFieldReadFor = (source: Representation, target: Representation): ConversionNode | null => {
+    if (source.kind !== 'optional') return assertedClassDowncastFor(source, target)
+    if (target.kind !== 'optional' || target.absence !== source.absence) return null
+    if (assertedClassDowncastFor(source.payload, target.payload) === null) return null
+    return contextualNode(source, target, 'checked-class-field-read', {
+      id: ASSERTED_CLASS_DOWNCAST_MATERIALIZER,
+      domain: `static:asserted-class-downcast:${representationKey(target)}`,
+      allocates: false,
+      nativeFieldProtocol: 'unused',
+      nativePayloadTransport: 'preserved',
+      nativeClassReferenceIdentity: 'preserved',
+      callableIdentityTransport: 'preserved'
+    })
+  }
   const absentIndexReadFor = (source: Representation, target: Representation): ConversionNode => {
     const ordinary = nodeFor(source, target)
     if (ordinary.capability.kind !== 'never') return ordinary
@@ -1255,6 +1278,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     callArgumentFor,
     fieldReadFor,
     checkedFieldReadFor,
+    checkedClassFieldReadFor,
     absentIndexReadFor,
     nativeMethodFor,
     nativeBufferMethodFor,

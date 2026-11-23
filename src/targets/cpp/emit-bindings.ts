@@ -133,6 +133,13 @@ export const emitBindingRead = (ctx: EmitContext, lines: string[], operation: Bi
     defineValueAlias(ctx, operation.result, `std::as_const(${fieldCell})`)
     return
   }
+  // A cell that points at its window cell (`EmitContext.borrowedWindowCells`).
+  // Const for the same reason: a consumer that moves must not empty the array.
+  const windowCell = ctx.borrowedWindowCellNames.get(operation.declaration)
+  if (windowCell !== undefined) {
+    defineValueAlias(ctx, operation.result, `std::as_const(*${windowCell})`)
+    return
+  }
   // A char-code buffer is read by naming the string, never by copying it: a push appends to the cell itself.
   if (ctx.charCodeBuffers.reads.has(operation.result.id)) {
     defineValueAlias(ctx, operation.result, cellValueText(bindingReference(ctx, operation.declaration, 'a char-code buffer read')))
@@ -471,6 +478,21 @@ export const emitBindingWrite = (ctx: EmitContext, lines: string[], operation: B
   // The one write of a forwarded cell: its one read spells the value instead
   // (`EmitContext.forwardedBindings`), so there is no cell to declare or fill.
   if (ctx.forwardedBindings.get(operation.declaration)?.value.value === operation.value.value) return
+  // The one write of a cell that borrows its window cell stores the cell's
+  // address: the read rendered as the cell itself, an lvalue in both arms, and
+  // the loop changes no array, so the address holds the element for every read.
+  if (ctx.borrowedWindowCells.has(operation.declaration) && ctx.denseCellReads.has(operation.value.value)) {
+    const held = ctx.placements.get(operation.declaration)?.representation
+    const deferred = ctx.deferredTexts.get(operation.value.value)
+    if (held !== undefined && held !== null && deferred !== undefined && !ctx.declaredBindings.has(operation.declaration)) {
+      const cell = bindingReference(ctx, operation.declaration, 'a borrowed window cell')
+      declareCell(ctx, cell.name, `const ${cppTypeOf(held)}*`)
+      ctx.declaredBindings.add(operation.declaration)
+      ctx.borrowedWindowCellNames.set(operation.declaration, cell.name)
+      lines.push(`${cell.name} = &${deferred};`)
+      return
+    }
+  }
   // The value is the class object of a generic the program never instantiates
   // at the written name (`classObjectReadsOf`): the read names the bare
   // declaration, which has no cell of its own, but the family the carrier names

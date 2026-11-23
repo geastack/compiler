@@ -13,7 +13,9 @@ import {
   type NaturalLoop
 } from './dominance.js'
 import { loopInvariantHoistsOf, type HoistPlan } from './hoist.js'
-import { borrowSafeOperationsOf } from './borrow-effects.js'
+import { borrowSafeOperationsOf, type PlainFieldRead } from './borrow-effects.js'
+import type { CodeFreeFieldRead } from './field-read-reuse.js'
+import { codeFreeGetOf } from './plain-field-read.js'
 import { representationKey, type Representation, type TypedArrayElementDomain } from '../representation/model.js'
 import type { IrBlockId, IrBody, IrNonTerminatorOperation, IrOperand } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
@@ -88,6 +90,12 @@ export interface DenseArray {
    * both assigned and invariant.
    */
   readonly relocatedReads: readonly IrValueId[]
+  /**
+   * The cell whose own `length` is the loop's bound, when the bound is one of
+   * `relocatedReads`. A window through that cell is the one array whose read
+   * the hoist plan already had to prove the loop cannot change.
+   */
+  readonly lengthCell?: DeclarationId
   /** Whether the test admits the bound itself (`<=`), so the window is one wider. */
   readonly inclusive: boolean
   /** The counter's step, checked non-negative at the preheader. */
@@ -156,6 +164,22 @@ export interface DenseArray {
    * the row for the current turn is taken, behind the folded flag.
    */
   readonly rows?: DenseRowRange
+  /**
+   * A typed-array window whose indices the loop's own test does not bound --
+   * `position[v * 3 + 1]`, a vertex writer's strided store. The preheader
+   * takes the view's pointer and length once, and each access compares its
+   * index with that length instead of re-reading the view.
+   *
+   * Worth a window without the proof because a typed element store is a
+   * may-alias store: after each one the backend re-reads the view's buffer,
+   * length, detach flag and base, so a quad writer paid five loads per float.
+   * Measured on Saltline's HUD quad emit: 94 ns a quad, 66 with the six output
+   * views taken once (V8 46). A view cannot be resized, and `nativeOnly`
+   * already rules out code that could detach its buffer, so the length taken
+   * at the preheader holds for the whole loop. `bases` carries no meaning for
+   * one of these.
+   */
+  readonly checked?: true
 }
 
 /** The enclosing loop's counter range a folded row window's check walks. */
@@ -291,13 +315,29 @@ export const emptyDenseLoopPlan: DenseLoopPlan = { arrays: [], groups: [], acces
 const denseStorageConversionIsOrdinary = (node: ConversionNode, conversions: ConversionCensus): boolean =>
   nativeArrayViewPlansOf(recipeClosureOf([node], conversions.nodeById).values()).length === 0
 
-/** Dense preheaders perform real reads; their transport belongs to the lowered body's certificate too. */
+/**
+ * Dense preheaders perform real reads; their transport belongs to the lowered body's certificate too.
+ *
+ * `plainFieldRead` and `codeFreeFieldRead` are the target's own answers
+ * (`plainFieldReadOf`, `codeFreeFieldReadOf`): the hoists this plan locates
+ * values by may be no more optimistic than the ones the target renders, since
+ * a window's setup names its bound where these put it. A window admits a loop
+ * only when its reads run no program code, and a field of the receiver's own
+ * type still runs a getter when the receiver is a live view of a shape that
+ * answers the key with one, so admission asks both too.
+ */
 export const publishDenseLoopPlan = (
   body: IrBody,
   placements: ReadonlyMap<DeclarationId, BindingPlacement>,
-  conversions: ConversionCensus
+  conversions: ConversionCensus,
+  plainFieldRead: PlainFieldRead,
+  codeFreeFieldRead: CodeFreeFieldRead
 ): IrBody => {
-  const raw = denseLoopsOf(body)
+  const raw = denseLoopsOf(
+    body,
+    loopInvariantHoistsOf(body, undefined, undefined, undefined, undefined, codeFreeGetOf(body, plainFieldRead, codeFreeFieldRead)),
+    (receiver, key) => plainFieldRead(receiver, key) && codeFreeFieldRead(receiver, key)
+  )
   const seal = (reference: DenseReference): DenseReference | null => {
     if (reference.kind === 'element') {
       const holder = seal(reference.holder)
@@ -381,7 +421,7 @@ export const denseLoopPlanMatches = (
  * and boxing decision, not a fact of the program. `admitsCell` is that one
  * hook (`emit-arrays.ts`'s `denseCellName` is its sole implementation).
  */
-export type DenseCellPolicy = (declaration: DeclarationId) => boolean
+export type DenseCellPolicy = (declaration: DeclarationId, boundsTheLoop: boolean) => boolean
 
 /** The windows a body ends up able to render, once `admittedDenseLoopPlanOf` has trimmed the raw plan. */
 export interface AdmittedDenseLoopPlan {
@@ -401,10 +441,15 @@ export interface AdmittedDenseLoopPlan {
  * access at all (`ir/integers.ts`) -- on top of the same question for the
  * array it is a row of.
  */
-const referenceIsAdmitted = (reference: DenseReference, integerValues: ReadonlySet<IrValueId>, admitsCell: DenseCellPolicy): boolean => {
-  if (reference.kind === 'cell') return admitsCell(reference.declaration)
+const referenceIsAdmitted = (
+  reference: DenseReference,
+  integerValues: ReadonlySet<IrValueId>,
+  admitsCell: DenseCellPolicy,
+  lengthCell: DeclarationId | undefined
+): boolean => {
+  if (reference.kind === 'cell') return admitsCell(reference.declaration, reference.declaration === lengthCell)
   if (reference.kind === 'value') return true
-  return integerValues.has(reference.key.value) && referenceIsAdmitted(reference.holder, integerValues, admitsCell)
+  return integerValues.has(reference.key.value) && referenceIsAdmitted(reference.holder, integerValues, admitsCell, undefined)
 }
 
 /**
@@ -449,9 +494,9 @@ export const admittedDenseLoopPlanOf = (
     plan.arrays
       .filter(
         (array) =>
-          admitsCell(array.counter) &&
-          (array.rows === undefined || admitsCell(array.rows.counter)) &&
-          referenceIsAdmitted(array.reference, integerValues, admitsCell) &&
+          admitsCell(array.counter, false) &&
+          (array.rows === undefined || admitsCell(array.rows.counter, false)) &&
+          referenceIsAdmitted(array.reference, integerValues, admitsCell, array.lengthCell) &&
           array.relocatedReads.every((value) => relocated.has(value))
       )
       .map((array) => array.ordinal)
@@ -489,7 +534,11 @@ export const admittedDenseLoopPlanOf = (
   return { arrays, groups, accesses, lengths, regions }
 }
 
-export const denseLoopsOf = (body: IrBody, hoists: HoistPlan = loopInvariantHoistsOf(body)): DenseLoopPlan => {
+export const denseLoopsOf = (
+  body: IrBody,
+  hoists: HoistPlan = loopInvariantHoistsOf(body),
+  plainFieldRead: PlainFieldRead = () => false
+): DenseLoopPlan => {
   // A try region renders as one assembled chunk, so a preheader inside one has
   // no single place for the setup to land -- the same restriction `hoist.ts`
   // takes, and for the same reason.
@@ -588,9 +637,14 @@ export const denseLoopsOf = (body: IrBody, hoists: HoistPlan = loopInvariantHois
   // the loop's own operations, and naming that value in the preheader emits a
   // use of a variable no statement has assigned yet.
 
+  // A typed window holds a raw pointer, so no operation in its loop may run
+  // program code; a data field read (`plainFieldRead`, the target's answer)
+  // runs none, and a quad writer reads its corners off `this` every turn.
+  const nativeOperations = borrowSafeOperationsOf(body, new Set(), plainFieldRead)
   const found = loops.map((loop) =>
     loopWindowsOf(loop, body, graph, loops, {
       body,
+      nativeOperations,
       values: body.values,
       readsCell,
       constantTexts,
@@ -635,6 +689,7 @@ export const denseLoopsOf = (body: IrBody, hoists: HoistPlan = loopInvariantHois
     if (!outer || !innerLoop || !outerLoop) continue
     const windows = foldedWindowsOf(inner, innerLoop, outer, outerLoop, {
       body,
+      nativeOperations,
       values: body.values,
       readsCell,
       constantTexts,
@@ -699,11 +754,13 @@ export const denseLoopsOf = (body: IrBody, hoists: HoistPlan = loopInvariantHois
         counter: loop.counter,
         bound: folded?.bound ?? loop.bound,
         relocatedReads: rows && host ? host.relocatedReads : loop.relocatedReads,
+        ...(!rows && !folded && loop.lengthCell !== undefined ? { lengthCell: loop.lengthCell } : {}),
         inclusive: loop.inclusive,
         step: folded ? folded.step : loop.step,
         widened: loop.widened,
         ...(folded ? { seed: folded.seed } : {}),
-        ...(rows ? { rows } : {})
+        ...(rows ? { rows } : {}),
+        ...(candidate.checked ? { checked: true as const } : {})
       })
       for (const operation of candidate.operations) {
         const flag = flagAt(blockOfOperation.get(operation) ?? loop.preheader)
@@ -899,6 +956,9 @@ const denseRegionsOf = (
     if (!loop || folded.has(index)) continue
     const restricted = arrays.filter((array) => array.group === group && stored.has(array.ordinal) && array.rows === undefined)
     if (restricted.length === 0) continue
+    // A checked access can take its cold half inside the fast version of the
+    // loop, which a restricted pointer's region does not allow for.
+    if (arrays.some((array) => array.group === group && array.checked === true)) continue
     const named = new Set(arrays.filter((array) => array.group === group).map((array) => array.ordinal))
     let sound = true
     for (const [operation, access] of accesses) {
@@ -954,10 +1014,32 @@ interface LoopWindows {
   readonly counter: DeclarationId
   readonly bound: IrOperand
   readonly relocatedReads: readonly IrValueId[]
+  readonly lengthCell?: DeclarationId
   readonly inclusive: boolean
   readonly step: IrOperand | null
   readonly widened: boolean
   readonly candidates: readonly WindowCandidate[]
+}
+
+/**
+ * The reads a bound of `captured.length` needs moved out of the loop: the
+ * cell read and the length read on it. `for (let i = 0; i < boxes.length; i++)`
+ * over an array a closure captured is the commonest loop a collision world
+ * runs, and it re-read the capture and its length on every turn. Like a
+ * captured bound, whether the read can move is the target's capture layout
+ * and its proof that the loop resizes no array, so the window is taken
+ * conditionally and admitted only when the target's hoist plan moved both.
+ */
+const capturedLengthOf = (
+  bound: IrOperand,
+  context: Omit<WindowContext, 'counter'>
+): { readonly reads: readonly IrValueId[]; readonly cell: DeclarationId } | null => {
+  const read = context.operationOf.get(bound.value)
+  if (read?.kind !== 'get' || read.receiver.representation.kind !== 'array-object') return null
+  if (context.constantTexts.get(read.key.value) !== 'length') return null
+  const cell = context.readsCell.get(read.receiver.value)
+  if (cell === undefined || (context.cellWrites.get(cell) ?? []).length > 0) return null
+  return { reads: [read.receiver.value, bound.value], cell }
 }
 
 const loopWindowsOf = (
@@ -986,7 +1068,9 @@ const loopWindowsOf = (
   // something the IR states. The window takes it conditionally and the
   // target admits it only when its own hoist plan moved the read out.
   const boundCell = invariantBound === null ? context.readsCell.get(right.value) : undefined
-  const relocatedReads = boundCell !== undefined && (context.cellWrites.get(boundCell) ?? []).length === 0 ? [right.value] : []
+  const capturedLength = invariantBound === null && boundCell === undefined ? capturedLengthOf(right, context) : null
+  const relocatedReads =
+    boundCell !== undefined && (context.cellWrites.get(boundCell) ?? []).length === 0 ? [right.value] : (capturedLength?.reads ?? [])
   const bound = invariantBound ?? (relocatedReads.length > 0 ? right : null)
   if (bound === null) return null
   // Exactly one advance, by an amount the preheader can name. Several
@@ -1012,6 +1096,7 @@ const loopWindowsOf = (
     counter,
     bound,
     relocatedReads,
+    ...(capturedLength ? { lengthCell: capturedLength.cell } : {}),
     inclusive: test.operator === '<=',
     step,
     widened: advanceReachesAnAccess(loop, body, graph, advance.block, counter),
@@ -1059,15 +1144,30 @@ const stepOf = (
 ): IrOperand | null | undefined => {
   const compute = operationOf.get(written.value)
   if (compute?.kind !== 'compute') return undefined
+  // An `i32`/`int` counter's advance reads the cell through the widening view
+  // to a plain Number before `++` -- exact, so still the counter itself.
+  const readsCounter = (operand: IrOperand): boolean => {
+    if (readsCell.get(operand.value) === counter) return true
+    const view = operationOf.get(operand.value)
+    return (
+      view?.kind === 'convert' &&
+      view.source.representation.kind === 'scalar' &&
+      view.source.representation.integerWidth !== undefined &&
+      view.result.representation.kind === 'scalar' &&
+      view.result.representation.domain === 'number' &&
+      view.result.representation.integerWidth === undefined &&
+      readsCell.get(view.source.value) === counter
+    )
+  }
   if (compute.form === 'update') {
     const target = compute.operands[0]
-    return target && readsCell.get(target.value) === counter && compute.operator === '++' ? null : undefined
+    return target && readsCounter(target) && compute.operator === '++' ? null : undefined
   }
   if (compute.form !== 'binary' || compute.operator !== '+') return undefined
   const [left, right] = compute.operands
   if (!left || !right) return undefined
-  if (readsCell.get(left.value) === counter) return right
-  if (readsCell.get(right.value) === counter) return left
+  if (readsCounter(left)) return right
+  if (readsCounter(right)) return left
   return undefined
 }
 
@@ -1082,6 +1182,7 @@ interface WindowCandidate {
   readonly bases: readonly DenseOffset[]
   readonly operations: readonly IrNonTerminatorOperation[]
   readonly signed: readonly IrNonTerminatorOperation[]
+  readonly checked: boolean
 }
 
 interface WindowRecord {
@@ -1098,6 +1199,8 @@ interface WindowRecord {
   readonly operations: IrNonTerminatorOperation[]
   /** The accesses whose index is a remainder and may be negative (`DenseAccess.signed`). */
   readonly signed: IrNonTerminatorOperation[]
+  /** Some access's index is not the counter plus invariants (`DenseArray.checked`). */
+  checked: boolean
   sound: boolean
 }
 
@@ -1164,6 +1267,8 @@ const heldArrayOf = (
 
 interface WindowContext {
   readonly body: IrBody
+  /** The operations that run none of the program's code (`borrowSafeOperationsOf` with the target's field answer). */
+  readonly nativeOperations: ReadonlySet<IrNonTerminatorOperation>
   /** Every value's producer carrier, before a use site applies flow narrowing. */
   readonly values: ReadonlyMap<IrValueId, Representation>
   readonly readsCell: ReadonlyMap<IrValueId, DeclarationId>
@@ -1187,7 +1292,7 @@ interface WindowContext {
  */
 const windowsOfLoop = (blocks: ReadonlySet<IrBlockId>, body: IrBody, context: WindowContext): readonly WindowCandidate[] => {
   const byReference = new Map<string, WindowRecord>()
-  const nativeOperations = borrowSafeOperationsOf(body)
+  const nativeOperations = context.nativeOperations
   // No pointer may outlive a callback that can replace/detach its storage.
   // Numeric typed-array writes alias bytes but cannot invalidate geometry.
   const nativeOnly = [...blocks].every((id) => body.blocks.get(id)?.operations.every((operation) => nativeOperations.has(operation)))
@@ -1235,9 +1340,44 @@ const windowsOfLoop = (blocks: ReadonlySet<IrBlockId>, body: IrBody, context: Wi
       if (typed !== null && ((wrapped && modulus === null) || held.reference.kind === 'element')) continue
       const base = wrapped ? null : indexBaseOf(operation.key, context, blocks)
       const found = byReference.get(key)
+      // An unbounded index into a typed view still takes the view once; the
+      // access checks itself against the length the preheader read.
+      if (base === undefined && typed !== null && !wrapped) {
+        if (!found)
+          byReference.set(key, {
+            ...held,
+            element,
+            typed,
+            wrapped,
+            modulus,
+            bases: [],
+            operations: [operation],
+            signed: [],
+            checked: true,
+            sound: true
+          })
+        else if (found.wrapped) found.sound = false
+        else {
+          found.checked = true
+          found.operations.push(operation)
+        }
+        continue
+      }
       if (base === undefined) {
         if (found) found.sound = false
-        else byReference.set(key, { ...held, element, typed, wrapped, modulus, bases: [], operations: [], signed: [], sound: false })
+        else
+          byReference.set(key, {
+            ...held,
+            element,
+            typed,
+            wrapped,
+            modulus,
+            bases: [],
+            operations: [],
+            signed: [],
+            checked: false,
+            sound: false
+          })
         continue
       }
       if (!found) {
@@ -1250,6 +1390,7 @@ const windowsOfLoop = (blocks: ReadonlySet<IrBlockId>, body: IrBody, context: Wi
           bases: [base],
           operations: [operation],
           signed: signed ? [operation] : [],
+          checked: false,
           sound: true
         })
         continue

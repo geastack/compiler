@@ -2,8 +2,9 @@ import type { DeclarationId, FunctionId, IrValueId } from '../identity/ids.js'
 import type { ClassLayout, ClassMethod } from '../projection/classes.js'
 import { abiOfCallee } from '../projection/callee.js'
 import {
+  classDynamicMethodShadowOf,
   classFamilyOverridesOf,
-  classMethodValueArmsOf,
+  classPresentMethodArmsOf,
   classPrototypeMethodKeysOf,
   classPrototypeMethodValueArmsOf
 } from '../projection/dispatch.js'
@@ -94,6 +95,11 @@ export const nativeMethodSourceInputsOf = (
       return null
     })
   const abiOf = (callable: FunctionId): CallableAbi | null => abis.get(callable) ?? null
+  // A shadow a dynamic write installed is read out of the expando table as the
+  // slot would have held it: the method's own convention, without a receiver
+  // (`ClassLayout.dynamicMethodShadows`).
+  const shadowOf = (abi: CallableAbi): Representation => ({ kind: 'function-value-dispatch', abi: { ...abi, receiver: null } })
+  const shadows: Representation[] = []
   const union = operation.receiver.representation.kind === 'tagged-union'
   for (const receiver of receiverArmsOf(operation.receiver.representation)) {
     if (receiver.kind !== 'class-ref') continue
@@ -115,13 +121,14 @@ export const nativeMethodSourceInputsOf = (
           if (abi !== null) add(key, method!.callable, 'prototype', { kind: 'function-value-dispatch', abi })
           const own = classMethodOverrideOf(classes, arm.allocation, key)
           if (own !== null) add(key, null, 'own', own.value)
+          else if (abi !== null && classDynamicMethodShadowOf(classes, arm.allocation, key)) add(key, null, 'own', shadowOf(abi))
         }
         continue
       }
       if (member?.kind !== 'method') continue
       const overridden = !staticDispatch && classFamilyOverridesOf(classes, receiver.declaration, key).length > 0
       const methods: readonly ClassMethod[] = overridden
-        ? (classMethodValueArmsOf(classes, receiver.declaration, key)?.map((arm) => arm.method) ?? [])
+        ? (classPresentMethodArmsOf(classes, receiver.declaration, key)?.map((arm) => arm.method) ?? [])
         : [member.method]
       for (const method of methods) {
         const selected = union
@@ -131,9 +138,12 @@ export const nativeMethodSourceInputsOf = (
             : method
         const abi = selected.callable === null ? null : abiOf(selected.callable)
         if (abi !== null) add(key, selected.callable, 'prototype', { kind: 'function-value-dispatch', abi })
+        if (abi !== null && !staticDispatch && classDynamicMethodShadowOf(classes, receiver.declaration, key)) shadows.push(shadowOf(abi))
       }
       const own = staticDispatch ? null : classMethodOverrideOf(classes, receiver.declaration, key)
       if (own !== null) add(key, null, 'own', own.value)
+      else for (const shadow of shadows.splice(0)) add(key, null, 'own', shadow)
+      shadows.length = 0
     }
   }
   return [...inputs.values()]

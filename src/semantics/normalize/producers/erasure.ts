@@ -17,19 +17,22 @@ import ts from '#typescript'
  * silent -- so there is one, and it is the only one.
  */
 export const unwrapErased = (node: ts.Node): ts.Node => {
+  // One switch on the kind rather than five `ts.is*` calls: the value-flow
+  // solver unwraps every expression it interns, hundreds of millions of times
+  // on a large program, and almost none of them are wrapped.
   let current = node
   for (;;) {
-    if (
-      ts.isParenthesizedExpression(current) ||
-      ts.isNonNullExpression(current) ||
-      ts.isAsExpression(current) ||
-      ts.isSatisfiesExpression(current) ||
-      ts.isTypeAssertionExpression(current)
-    ) {
-      current = current.expression
-      continue
+    switch (current.kind) {
+      case ts.SyntaxKind.ParenthesizedExpression:
+      case ts.SyntaxKind.NonNullExpression:
+      case ts.SyntaxKind.AsExpression:
+      case ts.SyntaxKind.SatisfiesExpression:
+      case ts.SyntaxKind.TypeAssertionExpression:
+        current = (current as ts.ParenthesizedExpression).expression
+        continue
+      default:
+        return current
     }
-    return current
   }
 }
 

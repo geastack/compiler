@@ -503,19 +503,34 @@ export const geaHostNamespacePropertySetters = (): ReadonlyMap<string, string> =
 /** The host's free functions, by the name the program writes. */
 export const geaHostFunctions = (): ReadonlyMap<string, string> => flatTable(geaShims()?.embeddedHostFunctions)
 
-/** The declaration authority already selected for this host's native signatures. */
-export const geaCoreDeclarationFileName = (options?: PluginOptions): string =>
-  resolve(
-    options?.get('gea.native-signature-core-root') ??
-      process.env.GEA_CORE_DIR ??
-      dirname(packageLoader.resolve('@geastack/core/package.json')),
-    'index.d.ts'
-  )
+/** `@geastack/core`'s installed root; `null` when it is not installed, which is a configuration, as with the shims above. */
+const installedGeaCoreRoot = (): string | null => {
+  try {
+    return dirname(packageLoader.resolve('@geastack/core/package.json'))
+  } catch (error) {
+    if ((error as { code?: string }).code === 'MODULE_NOT_FOUND') return null
+    throw error
+  }
+}
+
+/**
+ * The declaration authority already selected for this host's native signatures.
+ * `null` when nothing names one and `@geastack/core` is not installed: a
+ * program compiled without gea (a Node server, a library's test fixture) has no
+ * gea provider to recognize, and must not fail to start for lack of one.
+ */
+export const geaCoreDeclarationFileName = (options?: PluginOptions): string | null => {
+  const root = options?.get('gea.native-signature-core-root') ?? process.env.GEA_CORE_DIR ?? installedGeaCoreRoot()
+  return root === null ? null : resolve(root, 'index.d.ts')
+}
 
 export const geaNativeFunctionDeclarations = (options: PluginOptions): readonly NativeHostFunctionDeclaration[] => {
   const sources = geaShims()?.nativeFunctionSignatureSources ?? {}
   if (Object.keys(sources).length === 0) return []
-  const coreRoot = dirname(geaCoreDeclarationFileName(options))
+  const coreDeclarationFileName = geaCoreDeclarationFileName(options)
+  if (coreDeclarationFileName === null)
+    throw new Error('gea host shims state native function signatures, but @geastack/core is not installed')
+  const coreRoot = dirname(coreDeclarationFileName)
   const functions = geaHostFunctions()
   return Object.entries(sources).map(([name, source]) => {
     const cppFunction = functions.get(name)

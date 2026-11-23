@@ -1,7 +1,7 @@
 import type { GetOperation } from '../../../ir/model.js'
 import type { ClassMethod } from '../../../projection/classes.js'
 import type { CallableAbi, Representation } from '../../../representation/model.js'
-import { classMethodValueArmsOf } from '../../../projection/dispatch.js'
+import { classAbstractMemberMissesAt, classPrototypeMethodValueArmsOf } from '../../../projection/dispatch.js'
 import {
   heldMethodCopyOf as projectedHeldMethodCopyOf,
   publishedMethodCopyOf as projectedPublishedMethodCopyOf
@@ -26,7 +26,8 @@ export const computedOverriddenMethodValueText = (
     operandText(ctx, operation.receiver),
     key,
     materialize,
-    abiOfCallee(operation.result.representation)
+    abiOfCallee(operation.result.representation),
+    operation.result.representation
   )
 }
 
@@ -39,21 +40,35 @@ export const overriddenMethodValueText = (
   receiverText: string,
   key: string,
   materialize: (method: ClassMethod) => { readonly text: string; readonly type: string },
-  held: CallableAbi | null = null
+  held: CallableAbi | null = null,
+  carrier: Representation | null = null
 ): { readonly text: string; readonly type: string } => {
-  const arms = receiver.kind === 'class-ref' ? classMethodValueArmsOf(ctx.classes, receiver.declaration, key) : null
-  if (arms === null)
+  const arms = receiver.kind === 'class-ref' ? classPrototypeMethodValueArmsOf(ctx.classes, receiver.declaration, key) : null
+  const complete =
+    arms !== null &&
+    arms.some((arm) => arm.method !== null) &&
+    arms.every((arm) => (arm.method !== null && arm.owner !== null) || classAbstractMemberMissesAt(ctx.classes, arm.allocation, key))
+  if (!complete)
     throw createCppEmitBlockedError(
       'property-access:computed-class-method-virtual',
       `computed method "${key}" has no complete native prototype selection for this family`
     )
   const values = arms.map((arm) => {
+    if (arm.method === null) return { ...arm, text: null, type: null }
     const method = held === null ? arm.method : heldMethodCopyOf(ctx, arm.method, key, held)
     return { ...arm, ...materialize(method) }
   })
-  const type = values[0]!.type
+  const type = values.find((arm) => arm.type !== null)!.type!
+  // An instance of the abstract class itself reads `undefined`; the empty
+  // callable is that value, and calling it raises the TypeError JS raises for
+  // calling `undefined` -- after the arguments are evaluated, as JS orders it.
+  if (values.some((arm) => arm.text === null) && carrier?.kind !== 'function-value-dispatch')
+    throw createCppEmitBlockedError(
+      'property-access:computed-class-method-virtual',
+      `computed method "${key}" misses on an abstract allocation, and its carrier has no empty callable to stand for undefined`
+    )
   const branches = values.map(
-    (arm) => `if (gea::host::hasNativeClassLayoutRef<${cppClassName(arm.allocation)}>(${receiverText})) return ${arm.text};`
+    (arm) => `if (gea::host::hasNativeClassLayoutRef<${cppClassName(arm.allocation)}>(${receiverText})) return ${arm.text ?? `${type}()`};`
   )
   return { type, text: `([&]() -> ${type} { ${branches.join(' ')} std::abort(); })()` }
 }

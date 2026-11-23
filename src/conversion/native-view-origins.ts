@@ -1,5 +1,5 @@
 import type { ConversionCapability, ConversionNode, ConversionNodeResolver } from './algebra.js'
-import type { RecordViewPlan, RecordViewSource } from './record-view.js'
+import { dispatchedHomesOf, type RecordViewPlan, type RecordViewSource } from './record-view.js'
 import type { NativeFieldViewPlan } from './native-field-view.js'
 import type { Representation } from '../representation/model.js'
 
@@ -32,8 +32,8 @@ export const nativeViewOriginsOf = (nodes: Iterable<ConversionNode>, resolve?: C
         for (const arm of plan.arms) if (typeof arm.via === 'object') visitPlan(arm.via)
         return
       case 'iterator-result':
-        if (plan.yieldHome.payload !== null) visitPlan(plan.yieldHome.payload)
-        if (plan.returnHome.payload !== null) visitPlan(plan.returnHome.payload)
+      case 'present-field':
+        for (const home of dispatchedHomesOf(plan)) if (home.payload !== null) visitPlan(home.payload)
         return
       case 'fields':
         if (

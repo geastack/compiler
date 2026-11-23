@@ -183,6 +183,7 @@ export const isRecordViewTarget = (value: Representation): value is RecordViewTa
 export const recordViewDispatchesArms = (plan: RecordViewPlan): boolean =>
   plan.kind === 'dispatch' ||
   plan.kind === 'iterator-result' ||
+  plan.kind === 'present-field' ||
   ((plan.kind === 'optional' || plan.kind === 'assert') && recordViewDispatchesArms(plan.payload))
 
 export type RecordViewPlan =
@@ -258,6 +259,24 @@ export type RecordViewPlan =
       readonly yieldHome: IteratorResultHome
       readonly returnHome: IteratorResultHome
     }
+  /**
+   * A record two arms of a sum both take, told apart by whether ONE of its
+   * fields holds a value at run time: `{ serverSelectionTimeoutMS, waitQueueTimeoutMS,
+   * timeoutMS }` with `timeoutMS: number | undefined` entering `(Legacy |
+   * Timed) & { session? }`, where only `Timed` requires `timeoutMS`. The arm
+   * that requires the field is built when it holds a value and the other when
+   * it does not, because that is what the program's own `typeof v.timeoutMS ===
+   * 'number'` asks of the object and no carrier answers it statically. Either
+   * arm keeps every key the record holds, so nothing but the arm is decided.
+   */
+  | {
+      readonly kind: 'present-field'
+      readonly source: Extract<Representation, { kind: 'record' }>
+      readonly target: TaggedUnion
+      readonly key: string
+      readonly presentHome: IteratorResultHome
+      readonly absentHome: IteratorResultHome
+    }
   | {
       readonly kind: 'fields'
       readonly source: RecordViewSource
@@ -282,7 +301,7 @@ export type RecordViewPlan =
       readonly spilled?: readonly { readonly held: RecordField; readonly index: RecordIndexSidecar }[]
     }
 
-/** One arm of an `iterator-result` plan; `payload` null when the registry converts the pair without a view. */
+/** One arm of an `iterator-result` or `present-field` plan; `payload` null when the registry converts the pair without a view. */
 export interface IteratorResultHome {
   readonly index: number
   readonly payload: RecordViewPlan | null
@@ -375,7 +394,8 @@ export const recordViewUsesOnlyDirectFields = (plan: RecordViewPlan, heldPairUnu
     case 'recast-union':
       return plan.arms.every((arm) => arm.via === 'exact' || (arm.via !== 'convert' && direct(arm.via)))
     case 'iterator-result':
-      return [plan.yieldHome, plan.returnHome].every((home) => {
+    case 'present-field':
+      return dispatchedHomesOf(plan).every((home) => {
         const arm = plan.target.arms[home.index]
         return home.payload !== null
           ? direct(home.payload)
@@ -429,7 +449,8 @@ export const recordViewResidualReflection = (plan: RecordViewPlan, heldPairUnuse
       case 'dispatch':
         return inner.arms.every((arm) => arm.via === 'exact' || arm.via === 'absent' || (arm.via !== 'convert' && walk(arm.via)))
       case 'iterator-result':
-        return [inner.yieldHome, inner.returnHome].every((home) => {
+      case 'present-field':
+        return dispatchedHomesOf(inner).every((home) => {
           if (home.payload !== null) return walk(home.payload)
           const arm = inner.target.arms[home.index]
           return arm !== undefined && representationKey(inner.source) === representationKey(arm.value)
@@ -564,6 +585,64 @@ const iteratorResultHomes = (
   return firstDone.required ? { returnHome: first, yieldHome: second } : { returnHome: second, yieldHome: first }
 }
 
+/** The homes a dispatching plan builds, in no particular order. */
+export const dispatchedHomesOf = (
+  plan: Extract<RecordViewPlan, { kind: 'iterator-result' | 'present-field' }>
+): readonly IteratorResultHome[] =>
+  plan.kind === 'iterator-result' ? [plan.yieldHome, plan.returnHome] : [plan.presentHome, plan.absentHome]
+
+/**
+ * Two homes a record ties between, decided by one field the record holds as
+ * `T | undefined`: exactly one of them requires that field as a present value
+ * and NOTHING else the record may lack, and the other requires nothing the
+ * record may lack. Every other required field of either arm is held as a
+ * present value, so each home is total on its side of the test.
+ */
+const presentFieldHomes = (
+  layouts: RecordLayoutPolicy,
+  source: Representation,
+  target: TaggedUnion,
+  homes: readonly IteratorResultHome[]
+): { readonly key: string; readonly presentHome: IteratorResultHome; readonly absentHome: IteratorResultHome } | null => {
+  if (homes.length !== 2 || source.kind !== 'record') return null
+  const held = new Map(source.fields.map((field) => [field.key, field]))
+  const mayBeAbsent = (key: string): boolean => {
+    const field = held.get(key)
+    return field === undefined || !field.required || holdsAbsence(field.value)
+  }
+  // The fields an arm needs present that the record may not hold, or null
+  // when the arm needs one the record never holds at all.
+  const needs = (home: IteratorResultHome): readonly string[] | null => {
+    const arm = target.arms[home.index]?.value
+    const fields =
+      arm?.kind === 'record' ? arm.fields : arm?.kind === 'native-record-ref' && arm.native === null ? layouts.forShape(arm.shapeId) : null
+    if (fields === null || fields === undefined) return null
+    const keys: string[] = []
+    for (const field of fields) {
+      if (!field.required || holdsAbsence(field.value) || !mayBeAbsent(field.key)) continue
+      if (!held.has(field.key)) return null
+      keys.push(field.key)
+    }
+    return keys
+  }
+  const [first, second] = homes as [IteratorResultHome, IteratorResultHome]
+  const firstNeeds = needs(first)
+  const secondNeeds = needs(second)
+  if (firstNeeds === null || secondNeeds === null) return null
+  const [presentHome, absentHome, key] =
+    firstNeeds.length === 1 && secondNeeds.length === 0
+      ? [first, second, firstNeeds[0]!]
+      : secondNeeds.length === 1 && firstNeeds.length === 0
+        ? [second, first, secondNeeds[0]!]
+        : [null, null, null]
+  if (presentHome === null || key === null) return null
+  // The test reads the held value's presence flag: an `undefined`-absent
+  // optional, the one carrier whose empty state is exactly "holds no value".
+  const field = held.get(key)!
+  if (field.value.kind !== 'optional' || field.value.absence !== 'undefined') return null
+  return { key, presentHome, absentHome }
+}
+
 /** Whether a carrier has a state for an absent value -- what an `undefined` a record really holds can be stored as. */
 export const holdsAbsence = (carrier: Representation): boolean =>
   carrier.kind === 'optional' ||
@@ -661,6 +740,9 @@ export const structuralRecordViewPlan = (
     // its `value: any` takes anything -- answers wrongly for one of them.
     const byDone = iteratorResultHomes(layouts, source, target, homes)
     if (byDone !== null) return { kind: 'iterator-result', source, target, ...byDone }
+    const byPresence = presentFieldHomes(layouts, source, target, homes)
+    if (byPresence !== null)
+      return { kind: 'present-field', source: source as Extract<Representation, { kind: 'record' }>, target, ...byPresence }
     const exact =
       homes.length > 1 ? homes.filter((candidate) => !widensFieldIntoDynamic(layouts, source, target.arms[candidate.index]!.value)) : homes
     const home =

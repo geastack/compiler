@@ -79,7 +79,9 @@ test('erased construction remains native without inventing an unimplemented meth
   assert.doesNotMatch(result.source!, /is abstract and no class/)
 })
 
-test('an evaluated native method read requires an executable body instead of an aborting callable substitute', () => {
+// The lookup on an instance of an abstract base misses, as it does in
+// JavaScript: the call is a TypeError the program can catch, never an abort.
+test('a call of an abstract member on its own base throws instead of aborting', () => {
   const root = resolve('test/runtime/dynamic-host-argument-waiver-probe.ts')
   for (const implementation of [false, true]) {
     const result = compile({
@@ -98,18 +100,11 @@ test('an evaluated native method read requires an executable body instead of an 
       includeIr: true
     })
     assert.equal(result.diagnostics.clean, true, JSON.stringify(result.diagnostics.diagnostics))
-    if (implementation) {
-      assert.notEqual(result.certificate, null, JSON.stringify(result.refusals))
-      assert.notEqual(result.source, null, JSON.stringify(result.refusals))
-    } else {
-      assert.equal(result.certificate, null)
-      assert.equal(result.source, null)
-      assert.ok(
-        result.certification?.refusals.some((refusal) => refusal.key === 'property-access:computed-class-method-virtual'),
-        JSON.stringify(result.refusals)
-      )
-      assert.equal(result.emissionRefusals.length, 0, 'the missing body must be rejected before printing')
-    }
+    assert.notEqual(result.certificate, null, JSON.stringify(result.refusals))
+    assert.notEqual(result.source, null, JSON.stringify(result.refusals))
+    assert.equal(result.emissionRefusals.length, 0)
+    assert.doesNotMatch(result.source!, /is abstract and no class/)
+    if (!implementation) assert.match(result.source!, /TypeError/)
   }
 })
 

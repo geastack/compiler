@@ -1,3 +1,4 @@
+import { progress } from '../frontend-timing.js' // WIP-SOLVER-TIMING: not for commit
 import { callableCompletionSummaryOf } from './flow/callable-completions.js'
 import { relative } from 'node:path'
 import ts from '#typescript'
@@ -1225,9 +1226,133 @@ export const censusGlobalHostMutations = (
    * instance). Without it the answer is identity only -- the global object, a
    * standard-library binding, or a local cell some write fills with one.
    */
+  // Defined ahead of every census consumer: `isIntrinsicSurface` asks it while
+  // the alias facts below are still being built.
+  const completionValuesOf = (declaration: ts.SignatureDeclaration): readonly ts.Expression[] => {
+    const summary = callableCompletionSummaryOf(flow, declaration)
+    return summary === null ? [] : [...summary.values, ...summary.yields]
+  }
+  /**
+   * What a call resolved to a source method can complete with: the values of
+   * that body and of every override a class below its declaring class
+   * supplies, since a receiver typed as the declaring class may hold any of
+   * them. An abstract declaration contributes no body: an instance of its own
+   * class misses the lookup and throws before completing. A class whose
+   * `extends` this scan cannot resolve might be a subclass, so it counts. A
+   * write to the slot, a non-method member under the name, or a body whose
+   * completion this census cannot state leaves the answer unknown (`null`).
+   */
+  const methodCompletionValues = new Map<ts.MethodDeclaration, readonly ts.Expression[] | null>()
+  let programClasses: readonly ts.ClassLikeDeclaration[] | null = null
+  const methodFamilyCompletionValuesOf = (declaration: ts.MethodDeclaration): readonly ts.Expression[] | null => {
+    const known = methodCompletionValues.get(declaration)
+    if (known !== undefined) return known
+    const answer = methodFamilyCompletionValuesUncached(declaration)
+    methodCompletionValues.set(declaration, answer)
+    return answer
+  }
+  const methodFamilyCompletionValuesUncached = (declaration: ts.MethodDeclaration): readonly ts.Expression[] | null => {
+    if ((ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Static) !== 0) return null
+    const owner = declaration.parent
+    const name = declaration.name
+    if (!ts.isClassLike(owner) || !(ts.isIdentifier(name) || ts.isPrivateIdentifier(name))) return null
+    const slot = checker.getSymbolAtLocation(name)
+    if (slot === undefined || flow.writesToSymbol(slot).length > 0) return null
+    const family = new Set<ts.ClassLikeDeclaration>([owner])
+    const classes = (programClasses ??= nodes.filter(
+      (node): node is ts.ClassLikeDeclaration => ts.isClassDeclaration(node) || ts.isClassExpression(node)
+    ))
+    for (let grew = true; grew;) {
+      grew = false
+      for (const candidate of classes) {
+        if (family.has(candidate)) continue
+        const heritage = candidate.heritageClauses?.find((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword)?.types[0]
+        if (!heritage) continue
+        const extended = actualSymbol(checker.getSymbolAtLocation(unwrapErasedExpression(heritage.expression)))?.valueDeclaration
+        if (extended === undefined || !ts.isClassLike(extended) || family.has(extended)) {
+          family.add(candidate)
+          grew = true
+        }
+      }
+    }
+    const values: ts.Expression[] = []
+    let implemented = false
+    for (const member of family) {
+      for (const element of member.members) {
+        if (element.name === undefined || !(ts.isIdentifier(element.name) || ts.isPrivateIdentifier(element.name))) continue
+        if (element.name.text !== name.text) continue
+        if (!ts.isMethodDeclaration(element)) return null
+        if ((ts.getCombinedModifierFlags(element) & ts.ModifierFlags.Static) !== 0) continue
+        if (element.body === undefined) continue
+        const completed = completionValuesOf(element)
+        if (completed.length === 0) return null
+        implemented = true
+        values.push(...completed)
+      }
+    }
+    return implemented ? values : null
+  }
+  /**
+   * Whether a call always completes with an object this program allocated
+   * itself -- an object or array literal -- read through const-like locals
+   * and further such calls. It asks nothing of the callee's parameters or
+   * receiver: a refused invocation (one whose argument forwarding this census
+   * could not model) can still be known to return a fresh object, which is
+   * neither the global object nor an intrinsic.
+   */
+  const callReturnsFreshObject = (call: ts.CallExpression, seen: Set<ts.Node>): boolean => {
+    if (seen.has(call) || seen.size > 32) return false
+    seen.add(call)
+    try {
+      return callCompletionsAreFresh(call, seen)
+    } finally {
+      seen.delete(call)
+    }
+  }
+  const callCompletionsAreFresh = (call: ts.CallExpression, seen: Set<ts.Node>): boolean => {
+    const declaration = checker.getResolvedSignature(call)?.declaration
+    if (declaration === undefined || ts.isJSDocSignature(declaration) || declaration.getSourceFile().isDeclarationFile) return false
+    let completions: readonly ts.Expression[] | null = null
+    if (ts.isMethodDeclaration(declaration)) completions = methodFamilyCompletionValuesOf(declaration)
+    else if (ts.isFunctionDeclaration(declaration) && declaration.body !== undefined && declaration.name !== undefined) {
+      // A function's own `return` values are filed under it too; only an
+      // assignment to the binding replaces the function.
+      const written = flow
+        .writesToDeclaration(declaration)
+        .some(
+          (write) =>
+            write.slot === 'whole' &&
+            (write.edge === 'identifier-assignment' || write.edge === 'compound-assignment' || write.edge === 'logical-assignment')
+        )
+      const symbol = checker.getSymbolAtLocation(declaration.name)
+      if (!written && symbol !== undefined && (symbol.declarations?.length ?? 0) === 1) completions = completionValuesOf(declaration)
+    }
+    return completions !== null && completions.length > 0 && completions.every((value) => valueIsFreshObject(value, seen))
+  }
+  const valueIsFreshObject = (expression: ts.Expression, seen: Set<ts.Node>): boolean => {
+    const current = unwrapErasedExpression(expression)
+    if (ts.isObjectLiteralExpression(current) || ts.isArrayLiteralExpression(current)) return true
+    if (ts.isConditionalExpression(current))
+      return valueIsFreshObject(current.whenTrue, seen) && valueIsFreshObject(current.whenFalse, seen)
+    if (ts.isCallExpression(current)) return callReturnsFreshObject(current, seen)
+    if (!ts.isIdentifier(current)) return false
+    const binding = bindingOf(current)
+    if (binding === null || !ts.isVariableDeclaration(binding) || seen.has(binding)) return false
+    seen.add(binding)
+    try {
+      const writes = flow.writesToDeclaration(binding).filter((write) => write.slot === 'whole')
+      return writes.length > 0 && writes.every((write) => write.value !== null && valueIsFreshObject(write.value, seen))
+    } finally {
+      seen.delete(binding)
+    }
+  }
   const isIntrinsicSurface = (expression: ts.Expression, seen: ReadonlySet<ts.Node> = new Set(), byType = true): boolean => {
     const current = unwrapErasedExpression(expression)
     if (hasFreshLiteralIdentity(current)) return false
+    // A value that is always the program's own fresh allocation (a literal,
+    // read through locals and calls whose every runnable body returns one) is
+    // that allocation, whatever intrinsic its declared type admits.
+    if (valueIsFreshObject(current, new Set())) return false
     if (
       isProvenGlobalObject(current) ||
       (byType &&
@@ -2056,7 +2181,12 @@ export const censusGlobalHostMutations = (
       // backs it, so it carries no publication dependency -- and must still
       // go through the same memo the rest of this function writes, or the
       // dependency solver below never sees it as grounded and discards it.
-      const result = publishedTypeRepresentation(publishedTypeAt(current), current)
+      //
+      // A result type an intrinsic could inhabit (`Document`) still publishes
+      // `object` when every body the call can run returns a fresh allocation
+      // of its own (`callReturnsFreshObject`), which reads no parameter.
+      const result =
+        publishedTypeRepresentation(publishedTypeAt(current), current) ?? (callReturnsFreshObject(current, new Set()) ? 'object' : null)
       publishedRepresentations.set(current, result)
       return result
     }
@@ -2762,7 +2892,14 @@ export const censusGlobalHostMutations = (
   // that walk, once the shared layout grows per-binding-element slots.
   const frameForwardingIsModelled = (frame: SourceInvocationFrame): boolean =>
     frame.forwarding.kind === 'values' || frame.forwarding.reason === 'destructured-parameter'
+  let wipSites = 0 // WIP-SOLVER-TIMING
+  let wipClosedMs = 0
+  let wipSlowest = 0
   for (const site of reachableFlowCalls) {
+    if (++wipSites % 500 === 0)
+      progress(
+        `host-mutations call sites ${wipSites}/${reachableFlowCalls.length}, closedCalleeBodiesOf ${(wipClosedMs / 1000).toFixed(1)}s, slowest ${(wipSlowest / 1000).toFixed(1)}s`
+      )
     const explicitDeclaration = site.explicitThis ? flow.targetOf(site.explicitThis.callee)?.declaration : null
     const staticDeclaration =
       explicitDeclaration && ts.isFunctionLike(explicitDeclaration)
@@ -2893,7 +3030,17 @@ export const censusGlobalHostMutations = (
       // authority, which knows about the escape, so `sink( receiver );
       // receiver.run( globalThis )` was admitted as running only program bodies
       // and never asked whether it hands the global object to an open callee.
+      if (wipSites >= Number(process.env['GEA_WIP_TRACE_FROM'] ?? Infinity)) {
+        const wipFile = site.call.getSourceFile()
+        progress(
+          `host-mutations site ${wipSites} ${wipFile.fileName.split('/').pop()}:${wipFile.getLineAndCharacterOfPosition(site.call.getStart(wipFile)).line + 1} ${site.call.getText(wipFile).replace(/\s+/g, ' ').slice(0, 100)}`
+        )
+      }
+      const wipAt = performance.now()
       const closedBodies = callableFrames.closedCalleeBodiesOf?.(site.call) ?? null
+      const wipTook = performance.now() - wipAt
+      wipClosedMs += wipTook
+      if (wipTook > wipSlowest) wipSlowest = wipTook
       const allocationProven =
         process.env['GEA_NO_ALLOCATION_PROVEN'] !== '1' &&
         closedBodies !== null &&
