@@ -472,7 +472,7 @@ fixed-field-define-property-widening.runtime.js.cpp e2af5c1a6166
 fixed-field-define-property.runtime.js.cpp ef569e0cafc0
 flat-over-tuples-and-from-entries-of-entries.ts.cpp 7fd2a585518f
 flat-record-reached-through-an-any-view-keeps-identity.runtime.ts.cpp 0d583a2a899a
-float32-stencil-hot-loop.ts.cpp 7fdd5329af56
+float32-stencil-hot-loop.ts.cpp d1501df39d98
 fn-classref.ts.cpp 2bca1c4f62bf
 fn-scalar.ts.cpp 0ebb1e179ff1
 for-await-break-closes-async-generator.runtime.ts.cpp e1d4abdec981
@@ -1220,7 +1220,7 @@ returned-inferred-union.js.cpp b583dbba9316
 returned-nested-union.js.cpp 9c4f39c94ce5
 returned-object-bag.js.cpp eb68242d9c8b
 reused-field-reads-name-the-field.runtime.ts.cpp 1c406e773cee
-runtime-module-int-const.ts.cpp a04b6e23931b
+runtime-module-int-const.ts.cpp 6ebaeb3f36a7
 runtime-size-mask-index.ts.cpp 76746dbe319a
 same-block-reads-before-last-transferring-use-move.runtime.ts.cpp 75ba46449fb5
 scalar-arm-member-read-into-open-result.runtime.js.cpp da8a701f36d7
