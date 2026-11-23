@@ -233,7 +233,9 @@ const packageLanes = [
   ['debugger', 'debugger', ['check']],
   ['apple', 'apple/packages/geastack-apple', ['build']],
   // The repo tests import the plugin's dist/.
-  ['apple', 'apple/packages/geatsc-plugin-apple-native', ['build']]
+  ['apple', 'apple/packages/geatsc-plugin-apple-native', ['build']],
+  // Its JSX tests import its dist/; its own `test` script builds it first.
+  ['apple', 'apple/packages/geajs-apple-swiftui', ['build']]
 ]
 for (const [lane, path, scripts, env] of packageLanes) {
   if (!wanted(lane)) continue
