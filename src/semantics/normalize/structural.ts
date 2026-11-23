@@ -421,7 +421,7 @@ export const createStructuralMapper = (
   // asks the same question.
   const instantiatedMembersFor = createInstantiatedMembers(checker, specializations)
   // And one recurrence key for every view-independent cycle, for the same reason.
-  const viewIndependentKeyOf = createViewIndependentRecurrence(checker)
+  const viewIndependentKeyOf = createViewIndependentRecurrence(checker, (type) => linkFamilies.storageOf(type))
   // The ids those cycles settled on, for every view: a view that enters the
   // same cycle at another member (`State` where the first entered at
   // `State[]`) closes it through these instead of interning a second copy.

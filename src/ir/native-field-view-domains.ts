@@ -31,6 +31,14 @@ export interface NativeFieldStorageDomain {
    * `byteLength` are prototype accessors over the view's internal slots.
    */
   readonly nativeData?: true
+  /**
+   * A union's Array arm under an array-index key: the read is that Array's
+   * own element [[Get]] -- the element, or `undefined` for a hole or an index
+   * past its length -- so `read` is the element carrier made optional. A
+   * `Sort`-like union holding string arrays beside a Document-viewed tuple
+   * reads `t[1]` off each arm this way.
+   */
+  readonly arrayElement?: true
 }
 
 export interface NativeFieldViewDomains {
@@ -47,6 +55,11 @@ export interface NativeFieldViewDomains {
 }
 
 const binaryViewDataKeys = ['buffer', 'byteLength', 'byteOffset', 'length', 'BYTES_PER_ELEMENT'] as const
+
+const noRoutes: ReadonlyMap<string, readonly NativeFieldStorageDomain[]> = new Map()
+
+/** A canonical array index: the decimal spelling of an integer below 2^32 - 1. */
+const isArrayIndexKey = (key: string): boolean => /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < 4294967295
 
 const isDocumentPlan = (plan: NativeFieldViewPlan): boolean =>
   plan.source.kind === 'dictionary' && plan.fields.every((field) => field.declaredAnyEntry === true)
@@ -272,7 +285,9 @@ export const nativeFieldViewDomainsOf = (
         (arm) => arm.value.kind !== 'undefined' && arm.value.kind !== 'null' && arm.value.kind !== 'dynamic'
       )
       if (!ordinaryArm && !objectArms.some((arm) => domainsOf(arm.value) !== null)) return null
-      const arms = objectArms.map((arm) => domainsOf(arm.value, true, via))
+      // An Array arm names no keys of its own here; its index reads are
+      // answered per key below, from the element.
+      const arms = objectArms.map((arm) => (arm.value.kind === 'array-object' ? noRoutes : domainsOf(arm.value, true, via)))
       if (!arms.length || arms.some((arm) => arm === null)) return null
       // A per-arm union, not an intersection: a key only one arm stores (a
       // computed read, or a constant key some view-target arm declares --
@@ -287,8 +302,17 @@ export const nativeFieldViewDomainsOf = (
         let complete = true
         for (const [index, arm] of arms.entries()) {
           const held = arm!.get(key)
+          const array = objectArms[index]!.value
           if (held !== undefined) routes.push(...held)
-          else if (keyAbsentIn(objectArms[index]!.value, key, new Set())) {
+          else if (array.kind === 'array-object') {
+            if (array.extension !== null || !isArrayIndexKey(key)) {
+              complete = false
+              break
+            }
+            const read: Representation = { kind: 'optional', payload: array.element, absence: 'undefined' }
+            if (!routes.some((route) => route.arrayElement === true && representationKey(route.read) === representationKey(read)))
+              routes.push({ read, write: null, arrayElement: true })
+          } else if (keyAbsentIn(objectArms[index]!.value, key, new Set())) {
             if (!routes.some((route) => route.originalAbsent === true))
               routes.push({ read: { kind: 'undefined' }, write: null, originalAbsent: true })
           } else {

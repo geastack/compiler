@@ -41,10 +41,20 @@ export const compatibilityFieldReadSourcesOf = (operation: GetOperation, deriver
   )
     return []
   const receiver = operation.receiver.representation
-  if (receiver.kind === 'record' || receiver.kind === 'record-with-index') return receiver.fields
-  if (receiver.kind === 'class-ref' || (receiver.kind === 'native-record-ref' && receiver.native === null))
-    return recordFieldsOfShape(deriver, receiver.shapeId) ?? []
-  return []
+  const fields =
+    receiver.kind === 'record' || receiver.kind === 'record-with-index'
+      ? receiver.fields
+      : receiver.kind === 'class-ref' || (receiver.kind === 'native-record-ref' && receiver.native === null)
+        ? (recordFieldsOfShape(deriver, receiver.shapeId) ?? [])
+        : []
+  // A key whose domain the IR proved names only those fields: a class read by
+  // `command[key as keyof typeof MAP]` reaches its three numeric and Document
+  // members, never the `ns: string` beside them, which has no arm in the
+  // read's union. A key outside the domain is the route's unreachable tail.
+  const domain = operation.provenKeyTexts
+  if (domain === undefined) return fields
+  const named = fields.filter((field) => domain.includes(field.key))
+  return named.length > 0 ? named : fields
 }
 
 /** Property results produced by getter bodies and ordinary native property tables. */

@@ -684,6 +684,27 @@ const widensFieldIntoDynamic = (layouts: RecordLayoutPolicy, source: Representat
   })
 }
 
+/**
+ * A table whose every entry is `undefined` (`Record<string, never>`, the
+ * "fetch these credentials for me" marker) is no home for a record holding a
+ * required present field: reaching it reads that field as `undefined`, the
+ * chain's discard. `{ ...providers, azure }` storing an `AccessToken` into
+ * `{ accessToken: string } | Record<string, never> | ...` tied the empty
+ * table with the token's real arm and refused the pair.
+ */
+const emptyTableArmCannotHold = (layouts: RecordLayoutPolicy, source: Representation, arm: Representation): boolean => {
+  if (arm.kind !== 'dictionary' || arm.value.kind !== 'undefined') return false
+  const sourceFields =
+    source.kind === 'record' || source.kind === 'record-with-index'
+      ? source.fields
+      : source.kind === 'native-record-ref'
+        ? layouts.forShape(source.shapeId)
+        : null
+  const absent = (value: Representation): boolean =>
+    value.kind === 'undefined' || value.kind === 'void' || (value.kind === 'optional' && value.absence === 'undefined')
+  return sourceFields !== null && sourceFields.some((field) => field.required && !absent(field.value))
+}
+
 export const structuralRecordViewPlan = (
   layouts: RecordLayoutPolicy,
   source: Representation,
@@ -716,6 +737,7 @@ export const structuralRecordViewPlan = (
       // where it was the ONLY home it certified a discard, and a library's
       // `callback(error)` into `(err?: Error | null)` passed `undefined`.
       if (arm.value.kind === 'undefined' || arm.value.kind === 'null' || arm.value.kind === 'void') continue
+      if (emptyTableArmCannotHold(layouts, source, arm.value)) continue
       if (convertible(source, arm.value, 'sum-home')) {
         homes.push({ index, payload: null })
         continue

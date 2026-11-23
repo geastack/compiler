@@ -215,12 +215,32 @@ export const nativeFieldViewOperationNeedsReceipt = (
   hostNamespaces: HostNamespaceCensus | undefined,
   /** The read's constant key, when it has one. */
   key?: string | null,
-  layoutOf?: Pick<RepresentationDeriver, 'layoutOf'> | null
+  layoutOf?: Pick<RepresentationDeriver, 'layoutOf'> | null,
+  flow?: Pick<FieldFlow, 'nativeFieldStorageValues' | 'nativeFieldViewOrigins'> | null
 ): boolean =>
   !(hostNamespaces?.reads.has(operation.receiver.value) || hostNamespaces?.values.has(operation.receiver.value)) &&
-  (operation.kind === 'get' && key !== null && key !== undefined && operation.receiver.representation.kind === 'tagged-union'
+  (operation.kind === 'get' &&
+  key !== null &&
+  key !== undefined &&
+  (operation.receiver.representation.kind === 'tagged-union' || plainAllocationsOnly(operation.receiver.value, key, flow))
     ? unionReadNeedsReceipt(operation.receiver.representation, key, targets, layoutOf)
     : nativeFieldViewCarrierNeedsReceipt(operation.receiver.representation, targets))
+
+/**
+ * A plain record receiver answers a key its layout lacks with the ordinary
+ * [[Get]] only where every allocation behind it is a known plain one: an
+ * installed live view forwards the key to native slots whose dynamic
+ * observation exists only through a receipt's adapter (`options = {}` handed an
+ * `Object.assign` result viewed as `{}`).
+ */
+const plainAllocationsOnly = (
+  receiver: IrValueId,
+  key: string,
+  flow: Pick<FieldFlow, 'nativeFieldStorageValues' | 'nativeFieldViewOrigins'> | null | undefined
+): boolean => {
+  const slots = flow?.nativeFieldStorageValues.get(receiver)
+  return slots !== undefined && !slots.has(key) && flow?.nativeFieldViewOrigins?.has(receiver) !== true
+}
 
 /**
  * A constant-key read off a union is the per-arm dispatch of
@@ -232,6 +252,10 @@ export const nativeFieldViewOperationNeedsReceipt = (
  * node-compat's `Request` reads `init.body.type` after a call that may write
  * `init.body`, so the read is off the whole `BodyInit` union, and its
  * Document-viewed `ArrayBufferView` arm declares no `type`.
+ *
+ * A plain record receiver is that arm on its own: `options?.session` inside a
+ * generic `resolveOptions<T>` copy whose `T` is a literal record lacking
+ * `session` is the same ordinary [[Get]].
  */
 const unionReadNeedsReceipt = (
   value: Representation,
@@ -283,7 +307,9 @@ const fieldSourcesOf = (
   if (physical === null) return carried ?? (at === undefined ? null : (flow.nativeFieldViewAbsentRoutesOf?.(receiver, key) ?? null))
   // Physical allocation slots are the whole answer where they exist; a union
   // arm's certified absence speaks only for a receiver with none.
-  const domains = carried?.some((entry) => entry.originalAbsent === true || entry.dynamicGet === true || entry.nativeData === true)
+  const domains = carried?.some(
+    (entry) => entry.originalAbsent === true || entry.dynamicGet === true || entry.nativeData === true || entry.arrayElement === true
+  )
     ? undefined
     : carried
   const routes = physical.flatMap((read) => {
@@ -339,7 +365,9 @@ export const nativeFieldViewReadFor = (
     // guard proved, a TypeError for any other -- never an unchecked `get<k>`.
     const selected = recipeIsMaterializableWithoutPriorSourceGuard(unguarded, conversions.nodeById)
       ? unguarded
-      : (conversions.assertedUnionFor(source, target, false) ?? conversions.checkedClassFieldReadFor(source, target))
+      : (conversions.assertedUnionFor(source, target, false) ??
+        conversions.checkedClassFieldReadFor(source, target) ??
+        conversions.presentPayloadFor(source, target))
     if (selected === null || !recipeIsMaterializableWithoutPriorSourceGuard(selected, conversions.nodeById)) return null
     const previous = sources.get(representationKey(source))
     if (previous !== undefined && previous.conversion !== selected.id) {
@@ -468,7 +496,9 @@ export const nativeFieldViewWriteOf = (
   if (
     !data &&
     !accessor &&
-    descriptors?.some((entry) => entry.originalAbsent === true || entry.dynamicGet === true || entry.nativeData === true)
+    descriptors?.some(
+      (entry) => entry.originalAbsent === true || entry.dynamicGet === true || entry.nativeData === true || entry.arrayElement === true
+    )
   )
     return null
   const targets = new Map<string, NativeFieldViewWrite['targets'][number]>()

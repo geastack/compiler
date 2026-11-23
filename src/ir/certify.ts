@@ -1602,7 +1602,8 @@ const nativeFieldViewDemandsOf = (operation: IrOperation, ctx: CertifyContext): 
     ctx.nativeFieldViewTargets ?? new Set(),
     ctx.authenticatedHosts,
     key,
-    ctx.deriver
+    ctx.deriver,
+    ctx.nativeFieldViews
   )
   if (!required && receipt === undefined) return []
   const semantic = ctx.semanticOperationOf(operation.lineage)

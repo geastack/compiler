@@ -46,6 +46,7 @@ import {
   CAUGHT_HANDOFF_MATERIALIZER,
   ASSERTED_CLASS_DOWNCAST_MATERIALIZER,
   NULLISH_OPTIONAL_MATERIALIZER,
+  PRESENT_PAYLOAD_MATERIALIZER,
   NATIVE_BASE_VIEW_MATERIALIZER,
   IMPOSSIBLE_INDEX_READ,
   exactArmIndexOf,
@@ -5596,6 +5597,21 @@ const renderedRecipeText = (ctx: ConversionSite, node: ConversionNode, text: str
     return (
       `[](const gea::Value& gea_nullish) -> ${optionalType} { return gea_nullish.tag() == gea::Value::Tag::Null || ` +
       `gea_nullish.tag() == gea::Value::Tag::Undefined ? ${optionalType}() : ${optionalType}(${payload}); }(${text})`
+    )
+  }
+  // The census's checked read of a present payload (`nodes.ts`'s `presentPayloadFor`).
+  if (
+    node.capability.kind === 'static' &&
+    node.capability.materializer.id === PRESENT_PAYLOAD_MATERIALIZER &&
+    node.source.kind === 'optional'
+  ) {
+    const payloadNode = node.capability.materializer.dependencies?.[0]
+    if (!payloadNode || ctx.conversions.nodeById(payloadNode.id) !== payloadNode) return null
+    const payload = recipeText(ctx, payloadNode, '(*gea_present)')
+    if (payload === null) return null
+    return (
+      `[&](const auto& gea_present) -> ${cppTypeOf(node.target)} { if (!gea_present.has_value()) ` +
+      `gea::host::throwRuntimeError("TypeError", "a value the program proved present was absent"); return ${payload}; }(${text})`
     )
   }
   // The census's checked class downcast for an `as Derived` receiver

@@ -57,6 +57,7 @@ const emptyConversions = (nodes = new Map<string, ConversionNode>()): Conversion
   nativeBufferMethodFor: () => null,
   checkedFieldReadFor: () => null,
   checkedClassFieldReadFor: () => null,
+  presentPayloadFor: () => null,
   nativeObjectSampleFor: () => null,
   nativeDescriptorSnapshotFor: () => null,
   dictionaryReadFor: () => null,

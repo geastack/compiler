@@ -214,6 +214,33 @@ export const documentRecordViewPlanOf = (
 }
 
 /** Wrappers retain every live source arm and cite their own exact absence conversions. */
+/**
+ * The zero-field record the bare `object` keyword lowers to
+ * (`structural.ts`): it has no layout to read a field from, and every own
+ * property lives in its dynamic sidecar, so it is viewed as the open Document
+ * it is before a typed record reads it -- `throw new
+ * MongoWriteConcernError(writeConcernError as any)` hands an `object | null`
+ * local to a typed result interface.
+ */
+const documentTakesTableArm = (
+  from: Extract<Representation, { kind: 'dictionary' }>,
+  arm: Representation,
+  accepted: AcceptedConversion,
+  resolve?: ConversionNodeResolver
+): boolean => {
+  if (arm.kind !== 'dictionary' || arm.key !== from.key || arm.value.kind === 'undefined') return false
+  const conversion = accepted(from, arm)
+  return conversion !== null && recipeIsMaterializableWithoutPriorSourceGuard(conversion, resolve)
+}
+
+const fieldlessObject = (value: Representation): boolean =>
+  value.kind === 'record' && value.fields.length === 0 && value.accessors.length === 0 && value.ownership === 'shared-refcount'
+
+const containsFieldlessObject = (value: Representation): boolean =>
+  fieldlessObject(value) ||
+  (value.kind === 'optional' && containsFieldlessObject(value.payload)) ||
+  (value.kind === 'tagged-union' && value.arms.some((arm) => containsFieldlessObject(arm.value)))
+
 export const composedDocumentRecordViewPlanOf = (
   source: Representation,
   target: Representation,
@@ -223,11 +250,16 @@ export const composedDocumentRecordViewPlanOf = (
   resolve?: ConversionNodeResolver,
   store?: NativeEntryStoreOptions
 ): ComposedDocumentRecordViewPlan | null => {
-  if (!containsOpenDocument(source) && (source.kind !== 'dynamic' || source.reason === 'untyped-callable')) return null
+  if (
+    !containsOpenDocument(source) &&
+    (source.kind !== 'dynamic' || source.reason === 'untyped-callable') &&
+    !containsFieldlessObject(source)
+  )
+    return null
   const fields: NativeFieldViewPlan[] = []
   const dependencies = new Map<string, ConversionNode>()
   const build = (from: Representation, into: Representation): DocumentRecordViewStep | null => {
-    if (from.kind === 'dynamic') {
+    if (from.kind === 'dynamic' || (fieldlessObject(from) && into.kind !== 'optional' && !fieldlessObject(into))) {
       if (into.kind === 'optional') {
         const present = build(from, into.payload)
         const absent = accepted({ kind: into.absence }, into)
@@ -240,7 +272,7 @@ export const composedDocumentRecordViewPlanOf = (
         kind: 'dictionary',
         key: 'string',
         ownership: 'shared-refcount',
-        value: from
+        value: from.kind === 'dynamic' ? from : { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
       }
       const conversion = accepted(from, document)
       if (!conversion || !recipeIsMaterializableWithoutPriorSourceGuard(conversion, resolve)) return null
@@ -265,6 +297,12 @@ export const composedDocumentRecordViewPlanOf = (
       return payload === null ? null : { kind: 'wrap', target: into, payload }
     }
     if (into.kind === 'tagged-union' && containsOpenDocument(from)) {
+      // A Document is a string-keyed table, and a union arm that is one takes
+      // it as a table: the record arms are fixed-key readings of the same
+      // object the program never asked for. `formatSort(doc)` over `Sort`
+      // otherwise viewed the Document as the `[string, SortDirection]` tuple
+      // arm, whose `t[1]` then had no receipt.
+      if (from.kind === 'dictionary' && into.arms.some((arm) => documentTakesTableArm(from, arm.value, accepted, resolve))) return null
       const candidates = into.arms.flatMap((arm, index) => {
         const view = documentRecordViewPlanOf(from, arm.value, layouts, accepted, readAccepted, resolve, store)
         return view === null ? [] : [{ index, view }]
