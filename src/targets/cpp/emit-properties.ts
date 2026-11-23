@@ -42,6 +42,7 @@ import {
   fieldDeclaringStructOf,
   lazyArrowFieldGetPlanOf,
   lazyMaterializedFieldText,
+  readsReactiveCell,
   structNameOfReceiver,
   isConstructorViewShape,
   type LazyArrowFieldPlan
@@ -1241,9 +1242,11 @@ const emitGetRendering = (ctx: EmitContext, lines: string[], operation: GetOpera
   // from the read to every use (`ctx.stableFieldReads`), so the read names
   // the member. Only the plain member load qualifies: a presence test or a
   // narrowing is a new value at each evaluation, and a scalar's copy is free.
+  // A reactive cell's member is the cell, not its value (`readsReactiveCell`).
   if (
     ctx.stableFieldReads.has(operation.result.id) &&
     operation.result.representation.kind !== 'scalar' &&
+    !readsReactiveCell(ctx.classes, ctx.hosts.reactive.celled, operation, fieldName) &&
     read === plainFieldReadText(ctx, operation, fieldName)
   ) {
     defineValueAlias(ctx, operation.result, read)

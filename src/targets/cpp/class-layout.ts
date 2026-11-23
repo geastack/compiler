@@ -593,6 +593,38 @@ export const fieldDeclaringStructOf = (
 }
 
 /**
+ * Whether reading `key` loads a reactive CELL. Its member spells the
+ * `Signal<T>`, not the value: the cell converts only to `const T&`, so
+ * `gea_this->a == gea_this->b` is an ambiguous overload and a `string_view`
+ * parameter or `.empty()` cannot take it. Only a copy out of it is the value.
+ *
+ * A CLASS field's reactivity is `operation.reactive`, filled at lowering from
+ * the plugin's own table, walking the same inheritance chain `classMemberOf`
+ * does, so it names the class that truly declares the field (`celled` is keyed
+ * by declarer). It replaced asking by bare key name across every celled
+ * struct, which caught a plain field merely sharing a name with some unrelated
+ * class's reactive field. A RECORD element's reactivity has no plugin
+ * declaration (`reactiveBoundRecordFields` derives it from what JSX binds,
+ * after lowering), so its own struct is asked, exactly, having no base.
+ *
+ * Being declared reactive is not having a cell: a reactive field whose carrier
+ * cannot be one (`records.ts`'s `representationCanCell`) gets a companion
+ * revision cell and stays an ordinary member, so `celled` decides.
+ */
+export const readsReactiveCell = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  celled: ReadonlyMap<string, ReadonlySet<string>>,
+  operation: GetOperation,
+  key: string
+): boolean => {
+  const receiver = operation.receiver.representation
+  const declaring =
+    operation.reactive === true && receiver.kind === 'class-ref' ? (classMemberOf(classes, receiver.declaration, key)?.owner ?? null) : null
+  const struct = declaring !== null ? cppClassName(declaring) : structNameOfReceiver(receiver)
+  return struct !== null && celled.get(struct)?.has(key) === true
+}
+
+/**
  * Whether this receiver names `super` -- the one member access the language
  * binds statically (13.3.7), so dispatching it through the object would
  * re-enter the override that wrote it.

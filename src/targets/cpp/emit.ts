@@ -190,7 +190,7 @@ import { mergeWritesOf } from './emit-namespaces.js'
 import { stringStoreText, templateText, toStringRefusal } from './emit-tostring.js'
 import { mixedDynamicPlusText } from './emit-mixed-binary.js'
 import { emitFieldStore, emitGet, isPlainMemberRead } from './emit-properties.js'
-import { classMemberOf, lazyCalleeReadsOf, structNameOfReceiver } from './class-layout.js'
+import { classMemberOf, lazyCalleeReadsOf, readsReactiveCell, structNameOfReceiver } from './class-layout.js'
 import {
   emitAllocateRecord,
   emitAllocateRegExp,
@@ -3337,48 +3337,12 @@ export const emitBody = (
     codeFreeStore,
     codeFreeGet,
     // A read of a plain field defers like an Array's `length` does -- see
-    // `deferrableValuesOf`. Not a read of a reactive CELL: `gea_this->count`
-    // spells the `Signal<double>` itself, and only the temporary it used to be
-    // copied into converted it to a `double`. Inline, `(gea_this->a) ==
-    // (gea_this->b)` is an ambiguous overload.
-    //
-    // A CLASS field's reactivity is `operation.reactive`, filled at lowering
-    // from the plugin's own table (`GetOperation.reactive`) -- precise per
-    // read, including an INHERITED field, because lowering walked the same
-    // inheritance chain `classMemberOf` always does to find which class truly
-    // declares it. This used to be asked by bare key name across every
-    // celled struct in the program (`[...celled.values()].flatMap(...)`),
-    // which refused deferral for a plain field merely SHARING a name with
-    // some unrelated class's reactive field anywhere in the program -- an
-    // over-approximation now replaced by a per-operation fact.
-    //
-    // A RECORD element's reactivity has no plugin declaration to mark at
-    // lowering (`reactiveBoundRecordFields` derives it from what JSX binds,
-    // after lowering has already run), so that half asks the target's own
-    // per-struct table -- exact already, since a record has no base class to
-    // walk.
-    //
-    // But `reactive` alone is the WRONG question here, and answering it that
-    // way materialized a read that had always deferred correctly. Being
-    // declared reactive is not the same as HAVING a cell: a reactive field
-    // whose carrier cannot be one -- an array, `records.ts`'s
-    // `representationCanCell` -- gets a companion revision cell beside it and
-    // is absent from `celled`, and its own read is then an ordinary field
-    // load that must go on deferring. So the marker's job is to say WHICH
-    // struct declares the field (the inheritance walk `celled`'s
-    // declarer-keying needs and a receiver's own name cannot give), and
-    // `celled` still decides whether that field is a cell.
+    // `deferrableValuesOf`. Not a read of a reactive cell (`readsReactiveCell`):
+    // only a temporary converts it to its value.
     deferrableMemberRead: (operation) => {
       const key = keyTexts.get(operation.key.value) ?? null
       if (!isPlainMemberRead(ctx, operation, key)) return false
-      if (key === null) return true
-      const receiver = operation.receiver.representation
-      const declaring =
-        operation.reactive === true && receiver.kind === 'class-ref'
-          ? (classMemberOf(classes, receiver.declaration, key)?.owner ?? null)
-          : null
-      const struct = declaring !== null ? cppClassName(declaring) : structNameOfReceiver(receiver)
-      return struct === null || ctx.hosts.reactive.celled.get(struct)?.has(key) !== true
+      return key === null || !readsReactiveCell(classes, ctx.hosts.reactive.celled, operation, key)
     },
     forwarding: {
       // Only the renderers that pass every argument through `argumentText`
