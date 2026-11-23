@@ -6,7 +6,7 @@ import {
 import { nativePayloadTransportMatches } from '../conversion/native-payload-transport.js'
 import type { IrValueId, SemanticResultId } from '../identity/ids.js'
 import { isNativeCallableCarrier } from '../representation/callable-object.js'
-import { carriesUndefined, representationKey, walkRepresentation } from '../representation/model.js'
+import { carriesUndefined, representationKey } from '../representation/model.js'
 import { operandOf } from '../semantics/model/operands.js'
 import { allOperationsOf, type IrBody, type IrOperation } from './model.js'
 import { nativeCallableDataOwnerAuthorityOf } from './native-callable-data-owner.js'
@@ -40,8 +40,21 @@ export const nativeCallableTypedDataReadRequiresAuthority = (operation: IrOperat
   (key === null ||
     (!['name', 'length', 'prototype'].includes(key) && !nonExpandoFunctionMemberNames.has(key) && !objectPrototypeMemberNames.has(key)))
 
+/** Whether the value ITSELF may be a native Function: a write installs own
+ * data on its receiver, never on a Function held in one of the receiver's
+ * fields, so a connect-options record with a `lookup` callback field (whose
+ * `result[name] = options[name]` loop has a computed key) installs nothing a
+ * Function read could observe. */
 const holdsNativeCallable = (value: Representation): boolean =>
-  [...walkRepresentation(value)].some((carrier) => isNativeCallableCarrier(carrier.kind) || carrier.kind === 'callable-identity')
+  value.kind === 'optional'
+    ? holdsNativeCallable(value.payload)
+    : value.kind === 'borrowed-ref'
+      ? holdsNativeCallable(value.referent)
+      : value.kind === 'tagged-union'
+        ? value.arms.some((arm) => holdsNativeCallable(arm.value))
+        : value.kind === 'proxy-object'
+          ? holdsNativeCallable(value.target)
+          : isNativeCallableCarrier(value.kind) || value.kind === 'callable-identity'
 
 const installedKeyCensuses = new WeakMap<object, { readonly keys: ReadonlySet<string>; readonly unknown: boolean }>()
 

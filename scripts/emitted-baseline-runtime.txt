@@ -275,6 +275,7 @@ computed-get-over-literal-key-union.ts.cpp 91c40fbbdc64
 computed-key-bag-passed-as-union-argument.runtime.js.cpp 4de9b17c520a
 computed-key-before-declared-field-key-order.runtime.ts.cpp 7acf4bd935a1
 computed-key-own-assignment-into-dictionary-field.runtime.js.cpp 66c88244f5d1
+computed-key-store-into-a-record-with-a-callback-field-installs-nothing-on-a-function.runtime.ts.cpp ac4e15098b61
 computed-key-store-into-typed-table-of-union-slots.runtime.js.cpp 8457a44b7902
 computed-key-writes-do-not-taint-intrinsics.runtime.ts.cpp dd5df04f4898
 computed-literal-union-key-writes-past-member-type.runtime.ts.cpp 39395a63d5c9
@@ -1237,6 +1238,7 @@ same-block-reads-before-last-transferring-use-move.runtime.ts.cpp 75ba46449fb5
 scalar-arm-member-read-into-open-result.runtime.js.cpp da8a701f36d7
 scalar-roundtrip.ts.cpp 17809a57a118
 schema-validator-callable-object-intersection.ts.cpp 9330b1f3fa3d
+self-installed-function-data-beside-a-computed-write-to-an-any-value.runtime.ts.cpp f983ec0aa6be
 self-referential-record-crossing-from-dynamic.runtime.ts.cpp ff932521a431
 set-and-array-into-iterable-parameters.runtime.ts.cpp ad86efa88988
 set-constructed-from-a-string.ts.cpp 32f91c08a98d

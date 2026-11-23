@@ -170,7 +170,9 @@ export const nativeFieldViewReadForText = (
         : `return ${renderedLeaf(
             ctx,
             route.conversion,
-            `(${text}->hasElementValue(${key}) ? ${optional}(${text}->elementAt(${key})) : ${optional}())`
+            // `readElement`, not `elementAt`: a Document arm's Array may be a live
+            // view over a dynamic array, whose cells only its source answers.
+            `(${text}->hasElementValue(${key}) ? ${optional}(${text}->readElement(${key})) : ${optional}())`
           )};`
     }
   const forKey = (key: string): string =>

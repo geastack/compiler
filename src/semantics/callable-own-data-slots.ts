@@ -479,11 +479,70 @@ const inventoryOf = (graph: SemanticGraph, native: CallableOwnDataOriginInput | 
       observeAll(functions, { operation, target, key: null, kind: 'publication' })
     }
   }
+  // A Function no operation publishes, which is stored only into its own data
+  // slots (`saslprep.saslprep = saslprep`) and whose stored self is never read
+  // back into a value the origins lose, is held only by values whose origins
+  // name it. A write through an unknown target therefore cannot reach it. The
+  // obligation is coinductive over the same origins every `exposure` blocker
+  // already trusts: a read of a self-storing key either keeps the Function's
+  // origin or is consumed only as a callee.
+  let consumers: Map<SemanticResultId, SemanticOperation[]> | null = null
+  const consumersOf = (result: SemanticResultId): readonly SemanticOperation[] => {
+    if (consumers === null) {
+      consumers = new Map()
+      for (const operation of graph.operations.values())
+        for (const operand of operation.operands) {
+          if (operand.source.kind !== 'result') continue
+          const bucket = consumers.get(operand.source.result) ?? []
+          if (bucket[bucket.length - 1] !== operation) bucket.push(operation)
+          consumers.set(operand.source.result, bucket)
+        }
+    }
+    return consumers.get(result) ?? []
+  }
+  const calledOnly = (result: SemanticResultId): boolean =>
+    consumersOf(result).every(
+      (consumer) =>
+        consumer.family === 'invocation' &&
+        consumer.operands.every(
+          (operand) => operand.source.kind !== 'result' || operand.source.result !== result || operand.role === 'callee'
+        )
+    )
+  const selfKeys = new Map<FunctionId, Set<string> | null>()
+  for (const write of writes) {
+    if (write.value === null || write.value === undefined || write.value.source.kind !== 'result') continue
+    if (write.kind !== 'set' && write.kind !== 'define-own-property' && write.kind !== 'reflect-set') continue
+    const targets = sourcesOf(write.result)
+    for (const functionId of sourcesOf(write.value.source.result)) {
+      const keys = selfKeys.get(functionId)
+      if (keys === null) continue
+      if (write.key === null || targets.length !== 1 || targets[0] !== functionId) selfKeys.set(functionId, null)
+      else selfKeys.set(functionId, (keys ?? new Set()).add(write.key))
+    }
+  }
+  const confined = (functionId: FunctionId): boolean => {
+    const keys = selfKeys.get(functionId)
+    if (keys === null || (exposures.get(functionId)?.length ?? 0) > 0) return false
+    return (observations.get(functionId) ?? []).every((observed) => {
+      if (observed.kind === 'publication' || observed.kind === 'prototype' || observed.kind === 'invocation-receiver') return false
+      if (observed.kind !== 'get' && observed.kind !== 'descriptor') return true
+      if (keys === undefined || (observed.key !== null && !keys.has(observed.key))) return true
+      return (
+        observed.kind === 'get' &&
+        observed.key !== null &&
+        observed.operation.results.every((value) => sourcesOf(value.id).includes(functionId) || calledOnly(value.id))
+      )
+    })
+  }
+  const confinedOwners = new Set<FunctionId>()
+  for (const functionId of new Set([...allocations.keys(), ...[...origins.values()].flat()]))
+    if (confined(functionId)) confinedOwners.add(functionId)
   const blockerList = blockerInterner()
   const schemas = new Map<FunctionId, ReadonlyMap<string, CallableOwnDataSlotSchema>>()
   for (const [functionId, keys] of owned) {
     const perKey = new Map<string, CallableOwnDataSlotSchema>()
     const blockingWrites = blockingWritesOf(functionId)
+    const reachable = (write: CallableWriteTarget): boolean => unknownTargetWriteSet.has(write) && !confinedOwners.has(functionId)
     for (const [key, writers] of keys) {
       const blockers = blockerList()
       const add = blockers.add
@@ -502,14 +561,10 @@ const inventoryOf = (graph: SemanticGraph, native: CallableOwnDataOriginInput | 
         // Without a prior own-descriptor receipt, all schemas for this owner
         // must retain the possible inherited-chain change, including writes
         // through an identity the inventory cannot isolate from this owner.
-        if (
-          write.key === '__proto__' &&
-          (write.kind === 'set' || write.kind === 'reflect-set') &&
-          (own || unknownTargetWriteSet.has(write))
-        )
+        if (write.key === '__proto__' && (write.kind === 'set' || write.kind === 'reflect-set') && (own || reachable(write)))
           add(write.operation, 'inherited-chain')
         if (write.key !== null && write.key !== key) continue
-        if (unknownTargetWriteSet.has(write)) add(write.operation, 'unknown-target')
+        if (reachable(write)) add(write.operation, 'unknown-target')
         if (prototypeWriteSet.has(write)) add(write.operation, 'prototype-mutation')
       }
       for (const operation of exposures.get(functionId) ?? [])
@@ -543,14 +598,19 @@ const inventoryOf = (graph: SemanticGraph, native: CallableOwnDataOriginInput | 
   // order; `inherited-chain` joins it only where the target is unknown, and
   // `unknown-key` needs ownership, so both stay per owner otherwise.
   const shared = blockerList()
+  const confinedShared = blockerList()
   for (const index of sharedWriteIndexes) {
     const write = writes[index]!
     if (unknownTargetWriteSet.has(write)) shared.add(write.operation, 'unknown-target')
-    if (prototypeWriteSet.has(write)) shared.add(write.operation, 'prototype-mutation')
+    if (prototypeWriteSet.has(write)) {
+      shared.add(write.operation, 'prototype-mutation')
+      confinedShared.add(write.operation, 'prototype-mutation')
+    }
     if (write.key === '__proto__' && (write.kind === 'set' || write.kind === 'reflect-set') && unknownTargetWriteSet.has(write))
       shared.add(write.operation, 'inherited-chain')
   }
   const sharedBlockers = shared.list()
+  const confinedSharedBlockers = confinedShared.list()
   for (const functionId of new Set([...allocations.keys(), ...[...origins.values()].flat()])) {
     const blockers = blockerList()
     const add = blockers.add
@@ -570,7 +630,7 @@ const inventoryOf = (graph: SemanticGraph, native: CallableOwnDataOriginInput | 
       writes: (ownWriteIndexes.get(functionId) ?? []).map((index) => writes[index]!),
       observations: observations.get(functionId) ?? [],
       blockers: blockers.list(),
-      sharedBlockers
+      sharedBlockers: confinedOwners.has(functionId) ? confinedSharedBlockers : sharedBlockers
     })
   }
   return { owners, schemas, unknownTargetWrites, prototypeWrites }
