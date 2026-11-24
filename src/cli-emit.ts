@@ -62,6 +62,14 @@ interface EmitRequest {
    * taken through this command was measuring a program with that fix absent.
    */
   readonly projectFileName: string | null
+  /**
+   * `--no-project`: compile under this compiler's own defaults, discovering
+   * nothing. The flag had the same history as `--project`: it matched no case,
+   * so a caller that asked for no project silently got whichever tsconfig sat
+   * above the input -- and whether the input is an ambiguous entry point
+   * (`program.ts`) is decided by exactly that.
+   */
+  readonly noProject: boolean
   /** `--isolate-symbols`: this unit is one of several a resident build links -- see `TranslationUnitInput.isolateSymbols`. */
   readonly isolateSymbols: boolean
   readonly realmStorage: boolean
@@ -91,6 +99,7 @@ const parseEmitArguments = (argv: readonly string[]): EmitRequest | string => {
   let entry: string | null = null
   let stage = 'hybrid'
   let projectFileName: string | null = null
+  let noProject = false
   let dynamicFallback = false
   let closedScriptScope = false
   let isolateSymbols = false
@@ -138,6 +147,8 @@ const parseEmitArguments = (argv: readonly string[]): EmitRequest | string => {
         return `compile: --translation-units takes "single", "per-file", or "balanced", not "${value}"`
       translationUnits = value
       index += 1
+    } else if (argument === '--no-project') {
+      noProject = true
     } else if (argument === '--project') {
       projectFileName = argv[index + 1] ?? null
       index += 1
@@ -163,6 +174,9 @@ const parseEmitArguments = (argv: readonly string[]): EmitRequest | string => {
       positional.push(argument)
     }
   }
+  // Two answers to the one question discovery would otherwise guess at; either
+  // winning silently compiles a program the caller did not ask for.
+  if (noProject && projectFileName !== null) return 'compile: --project and --no-project cannot both be given'
   const input = positional[0]
   if (input === undefined) return 'compile: no input file'
   if (outDir === null) return 'compile: --out-dir is required'
@@ -178,6 +192,7 @@ const parseEmitArguments = (argv: readonly string[]): EmitRequest | string => {
     plugins,
     pluginOptions,
     projectFileName,
+    noProject,
     isolateSymbols,
     realmStorage,
     debugSource,
@@ -237,10 +252,10 @@ export const runEmit = async (argv: readonly string[], moduleGraph = false): Pro
   // generated type hints), so the honest reading is that it has no project,
   // and its types come from JSDoc.
   const bundled = /\.[cm]?js$/.test(input)
-  // A named project wins over discovery, and over the bundle rule above: a
-  // caller that states which project an input belongs to has answered the
-  // question this command would otherwise guess at.
-  const projectFileName = parsed.projectFileName ?? (bundled ? null : findProjectFile(dirname(input)))
+  // A named project -- or a stated absence of one -- wins over discovery, and
+  // over the bundle rule above: a caller that states which project an input
+  // belongs to has answered the question this command would otherwise guess at.
+  const projectFileName = parsed.noProject ? null : (parsed.projectFileName ?? (bundled ? null : findProjectFile(dirname(input))))
   const result = compile({
     rootFileNames: [input],
     projectFileName,
@@ -277,7 +292,7 @@ const runModuleGraph = (parsed: EmitRequest, plugins: readonly CompilerPlugin[])
   const graph = readModuleGraph(parsed.input, parsed.stage, parsed.entry)
   const result = compile({
     rootFileNames: [graph.entry],
-    projectFileName: parsed.projectFileName ?? findProjectFile(dirname(graph.entry)),
+    projectFileName: parsed.noProject ? null : (parsed.projectFileName ?? findProjectFile(dirname(graph.entry))),
     javaScriptSources: true,
     dynamicFallback: parsed.dynamicFallback,
     plugins,
