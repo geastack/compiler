@@ -3157,3 +3157,150 @@ test('a proxy trap that can be handed another receiver stays fail-closed', () =>
     assert.ok(taint.has('*'), source)
   }
 })
+
+const envProcessPlugin: CompilerPlugin = {
+  name: 'global-this-env-process-binding-test',
+  instantiate: () => ({
+    producers: () => [],
+    lower: () => false,
+    capabilities: {
+      ...noPluginCapabilities,
+      nativeTypesByDeclaration: new Map([
+        ['Process', { declarationName: 'Process', declarationFileName: hostDeclaration, native: processCarrier }]
+      ]),
+      hostSingletonDeclarations: new Map([['process', { declarationName: 'process', declarationFileName: hostDeclaration }]]),
+      hostMembers: new Map([[`${processCarrier}.env`, { kind: 'property', emit: 'test::process_env()', store: null }]]),
+      nativeIncludes: new Map([[processCarrier, '#include "test_process.hpp"']])
+    }
+  })
+}
+
+test('a host member declared as a bare string dictionary is carried as the dictionary itself', () => {
+  const result = compile({
+    rootFileNames: [entry, hostDeclaration],
+    projectFileName: null,
+    sourceOverlay: new Map([
+      [
+        hostDeclaration,
+        'interface ProcessEnv { [key: string]: string | undefined } interface Process { readonly env: ProcessEnv } declare var process: Process'
+      ],
+      [entry, "console.log(Number(process.env.PORT ?? '3900'))"]
+    ]),
+    plugins: [envProcessPlugin]
+  })
+
+  assert.ok(result.certificate, JSON.stringify({ diagnostics: result.diagnostics.diagnostics, refusals: result.refusals }))
+  assert.deepEqual(result.loweringBlockers, [])
+  assert.deepEqual(result.emissionRefusals, [])
+  const source = result.source ?? ''
+  assert.match(source, /gea::dictionary::readHinted\(\(\*\(test::process_env\(\)\)\), \("PORT"\)/)
+})
+
+test('a host member declared as a number- or symbol-keyed dictionary is carried as the dictionary itself', () => {
+  const reads = [
+    [
+      'interface ProcessEnv { [key: number]: string | undefined }',
+      "console.log(process.env[3] ?? 'none')",
+      /\(test::process_env\(\)\)->read\(\("3"\)\)/
+    ],
+    [
+      'interface ProcessEnv { [key: symbol]: string | undefined }',
+      "const tag = Symbol('tag'); console.log(process.env[tag] ?? 'none')",
+      /\(test::process_env\(\)\)->read\(gea_global_decl_\w+\)/
+    ]
+  ] as const
+  for (const [env, use, read] of reads) {
+    const result = compile({
+      rootFileNames: [entry, hostDeclaration],
+      projectFileName: null,
+      sourceOverlay: new Map([
+        [hostDeclaration, `${env} interface Process { readonly env: ProcessEnv } declare var process: Process`],
+        [entry, use]
+      ]),
+      plugins: [envProcessPlugin]
+    })
+    assert.ok(result.certificate, JSON.stringify({ env, diagnostics: result.diagnostics.diagnostics, refusals: result.refusals }))
+    assert.deepEqual(result.emissionRefusals, [], env)
+    assert.match(result.source ?? '', read, env)
+  }
+})
+
+test('a host dictionary whose values share one data type many times over is judged once per type', () => {
+  const depth = 40
+  const chain = Array.from({ length: depth }, (_, level) =>
+    level === 0 ? 'interface Node0 { value: string }' : `interface Node${level} { left: Node${level - 1}; right: Node${level - 1} }`
+  ).join(' ')
+  const result = compile({
+    rootFileNames: [entry, hostDeclaration],
+    projectFileName: null,
+    sourceOverlay: new Map([
+      [
+        hostDeclaration,
+        `${chain} interface ProcessEnv { [key: string]: Node${depth - 1} } interface Process { readonly env: ProcessEnv } declare var process: Process`
+      ],
+      [entry, "console.log(process.env.PORT === undefined ? 'none' : 'some')"]
+    ]),
+    plugins: [envProcessPlugin]
+  })
+  assert.ok(result.certificate, JSON.stringify({ diagnostics: result.diagnostics.diagnostics, refusals: result.refusals }))
+})
+
+test('a host member declared as a dictionary of host operations is not carried as program data', () => {
+  const refusedBoundary = (env: string, use: string) => {
+    const result = compile({
+      rootFileNames: [entry, hostDeclaration],
+      projectFileName: null,
+      sourceOverlay: new Map([
+        [hostDeclaration, `${env} interface Process { readonly env: ProcessEnv } declare var process: Process`],
+        [entry, use]
+      ]),
+      plugins: [envProcessPlugin]
+    })
+    return result.certificate === null && JSON.stringify(result.refusals).includes('native-boundary:ProcessEnv')
+  }
+  const shapes = [
+    ['interface ProcessEnv { [key: string]: (() => string) | undefined }', "console.log(process.env.PORT === undefined ? 'none' : 'some')"],
+    ['interface ProcessEnv { [key: string]: () => string }', 'console.log(process.env.PORT())'],
+    ['interface ProcessEnv { [key: string]: { read(): string } }', 'console.log(process.env.PORT.read())'],
+    ['interface ProcessEnv { [key: string]: any }', 'console.log(process.env.PORT())'],
+    ['interface ProcessEnv { [key: string]: unknown }', "console.log(typeof process.env.PORT === 'function' ? 'callable' : 'data')"],
+    ['interface Runs extends Array<string> { run: () => void } interface ProcessEnv { [key: string]: Runs }', 'process.env.PORT.run()']
+  ] as const
+  assert.deepEqual(
+    shapes.map(([env, use]) => [env, refusedBoundary(env, use)]),
+    shapes.map(([env]) => [env, true])
+  )
+})
+
+test('a dot read through an index signature is judged as the bracket read is', () => {
+  const taintWith = (declaration: string, use: string) =>
+    [
+      ...globalHostMutationAuditOf(
+        `/// <reference path="./global-host-hooks.d.ts" />
+        export {}
+        declare var hostProcess: object
+        const box = { key: 1 }
+        const handlers: Array<(value: object) => void> = []
+        handlers.push((value) => {})
+        for (const handler of handlers) handler(box)
+        ${use}`,
+        ['hostProcess'],
+        [],
+        undefined,
+        false,
+        new Map([[resolve('test/fixtures/global-host-hooks.d.ts'), declaration]])
+      ).taint
+    ].sort()
+  const values = [
+    ['interface Hooks { [key: string]: string | undefined } declare var hooks: Hooks', false],
+    ['interface Hooks { [key: string]: (value?: object) => void } declare var hooks: Hooks', true],
+    ['interface Hooks { [key: string]: ((value?: object) => void) | undefined } declare var hooks: Hooks', true],
+    ['interface Hooks<T> { [key: string]: T } declare var hooks: Hooks<(value?: object) => void>', true],
+    ['interface Hooks<T> { [key: string]: T | undefined } declare var hooks: Hooks<(value?: object) => void>', true]
+  ] as const
+  for (const [declaration, callable] of values) {
+    const bracket = taintWith(declaration, "console.log([hooks['run']].length)")
+    assert.equal(bracket.length > 0, callable, declaration)
+    assert.deepEqual(taintWith(declaration, 'console.log([hooks.run].length)'), bracket, declaration)
+  }
+})
