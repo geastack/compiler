@@ -416,6 +416,114 @@ const awaitsAtTopLevel = (file: ts.SourceFile): boolean => {
 const moduleMarkerForTopLevelAwait = (file: ts.SourceFile): string | null =>
   !file.isDeclarationFile && !ts.isExternalModule(file) && awaitsAtTopLevel(file) ? `${file.text}\nexport {}\n` : null
 
+/** Names through which a program reaches the global object, or evaluates text against it. */
+const globalObjectNames: ReadonlySet<string> = new Set(['globalThis', 'window', 'self', 'global', 'eval', 'Function'])
+
+/** Whether `node` is the name a property or member is spelled with, rather than a reference. */
+const isMemberName = (node: ts.Identifier, parent: ts.Node): boolean =>
+  (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+  ((ts.isPropertyAssignment(parent) ||
+    ts.isPropertyDeclaration(parent) ||
+    ts.isMethodDeclaration(parent) ||
+    ts.isAccessor(parent) ||
+    ts.isEnumMember(parent)) &&
+    parent.name === node)
+
+/**
+ * Whether a classic script could tell that it is not running as one.
+ *
+ * A classic script and a module differ in what reaches the global object:
+ * the script's top-level `var` and function declarations are properties of
+ * it, and its top-level `this` IS it. Every other difference the checker
+ * already reports once the file is a module -- a global interface merge stops
+ * merging, a typed `globalThis.name` read stops resolving -- so it cannot
+ * change a program silently. What it cannot see is an untyped read: `(globalThis
+ * as any).name`, `window[key]`, a top-level `this.name`, or text handed to
+ * `eval`/`Function` that names a global. Each needs one of the names above or a
+ * top-level `this`, so their absence from the parse tree is the guarantee.
+ *
+ * A top-level `declare` counts as well, and is not a type: in a classic script
+ * `declare function f(): void` says the HOST defines a global `f`, and the
+ * call links against it; in a module the same text declares a module-local
+ * binding nothing defines, and the call is a ReferenceError.
+ *
+ * Over-approximate on purpose: a local `const self = this` counts too. Missing
+ * a reference would miscompile; counting a harmless one only keeps the file a
+ * classic script, which is what it was.
+ */
+const observesGlobalObject = (file: ts.SourceFile): boolean => {
+  // The parent is carried rather than read off `node.parent`: a host may parse
+  // without parent pointers, and this runs inside the host.
+  const visit = (node: ts.Node, parent: ts.Node, thisIsGlobal: boolean): boolean => {
+    if (node.kind === ts.SyntaxKind.ThisKeyword) return thisIsGlobal
+    if (ts.isIdentifier(node)) return globalObjectNames.has(node.text) && !isMemberName(node, parent)
+    // A type is erased, so `typeof globalThis` observes nothing -- but a class
+    // heritage clause's expression is evaluated, and it is a type node too.
+    if (ts.isTypeNode(node) && !ts.isExpressionWithTypeArguments(node)) return false
+    // A non-arrow function, a field initializer and a static block bind `this`
+    // themselves; their computed NAME is still evaluated in the outer scope.
+    const bindsThis =
+      (ts.isFunctionLike(node) && !ts.isArrowFunction(node)) || ts.isPropertyDeclaration(node) || ts.isClassStaticBlockDeclaration(node)
+    const name = (node as { readonly name?: ts.Node }).name
+    return ts.forEachChild(node, (child) => visit(child, node, child === name ? thisIsGlobal : thisIsGlobal && !bindsThis)) ?? false
+  }
+  const declaresGlobal = (statement: ts.Statement): boolean =>
+    ts.canHaveModifiers(statement) &&
+    (ts.getModifiers(statement)?.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword) ?? false)
+  return file.statements.some(declaresGlobal) || (ts.forEachChild(file, (child) => visit(child, file, true)) ?? false)
+}
+
+/**
+ * Whether `file` is an AMBIGUOUS ENTRY POINT: the one root of a compilation
+ * that has no project, written in TypeScript, with neither an import nor an
+ * export to state its goal symbol.
+ *
+ * "Ambiguous" in the sense Babel's `sourceType: "unambiguous"` and Node's
+ * syntax detection use: its grammar is valid under both of ECMA-262's goals,
+ * so the host chooses. A project chooses for its files (`moduleDetection`), so
+ * a program with one is left to it. JavaScript is excluded: a `.js` root is a
+ * generated bundle (`cli-emit.ts`), written for classic-script scope.
+ */
+const isAmbiguousEntry = (file: ts.SourceFile, input: ProgramInput): boolean =>
+  !input.projectFileName &&
+  input.rootFileNames.length === 1 &&
+  resolve(file.fileName) === resolve(input.rootFileNames[0]!) &&
+  /\.[cm]?tsx?$/.test(file.fileName) &&
+  !file.isDeclarationFile &&
+  !ts.isExternalModule(file)
+
+/**
+ * AN AMBIGUOUS ENTRY POINT TAKES THE MODULE GOAL.
+ *
+ * A classic script shares one lexical scope with every other classic script in
+ * its realm, which is the only thing script scope is for. An entry point
+ * compiled alone has no other: nothing can read its top-level bindings, so the
+ * script goal buys it nothing -- except collisions with every global the host's
+ * declarations name. `class Node {}` in such a file is TS2300 against
+ * `lib.dom.d.ts`'s `Node`, and every use of it then resolves to the DOM's; the
+ * same file as a module is an ordinary program. Deno gives every file the
+ * module goal for this reason, and TypeScript's `moduleDetection: "force"` does
+ * the same per project.
+ *
+ * Unlike `moduleMarkerForTopLevelAwait`, this does fire on programs that
+ * compiled, so the argument is not "TypeScript refused it" but that the goal is
+ * unobservable:
+ *
+ * - Strictness does not move. No project means `defaultCompilerOptions`, whose
+ *   `strict` implies `alwaysStrict`, so the script was already strict code.
+ * - Anything that relied on the global namespace and is TYPED becomes a checker
+ *   error, never a different program.
+ * - Anything untyped needs the global object by name or a top-level `this`,
+ *   which `observesGlobalObject` keeps a classic script.
+ *
+ * `export {}`, appended, for the same reason as its sibling: every later stage
+ * then sees an ordinary module. One that exports nothing, which reachability
+ * (`normalize/reachability.ts`) prunes exactly as it prunes a script, so the
+ * never-called helpers of a program that compiled before still do not count.
+ */
+const moduleGoalForAmbiguousEntry = (file: ts.SourceFile, input: ProgramInput): string | null =>
+  isAmbiguousEntry(file, input) && !observesGlobalObject(file) ? `${file.text}\nexport {}\n` : null
+
 /**
  * The compiler host, with the installed plugins' source transforms -- and the
  * `.json`-module rewrite above, which every compilation gets regardless of
@@ -720,7 +828,7 @@ const transformingHost = (
     // the file a module, and can equally introduce the top-level `await` that
     // asks for one. Either way the question is about the text this program
     // actually compiles.
-    const marked = moduleMarkerForTopLevelAwait(transformedFile)
+    const marked = moduleMarkerForTopLevelAwait(transformedFile) ?? moduleGoalForAmbiguousEntry(transformedFile, input)
     if (marked === null) return transformedFile
     return ts.createSourceFile(fileName, marked, languageVersionOrOptions, true, scriptKindOf(fileName))
   }
