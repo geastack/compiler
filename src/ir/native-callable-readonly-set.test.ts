@@ -100,20 +100,29 @@ test('closed unentered callers do not hide the actual stock key or turn its read
   assert.doesNotMatch(result.source!, /gea::callableDynamicSet|gea::callableNativeDataSet/)
 })
 
-test('unentered exclusion does not authenticate a public union of incompatible native receiver frames', () => {
-  const result = compileSource(`
+test('an entered union of incompatible native receiver frames is not authenticated; an unentered caller adds no frame', () => {
+  const program = (callUnused: boolean) => `
     /** @param {string | symbol} key */
     function attempt(obj, key) { obj[key] = 7 }
     function unused() { attempt(() => 7, Symbol()) }
     function verify(obj, key) { attempt(obj, key) }
     verify(Date.prototype.getTime, 'name')
-  `)
-  assert.equal(result.diagnostics.clean, true, JSON.stringify(result.diagnostics.diagnostics))
-  assert.equal(result.source, null)
+    ${callUnused ? 'unused()' : ''}
+  `
+  const entered = compileSource(program(true))
+  assert.equal(entered.diagnostics.clean, true, JSON.stringify(entered.diagnostics.diagnostics))
+  assert.equal(entered.source, null)
   assert.equal(
-    result.refusals.some((refusal) => refusal.key === 'property-access:tagged-union:set:true'),
-    true
+    entered.refusals.some((refusal) => refusal.key === 'property-access:tagged-union:set:true'),
+    true,
+    JSON.stringify(entered.refusals)
   )
+  // `unused` is never called in this closed script, so its arrow never
+  // reaches `attempt`: the only frame is the native method's, whose `name`
+  // is read-only, and the strict write is the TypeError.
+  const unentered = compileSource(program(false))
+  assert.notEqual(unentered.source, null, JSON.stringify(unentered.refusals))
+  assert.match(unentered.source!, /Cannot assign to read-only Function own property/)
 })
 
 test('readonly receipt replay refuses unrelated SSA, stock source, entry and strictness substitutions', () => {

@@ -696,22 +696,17 @@ export const closedCallableAuthorityOf = (
 }
 
 /**
- * Every value the array `array` names can ever hold, under the shared
- * closed-frame authority, or `null` when that set is not closed. For a census
- * outside this module's own proofs; intrinsic obligations go to the caller's
- * active ledger capture.
+ * Prove the array can never hold a value under the shared closed-frame
+ * authority. Intrinsic obligations go to the caller's active ledger capture.
  */
-export const closedArrayStoredValuesOf = (
-  checker: ts.TypeChecker,
-  flow: ValueFlowIndex,
-  array: ts.Expression
-): readonly ts.Expression[] | null =>
+export const closedArrayIsProvenEmpty = (checker: ts.TypeChecker, flow: ValueFlowIndex, array: ts.Expression): boolean =>
   arrayStoredValuesOf(
     checker,
     flow,
     array,
-    closedCallableAuthorityOf(checker, flow, checkerTypeAtOf(checker), argumentsUsesAtOf(checker, flow))
-  )
+    closedCallableAuthorityOf(checker, flow, checkerTypeAtOf(checker), argumentsUsesAtOf(checker, flow)),
+    'empty'
+  )?.length === 0
 
 /**
  * The array-callee extension of `closedCallableAuthorityOf`, for a consumer

@@ -947,11 +947,34 @@ const includesText: ArrayCallRenderer = (ctx, receiverText, element, args, resul
 /** The reducers: `reduce(cb)` and `reduce(cb, initialValue)` are two physical arities and two runtime overloads; the no-initial form's empty-array TypeError lives in the runtime. */
 const reduceText =
   (member: 'reduce' | 'reduceRight', clause: string): ArrayCallRenderer =>
-  (ctx, receiverText, _element, args): string => {
+  (ctx, receiverText, _element, args, _result, operation): string => {
     requireArity(member, clause, [1, 2], args)
     // An integer-spelled Number literal must not let C++ deduce an integer
     // accumulator: JavaScript Number reducers retain fractional results.
     const initial = args[1]
+    // The seed in the callback's accumulator carrier, when the two differ
+    // (`host-template-conversions.ts` certifies that one conversion).
+    const callback = args[0]?.representation
+    const accumulator =
+      callback?.kind === 'function-value-dispatch' && callback.abi.receiver === null ? callback.abi.parameters[0]?.value : undefined
+    if (initial && accumulator && operation && representationKey(accumulator) !== representationKey(initial.representation)) {
+      const seeded = operationConversionText(
+        ctx,
+        operation,
+        'prototype-argument',
+        initial.representation,
+        accumulator,
+        operandText(ctx, initial)
+      )
+      if (seeded === null) {
+        throw createCppEmitBlockedError(
+          `runtime-helper:element:${member}:seed`,
+          `"Array.prototype.${member}" (ECMA-262 ${clause}) seeds a "${representationKey(accumulator)}" accumulator with ` +
+            `"${representationKey(initial.representation)}", and no certified conversion carries one into the other`
+        )
+      }
+      return `gea::runtime::array::${member}(${receiverText}, ${operandText(ctx, args[0]!)}, ${seeded})`
+    }
     if (initial?.representation.kind === 'scalar' && initial.representation.domain === 'number') {
       return `gea::runtime::array::${member}(${receiverText}, ${operandText(ctx, args[0]!)}, static_cast<${cppTypeOf(initial.representation)}>(${operandText(ctx, initial)}))`
     }

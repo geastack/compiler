@@ -90,7 +90,7 @@ logical-merge-boolean-left.ts.cpp 1f92efe0175a
 logical-merge-nullable-reference.ts.cpp 81b786723feb
 logical-merge-truthiness.ts.cpp 9eb777b71c1f
 logical.ts.cpp f9b3a5edd223
-loop-iteration-helper-repro.ts.cpp f126b9ba7159
+loop-iteration-helper-repro.ts.cpp 8adf36b2bd22
 merge-array-materialization.ts.cpp 4a0d00312a2b
 method.ts.cpp 9dc90f211c56
 namespace-generic-member.ts.cpp af32672f559c
@@ -150,7 +150,7 @@ try-catch-bound.ts.cpp c416ae6eb581
 try-catch-empty.ts.cpp 6396a0c8f5fe
 try-catch-equality.ts.cpp 4c359abaed53
 try-catch.ts.cpp b4f06efd4e01
-try-finally.ts.cpp 03c6d3f013d2
+try-finally.ts.cpp abb24aedff38
 tuple-iteration.ts.cpp 02a5dc739b05
 type-only-import.ts.cpp 4c6c16207b27
 type-only-module.ts.cpp 37eacac04ef4

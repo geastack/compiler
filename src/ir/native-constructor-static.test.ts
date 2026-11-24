@@ -46,7 +46,7 @@ const layout = (id: DeclarationId, base: DeclarationId | null = null): ClassLayo
   staticAccessors: []
 })
 
-const fixture = (unknownGetter = false, publishConstructor = false) => {
+const fixture = (unknownGetter = false, publishConstructor = false, publishTraps = false) => {
   const classes = new Map<DeclarationId, ClassLayout>([
     [
       declaration,
@@ -68,12 +68,16 @@ const fixture = (unknownGetter = false, publishConstructor = false) => {
   const cellKey = builder.constant(entry, lineage, '_sdk', 'string', string)
   builder.set(entry, lineage, operand(classValue, constructor), operand(cellKey, string), operand(actualProxy, proxy), true, constructor)
   if (publishConstructor) {
+    const published = publishTraps ? [operand(classValue, constructor), operand(traps, handler)] : [operand(classValue, constructor)]
     const consumer: Representation = {
       kind: 'function-value-dispatch',
-      abi: { ...voidAbi, parameters: [{ value: constructor, passing: 'by-value', ownership: 'owned' }] }
+      abi: {
+        ...voidAbi,
+        parameters: published.map(({ representation }) => ({ value: representation, passing: 'by-value', ownership: 'owned' }))
+      }
     }
     const external = builder.bindingRead(entry, lineage, 'external-consumer' as never, consumer)
-    builder.call(entry, lineage, operand(external, consumer), null, [operand(classValue, constructor)], null)
+    builder.call(entry, lineage, operand(external, consumer), null, published, null)
   }
   const publicKey = builder.constant(entry, lineage, 'sdk', 'string', string)
   const read = builder.get(entry, lineage, operand(classValue, constructor), operand(publicKey, string), proxy)
@@ -115,18 +119,27 @@ test('an actual static getter reads the original Proxy and its private trap thro
   assert.deepEqual(flow.callables.get(trapRead), { kind: 'exact', functionId: trapId })
 })
 
-test('unknown getter bodies and publication of the constructor cannot retain a closed static source', () => {
-  for (const [unknownGetter, publishConstructor] of [
-    [true, false],
-    [false, true]
+test('unknown getter bodies and publication of the trap table cannot retain a closed static source', () => {
+  for (const [unknownGetter, publishConstructor, publishTraps] of [
+    [true, false, false],
+    [false, true, true]
   ]) {
-    const { classes, bodies, placements, trapRead } = fixture(unknownGetter, publishConstructor)
+    const { classes, bodies, placements, trapRead } = fixture(unknownGetter, publishConstructor, publishTraps)
     assert.equal(
       nativeCallableFlowOf(bodies, placements, classes).callables.has(trapRead),
       false,
-      unknownGetter ? 'missing getter body' : 'constructor publication'
+      unknownGetter ? 'missing getter body' : 'trap table publication'
     )
   }
+})
+
+test('publishing only the constructor still reads the compiled Proxy allocation and its unpublished trap', () => {
+  // Code handed the constructor can replace the static cell, but only with a
+  // value of the Proxy carrier, which only compiled code allocates, and
+  // [[ProxyHandler]] is an internal slot nothing can replace: the one compiled
+  // allocation's trap table stays the only one, and nobody else holds it.
+  const { classes, bodies, placements, trapRead } = fixture(false, true)
+  assert.deepEqual(nativeCallableFlowOf(bodies, placements, classes).callables.get(trapRead), { kind: 'exact', functionId: trapId })
 })
 
 test('static accessor provenance authenticates the selected active body and exact physical frame', () => {

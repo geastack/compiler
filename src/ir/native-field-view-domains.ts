@@ -9,6 +9,7 @@ import { classMemberOf } from '../projection/fields.js'
 import { extendsClass } from '../projection/dispatch.js'
 import { abiOfCallee } from '../projection/callee.js'
 import { nativeDataPropertyOf } from '../representation/native-data-properties.js'
+import { objectPrototypeMemberNames } from '../representation/record-fields.js'
 
 export interface NativeFieldStorageDomain {
   readonly read: Representation
@@ -59,6 +60,9 @@ const binaryViewDataKeys = ['buffer', 'byteLength', 'byteOffset', 'length', 'BYT
 const noRoutes: ReadonlyMap<string, readonly NativeFieldStorageDomain[]> = new Map()
 
 /** A canonical array index: the decimal spelling of an integer below 2^32 - 1. */
+const declaredAnyEntryTable = (value: Representation): boolean =>
+  value.kind === 'dictionary' && value.key === 'string' && value.ownership === 'shared-refcount' && value.value.kind === 'dynamic'
+
 const isArrayIndexKey = (key: string): boolean => /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < 4294967295
 
 const isDocumentPlan = (plan: NativeFieldViewPlan): boolean =>
@@ -281,8 +285,14 @@ export const nativeFieldViewDomainsOf = (
       // recursing with an `any` entry): its read is that Value's own [[Get]],
       // converted by the same leaf as every other route. Nothing is boxed.
       const dynamicArms = receiver.arms.filter((arm) => arm.value.kind === 'dynamic')
+      // A `Record<string, any>` arm answers a named key with its own entry,
+      // a Value (`undefined` on a miss), exactly as the ordinary per-arm
+      // dispatch reads it (`emit-union-properties.ts`); an `Object.prototype`
+      // member name is no entry read, so such a key gets no route.
+      const entryArms = receiver.arms.filter((arm) => declaredAnyEntryTable(arm.value))
       const objectArms = receiver.arms.filter(
-        (arm) => arm.value.kind !== 'undefined' && arm.value.kind !== 'null' && arm.value.kind !== 'dynamic'
+        (arm) =>
+          arm.value.kind !== 'undefined' && arm.value.kind !== 'null' && arm.value.kind !== 'dynamic' && !declaredAnyEntryTable(arm.value)
       )
       if (!ordinaryArm && !objectArms.some((arm) => domainsOf(arm.value) !== null)) return null
       // An Array arm names no keys of its own here; its index reads are
@@ -320,10 +330,17 @@ export const nativeFieldViewDomainsOf = (
             break
           }
         }
-        if (!complete) continue
+        if (!complete || (entryArms.length > 0 && objectPrototypeMemberNames.has(key))) continue
         for (const arm of dynamicArms)
           if (!routes.some((route) => route.dynamicGet === true && representationKey(route.read) === representationKey(arm.value)))
             routes.push({ read: arm.value, write: null, dynamicGet: true })
+        // The entry is a Value read by the same leaf as a `dynamic` arm's.
+        for (const arm of entryArms) {
+          if (arm.value.kind !== 'dictionary') continue
+          const entry = arm.value.value
+          if (!routes.some((route) => route.dynamicGet === true && representationKey(route.read) === representationKey(entry)))
+            routes.push({ read: entry, write: null, dynamicGet: true })
+        }
         common.set(key, routes)
       }
       cache.set(identity, common)
@@ -489,6 +506,17 @@ export const nativeFieldViewDomainsOf = (
           add(field.key, { read: { kind: 'undefined' }, write: null, sourceAbsent: true })
           if ('shapeId' in plan.source)
             for (const stored of expandoStoredOf(plan.source.shapeId, field.key)) add(field.key, { read: stored, write: null })
+          // A source that is itself a Document view (one of the views that
+          // can be this plan's very source) forwards the key on to its
+          // dictionary, which answers with its own entry, a declared `any`.
+          // Where the source's routes already read that entry -- a Document
+          // naming the key, whose route carries its checked read -- that route
+          // is the entry's one reader, and a second, unchecked one would make
+          // the two disagree on how the same Value converts.
+          if ('shapeId' in plan.source && !(inherited?.get(field.key) ?? []).some((route) => route.read.kind === 'dynamic'))
+            for (const source of installedFor(plan.source.shapeId, plan) ?? [])
+              if (isDocumentPlan(source) && source.source.kind === 'dictionary')
+                add(field.key, { read: source.source.value, write: null, declaredAnyEntry: true })
         }
       }
     }

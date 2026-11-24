@@ -3,6 +3,7 @@ import type { ConversionCensus } from '../conversion/nodes.js'
 import { withoutFunctionSpecialization, type DeclarationId, type StructuralTypeId } from '../identity/ids.js'
 import type { ClassLayout } from '../projection/classes.js'
 import { declaredRecordFieldOf } from '../projection/fields.js'
+import { describedFieldRepresentationOf } from '../projection/native-object-data.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import { representationKey, type Representation } from '../representation/model.js'
 import type { PropertyOperation } from '../semantics/model/operations.js'
@@ -357,4 +358,61 @@ const classAccessorKeysOf = (classes: ReadonlyMap<DeclarationId, ClassLayout>, d
     current = layout.base
   }
   return keys
+}
+
+/** One key of a correlated copy: the carrier of the field the stored value was read from. */
+export interface CorrelatedSourceField {
+  readonly key: string
+  readonly source: Representation
+}
+
+/**
+ * `target[ name ] = source[ name ]` over a closed key domain stores, for each
+ * key, exactly what the source holds under that same key -- `ca` copies the
+ * source's `ca`, never its `rejectUnauthorized`. The stored value's own
+ * carrier is the union across every key, so a store into one key's slot
+ * would otherwise have to check, at run time, an arm the copy already fixes.
+ *
+ * Both keys must be reads of one immutable binding, and the value must be the
+ * source read itself, not a value held across statements: the key is then the
+ * same string at the read and at the store. Each key's source carrier is the
+ * field the source's static type declares for it; a key with no plain data
+ * field on the source (an accessor, an index signature) names no carrier, and
+ * the whole copy is left uncorrelated.
+ */
+export const correlatedSourceFieldsOf = (
+  graph: SemanticGraph,
+  operation: PropertyOperation,
+  deriver: RepresentationDeriver
+): readonly CorrelatedSourceField[] | undefined => {
+  if (operation.internalMethod !== 'set' || !operation.keyIsComputed) return undefined
+  const keys = computedPropertyKeyTextsOf(graph, operation)
+  if (keys === undefined || keys.length < 2) return undefined
+  const producerOf = (source: ReturnType<typeof operandOf>) => {
+    if (source?.source.kind !== 'result') return undefined
+    const id = graph.results.get(source.source.result)
+    return id === undefined ? undefined : graph.operations.get(id)
+  }
+  // A plain `=` assignment evaluates to exactly its right-hand value, so the
+  // stored value is that value whichever of the two the set consumes.
+  let read = producerOf(operandOf(operation, 'value'))
+  if (read?.family === 'computation' && read.form === 'assignment' && read.operator === '=') read = producerOf(operandOf(read, 'value'))
+  if (read?.family !== 'property' || read.internalMethod !== 'get' || !read.keyIsComputed) return undefined
+  const bindingOf = (key: ReturnType<typeof operandOf>) => {
+    if (key?.source.kind !== 'result') return undefined
+    const id = graph.results.get(key.source.result)
+    const binding = id === undefined ? undefined : graph.operations.get(id)
+    return binding?.family === 'binding' && binding.action === 'read' && !binding.mutable ? binding.declaration : undefined
+  }
+  const storedKey = bindingOf(operandOf(operation, 'key'))
+  if (storedKey === undefined || storedKey !== bindingOf(operandOf(read, 'key'))) return undefined
+  const source = operandOf(read, 'receiver')?.type
+  if (source === undefined) return undefined
+  const fields: CorrelatedSourceField[] = []
+  for (const key of keys) {
+    const field = describedFieldRepresentationOf(deriver, source, key)
+    if (field === null) return undefined
+    fields.push({ key, source: field })
+  }
+  return fields
 }

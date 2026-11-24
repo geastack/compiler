@@ -20,7 +20,14 @@ import { contextualArrayConstructTypeAt, contextualCollectionTypeAt, statedColle
 import { implementationSignatureOf } from '../structural-declarations.js'
 import { physicalGeneratorOverloadResultAt, physicalInheritedCallableReturnAt } from '../physical-overload-result.js'
 import { readOnlyArrayArgumentAt, unsharedArrayResultBodyOf, type ArgumentFormalOf } from '../unshared-array-result.js'
-import { regionId, semanticResultId, withoutSpecialization, type FunctionId, type StructuralTypeId } from '../../../identity/ids.js'
+import {
+  regionId,
+  semanticResultId,
+  withoutSpecialization,
+  type DeclarationId,
+  type FunctionId,
+  type StructuralTypeId
+} from '../../../identity/ids.js'
 import type { CensusCandidate } from '../census.js'
 import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { ProducerContext } from '../producer-context.js'
@@ -1819,9 +1826,14 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
             if (!targetFile || targetFile.isDeclarationFile) {
               return { kind: 'blocked' as const, reason: `host builtin module "${builtinModule}" has no compiled runtime source record` }
             }
+            const namespace = esModuleNamespaceOf(context.checker, context.identities, targetFile)
             return {
               kind: 'lookup' as const,
-              value: { target: regionId(context.identities.nodeIdOf(targetFile), 'module-body'), builtinModule }
+              value: {
+                target: regionId(context.identities.nodeIdOf(targetFile), 'module-body'),
+                builtinModule,
+                ...(namespace === null ? {} : { namespace })
+              }
             }
           })()
         : null
@@ -2471,4 +2483,39 @@ const deadEventCallFactOf = (
   if (dead === 'emission') return { deadEventEmission: true }
   if (dead === 'registration') return { deadEventRegistration: true }
   return {}
+}
+
+/**
+ * The export cells an ES-module builtin's namespace object reads. Node answers
+ * `getBuiltinModule(id)` for such a module with its namespace -- what
+ * `import * as m` binds -- never a CommonJS `module.exports`, which an ES
+ * module does not populate. A namespace property is a live view of its
+ * binding; a record filled once agrees with that view only when no export can
+ * be reassigned, so a mutable export leaves the lookup on its dynamic path.
+ */
+const esModuleNamespaceOf = (
+  checker: ts.TypeChecker,
+  identities: { readonly declarationIdOf: (node: ts.Declaration) => DeclarationId },
+  file: ts.SourceFile
+): readonly { readonly key: string; readonly declaration: DeclarationId }[] | null => {
+  if (!ts.isExternalModule(file) || (file as ts.SourceFile & { commonJsModuleIndicator?: ts.Node }).commonJsModuleIndicator) return null
+  const module = checker.getSymbolAtLocation(file)
+  if (module === undefined) return null
+  const fields: { readonly key: string; readonly declaration: DeclarationId }[] = []
+  for (const exported of checker.getExportsOfModule(module)) {
+    const target = (exported.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(exported) : exported
+    if ((target.flags & ts.SymbolFlags.Value) === 0) continue
+    const declaration = target.valueDeclaration
+    if (declaration === undefined || declaration.getSourceFile().isDeclarationFile) return null
+    const immutable =
+      ts.isFunctionDeclaration(declaration) ||
+      ts.isClassDeclaration(declaration) ||
+      (ts.isVariableDeclaration(declaration) &&
+        ts.isIdentifier(declaration.name) &&
+        ts.isVariableDeclarationList(declaration.parent) &&
+        (declaration.parent.flags & ts.NodeFlags.Const) !== 0)
+    if (!immutable) return null
+    fields.push({ key: ts.symbolName(exported), declaration: identities.declarationIdOf(declaration) })
+  }
+  return fields
 }

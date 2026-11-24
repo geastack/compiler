@@ -142,9 +142,12 @@ export const nativeObjectDataStorageOf = (
   // The local semantic origin map intentionally does not invent parameter
   // aliases. When the source session closes that domain, its complete slot
   // inputs must agree with this storage too, including writes in the called
-  // body and values copied by other assignments to the same allocation.
+  // body and values copied by other assignments to the same allocation. A
+  // slot's possible absence is no stored value: a read answers it from the
+  // key's presence, as every extension read already does.
   if (schema.storedValues !== undefined)
     for (const value of schema.storedValues) {
+      if (value.absence === true) continue
       const source = bulkValueRepresentationOf(value)
       if (!source || !nativeCallableDataCarrierHasStorageIdentity(source) || representationKey(source) !== representationKey(storage))
         return null

@@ -8,7 +8,7 @@ import type { VirtualMemberRole } from '../projection/dispatch.js'
 import type { UnboxedMethodAssumption } from '../projection/method-value-escapes.js'
 import type { NativeEqualityRecipe } from './native-equality.js'
 import type { FixedDataDefinitionRecipe } from './fixed-data-definition.js'
-import type { TypedComputedReadRecipe, TypedComputedWriteRecipe } from './typed-property-access.js'
+import type { CorrelatedSourceField, TypedComputedReadRecipe, TypedComputedWriteRecipe } from './typed-property-access.js'
 import type { OperationConversion } from './operation-conversions.js'
 import type { NativeMethodValueRecipe } from '../conversion/native-method.js'
 import type { DenseLoopPlan } from './dense-loops.js'
@@ -269,6 +269,8 @@ export interface SetOperation extends IrOperationBase {
   readonly typedComputedWrite?: TypedComputedWriteRecipe
   /** See `GetOperation.provenKeyTexts` -- the same fact, copied for a `[[Set]]`'s own computed key. */
   readonly provenKeyTexts?: readonly string[]
+  /** See `correlatedSourceFieldsOf`: per key, the carrier of the source field the stored value was read from. */
+  readonly correlatedSourceFields?: readonly CorrelatedSourceField[]
 }
 
 export interface DeleteOperation extends IrOperationBase {
@@ -384,7 +386,7 @@ export interface CallOperation extends IrOperationBase {
   readonly arguments: readonly IrOperand[]
   readonly result: IrResult | null
   /** A retained ModuleRecord exposed through a host's dynamic builtin lookup. */
-  readonly builtinModuleLookup?: { readonly target: RegionId; readonly builtinModule: string }
+  readonly builtinModuleLookup?: import('../semantics/model/operations.js').CallBuiltinModuleLookup
   /**
    * `true` exactly when `arguments` holds ONE operand that is itself the
    * whole, already-materialized element sequence of a spread argument
@@ -586,6 +588,20 @@ export interface CommonJsRequireOperation extends IrOperationBase {
   readonly absentPackage: string | null
   /** Canonical host builtin name, or null for an ordinary resolved module. */
   readonly builtinModule: string | null
+  readonly result: IrResult
+}
+
+/**
+ * The one namespace object of an ES module reached by a literal builtin lookup
+ * (`process.getBuiltinModule('v8')`). `fresh` is a record built from the
+ * module's export cells after its evaluation; the first one built in a realm
+ * is kept and every later lookup answers that same object, as Node's
+ * namespace identity requires.
+ */
+export interface ModuleNamespaceOperation extends IrOperationBase {
+  readonly kind: 'module-namespace'
+  readonly target: RegionId
+  readonly fresh: IrOperand
   readonly result: IrResult
 }
 
@@ -1584,6 +1600,7 @@ export type IrOperation =
   | SpreadCopyOperation
   | CallOperation
   | CommonJsRequireOperation
+  | ModuleNamespaceOperation
   | CommonJsBindingOperation
   | CommonJsBindingSetOperation
   | SuperInitializeOperation

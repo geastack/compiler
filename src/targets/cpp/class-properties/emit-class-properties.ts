@@ -918,7 +918,15 @@ export const computedClassPrototypeMethodText = (ctx: EmitContext, operation: Ge
   }
   const methods: { readonly key: string; readonly method: ClassLayout['methods'][number] }[] = []
   const overriddenKeys: string[] = []
+  // A proven key domain (`GetOperation.provenKeyTexts`, the key's own literal
+  // set when its type is one) is the set the method-frame census publishes
+  // (`native-method-frames.ts`): a method outside it -- a `clone(): Request`
+  // or `bytes()` whose frame happens to convert into the joined result of
+  // `raw[key]()` over `keyof Body` -- has no certified frame and is no value
+  // this read takes.
+  const domain = operation.provenKeyTexts === undefined ? null : new Set(operation.provenKeyTexts)
   for (const { key: methodKey, method } of reachableClassMethodsOf(ctx.classes, receiver.declaration)) {
+    if (domain !== null && !domain.has(methodKey)) continue
     if (method === null) {
       overriddenKeys.push(methodKey)
       continue

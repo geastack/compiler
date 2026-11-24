@@ -3,7 +3,7 @@ import { censusRefusal, type CensusRefusal } from './census-refusal.js'
 import { disjointUnionTypeOf, isStandardInterfaceType, joinOfWrites, literalMemberNameOf, widestOf } from './derived-expression-type.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import type { ValueFlowIndex, ValueWrite } from './flow/model.js'
-import { closedArrayStoredValuesOf } from './flow/callable-reach.js'
+import { closedArrayIsProvenEmpty } from './flow/callable-reach.js'
 import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 
@@ -1068,7 +1068,7 @@ export const censusCollectionBindings = (
     if (!ledger) return false
     const literals = [...aliases].flatMap((alias) => arraysByOwner.get(alias) ?? [])
     if (literals.length === 0) return false
-    const proof = ledger.capture(() => literals.every((literal) => closedArrayStoredValuesOf(checker, flow, literal)?.length === 0))
+    const proof = ledger.capture(() => literals.every((literal) => closedArrayIsProvenEmpty(checker, flow, literal)))
     if (!proof.value) return false
     neverStoredRequirements.push(...proof.requirements)
     return true

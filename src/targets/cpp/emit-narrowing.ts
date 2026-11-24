@@ -59,7 +59,7 @@ import type { CaptureIndex } from './emit-context.js'
 import { certifiedRecordViewText, familyMemberViewText, structuralRecordViewText } from './emit-record-view.js'
 import { documentRecordViewText } from './emit-document-record-view.js'
 import { dynamicRecordLoadNeedsPlan } from '../../conversion/document-record-view.js'
-import { IMPOSSIBLE_FIELD_READ } from '../../conversion/impossible-field-read.js'
+import { ABSENT_ONLY_FIELD_READ, IMPOSSIBLE_FIELD_READ } from '../../conversion/impossible-field-read.js'
 import { checkedNativeFieldReadMismatchOf } from '../../conversion/checked-native-field-read.js'
 import { callablePayloadText, callableViewText } from './emit-callable-view.js'
 import { dictionaryReadText, dictionaryViewText } from './emit-dictionary-view.js'
@@ -5536,6 +5536,13 @@ const renderedRecipeText = (ctx: ConversionSite, node: ConversionNode, text: str
     }
     if (materializer.id === IMPOSSIBLE_FIELD_READ || materializer.id === IMPOSSIBLE_INDEX_READ)
       return `((void)(${text}), gea::host::unreachableValue<${cppTypeOf(node.target)}>())`
+    if (materializer.id === ABSENT_ONLY_FIELD_READ && node.target.kind === 'optional') {
+      const optionalType = cppTypeOf(node.target)
+      return (
+        `[](const auto& gea_absent_only) -> ${optionalType} { if (gea_absent_only.has_value()) ` +
+        `return gea::host::unreachableValue<${optionalType}>(); return ${optionalType}(); }(${text})`
+      )
+    }
   }
   if (node.capability.kind === 'coercion') return coercionText(node.capability.operation, text, node.source, ctx.layouts)
   if (node.capability.kind === 'class-family') return classFamilyLoadText(ctx, node.source, node.target, text)
@@ -5609,8 +5616,12 @@ const renderedRecipeText = (ctx: ConversionSite, node: ConversionNode, text: str
     if (!payloadNode || ctx.conversions.nodeById(payloadNode.id) !== payloadNode) return null
     const payload = recipeText(ctx, payloadNode, '(*gea_present)')
     if (payload === null) return null
+    // The parameter names the source's own type: the payload recipe calls
+    // member templates on it (`.is<1>()`), which a generic `auto` parameter
+    // makes dependent names that need `.template` -- and this text may itself
+    // sit inside another generic lambda (a native field-view write).
     return (
-      `[&](const auto& gea_present) -> ${cppTypeOf(node.target)} { if (!gea_present.has_value()) ` +
+      `[&](const ${cppTypeOf(node.source)}& gea_present) -> ${cppTypeOf(node.target)} { if (!gea_present.has_value()) ` +
       `gea::host::throwRuntimeError("TypeError", "a value the program proved present was absent"); return ${payload}; }(${text})`
     )
   }

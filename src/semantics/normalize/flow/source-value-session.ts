@@ -243,7 +243,7 @@ interface TransferInputs {
   readonly tested: ReadonlySet<Value>[]
   readonly testedSizes: number[]
   readonly holders: (readonly [Value, number])[]
-  readonly joined: ReadonlySet<Value>[]
+  readonly joined: FactState<Query, Value, Cause>[]
   readonly joinedSizes: number[]
 }
 const CANONICAL_INDEX = /^(?:0|[1-9][0-9]*)$/
@@ -2425,22 +2425,21 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           for (const held of values) facts.add(held)
           return
         }
-        let before = 0
+        let delta = values
         if (!whole) {
           let through = addedThrough.get(query)
           if (through === undefined) addedThrough.set(query, (through = new Map()))
-          before = through.get(values) ?? 0
+          const before = through.get(values) ?? 0
           const size = values.size
           if (before === size) return
           through.set(values, size)
+          if (before !== 0) delta = values.factsFrom(before)
         }
-        let at = 0
         if (gating === null) {
-          for (const held of values) if (at++ >= before) facts.add(held)
+          for (const held of delta) facts.add(held)
           return
         }
-        for (const held of values) {
-          if (at++ < before) continue
+        for (const held of delta) {
           if (held.kind === ts.SyntaxKind.OmittedExpression && gates.has(held)) {
             if (!gating.seen.has(held)) {
               gating.seen.add(held)
@@ -4874,8 +4873,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         }
         if (through === undefined) addedThrough.set(query, (through = new Map()))
         const before = through.get(held) ?? 0
-        let at = 0
-        for (const value of held) if (at++ >= before) facts.add(value)
+        for (const value of before === 0 ? held : held.factsFrom(before)) facts.add(value)
         through.set(held, size)
       }
       return facts
@@ -5157,12 +5155,18 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       // literal held in an `any` position was handed to dynamic code as a
       // Document, and a typed read of it is a live view over those entries.
       const declared = new Set(keys)
+      // A source typed with a string index of `any` entries types none of its
+      // undeclared keys: whatever a held literal adds is one of those entries,
+      // copied as its Value like every other run-time key.
+      const anyEntries = checker
+        .getIndexInfosOfType(checker.getTypeAtLocation(expression))
+        .some((info) => (info.keyType.flags & ts.TypeFlags.String) !== 0 && (info.type.flags & ts.TypeFlags.Any) !== 0)
       for (const root of admitted(value(expression)) ?? []) {
         if (!ts.isObjectLiteralExpression(root)) continue
         const contextual = checker.getContextualType(root)
         if (contextual !== undefined && (contextual.flags & ts.TypeFlags.Any) !== 0) continue
         const owned = admitted(nodeQuery('own-keys', root))
-        if (owned === null || owned.some((key) => !ts.isStringLiteral(key) || !declared.has(key.text))) return null
+        if (owned === null || owned.some((key) => !ts.isStringLiteral(key) || (!anyEntries && !declared.has(key.text)))) return null
         const writes = admitted(nodeQuery('closure', root))
         if (writes === null || writes.some((write) => ts.isCallExpression(write) && definitionPlans.has(write))) return null
       }

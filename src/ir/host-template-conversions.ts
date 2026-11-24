@@ -178,6 +178,18 @@ export const hostTemplateConversionInputsOf = (
         )
           add('prototype-result', storedCarrier(callback.abi.result), result.element)
       }
+      // `reduce(cb, initialValue)` threads ONE accumulator through the seed,
+      // every callback argument 0 and every callback answer (23.1.3.24), so
+      // the seed enters the callback's own accumulator carrier -- the checker's
+      // `T`-overload with `T = any` (an `any[]` receiver) gives a `{}` seed an
+      // `any` accumulator, and the runtime reducer has one accumulator type.
+      if ((member === 'reduce' || member === 'reduceRight') && operation.arguments.length === 2) {
+        const callback = operation.arguments[0]?.representation
+        const seed = operation.arguments[1]?.representation
+        const accumulator =
+          callback?.kind === 'function-value-dispatch' && callback.abi.receiver === null ? callback.abi.parameters[0] : null
+        if (seed && accumulator) add('prototype-argument', seed, accumulator.value)
+      }
       // SortCompare hands the comparator two elements; the emitter converts
       // each into its parameter's carrier (`sortText`), so both pairs are
       // this call's own certified conversions.

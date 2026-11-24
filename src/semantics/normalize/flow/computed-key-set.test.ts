@@ -208,10 +208,19 @@ test('direct literal key iteration cites every actual element and the Array iter
     keySet(`for (const key of ['error']) target[key] = 1;`, { intrinsics: () => false }),
     'refused:intrinsic-Array-prototype-unproven'
   )
-  for (const iterable of [`['error', , 'debug']`, `['error', ...['debug']]`, `['error', dynamicKey]`, `keys`]) {
+  for (const iterable of [`['error', , 'debug']`, `['error', ...['debug']]`, `['error', dynamicKey]`]) {
     const answer = keySet(`const keys = ['error']; for (const key of ${iterable}) target[key] = 1;`)
     assert.equal(typeof answer, 'string', iterable)
     assert.match(answer as string, /^refused:/, iterable)
+  }
+  // A `const` array every mention of which only iterates or indexes it holds
+  // exactly its literal's elements (`constArrayElementsOf`); one any mention
+  // could hand onward or mutate does not.
+  assert.deepEqual(keySet(`const keys = ['error', 'debug']; for (const key of keys) target[key] = 1;`), ['debug', 'error'])
+  for (const escape of ['keys.push(dynamicKey);', 'keys[0] = dynamicKey;', 'const alias = keys;', 'external(keys);']) {
+    const answer = keySet(`const keys = ['error']; ${escape} for (const key of keys) target[key] = 1;`)
+    assert.equal(typeof answer, 'string', escape)
+    assert.match(answer as string, /^refused:/, escape)
   }
   assert.equal(keySet(`for (let key of ['error']) { key = dynamicKey; target[key] = 1; }`), 'refused:key-binding-uninitialized')
 })

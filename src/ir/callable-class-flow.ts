@@ -66,7 +66,7 @@ import {
   type NativePropertyPresenceGuard
 } from './native-property-presence.js'
 import { abiKey, representationKey, walkRepresentation, type CallableAbi, type Representation } from '../representation/model.js'
-import { allOperationsOf, type CallCalleeIdentity, type IrBody, type IrOperand, type IrOperation } from './model.js'
+import { allOperationsOf, type CallCalleeIdentity, type IrBlockId, type IrBody, type IrOperand, type IrOperation } from './model.js'
 import { nativeArgumentsMatch, receivedCallArguments } from './call-entry.js'
 import { nativeGenericCallEntriesOf, nativeGenericSelectorMatches } from './generic-call-entry.js'
 import {
@@ -75,7 +75,7 @@ import {
   explicitObjectConstructEntryOf,
   ordinaryConstructBodyMatches
 } from './construct-entry.js'
-import { observesNativeCarrierOnly, operandsOfIrOperation, resultOfIrOperation } from './queries.js'
+import { observesNativeCarrierOnly, operandsOfIrOperation, resultOfIrOperation, successorsOfTerminator } from './queries.js'
 import type { ProgramConversionRecipe } from './program-conversions.js'
 import { nativeCallablePrimitiveDataWritePreservesOwner } from './native-callable-data-flow.js'
 
@@ -657,6 +657,99 @@ const ownedOperationKinds: ReadonlySet<IrOperation['kind']> = new Set<IrOperatio
  * bodies cite, the program-level recipes', and everything they reach. This is
  * the only thing the solve reads of `programConversions` (`nativeCallableFlowOf`).
  */
+/**
+ * The writes that reach each binding read, for the reads where that set is
+ * provable from one body's own control flow -- keyed by the read's result.
+ *
+ * A binding is one mutable cell, so linking every write of a declaration to
+ * every read of it is always sound; it is also why `options = filter(options)`
+ * made the filtered copy's reads answer for the caller's original too. This
+ * narrows a read to the writes that can reach it, and only where nothing else
+ * can write the cell between them: every read and write of the declaration in
+ * one straight-line-or-branching body (no loop, no try/catch, no
+ * iterator-close, generator or async resumption), no closure capturing it, no
+ * per-iteration renewal, and a write on EVERY path from entry to the read (a
+ * parameter, a hoisted `var` or function binding, or a read before the
+ * initializer reaches the entry state, which the IR does not spell as a
+ * write). Every other read is absent and keeps linking every write.
+ */
+const exactReachingBindingWritesOf = (
+  bodies: readonly IrBody[],
+  placements: ReadonlyMap<DeclarationId, BindingPlacement>
+): ReadonlyMap<IrValueId, readonly IrValueId[]> => {
+  const owners = new Map<DeclarationId, IrBody | null>()
+  const shared = new Set<DeclarationId>()
+  for (const body of bodies) {
+    for (const declaration of body.facts?.capturedDeclarations ?? []) shared.add(declaration)
+    for (const declaration of body.facts?.boxed ?? []) shared.add(declaration)
+    for (const block of body.blocks.values())
+      for (const operation of block.operations) {
+        if (operation.kind !== 'binding-read' && operation.kind !== 'binding-write' && operation.kind !== 'binding-renew') continue
+        if (operation.kind === 'binding-renew') shared.add(operation.declaration)
+        const owner = owners.get(operation.declaration)
+        if (owner === undefined) owners.set(operation.declaration, body)
+        else if (owner !== body) owners.set(operation.declaration, null)
+      }
+  }
+  const tracked = (declaration: DeclarationId, body: IrBody): boolean =>
+    owners.get(declaration) === body &&
+    !shared.has(declaration) &&
+    ['local', 'region'].includes(placements.get(declaration)?.storage.kind ?? '')
+  const exact = new Map<IrValueId, readonly IrValueId[]>()
+  const entryState = null
+  for (const body of bodies) {
+    if (body.tryRegions.length > 0 || (body.iteratorCloseRegions?.length ?? 0) > 0) continue
+    if (body.generator || body.async || body.generatorPrologueBoundary) continue
+    // Reverse postorder over an acyclic graph; a back edge (any loop) or a
+    // block the entry never reaches leaves the whole body on the fallback.
+    const order: IrBlockId[] = []
+    const state = new Map<IrBlockId, 'open' | 'done'>()
+    let acyclic = true
+    const visit = (id: IrBlockId): void => {
+      const block = body.blocks.get(id)
+      if (!block) {
+        acyclic = false
+        return
+      }
+      state.set(id, 'open')
+      for (const next of successorsOfTerminator(block.terminator)) {
+        const seen = state.get(next)
+        if (seen === 'open') acyclic = false
+        else if (seen === undefined) visit(next)
+        if (!acyclic) return
+      }
+      state.set(id, 'done')
+      order.push(id)
+    }
+    visit(body.entry)
+    if (!acyclic || order.length !== body.blocks.size) continue
+    order.reverse()
+    type Reaching = Map<DeclarationId, ReadonlySet<IrValueId | typeof entryState>>
+    const exits = new Map<IrBlockId, Reaching>()
+    const predecessors = new Map<IrBlockId, IrBlockId[]>()
+    for (const id of order)
+      for (const next of successorsOfTerminator(body.blocks.get(id)!.terminator))
+        predecessors.set(next, [...(predecessors.get(next) ?? []), id])
+    // A declaration absent from a block's exit still holds the entry state there.
+    for (const id of order) {
+      const incoming = (predecessors.get(id) ?? []).map((predecessor) => exits.get(predecessor)!)
+      const reaching: Reaching = new Map()
+      for (const declaration of new Set(incoming.flatMap((exit) => [...exit.keys()])))
+        reaching.set(declaration, new Set(incoming.flatMap((exit) => [...(exit.get(declaration) ?? [entryState])])))
+      for (const operation of body.blocks.get(id)!.operations) {
+        if (operation.kind === 'binding-write' && tracked(operation.declaration, body))
+          reaching.set(operation.declaration, new Set([operation.value.value]))
+        else if (operation.kind === 'binding-read' && tracked(operation.declaration, body)) {
+          const writes = reaching.get(operation.declaration)
+          if (writes && !writes.has(entryState)) exact.set(operation.result.id, [...writes] as IrValueId[])
+        }
+      }
+      exits.set(id, reaching)
+    }
+  }
+  return exact
+}
+
 const flowViewNodesOf = (
   bodies: readonly IrBody[],
   conversions: (Pick<ConversionCensus, 'nodeById'> & Partial<Pick<ConversionCensus, 'nodeFor'>>) | undefined,
@@ -895,6 +988,9 @@ const solveNativeCallableFlow = (
   const arrayHeaps = new Map<string, NativeHeap>()
   const dictionaryHeaps = new Map<string, NativeHeap>()
   const proxyHeaps = new Map<string, NativeHeap>()
+  // Every compiled allocation of each proxy carrier, keyed by the carrier's summary heap.
+  const proxyAllocations = new Map<NativeHeap, NativeHeap[]>()
+  let proxyHoldersSettled = false
   const recordViews = new WeakMap<Representation, NativeHeap>()
   const adaptedFrames = new Map<string, Map<string, NativeCallableEntryReceiver>>()
   const transportsCallablePrefix = (from: Representation, to: Representation, node: ConversionNode | null | undefined): boolean => {
@@ -944,6 +1040,7 @@ const solveNativeCallableFlow = (
     classHeaps.set(layout.declaration, { declaration: layout.declaration, fields: slots, layoutKey: null, valid: true })
   }
   const operations = bodies.flatMap((body) => [...body.blocks.values()].flatMap((block) => [...block.operations, block.terminator]))
+  const reachingBindingWrites = exactReachingBindingWritesOf(bodies, placements)
   const staticSlots = censusClassStaticFieldSlots(bodies, classes)
   const staticHeaps = new Map<DeclarationId, NativeHeap>(
     [...staticSlots.slots].map(([declaration, slots]) => [
@@ -1667,6 +1764,44 @@ const solveNativeCallableFlow = (
       return implicitEntriesComplete && body?.abi != null && body.construct === null && !implicitEntries.has(id)
     })
   )
+  // A conversion the census does not vouch for may build a proxy carrier
+  // itself, with parts no compiled allocation describes, so an unknown holder
+  // of that carrier cannot be narrowed to the compiled allocations.
+  const foreignProxyCarriers = new Set<NativeHeap>()
+  const proxyCarriersOf = (representation: Representation): Representation[] =>
+    representation.kind === 'proxy-object'
+      ? [representation]
+      : representation.kind === 'optional'
+        ? proxyCarriersOf(representation.payload)
+        : representation.kind === 'borrowed-ref'
+          ? proxyCarriersOf(representation.referent)
+          : representation.kind === 'tagged-union'
+            ? representation.arms.flatMap((arm) => proxyCarriersOf(arm.value))
+            : []
+  for (const operation of operations) {
+    if (operation.kind !== 'convert') continue
+    const node = conversions?.nodeById(operation.conversionUse)
+    if (
+      node &&
+      representationKey(node.source) === representationKey(operation.source.representation) &&
+      representationKey(node.target) === representationKey(operation.result.representation)
+    )
+      continue
+    for (const carrier of proxyCarriersOf(operation.result.representation))
+      for (const heap of nativeReferences(carrier).heaps) foreignProxyCarriers.add(heap)
+  }
+  // The compiled allocations are the ones this flow's bodies hold. A function
+  // the program can enter whose body the flow lacks (a class member, or a
+  // closure allocated here) may allocate proxies of its own, so then no
+  // unknown holder of a proxy carrier is narrowed to the listed allocations.
+  const enterableFunctions: (FunctionId | null)[] = []
+  for (const layout of classes.values()) {
+    enterableFunctions.push(layout.constructor)
+    for (const method of [...layout.methods, ...layout.staticMethods]) enterableFunctions.push(method.callable)
+    for (const accessor of [...layout.accessors, ...layout.staticAccessors]) enterableFunctions.push(accessor.getter, accessor.setter)
+  }
+  for (const operation of operations) if (operation.kind === 'allocate-callable') enterableFunctions.push(operation.functionId)
+  const proxyAllocationsComplete = enterableFunctions.every((id) => id === null || bodyById.has(id))
   const entered = new Set<IrBody>()
   const pendingBodies: IrBody[] = []
   const enter = (id: FunctionId): void => {
@@ -2124,16 +2259,30 @@ const solveNativeCallableFlow = (
         }
         link(value(operation.target.value), heap.fields.get('target')!.cell)
         link(value(operation.handler.value), heap.fields.get('handler')!.cell)
+        if (heap.template !== undefined) {
+          const allocated = proxyAllocations.get(heap.template) ?? []
+          if (!allocated.includes(heap)) allocated.push(heap)
+          proxyAllocations.set(heap.template, allocated)
+        }
         break
       }
       case 'proxy-part': {
-        heapEffect(operation, () => {
-          const proxy = value(operation.proxy.value)
-          if (proxy.unknown) {
-            untrusted(operation)
-            return true
-          }
-          for (const heap of proxy.heaps) {
+        // A proxy's carrier is a native type only compiled code allocates,
+        // so a holder of that carrier the solve cannot name -- unknown, or
+        // still empty once every origin has settled -- holds one of the
+        // carrier's compiled allocations, each with its own parts. An empty
+        // holder is not rejected: rejecting it publishes the trap calls its
+        // parts feed before their callees can arrive.
+        const compiledAllocations = (): NativeHeap[] | null => {
+          const carrier = operation.proxy.representation.kind === 'proxy-object' ? nativeReferences(operation.proxy.representation) : null
+          return proxyAllocationsComplete && carrier?.complete === true && !carrier.heaps.some((heap) => foreignProxyCarriers.has(heap))
+            ? carrier.heaps.flatMap((summary) => proxyAllocations.get(summary) ?? [])
+            : null
+        }
+        // [[ProxyTarget]] and [[ProxyHandler]] are internal slots that no
+        // holder can replace (`observeProxy`), so their parts stay exact.
+        const linkParts = (heaps: readonly NativeHeap[]): boolean => {
+          for (const heap of heaps) {
             const part = heap.fields.get(operation.part)
             if (
               !heap.valid ||
@@ -2142,11 +2291,21 @@ const solveNativeCallableFlow = (
               representationKey(part.representation) !== representationKey(operation.result.representation)
             ) {
               untrusted(operation)
-              return true
+              return false
             }
             link(part.cell, value(operation.result.id))
           }
-          return proxy.heaps.size > 0
+          return true
+        }
+        heapEffect(operation, () => {
+          const proxy = value(operation.proxy.value)
+          const allocations = proxy.unknown || (proxyHoldersSettled && proxy.heaps.size === 0) ? compiledAllocations() : []
+          if (allocations === null) {
+            untrusted(operation)
+            return true
+          }
+          const heaps = [...new Set([...proxy.heaps, ...allocations])]
+          return !linkParts(heaps) || heaps.length > 0 || proxyHoldersSettled
         })
         break
       }
@@ -2236,8 +2395,10 @@ const solveNativeCallableFlow = (
         if (!['local', 'region'].includes(placements.get(operation.declaration)?.storage.kind ?? ''))
           markEscaped(value(operation.value.value), undefined, [operation])
         break
-      case 'binding-read':
-        link(binding(operation.declaration), value(operation.result.id))
+      case 'binding-read': {
+        const reaching = reachingBindingWrites.get(operation.result.id)
+        if (reaching) for (const write of reaching) link(value(write), value(operation.result.id))
+        else link(binding(operation.declaration), value(operation.result.id))
         if (!['local', 'region'].includes(placements.get(operation.declaration)?.storage.kind ?? ''))
           external(value(operation.result.id), operation.result.representation)
         if (operation.closedCallable)
@@ -2246,6 +2407,7 @@ const solveNativeCallableFlow = (
             : operation.closedCallable.functionIds)
             addFunction(value(operation.result.id), id)
         break
+      }
       case 'phi':
         for (const incoming of operation.incoming) link(value(incoming.value.value), value(operation.result.id))
         break
@@ -3019,6 +3181,9 @@ const solveNativeCallableFlow = (
       if (returned) escape(returned, `implicit-accessor-return:${id}`)
     }
   }
+  settle()
+  proxyHoldersSettled = true
+  settle()
   for (;;) {
     for (const operation of pendingCalls) {
       if (matchedCalls.has(operation) || rejectedCalls.has(operation)) continue
@@ -3230,6 +3395,27 @@ const solveNativeCallableFlow = (
       if (source.described === true) storeExpando(owner, null, { kind: 'dynamic', reason: 'declared-any-never-narrowed' })
     }
   }
+  // A record boxed into `any` can meet any store through a dynamic receiver
+  // (`target[key] = value` on an `any` target): a key its layout lacks lands
+  // in its expando as the Value written, so a live view reading that key
+  // through this allocation meets a Value and must read it checked into its
+  // own carrier. Only a program with such a store, and under only the keys
+  // those stores can name, adds the route.
+  const dynamicStoreKeys = new Set<string | null>()
+  for (const operation of operations)
+    if (operation.kind === 'set' && operation.receiver.representation.kind === 'dynamic') {
+      const constant = keyOf(operation.key)
+      if (constant !== null) dynamicStoreKeys.add(constant)
+      else for (const key of operation.provenKeyTexts ?? [null]) dynamicStoreKeys.add(key)
+    }
+  if (dynamicStoreKeys.size > 0)
+    for (const operation of operations) {
+      if (operation.kind !== 'convert' || operation.result.representation.kind !== 'dynamic') continue
+      let boxed = operation.source.representation
+      while (boxed.kind === 'optional' || boxed.kind === 'borrowed-ref') boxed = boxed.kind === 'optional' ? boxed.payload : boxed.referent
+      if ((boxed.kind !== 'record' && boxed.kind !== 'native-record-ref') || boxed.ownership !== 'shared-refcount') continue
+      for (const key of dynamicStoreKeys) storeExpando(boxed, key, { kind: 'dynamic', reason: 'declared-any-never-narrowed' })
+    }
   // A runtime-keyed store over a live view target (`for (const key in
   // parameters) data[key] = parameters[key]`): a key no descriptor names
   // lands, in the value's own carrier, in the expando of the plain allocation

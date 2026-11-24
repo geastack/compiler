@@ -7,7 +7,12 @@ import { IrLoweringBlockedError } from './lower-graph.js'
 import { pendingShortCircuitOf } from './lower-short-circuit.js'
 import { methodValueOriginOf } from '../projection/callee.js'
 import { propertyReadResultRepresentationOf } from '../projection/fields.js'
-import { computedPropertyKeyTextsOf, typedComputedReadRecipeOf, typedComputedWriteRecipeOf } from './typed-property-access.js'
+import {
+  computedPropertyKeyTextsOf,
+  correlatedSourceFieldsOf,
+  typedComputedReadRecipeOf,
+  typedComputedWriteRecipeOf
+} from './typed-property-access.js'
 import { nativePropertyReadNeedsCoercibility } from './native-property-coercibility.js'
 import { holdsProxyArm, lowerProxyAccess, lowerProxyUnionAccess } from './lower-proxy.js'
 import type { FlowController } from './lower-flow.js'
@@ -310,7 +315,8 @@ const lowerPropertyOn = (
         typedComputedWriteRecipeOf(ctx.graph, operation, receiver.representation, ctx.constantDeriver, ctx.program.classes) ?? undefined,
         computedPropertyKeyTextsOf(ctx.graph, operation),
         operation.ordinaryFunctionDataWrite,
-        operation.ordinaryObjectDataWriteAbsent
+        operation.ordinaryObjectDataWriteAbsent,
+        correlatedSourceFieldsOf(ctx.graph, operation, ctx.constantDeriver)
       )
     }
     case 'define-own-property': {

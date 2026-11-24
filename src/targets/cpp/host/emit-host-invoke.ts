@@ -13,7 +13,7 @@ import {
   type EmitContext
 } from '../emit-context.js'
 import { consoleArgumentsText, toStringRefusal, toStringText, toStringTextOver } from '../emit-tostring.js'
-import { classToNumberText, classToPrimitiveOf, toNumberRefusal, toNumberText } from '../emit-tonumber.js'
+import { classToNumberText, classToPrimitiveTextOf, toNumberRefusal, toNumberText } from '../emit-tonumber.js'
 import { booleanTestText } from '../emit-presence.js'
 import { hostArgumentText, hostMemberReceiverText } from './emit-host-arity.js'
 import { fillHostTemplate, hostMemberOf } from './host-members.js'
@@ -370,7 +370,7 @@ const renderBigInt = ({ ctx, args, role }: HostInvocationRequest): string => {
  * which `gea::host::BigIntConstructor::create`'s overloads are.
  *
  * A program class converts through its own `valueOf` when ToPrimitive is
- * decided statically (`classToPrimitiveOf`); a `null`/`undefined` primitive
+ * decided statically (`classToPrimitiveTextOf`); a `null`/`undefined` primitive
  * is ToBigInt's TypeError. A tagged union dispatches on the arm it holds, so
  * `BigInt(id)` over `number | bigint | SomeClass` needs no box. `depth`
  * only names the per-arm lambda locals apart.
@@ -386,9 +386,10 @@ const bigIntText = (ctx: EmitContext, text: string, carrier: Representation, dep
   if (carrier.kind === 'undefined' || carrier.kind === 'null') return `([&]() -> gea::BigInt { (void)(${text}); ${failure}; })()`
   const local = `gea_bigint_source_${depth}`
   if (carrier.kind === 'class-ref') {
-    const primitive = classToPrimitiveOf(ctx, carrier)
-    if (primitive === null) return null
-    const converted = bigIntText(ctx, primitive.call(local), primitive.result, depth + 1)
+    const converted = classToPrimitiveTextOf(ctx, carrier, local, {
+      convert: (primitive, primitiveCarrier) => bigIntText(ctx, primitive, primitiveCarrier, depth + 1),
+      type: 'gea::BigInt'
+    })
     if (converted === null) return null
     // A refcounted reference can be the collapsed null of `T | null`.
     const present = carrier.ownership === 'shared-refcount' ? `if (!static_cast<bool>(${local})) ${failure}; ` : ''

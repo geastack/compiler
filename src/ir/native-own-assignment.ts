@@ -473,8 +473,18 @@ export const nativeOwnAssignmentRecipeOf = (
   )
     return null
   const local = nativeOwnAssignmentRootOf(target.value, operations, input)
-  if (describedFact && local === null) return null
-  const targetResult = describedFact ? local!.lineage : fact.targets[0]!
+  // A conditional source argument splits a described copy from its target
+  // too. The target argument must then be the exact native allocation, seen
+  // through its own initializing stores only; the body-wide producer check
+  // below authenticates it.
+  const splitRootOf = (id: IrValueId, depth: number): Extract<IrOperation, { kind: 'allocate-record' }> | null => {
+    const one = depth > 64 ? null : definitionOf(id)
+    if (one?.kind === 'allocate-record') return sharedRecord(one.result.representation) ? one : null
+    return one?.kind === 'set' || one?.kind === 'define-own-property' ? splitRootOf(one.receiver.value, depth + 1) : null
+  }
+  const describedRoot = local ?? (describedFact ? splitRootOf(target.value, 0) : null)
+  if (describedFact && describedRoot === null) return null
+  const targetResult = describedFact ? describedRoot!.lineage : fact.targets[0]!
   const allocation = allocationOf(input.graph, targetResult)
   const body = input.bodyOf?.(operation)
   // A conditional source argument splits the call from its already evaluated
@@ -504,6 +514,13 @@ export const nativeOwnAssignmentRecipeOf = (
     const semanticSource = operandOf(semantic, 'argument', source.ordinal)
     if (!receiver || !semanticSource || semanticSource.source !== source.source) return null
     if (source.described !== undefined) {
+      // A declared-any table declaring no member holds only Values: every
+      // run-time key it enumerates is copied as its live entry.
+      const surfaces = surfacesOf(receiver.representation)
+      if (source.described.keys.length === 0 && surfaces.length > 0 && surfaces.every(declaredDynamicDictionary)) {
+        sources.push({ ordinal: source.ordinal, protocol: 'dictionary-entry', described: true, fields: [], receiver, roots: [] })
+        continue
+      }
       const described = describedSourceFieldsOf(
         receiver.representation,
         source.described.keys,

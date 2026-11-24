@@ -269,6 +269,18 @@ export interface BindingOperation extends SemanticOperationBase {
   }
 }
 
+/** A literal host builtin lookup whose ModuleRecord must be retained. */
+export interface CallBuiltinModuleLookup {
+  readonly target: RegionId
+  readonly builtinModule: string
+  /**
+   * The ES module namespace a literal lookup of an ES-module builtin denotes:
+   * each export's key and the cell that holds it. Absent for a CommonJS
+   * target, or when some export is a mutable binding a snapshot cannot track.
+   */
+  readonly namespace?: readonly { readonly key: string; readonly declaration: DeclarationId }[]
+}
+
 /** Evaluated `[[Call]]` and `[[Construct]]`, plus tagged-template application. */
 export interface InvocationOperation extends SemanticOperationBase {
   /** Actual unmodified standard Object()/new Object(), with no arguments. */
@@ -299,7 +311,7 @@ export interface InvocationOperation extends SemanticOperationBase {
         readonly builtinModule: null
       }
   /** A literal host builtin lookup whose ModuleRecord must be retained. */
-  readonly builtinModuleLookup?: { readonly target: RegionId; readonly builtinModule: string }
+  readonly builtinModuleLookup?: CallBuiltinModuleLookup
   /** A checker-authenticated intrinsic that mutates its first argument. */
   readonly intrinsicMutation?: 'object-assign' | 'reflect-set' | 'object-define-property' | 'object-define-properties'
   /** Exact allocation/slot families consumed by the native bulk assignment authority. */

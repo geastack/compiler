@@ -8,7 +8,7 @@ import { createConversionDerivationContext, deriveConversionCapability } from '.
 import { narrowingCapabilityFor } from './build.js'
 import type { CoercionOperation, ConversionRuntimeRegistry } from './registry.js'
 import type { FamilyMemberKeys } from './record-view.js'
-import { impossibleFieldReadOf, IMPOSSIBLE_FIELD_READ } from './impossible-field-read.js'
+import { absentOnlyFieldReadOf, impossibleFieldReadOf, ABSENT_ONLY_FIELD_READ, IMPOSSIBLE_FIELD_READ } from './impossible-field-read.js'
 import { nativeUnboundMethodContractOf, NATIVE_UNBOUND_METHOD_MATERIALIZER } from './native-method.js'
 import { nativeBufferUnboundMethodContractOf } from './native-buffer-method.js'
 import { siblingClassArgumentOf, SIBLING_CLASS_ARGUMENT } from './sibling-class.js'
@@ -866,7 +866,15 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     const method = nativeMethodFor(source, target)
     if (method) return method
     const ordinary = nodeFor(source, target)
-    if (ordinary.capability.kind !== 'never' || !impossibleFieldReadOf(source, target)) return ordinary
+    if (ordinary.capability.kind !== 'never') return ordinary
+    if (absentOnlyFieldReadOf(source, target))
+      return contextualNode(source, target, 'absent-only-field-read', {
+        id: ABSENT_ONLY_FIELD_READ,
+        domain: 'static:absent-only-field-read',
+        allocates: false,
+        nativeFieldProtocol: 'unused'
+      })
+    if (!impossibleFieldReadOf(source, target)) return ordinary
     return contextualNode(source, target, 'field-read', {
       id: IMPOSSIBLE_FIELD_READ,
       domain: 'static:impossible-field-read',

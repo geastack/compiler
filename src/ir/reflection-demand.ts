@@ -2698,7 +2698,13 @@ export const reflectionExposureOf = (
         carriesCallable(operand.representation) ||
         isDeferredCarrier(operand.representation)
       )
-        promoteFull(
+        // A live view published past the boundary answers its dynamic
+        // protocol from its ORIGINAL (`gea::dictionary::aliasOf` reads through
+        // `record::nativeViewRoute`'s owner), so every original behind it
+        // crosses too: a merged options record viewed as `DbOptions` and
+        // handed on as `Record<string, any>` otherwise enumerated its keys and
+        // read every value as `undefined`.
+        promoteLogicalReceiver(
           operand.representation,
           `unknown-operation-boundary:${operation.kind}${operation.kind === 'compute' ? `:${operation.form}:${operation.operator}` : ''}${
             operation.kind === 'convert' && promotionWatch !== undefined ? `:${convertCauseOf(operation)}` : ''

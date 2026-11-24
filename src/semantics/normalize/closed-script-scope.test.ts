@@ -7,7 +7,11 @@ test('the compile request carries its script lexical boundary through every infe
   const entry = resolve('test/fixtures/closed-script-scope.ts')
   // Like native-stored-event-callback, exercise geatsc's inferred parameter
   // carrier independently of TypeScript's noImplicitAny diagnostic.
+  // The `globalThis` mention keeps this lone root a Script: an entry the
+  // difference cannot reach is given the module goal
+  // (`moduleGoalForAmbiguousEntry`), and a module has no script lexical scope.
   const source = `// @ts-nocheck
+    void globalThis;
     class Recorder { amount = 0; record(value) { this.amount = value } }
     const recorder = new Recorder(); recorder.record(7); console.log(recorder.amount);
   `

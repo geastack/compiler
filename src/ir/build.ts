@@ -6,7 +6,7 @@ import type { ConstantLiteral } from '../semantics/model/operands.js'
 import type { SemanticTargetProof } from '../semantics/model/operations.js'
 import type { HostMethodBinding } from '../semantics/host-methods.js'
 import type { UnboxedMethodAssumption } from '../projection/method-value-escapes.js'
-import type { TypedComputedReadRecipe, TypedComputedWriteRecipe } from './typed-property-access.js'
+import type { CorrelatedSourceField, TypedComputedReadRecipe, TypedComputedWriteRecipe } from './typed-property-access.js'
 import { irBlockId } from './model.js'
 import { successorsOfTerminator } from './queries.js'
 import type {
@@ -117,7 +117,9 @@ export interface IrBodyBuilder {
     provenKeyTexts?: readonly string[],
     /** See SetOperation.ordinaryFunctionDataWrite. */
     ordinaryFunctionDataWrite?: true,
-    ordinaryObjectDataWriteAbsent?: true
+    ordinaryObjectDataWriteAbsent?: true,
+    /** See `SetOperation.correlatedSourceFields`. */
+    correlatedSourceFields?: readonly CorrelatedSourceField[]
   ) => IrValueId | null
   readonly delete: (
     block: IrBlockId,
@@ -194,6 +196,7 @@ export interface IrBodyBuilder {
     builtinModule: string | null,
     representation: Representation
   ) => IrValueId
+  readonly moduleNamespace: (block: IrBlockId, lineage: SemanticResultId, target: RegionId, fresh: IrOperand) => IrValueId
   readonly commonJsBinding: (
     block: IrBlockId,
     lineage: SemanticResultId,
@@ -647,7 +650,8 @@ export const createIrBodyBuilder = (
     typedComputedWrite,
     provenKeyTexts,
     ordinaryFunctionDataWrite,
-    ordinaryObjectDataWriteAbsent
+    ordinaryObjectDataWriteAbsent,
+    correlatedSourceFields
   ) => {
     const result = mintOptionalResult(representation)
     append(block, {
@@ -663,7 +667,8 @@ export const createIrBodyBuilder = (
       ...(ordinaryFunctionDataWrite === undefined ? {} : { ordinaryFunctionDataWrite }),
       ...(ordinaryObjectDataWriteAbsent === undefined || !mayCarryOrdinaryObject(receiver.representation)
         ? {}
-        : { ordinaryObjectDataWriteAbsent })
+        : { ordinaryObjectDataWriteAbsent }),
+      ...(correlatedSourceFields === undefined ? {} : { correlatedSourceFields })
     })
     return result?.id ?? null
   }
@@ -781,6 +786,12 @@ export const createIrBodyBuilder = (
       ...(builtinShadowGuard ? { builtinShadowGuard } : {})
     })
     return result?.id ?? null
+  }
+
+  const moduleNamespace: IrBodyBuilder['moduleNamespace'] = (block, lineage, target, fresh) => {
+    const result = mintResult(fresh.representation)
+    append(block, { kind: 'module-namespace', lineage, target, fresh, result })
+    return result.id
   }
 
   const commonJsRequire: IrBodyBuilder['commonJsRequire'] = (block, lineage, owner, target, builtinModule, representation) => {
@@ -1211,6 +1222,7 @@ export const createIrBodyBuilder = (
     spreadCopy,
     call,
     commonJsRequire,
+    moduleNamespace,
     commonJsBinding,
     commonJsBindingSet,
     superInitialize,

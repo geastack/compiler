@@ -1475,6 +1475,15 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
     // one other place a type enters from a source position: a binding whose
     // whole declared type is an absent host class, rather than one arm of a
     // union of them.
+    // See `readerLayoutOf` in `structural-mutable-field.ts`: the slot it
+    // fills is laid out at the same type.
+    name: 'array-literal-reader-layout',
+    forms: [ts.SyntaxKind.ArrayLiteralExpression],
+    resolve(node) {
+      return ts.isArrayLiteralExpression(node) ? this.mutableFields.readerLayoutOf(node) : null
+    }
+  },
+  {
     name: 'array-literal-implied-pattern',
     forms: [ts.SyntaxKind.ArrayLiteralExpression],
     resolve(node) {

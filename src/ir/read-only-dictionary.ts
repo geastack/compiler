@@ -6,7 +6,7 @@ import type { CalleeRenderingInput } from '../projection/callee.js'
 import type { ClassLayout } from '../projection/classes.js'
 import type { Representation } from '../representation/model.js'
 import { closedCallFrameOf, hostTemplateFrameOf } from './call-entry.js'
-import { authenticatedArrayIsArrayCall } from './intrinsic-call-facts.js'
+import { authenticatedArrayIsArrayCall, intrinsicCallFlagsMatch } from './intrinsic-call-facts.js'
 import { nativeClassConstructionOf } from './native-class-construction.js'
 import { allOperationsOf, type IrBlockId, type IrBody, type IrOperation } from './model.js'
 import { observesNativeCarrierOnly, operandsOfIrOperation, resultOfIrOperation } from './queries.js'
@@ -66,12 +66,18 @@ export const createReadOnlyDictionaryAuthority = (input: ReadOnlyDictionaryInput
   const definitions = new Map<IrValueId, IrOperation>()
   const representations = new Map<IrValueId, Representation>()
   const cellReads = new Map<DeclarationId, { readonly value: IrValueId; readonly owner: IrBody['sourceOwner'] }[]>()
-  const capturedCells = new Set<DeclarationId>()
+  const capturedCells = new Map<DeclarationId, Set<IrBody>>()
+  const readingBodies = new Map<DeclarationId, Set<IrBody>>()
+  const cellWrites = new Map<DeclarationId, number>()
   const bodiesOfFunction = new Map<FunctionId, IrBody[]>()
   const parameters = new Map<IrBody, ReadonlyMap<number, IrValueId>>()
   const observed = new Set<IrValueId>()
   for (const body of input.bodies.values()) {
-    for (const declaration of body.facts?.capturedDeclarations ?? []) capturedCells.add(declaration)
+    for (const declaration of body.facts?.capturedDeclarations ?? []) {
+      const capturing = capturedCells.get(declaration) ?? new Set<IrBody>()
+      capturing.add(body)
+      capturedCells.set(declaration, capturing)
+    }
     const source = body.sourceOwner as FunctionId
     const implementations = bodiesOfFunction.get(source) ?? []
     implementations.push(body)
@@ -100,10 +106,14 @@ export const createReadOnlyDictionaryAuthority = (input: ReadOnlyDictionaryInput
           representations.set(result.id, result.representation)
         }
         if (operation.kind === 'parameter') formals.set(operation.ordinal, operation.result.id)
+        if (operation.kind === 'binding-write') cellWrites.set(operation.declaration, (cellWrites.get(operation.declaration) ?? 0) + 1)
         if (operation.kind === 'binding-read') {
           const list = cellReads.get(operation.declaration) ?? []
           list.push({ value: operation.result.id, owner: body.sourceOwner })
           cellReads.set(operation.declaration, list)
+          const reading = readingBodies.get(operation.declaration) ?? new Set<IrBody>()
+          reading.add(body)
+          readingBodies.set(operation.declaration, reading)
         }
       }
     parameters.set(body, formals)
@@ -127,11 +137,48 @@ export const createReadOnlyDictionaryAuthority = (input: ReadOnlyDictionaryInput
     const consumers = new Map<string, Consumer>()
     const pending = [root]
     const cursors = new Set<IrValueId>()
+    // Fresh objects the handle was stored into as a field (`{ params: view }`):
+    // the handle is reachable through each, so each is followed like an alias,
+    // and every use of it must be one that cannot expose or mutate the handle.
+    const containers = new Set<IrValueId>()
     const retain = (value: IrValueId): boolean => {
       const carrier = representations.get(value)
       if (carrier === undefined || carrier.kind === 'dynamic') return false
-      if (holdsDictionary(carrier) || cursors.has(value)) pending.push(value)
+      if (holdsDictionary(carrier) || cursors.has(value) || containers.has(value)) pending.push(value)
       return true
+    }
+    const contain = (value: IrValueId): boolean => {
+      const carrier = representations.get(value)
+      if (carrier === undefined || carrier.kind === 'dynamic') return false
+      containers.add(value)
+      pending.push(value)
+      return true
+    }
+    // Every alias step from a holder keeps following it as a holder.
+    let followingHolder = false
+    const follow = (value: IrValueId): boolean => (followingHolder ? holderStep(value) : retain(value))
+    // A value reached from a holder can itself be a holder (a nested object, a
+    // phi of two holders, a holder handed to a closed callee's parameter).
+    const objectLike = (carrier: Representation): boolean =>
+      carrier.kind === 'optional'
+        ? objectLike(carrier.payload)
+        : carrier.kind === 'borrowed-ref'
+          ? objectLike(carrier.referent)
+          : carrier.kind === 'tagged-union'
+            ? carrier.arms.some((arm) => objectLike(arm.value))
+            : carrier.kind === 'record' ||
+              carrier.kind === 'record-with-index' ||
+              carrier.kind === 'native-record-ref' ||
+              carrier.kind === 'class-ref' ||
+              carrier.kind === 'array-object'
+    const holderStep = (value: IrValueId): boolean => {
+      const carrier = representations.get(value)
+      if (carrier === undefined || carrier.kind === 'dynamic') return false
+      return holdsDictionary(carrier) ? retain(value) : objectLike(carrier) ? contain(value) : true
+    }
+    const freshObject = (value: IrValueId): boolean => {
+      const definition = definitions.get(value)
+      return definition?.kind === 'allocate-record' || definition?.kind === 'allocate-ordinary-object'
     }
     while (pending.length) {
       const value = pending.pop()!
@@ -154,21 +201,80 @@ export const createReadOnlyDictionaryAuthority = (input: ReadOnlyDictionaryInput
             continue
           return null
         }
+        // The handle stored as a field of a fresh object: that object now
+        // reaches it, so it is followed in its turn.
+        if (operation.kind === 'define-own-property' && operation.value.value === value && !containers.has(value)) {
+          if (operation.receiver.value === value || operation.key.value === value || !freshObject(operation.receiver.value)) return null
+          if (!contain(operation.receiver.value)) return null
+          if (operation.result !== null && !contain(operation.result.id)) return null
+          continue
+        }
+        if (operation.kind === 'allocate-record' && !containers.has(value)) {
+          if (!contain(operation.result.id)) return null
+          continue
+        }
+        followingHolder = containers.has(value)
+        if (containers.has(value)) {
+          switch (operation.kind) {
+            // Writing another value into the holder neither reads nor exposes
+            // the handle; a read of a member hands out at most the handle
+            // itself, which is then followed as an alias.
+            case 'define-own-property':
+            case 'set':
+              if (operation.receiver.value !== value || operation.key.value === value || operation.value.value === value) return null
+              continue
+            case 'get':
+              if (operation.receiver.value !== value || operation.key.value === value || !holderStep(operation.result.id)) return null
+              continue
+            case 'has-property':
+              if (operation.receiver.value !== value || operation.key.value === value) return null
+              continue
+            case 'own-property-keys':
+              if (operation.receiver.value !== value) return null
+              continue
+            // A holder converted to another record carrier still reaches the
+            // handle (a view, or a copy of the field), so the result is a
+            // holder too; into `dynamic` it escapes.
+            case 'convert': {
+              if (operation.source.value !== value || operation.rebuild !== undefined) return null
+              const node = input.conversions.nodeById(operation.conversionUse)
+              if (node === null || node.capability.kind === 'never' || !contain(operation.result.id)) return null
+              continue
+            }
+            default:
+              // phi, cell writes, closed calls, constructions, converts and
+              // tests: the same rules as for the handle itself, below.
+              break
+          }
+        }
         switch (operation.kind) {
           case 'phi':
-            if (!retain(operation.result.id)) return null
+            if (!follow(operation.result.id)) return null
             break
           case 'binding-write': {
             const storage = input.placements.get(operation.declaration)?.storage
             if (
               operation.value.value !== value ||
               (storage?.kind !== 'local' && storage?.kind !== 'region') ||
-              storage.owner !== use.owner.sourceOwner ||
-              capturedCells.has(operation.declaration)
+              storage.owner !== use.owner.sourceOwner
+            )
+              return null
+            // A cell a closure captures is read from other bodies too. When this
+            // is the cell's only write, every read anywhere yields this value, so
+            // following all of them covers every path to the handle -- provided
+            // each capturing body reads it itself. A capture fact with no read in
+            // its body is transitive (a nested closure, or reads this IR no
+            // longer shows), so those reads cannot be followed.
+            const capturing = capturedCells.get(operation.declaration)
+            const captured = capturing !== undefined
+            if (
+              captured &&
+              (cellWrites.get(operation.declaration) !== 1 ||
+                [...capturing].some((body) => readingBodies.get(operation.declaration)?.has(body) !== true))
             )
               return null
             for (const read of cellReads.get(operation.declaration) ?? [])
-              if (read.owner !== use.owner.sourceOwner || !retain(read.value)) return null
+              if ((!captured && read.owner !== use.owner.sourceOwner) || !follow(read.value)) return null
             break
           }
           case 'convert': {
@@ -185,14 +291,14 @@ export const createReadOnlyDictionaryAuthority = (input: ReadOnlyDictionaryInput
                   node.capability.materializer.nativePayloadTransport !== 'preserved')
               )
                 return null
-            } else if (!retain(operation.result.id)) return null
+            } else if (!follow(operation.result.id)) return null
             break
           }
           case 'merge-live-arm-rebuild':
-            if (operation.source.value !== value || operation.nativeTransport === undefined || !retain(operation.result.id)) return null
+            if (operation.source.value !== value || operation.nativeTransport === undefined || !follow(operation.result.id)) return null
             break
           case 'get':
-            if (operation.receiver.value !== value || operation.key.value === value || !retain(operation.result.id)) return null
+            if (operation.receiver.value !== value || operation.key.value === value || !follow(operation.result.id)) return null
             break
           case 'has-property':
             if (operation.receiver.value !== value || operation.key.value === value) return null
@@ -218,7 +324,7 @@ export const createReadOnlyDictionaryAuthority = (input: ReadOnlyDictionaryInput
               operation.form === 'require-iterable-present' ||
               operation.form === 'require-tagged-union-arm'
             )
-              if (!retain(operation.result.id)) return null
+              if (!follow(operation.result.id)) return null
             break
           case 'call': {
             if (
@@ -237,6 +343,16 @@ export const createReadOnlyDictionaryAuthority = (input: ReadOnlyDictionaryInput
               operation.hostTemplate === 'array-is-array' &&
               authenticatedArrayIsArrayCall(operation, semantic, rendering, (id) => definitions.get(id) ?? null) &&
               hostTemplateFrameOf(operation, input.conversions, null, input.classes) === true
+            )
+              break
+            // `Object.keys`/`getOwnPropertyNames`/`hasOwn` read the queried
+            // object's own keys exactly as `own-property-keys` does and return
+            // fresh strings or a boolean, never the object or a value from it.
+            if (
+              operation.intrinsicOwnKeys === true &&
+              operation.arguments[0]?.value === value &&
+              operation.arguments.slice(1).every((argument) => argument.value !== value) &&
+              intrinsicCallFlagsMatch(operation, semantic, rendering, (id) => definitions.get(id) ?? null)
             )
               break
             const identity = operation.closedCallee
@@ -261,7 +377,7 @@ export const createReadOnlyDictionaryAuthority = (input: ReadOnlyDictionaryInput
             for (const [ordinal, argument] of operation.arguments.entries()) {
               if (argument.value !== value) continue
               const target = formal(identity.functionId, ordinal)
-              if (target === null || !retain(target)) return null
+              if (target === null || !follow(target)) return null
             }
             break
           }
@@ -274,7 +390,7 @@ export const createReadOnlyDictionaryAuthority = (input: ReadOnlyDictionaryInput
                 for (const [ordinal, argument] of entry.arguments.entries()) {
                   if (argument.value !== value) continue
                   const target = formal(entry.functionId, ordinal)
-                  if (target === null || !retain(target)) return null
+                  if (target === null || !follow(target)) return null
                 }
             break
           }

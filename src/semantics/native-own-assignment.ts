@@ -8,6 +8,9 @@ import type { OperandSource } from './model/operands.js'
 export interface NativeOwnAssignmentValue {
   readonly type: StructuralTypeId
   readonly source: OperandSource | { readonly kind: 'function'; readonly callable: FunctionId }
+  /** The slot may be absent here: a read observes `undefined`, but nothing
+   * stores it -- the key's presence, not its storage, carries this value. */
+  readonly absence?: true
 }
 
 /** A direct slot projects the same complete source closure as bulk copies.

@@ -8729,6 +8729,15 @@ struct IsNativeCallableObject : std::false_type {};
 template <typename Result, typename... Arguments>
 struct IsNativeCallableObject<CallableObject<Result(Arguments...)>> : std::true_type {};
 
+/**
+ * A recursive callable's named wrapper (`targets/cpp/recursive-containers.ts`:
+ * `struct W final : CallableObject<R(A...)> { using Base = ...; }`). It adds
+ * only a declaration name, so every boundary crossing is its base callable's.
+ */
+template <typename T>
+concept RecursiveCallableWrapper = requires { typename T::Base; } && !std::is_same_v<T, typename T::Base> &&
+                                   IsNativeCallableObject<typename T::Base>::value && std::is_base_of_v<typename T::Base, T>;
+
 
 /**
  * `CallableObject`'s trailing-argument drop with the source thunk named in the
@@ -20116,6 +20125,10 @@ class Value {
   /** Boxes a value of any shape. The tag is stated by the caller because C++ type identity is not JavaScript type identity -- a `std::string` is a JS string, but a `gea::Optional<double>` is a JS number or `undefined` depending on the presence flag, and only the emitter knows which. */
   template <typename T>
   static Value box(Tag tag, T&& value) {
+    // A recursive callable wrapper boxes as the callable it is: its base
+    // carries the call table and the function identity.
+    if constexpr (detail::RecursiveCallableWrapper<std::decay_t<T>>)
+      return box(tag, static_cast<const typename std::decay_t<T>::Base&>(value));
     // A Document that views another object (`gea::dictionary::aliasOf`) boxes
     // as that object: `any` sees the instance itself -- its identity, its
     // class, its prototype -- and not a table standing in for it.
@@ -23418,6 +23431,18 @@ inline Value getBuiltinModule(std::string_view specifier) {
   return Value();
 }
 
+template <auto Loader, typename Namespace>
+struct ModuleNamespaceSlot {};
+
+// An ES module has one namespace object per realm: the first record built
+// from its export cells is the one every later lookup answers.
+template <auto Loader, typename Namespace>
+inline Namespace moduleNamespace(const Namespace& fresh) {
+  auto& slot = ::gea::detail::realmSlot<ModuleNamespaceSlot<Loader, Namespace>, std::optional<Namespace>>();
+  if (!slot) slot = fresh;
+  return *slot;
+}
+
 inline Value requireBinding() {
   // Static calls lower to module-record edges. A require value that escapes
   // that proof is still a real wrapper cell, but it cannot consult a process
@@ -25029,6 +25054,51 @@ struct DynamicCarrier<AsyncGenerator<T, TReturn, TNext>> {
   }
 };
 
+/**
+ * A sync iterator read out of a box: the exact `Iterator<E>` another native
+ * frame boxed comes back as itself; any other object is a hand-written
+ * iterator, viewed through `Iterator::ProtocolSteps` over that object's own
+ * `next`/`return` (ECMA-262 7.4.4 IteratorNext, 7.4.11 IteratorClose), with
+ * each yielded value read as `E` by its own exact carrier. A generator method
+ * a runtime-keyed write shadowed is the shape: its shadow is whatever function
+ * the program stored, and the typed call site needs the cursor its declared
+ * type names.
+ */
+template <typename E, typename TReturn, typename TNext>
+struct DynamicCarrier<Iterator<E, TReturn, TNext>> {
+  using Self = Iterator<E, TReturn, TNext>;
+  using Completion = typename Self::ReturnStorage;
+  static constexpr bool supported = DynamicCarrier<E>::supported && (std::is_void_v<TReturn> || DynamicCarrier<TReturn>::supported);
+  static Value out(const Self& value) { return Value::box(Value::Tag::Object, value); }
+  static bool accepts(const Value& value) { return value.tag() == Value::Tag::Object && value.payloadType() == payloadTypeTagFor<Self>(); }
+  static Self in(const Value& value, std::size_t position) {
+    if (value.tag() == Value::Tag::Undefined) refuseMissingCallArgument(position);
+    if (accepts(value)) return value.as<Self>();
+    if (value.tag() != Value::Tag::Object && value.tag() != Value::Tag::Function) refusePayloadMismatch("an iterator read out of a dynamic value");
+    auto steps = gea::makeRef<typename Self::ProtocolSteps>();
+    steps->next = [value](E& out, [[maybe_unused]] Completion& completion) -> bool {
+      const Value result = value.getProperty(PropertyKey::string("next")).callWithReceiver(NativeCallReceiver::fromValue(value), {});
+      if (result.tag() != Value::Tag::Object && result.tag() != Value::Tag::Function)
+        gea::host::throwRuntimeError("TypeError", "Iterator result is not an object");
+      const Value item = result.getProperty(PropertyKey::string("value"));
+      if (gea::host::detail::toBoolean(result.getProperty(PropertyKey::string("done")))) {
+        if constexpr (!std::is_void_v<TReturn>) {
+          if (item.tag() != Value::Tag::Undefined) completion = DynamicCarrier<TReturn>::in(item, 0);
+        }
+        return false;
+      }
+      out = DynamicCarrier<E>::in(item, 0);
+      return true;
+    };
+    steps->finish = [value]() {
+      const Value close = value.getProperty(PropertyKey::string("return"));
+      if (close.tag() != Value::Tag::Undefined && close.tag() != Value::Tag::Null)
+        (void)close.callWithReceiver(NativeCallReceiver::fromValue(value), {});
+    };
+    return Self(std::move(steps));
+  }
+};
+
 template <>
 struct DynamicCarrier<gea::Undefined> {
   static constexpr bool supported = true;
@@ -25501,6 +25571,35 @@ struct DynamicCallableCarrier<TaggedUnion<Arms...>> {
       matches == 1 ? callableLiveArmOf<0, Arms...>(value) : callableRemainderArm<0, Arms...>();
     if (live >= sizeof...(Arms)) refusePayloadMismatch("a dynamic callable union argument");
     return callableArmFromValue<0, Self, Arms...>(value, live, position);
+  }
+};
+
+/**
+ * A recursive callable's named wrapper (`targets/cpp/recursive-containers.ts`:
+ * `struct W final : CallableObject<R(A...)>`, the name a self-referencing
+ * function type needs to close its own equation). It crosses the boundary
+ * exactly as its base callable does -- the wrapper adds no state, only the
+ * declaration name -- so every rule is the base's, and a read rewraps.
+ */
+template <typename T>
+  requires RecursiveCallableWrapper<T>
+struct DynamicCarrier<T> {
+  using Base = typename T::Base;
+  static constexpr bool supported = DynamicCarrier<Base>::supported;
+  static Value out(const T& value) { return DynamicCarrier<Base>::out(value); }
+  static bool accepts(const Value& value) { return DynamicCarrier<Base>::accepts(value); }
+  static T in(const Value& value, std::size_t position) { return T(DynamicCarrier<Base>::in(value, position)); }
+  template <typename... Factory>
+  static T inWithReceiver(const Value& value, std::size_t position, Factory... factory) {
+    return T(DynamicCarrier<Base>::inWithReceiver(value, position, factory...));
+  }
+  template <std::size_t RestFrom, bool ActualArguments = false>
+  static T inWithRest(const Value& value, std::size_t position) {
+    return T(DynamicCarrier<Base>::template inWithRest<RestFrom, ActualArguments>(value, position));
+  }
+  template <std::size_t RestFrom, bool ActualArguments = false, typename... Factory>
+  static T inWithReceiverAndRest(const Value& value, std::size_t position, Factory... factory) {
+    return T(DynamicCarrier<Base>::template inWithReceiverAndRest<RestFrom, ActualArguments>(value, position, factory...));
   }
 };
 
@@ -30556,7 +30655,16 @@ bool nativeObjectDataReadNative(const gea::Ref<Receiver>& object, const Property
   const auto table = detail::expandoFor(nativePropertyAnchor(object), false);
   const PropertyDescriptor* found = table ? table->ownProperty(key) : nullptr;
   if (found == nullptr) return read.assign(Undefined{});
-  if (!found->isAccessor()) return found->nativeValue && found->nativeValue.read(read);
+  // A key the source layout lacks was installed by a write through a dynamic
+  // receiver, so no reader's routes can name the carrier it was stored in.
+  // The stored carrier answers when the reader takes it; otherwise a reader
+  // certified for a `Value` route reads the property as `[[Get]]` would and
+  // unboxes it checked. Any other reader still refuses.
+  if (!found->isAccessor()) {
+    if (!found->nativeValue) return read.assign(found->value);
+    if (found->nativeValue.read(read)) return true;
+    return read.acceptsExact<Value, NativeFieldLeafPolicy>() && read.assign(found->nativeValue.materialize());
+  }
   const auto handled = table->readNativeAccessor(key, NativeCallReceiver::object(object), read);
   return handled && *handled;
 }

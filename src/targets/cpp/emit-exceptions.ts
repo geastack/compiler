@@ -728,6 +728,11 @@ export const renderTryRegion = (
     lines.push('}')
     lines.push(`if (${finallyPendingName(region)}) std::rethrow_exception(${finallyPendingName(region)});`)
     lines.push('}')
+    // No side of the statement completes normally (`join` is null: every try
+    // and catch path returns or throws), so control never falls past the
+    // rethrow. Without saying so, a body whose last statement this is ends
+    // with no return and clang warns -Wreturn-type.
+    if (region.join === null) lines.push('__builtin_unreachable();')
   }
   return [...tryPart.owned, ...(catchPart?.owned ?? []), ...(finallyPart?.owned ?? [])]
 }

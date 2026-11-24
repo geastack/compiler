@@ -55,16 +55,19 @@ export const withFieldReceiver = (
   emit: (carrier: Representation) => string,
   dynamic?: (carrier: Representation, text: string) => string,
   nativeData?: (carrier: Representation, text: string) => string,
-  array?: (carrier: Representation, text: string) => string
+  array?: (carrier: Representation, text: string) => string,
+  dictionary?: (carrier: Representation, text: string) => string
 ): string => {
-  if (value.kind === 'borrowed-ref') return withFieldReceiver(value.referent, text, emit, dynamic, nativeData, array)
+  if (value.kind === 'borrowed-ref') return withFieldReceiver(value.referent, text, emit, dynamic, nativeData, array, dictionary)
   if (value.kind === 'optional')
     return (
       `if (!${text}.has_value()) gea::host::throwRuntimeError("TypeError", "Cannot access a nullish native view"); ` +
-      withFieldReceiver(value.payload, `(*${text})`, emit, dynamic, nativeData, array)
+      withFieldReceiver(value.payload, `(*${text})`, emit, dynamic, nativeData, array, dictionary)
     )
   // A `dynamic` arm is a `gea::Value` already; its own [[Get]] is the read.
   if (value.kind === 'dynamic' && dynamic !== undefined) return dynamic(value, text)
+  // A `Record<string, any>` arm answers a named key with its own entry.
+  if (value.kind === 'dictionary' && dictionary !== undefined) return dictionary(value, text)
   // A binary-view arm reads its own internal slot (`nativeData` routes).
   if ((value.kind === 'typed-array' || value.kind === 'data-view' || value.kind === 'array-buffer') && nativeData !== undefined)
     return nativeData(value, text)
@@ -77,7 +80,7 @@ export const withFieldReceiver = (
         // templates are dependent names.
         .map(
           (arm, index) =>
-            `if (${text}.template is<${index}>()) { ${withFieldReceiver(arm.value, `${text}.template get<${index}>()`, emit, dynamic, nativeData, array)} }`
+            `if (${text}.template is<${index}>()) { ${withFieldReceiver(arm.value, `${text}.template get<${index}>()`, emit, dynamic, nativeData, array, dictionary)} }`
         )
         .join(' ') + ' gea::host::throwRuntimeError("TypeError", "No native field-view receiver arm");'
     )
@@ -175,6 +178,19 @@ export const nativeFieldViewReadForText = (
             `(${text}->hasElementValue(${key}) ? ${optional}(${text}->readElement(${key})) : ${optional}())`
           )};`
     }
+  // `gea::Dictionary<gea::Value>::read`'s value-initialized miss IS `undefined`,
+  // so the entry read is the whole answer, routed like a `dynamic` arm's.
+  const dictionaryRead =
+    (key: string) =>
+    (carrier: Representation, text: string): string => {
+      const route =
+        carrier.kind === 'dictionary'
+          ? receipt.sources.find((entry) => representationKey(entry.source) === representationKey(carrier.value))
+          : undefined
+      return route === undefined
+        ? 'gea::host::throwRuntimeError("TypeError", "a dictionary arm has no certified entry route");'
+        : `return ${renderedLeaf(ctx, route.conversion, `${text}->read(${cppStringLiteral(key)})`)};`
+    }
   const forKey = (key: string): string =>
     withFieldReceiver(
       receiver.representation,
@@ -242,7 +258,8 @@ export const nativeFieldViewReadForText = (
       },
       dynamicRead(key),
       nativeDataRead(key),
-      arrayRead(key)
+      arrayRead(key),
+      dictionaryRead(key)
     )
   // The receiver is the statement-lambda's ARGUMENT, not a local bound inside
   // it: a withheld receiver can be `(*presentOrThrow(<element read>))`, a
@@ -287,6 +304,11 @@ export const nativeFieldViewReadForText = (
             return route === undefined
               ? 'gea::host::throwRuntimeError("TypeError", "Cannot access a non-object native view receiver");'
               : `return ${renderedLeaf(ctx, route.conversion, `${text}.getProperty(gea_field_key)`)};`
+          },
+          undefined,
+          undefined,
+          () => {
+            throw createCppEmitBlockedError('property-access:native-field-view-open-key', 'a dictionary arm has no open-key entry route')
           }
         )
       : 'gea::host::throwRuntimeError("TypeError", "No admitted native field-view key");'
