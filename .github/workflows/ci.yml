@@ -94,6 +94,9 @@ jobs:
             compiler/package-lock.json
             node-compat/apps/hono-hello/package-lock.json
 
+      - name: Install the gold linker
+        run: compiler/scripts/ci/node-compat/install-gold-linker.sh
+
       - name: Report the toolchain
         run: compiler/scripts/ci/shared/report-toolchain.sh
 
