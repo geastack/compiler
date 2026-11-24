@@ -466,7 +466,7 @@ family-allocation-field-presence.runtime.ts.cpp 9a67754818b7
 field-census-class-family-narrowing.runtime.js.cpp 16676ecb738b
 field-read-held-across-calls-that-store-it.ts.cpp 5d6e5456cfc5
 field-view-absent-union-or-any-key-of-a-plain-allocation-reads-undefined.runtime.js.cpp 9a30aeca6474
-field-view-optional-member-present-reads-and-stores-in-place.runtime.js.cpp 2ab855db05dd
+field-view-optional-member-present-reads-and-stores-in-place.runtime.js.cpp 2d647d7341cf
 filled-array-drops-spent-hole-flags.runtime.ts.cpp 46e9dd4962c2
 filter-under-a-type-guard-narrows-its-element.ts.cpp 824c9d6e26f1
 filtered-options-document-viewed-with-a-promise-or-document-field.runtime.ts.cpp 5c06c808b8b0
@@ -1036,6 +1036,7 @@ object-literal-into-data-only-class-slot-is-a-plain-object.ts.cpp 033e213aee34
 object-literal-into-intersection-or-array-union.runtime.ts.cpp 502d562cf16b
 object-literal-into-union-with-tuple-and-array-arms.runtime.ts.cpp d72502a10ef5
 object-literal-out-of-order-states-its-order-once.runtime.ts.cpp 9f745094c147
+object-literal-slot-widened-by-a-write-through-an-unenumerated-parameter.runtime.ts.cpp dd2b74901ede
 object-literal-spreading-generic-rest-element.runtime.ts.cpp efe44fd3e46a
 object-parameter-receives-record-or-class-state.runtime.ts.cpp 877e43f43d27
 object-pattern-numeric-key-over-array.ts.cpp b0791f91b61f

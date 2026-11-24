@@ -3,7 +3,7 @@ import { componentId, withoutFunctionSpecialization } from '../identity/ids.js'
 import { callableOriginsOf, callableOwnPropertyWritesOf, unknownCallableOwnProperty } from '../semantics/callable-origins.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import { partitionAuthorityComponents } from '../semantics/model/graph.js'
-import { operandOf, type SemanticResult } from '../semantics/model/operands.js'
+import { operandOf, type SemanticOperand, type SemanticResult } from '../semantics/model/operands.js'
 import type { SemanticOperation } from '../semantics/model/operations.js'
 import type {
   DateDeclarationPolicy,
@@ -652,6 +652,31 @@ const dynamicCallableValueOf = (
     : null
 }
 
+const absentRequireCells = new WeakMap<SemanticGraph, ReadonlySet<DeclarationId>>()
+/** Cells written only by `require`s of absent packages, and never declared without a value. */
+const absentRequireCellsOf = (graph: SemanticGraph): ReadonlySet<DeclarationId> => {
+  const known = absentRequireCells.get(graph)
+  if (known) return known
+  const verdicts = new Map<DeclarationId, boolean>()
+  const absentRequireResult = (operand: SemanticOperand | undefined): boolean => {
+    if (operand?.source.kind !== 'result') return false
+    const producer = graph.operations.get(graph.results.get(operand.source.result) ?? ('' as never))
+    return producer?.family === 'invocation' && producer.commonJsRequire?.target === null
+  }
+  for (const operation of graph.operations.values()) {
+    if (operation.family !== 'binding' || operation.action === 'read') continue
+    if (verdicts.get(operation.declaration) === false) continue
+    const stores =
+      (operation.action === 'initialize' || operation.action === 'write') &&
+      operation.parameterInitialization !== true &&
+      absentRequireResult(operation.operands.find((operand) => operand.evaluation.kind !== 'provenance'))
+    verdicts.set(operation.declaration, stores)
+  }
+  const cells = new Set([...verdicts].flatMap(([declaration, only]) => (only ? [declaration] : [])))
+  absentRequireCells.set(graph, cells)
+  return cells
+}
+
 /**
  * CommonJS module records are the one explicitly dynamic host boundary here.
  * The checker authenticated the wrapper declaration and normalization carried
@@ -664,6 +689,12 @@ const commonJsBoundaryOf = (graph: SemanticGraph, operation: SemanticOperation |
   // converts it by `unreachable-value` instead of needing a reader for a
   // module that does not exist.
   if (operation?.family === 'invocation' && operation.commonJsRequire?.target === null) return { kind: 'undefined' }
+  // So is a cell every write of which is such a require: `const peer =
+  // require('absent'); return peer` never stores, so `peer` holds nothing
+  // either. Laid out at its consumer's type instead, the dead `return peer`
+  // asked for a conversion from that type into whatever the function really
+  // returns -- the loader's error Proxy alone -- which no recipe has.
+  if (operation?.family === 'binding' && absentRequireCellsOf(graph).has(operation.declaration)) return { kind: 'undefined' }
   if (
     operation?.family === 'invocation' &&
     operation.commonJsRequire !== undefined &&

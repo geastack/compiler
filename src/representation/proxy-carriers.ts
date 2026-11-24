@@ -121,6 +121,14 @@ export const proxyCarriersOf = (
       returning.add(operation.caller.functionId)
     if (!value) continue
     if (operation.family === 'binding') followed.add(value.id)
+    // A `require` of a package absent from this build only throws
+    // MODULE_NOT_FOUND (`staticRequireOutcomeOf`): its result never holds a
+    // value, so it is followed and stays empty. Read as "other", the optional
+    // dependency loader `try { return require('x') } catch { return
+    // makeErrorModule(e) }` kept the module's declared record arm beside the
+    // proxy it is the only thing that ever returns.
+    else if (operation.family === 'invocation' && operation.commonJsRequire !== undefined && 'absentPackage' in operation.commonJsRequire)
+      followed.add(value.id)
     else if (operation.family === 'computation' && operation.form === 'assignment' && operation.operator === '=') followed.add(value.id)
     else if (calleeOf(operation) !== undefined) followed.add(value.id)
     else if (operation.family === 'property' && operation.internalMethod === 'set') followed.add(value.id)
@@ -170,8 +178,14 @@ export const proxyCarriersOf = (
       if (operation.family === 'class-lifecycle' && operation.event === 'define-field' && operation.placement === 'static') {
         const field = staticFieldByDeclaration.get(operation.declaration)
         if (!field) continue
-        // A field declared without an initializer starts `undefined`.
-        const initializer = field.initializer === null ? undefined : callables.get(field.initializer)
+        // A field declared without an initializer starts `undefined`, and that
+        // absence is the static-field-absence census's to add to the cell and
+        // every read of it (`staticFieldAbsenceOf`). Read as "other" here, it
+        // also restored the declared type's every arm: `_awsSDK ??=
+        // loadOptional()` over a loader that only returns its error proxy kept
+        // the module record arm, whose method calls have no receiver protocol.
+        if (field.initializer === null) continue
+        const initializer = callables.get(field.initializer)
         join(heldOf(staticCells, operation.declaration), initializer === undefined ? undefined : heldOf(returns, initializer))
         continue
       }

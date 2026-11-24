@@ -2451,6 +2451,21 @@ const solveNativeCallableFlow = (
         const node = conversions?.nodeById(operation.conversionUse)
         const from = operation.source.representation
         const to = operation.result.representation
+        // A conversion that never completes normally (`unreachable-value` out
+        // of a never-produced `undefined`: the dead `return peer` after an
+        // absent package's `require`) yields no value, so it carries no
+        // identity. Linking its source made that dead value's unknown origin
+        // the function's return, and the proxy it really returns lost the
+        // handler provenance its trap calls are resolved by.
+        if (
+          node !== null &&
+          node !== undefined &&
+          'materializer' in node.capability &&
+          node.capability.materializer.normalCompletion === 'never' &&
+          representationKey(node.source) === representationKey(from) &&
+          representationKey(node.target) === representationKey(to)
+        )
+          break
         // A Value injected into a union's own `dynamic` arm stays in that arm:
         // it is dispatched by its own [[Get]], never through an installed
         // Document entry protocol, so it does not withdraw the protocol every
