@@ -1060,7 +1060,8 @@ const computeInventory = (
   checker: ts.TypeChecker,
   flow: ValueFlowIndex,
   entry: ts.Expression,
-  authority: OriginAuthority
+  authority: OriginAuthority,
+  emptyOnly: boolean
 ): ArrayInventory | null => {
   const original = unwrapErasedExpression
   const values = new Set<ts.Expression>()
@@ -1192,7 +1193,28 @@ const computeInventory = (
     return REFUSED
   }
   const solve: (key: OriginKey) => SeededOriginVerdict = seededOriginSolver(expand)
-  const adopt = (cell: Cell): boolean => cells.has(cell) || solve(cell) !== 'refused'
+  const adopt = (cell: Cell): boolean => {
+    if (cells.has(cell)) return true
+    // An admitted call forwards the array into this parameter. A successful
+    // inventory would have to visit every reference to it. An argument to a
+    // direct push would either enter the inventory or make that use opaque.
+    // Both answers rule out a proof of emptiness, even before expanding the
+    // parameter's other callers and rebindings.
+    if (
+      emptyOnly &&
+      !isFieldCell(cell) &&
+      ts.isParameter(cell) &&
+      flow.referencesToDeclaration(cell).some((reference) => {
+        const access = reference.parent
+        if (!ts.isPropertyAccessExpression(access) || access.expression !== reference || access.name.text !== 'push') return false
+        const callee = outermostErasureOf(access)
+        const call = callee.parent
+        return ts.isCallExpression(call) && call.expression === callee && call.arguments.length > 0
+      })
+    )
+      return false
+    return solve(cell) !== 'refused'
+  }
   const seen = new Set<ts.Node>()
   /** Ordinary calls use the admitted frame. Construction still asks its
    * source constructor frame; checker selection alone never admits a method. */
@@ -1381,7 +1403,7 @@ const computeInventory = (
     return facts !== null && open === undefined
   }
   const root = cellNamedBy(checker, flow, entry, authority) ?? original(entry)
-  if (solve(root) !== 'allocated') return null
+  if (solve(root) !== 'allocated' || (emptyOnly && values.size > 0)) return null
   for (let index = 0; index < pending.length; index += 1) {
     const item = pending[index]!
     const closed = isFieldCell(item)
@@ -1389,7 +1411,7 @@ const computeInventory = (
       : ts.isVariableDeclaration(item) || ts.isPropertyDeclaration(item) || ts.isParameter(item)
         ? flow.referencesToDeclaration(item).every(use)
         : use(item)
-    if (!closed) return null
+    if (!closed || (emptyOnly && values.size > 0)) return null
   }
   const held = anchor ?? flow.arrayLiterals.find((literal) => arrayTyped(checker, literal)) ?? null
   const protocol = held ? nativeArrayProtocolPlanOf(checker, flow, held) : null
@@ -1408,12 +1430,14 @@ const inventoryOf = (
   checker: ts.TypeChecker,
   flow: ValueFlowIndex,
   expression: ts.Expression,
-  authority: OriginAuthority
+  authority: OriginAuthority,
+  emptyOnly = false
 ): ArrayInventory | null => {
   const key: OriginKey = cellNamedBy(checker, flow, expression, authority) ?? unwrapErasedExpression(expression)
   const cache = scopedCache(authorityInventories, authority, flow, () => new Map<OriginKey, ArrayInventory | null>())
   if (cache.has(key)) {
     const cached = cache.get(key)!
+    if (emptyOnly && cached && cached.values.length > 0) return null
     if (cached && cached.requirements.length > 0 && deferredIntrinsicProtocolLedgerOf(flow)?.include(cached.requirements) !== true)
       return null
     return cached
@@ -1437,11 +1461,15 @@ const inventoryOf = (
   enterHypothesisGuard(key, true)
   try {
     const ledger = deferredIntrinsicProtocolLedgerOf(flow)
-    const compute = (): ArrayInventory | null => computeInventory(checker, flow, expression, authority)
+    const compute = (): ArrayInventory | null => computeInventory(checker, flow, expression, authority, emptyOnly)
     // Shared across proofs where the authority can (see `sharedAnswerOf`); a
     // tainted inventory answered from an incomplete view stays this proof's.
     const captured = authority.sharedAnswerOf
-      ? authority.sharedAnswerOf(`array-inventory:${keyNameOf(key)}`, compute, () => !frame.tainted)
+      ? authority.sharedAnswerOf(
+          `${emptyOnly ? 'empty-array-inventory' : 'array-inventory'}:${keyNameOf(key)}`,
+          compute,
+          () => !frame.tainted
+        )
       : ledger
         ? ledger.capture(compute)
         : { value: compute(), requirements: [] }
@@ -1485,9 +1513,10 @@ export const arrayStoredValuesOf = (
   checker: ts.TypeChecker,
   flow: ValueFlowIndex,
   array: ts.Expression,
-  authority: OriginAuthority
+  authority: OriginAuthority,
+  goal: 'all' | 'empty' = 'all'
 ): readonly ts.Expression[] | null => {
-  const inventory = inventoryOf(checker, flow, array, authority)
+  const inventory = inventoryOf(checker, flow, array, authority, goal === 'empty')
   if (!inventory) return null
   for (const plan of inventory.plans) if (!authority.protocolClosed(plan)) return null
   for (const key of inventory.keys) if (!authority.numericKey(key)) return null

@@ -30,12 +30,22 @@ test('possible live array storage follows exact installed conversion and local a
     const installed = builder.convert(block, lineage, node.id, { value: unknown, representation: dynamic }, target)
     const binding = 'held-array' as never
     builder.bindingWrite(block, lineage, binding, { value: installed, representation: target })
+    let join = block
     if (mixed) {
-      const ordinary = builder.bindingRead(block, lineage, 'ordinary-array' as never, target)
-      builder.bindingWrite(block, lineage, binding, { value: ordinary, representation: target })
+      // The ordinary write sits on one path only, so both writers reach the
+      // read. Written straight-line it would overwrite the installed value,
+      // and the read sees only the write that reaches it.
+      const boolean: Representation = { kind: 'scalar', domain: 'boolean' }
+      const condition = builder.bindingRead(block, lineage, 'condition' as never, boolean)
+      const writes = builder.openBlock()
+      join = builder.openBlock()
+      builder.branch(block, lineage, { value: condition, representation: boolean }, writes, join)
+      const ordinary = builder.bindingRead(writes, lineage, 'ordinary-array' as never, target)
+      builder.bindingWrite(writes, lineage, binding, { value: ordinary, representation: target })
+      builder.jump(writes, lineage, join)
     }
-    const alias = builder.bindingRead(block, lineage, binding, target)
-    builder.return(block, null, null)
+    const alias = builder.bindingRead(join, lineage, binding, target)
+    builder.return(join, null, null)
     const placements = new Map([[binding, { storage: { kind: 'local' }, representation: target } as BindingPlacement]])
     return { body: builder.seal(), alias, installed, placements }
   }

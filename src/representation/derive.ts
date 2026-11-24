@@ -408,6 +408,51 @@ export const createRepresentationDeriver = (
 
   /** The carrier a *stored* position holds -- see `storedCarrier`. */
   const deriveStored = (id: StructuralTypeId): Representation => storedCarrier(derive(id))
+
+  /**
+   * The earlier instantiation of the same generic record declaration whose
+   * type arguments carry identically, or `null` when this one is the first.
+   *
+   * A generic class is one struct per LAYOUT (`classGroupsOf`): its copies are
+   * grouped by the representation of their fillings, so `List<any>` and
+   * `List<unknown>` -- both fillings the `dynamic` carrier -- are one struct.
+   * A record type built over the filling has to group the same way, or that
+   * one struct's field is typed `ListNode<any>` while the copy's own body
+   * reads and writes it as `ListNode<unknown>`: two nominal shapes with the
+   * same fields and no conversion between them, because none should exist --
+   * they are one object seen through two spellings of "anything". Keyed the
+   * way `classArgumentKeyOf` keys a class filling, and answered by the first
+   * instantiation in table order so every walk names the same shape.
+   */
+  let declaredInstantiations: Map<DeclarationId, StructuralTypeId[]> | null = null
+  const declaredLayoutTwinOf = (id: StructuralTypeId, shape: Extract<StructuralShape, { kind: 'declared' }>): StructuralTypeId | null => {
+    if (shape.typeArguments.length === 0) return null
+    if (declaredInstantiations === null) {
+      declaredInstantiations = new Map()
+      for (const [candidate, entry] of types) {
+        if (entry.shape.kind !== 'declared' || entry.shape.typeArguments.length === 0 || entry.shape.body === null) continue
+        const known = declaredInstantiations.get(entry.shape.declaration)
+        if (known) known.push(candidate)
+        else declaredInstantiations.set(entry.shape.declaration, [candidate])
+      }
+    }
+    const candidates = declaredInstantiations.get(shape.declaration) ?? []
+    if (candidates.length < 2 || candidates[0] === id) return null
+    const argumentKeyOf = (argument: StructuralTypeId): string => {
+      const filling = shapeOf(argument)
+      if (filling?.kind === 'declared' && filling.declaration === shape.declaration) return `self:${argument}`
+      return representationKey(deriveStored(argument))
+    }
+    const own = shape.typeArguments.map(argumentKeyOf).join(',')
+    for (const candidate of candidates) {
+      if (candidate === id) return null
+      const other = shapeOf(candidate)
+      if (other?.kind !== 'declared' || other.typeArguments.length !== shape.typeArguments.length || other.body === null) continue
+      if (shapeOf(other.body)?.kind !== 'object') continue
+      if (other.typeArguments.map(argumentKeyOf).join(',') === own) return candidate
+    }
+    return null
+  }
   const isDataOnlyBody = (id: StructuralTypeId): boolean => isDataOnlyObjectShape(shapeOf(id), shapeOf)
 
   type RecursiveContainerSource =
@@ -2960,11 +3005,22 @@ export const createRepresentationDeriver = (
         // handle. Delegating (rather than minting a second carrier here) keeps
         // the name and the body one answer, which is what `publish.ts` seals.
         if (valueRecords.forType(shape.body)) return derive(shape.body)
+        const nominal: Representation = {
+          kind: 'native-record-ref',
+          shapeId: shape.body,
+          ownership: ownership.forShape(shape, id),
+          native: null
+        }
+        const twin = declaredLayoutTwinOf(id, shape)
+        if (twin !== null) {
+          const shared = derive(twin)
+          if (shared.kind === 'native-record-ref' && shared.native === null && shared.ownership === nominal.ownership) return shared
+        }
         // Otherwise a declared name is carried nominally: its layout is
         // resolved from the sealed table by shape id at emission. Expanding it
         // here is what would make `interface Node { next: Node }` an infinite
         // carrier.
-        return { kind: 'native-record-ref', shapeId: shape.body, ownership: ownership.forShape(shape, id), native: null }
+        return nominal
       }
       case 'object-anchor': {
         // A callable-bearing object literal's nominal anchor (`structural.ts`).

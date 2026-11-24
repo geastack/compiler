@@ -772,7 +772,12 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // checker answer that IS usable is never second-guessed here, the same
     // discipline `parameter-bindings.ts`'s own `known()` keeps for a bound
     // parameter's narrowed use.
-    const censusNode = declaration ? (censusValueNodeOf(declaration) ?? declaration) : null
+    // A function or class declaration declares a callable VALUE, not a cell: the censuses key such a node by its signature, and their answer
+    // there is the narrowed RESULT (`return-bindings.ts`'s `statedTypeAt`),
+    // which as a member type would make `channel(): Channel<unknown, unknown>`
+    // a `Channel` field of the module namespace that exports it.
+    const callableDeclaration = declaration !== null && (ts.isFunctionDeclaration(declaration) || ts.isClassDeclaration(declaration))
+    const censusNode = declaration && !callableDeclaration ? (censusValueNodeOf(declaration) ?? declaration) : null
     // `object` and `{}` are upper bounds too. For `{ fields: payload }`,
     // a closed parameter census can know payload's concrete record even
     // though the checker retains its vacuous annotation. Storage must use

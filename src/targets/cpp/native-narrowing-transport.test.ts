@@ -211,8 +211,11 @@ test('an optional wrapped around a converted payload reads fields exactly as its
     accessors: []
   })
   const optional = (payload: Representation): Representation => ({ kind: 'optional', absence: 'undefined', payload })
-  // A `clone({})` call: an empty literal read as optional options.
-  const empty = record('empty', [])
+  // A literal with none of the options' keys read as optional options. (A
+  // zero-field literal is the bare `object` record, which is now viewed as the
+  // open Document it is -- `composedDocumentRecordViewPlanOf` -- so it no longer
+  // takes the recast this test is about.)
+  const empty = record('unrelated', [{ key: 'y', value: number, required: true }])
   const options = record('options', [{ key: 'x', value: optional(number), required: false }])
   assert.equal(conversionRecipeOf(empty, optional(options))?.id, 'optional-wrap-converted')
   const inner = conversions.nodeFor(empty, options)

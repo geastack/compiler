@@ -88,6 +88,11 @@ const store = (id: string, target: string, name: string, value: string) =>
     key(name),
     input('value', value)
   ])
+// An unknown target can reach only a Function some operation exposes: one never
+// published is confined (`inventoryOf`), so these fixtures publish `target` to an
+// open callee when they test what an unknown write still obliges.
+const publish = (target: string) =>
+  operation(`${target}-publish`, { family: 'invocation', internalMethod: 'call' }, [input('argument', target)])
 const graphOf = (operations: readonly SemanticOperation[]): SemanticGraph => ({
   operations: new Map(operations.map((op) => [op.id, op])),
   results: new Map(operations.flatMap((op) => op.results.map((result) => [result.id, op.id] as const))),
@@ -234,6 +239,7 @@ test('an unknown explicit Reflect.set Receiver remains an anonymous Function mut
     allocation('target'),
     allocation('first'),
     allocation('other'),
+    publish('target'),
     store('write', 'target', 'call', 'first'),
     reflect
   ])
@@ -294,6 +300,7 @@ test('computed mutation, direct formals, deletes and opaque definitions remain e
   const graph = graphOf([
     allocation('target'),
     allocation('first'),
+    publish('target'),
     runtimeKey,
     descriptor,
     store('write', 'target', 'call', 'first'),
@@ -305,7 +312,7 @@ test('computed mutation, direct formals, deletes and opaque definitions remain e
   assert.equal(callableWriteTargetsOf(graph).find((row) => row.operation === unknown)?.result, null)
   assert.deepEqual(
     new Set(schemaOf(graph)?.blockers.map((row) => row.kind)),
-    new Set(['unknown-target', 'unknown-key', 'delete', 'opaque-definition'])
+    new Set(['exposure', 'unknown-target', 'unknown-key', 'delete', 'opaque-definition'])
   )
   const facts = callableMutationFactsOf(graph, { selected: new Map() } as unknown as SealedRepresentationPlan)
   assert.equal(callableBuiltinResolution(facts, 'target-body' as FunctionId, 'call'), 'ordinary-property')
@@ -355,8 +362,14 @@ test('anonymous __proto__ Set cannot be discarded as an unrelated owner key', ()
     key('__proto__'),
     input('value', 'first')
   ])
-  const graph = graphOf([allocation('target'), allocation('first'), store('write', 'target', 'call', 'first'), mutation])
+  const graph = graphOf([allocation('target'), allocation('first'), publish('target'), store('write', 'target', 'call', 'first'), mutation])
   assert.ok(schemaOf(graph)?.blockers.some((blocker) => blocker.operation === mutation && blocker.kind === 'inherited-chain'))
+  const confined = graphOf([allocation('target'), allocation('first'), store('write', 'target', 'call', 'first'), mutation])
+  assert.equal(
+    schemaOf(confined)?.blockers.some((blocker) => blocker.operation === mutation),
+    false,
+    'an unpublished Function cannot be the unknown receiver'
+  )
 })
 
 test('own __proto__ data definitions and deletion do not imply an owner prototype change', () => {

@@ -1365,6 +1365,7 @@ const globalPointsTo = (input: ParallelRegionInput, program: Program): PointsToS
         case 'global-this':
         case 'unresolvable-reference':
         case 'commonjs-require':
+        case 'module-namespace':
         case 'commonjs-binding':
         case 'catch-binding':
         case 'await':

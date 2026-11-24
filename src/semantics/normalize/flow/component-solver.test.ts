@@ -1,7 +1,32 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { dependencyComponentSolver, dependencyFactSolver } from './component-solver.js'
+import { FactState, dependencyComponentSolver, dependencyFactSolver } from './component-solver.js'
 import { seededOriginSolver } from './seeded-origins.js'
+
+test('fact cursors keep insertion order across growth and copy-on-write sharing', () => {
+  class State extends FactState<string, number, never> {
+    constructor(readonly solverKey: string) {
+      super()
+    }
+  }
+  const left = new State('left')
+  const right = new State('right')
+  for (let value = 1; value <= 9; value++) {
+    left.add(value)
+    right.add(value)
+  }
+  assert.deepEqual([...left.factsFrom(7)], [8, 9])
+  assert.equal(left.shareFactsOf(right), true)
+  assert.deepEqual([...right.factsFrom(7)], [8, 9])
+  left.add(8)
+  left.add(10)
+  right.add(-0)
+  right.add(0)
+  right.add(11)
+  assert.deepEqual([...left.factsFrom(8)], [9, 10])
+  assert.deepEqual([...right.factsFrom(8)], [9, 0, 11])
+  assert.deepEqual([...left.factsFrom(left.size)], [])
+})
 
 test('all-dependencies admits complete self and mutual recursion and expands each node once', () => {
   const graph = new Map<string, { locallyComplete: boolean; dependencies: readonly string[] }>([

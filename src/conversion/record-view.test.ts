@@ -207,7 +207,15 @@ test('an absent optional source slot reads its undefined carrier without treatin
 })
 
 test('an added key forwards a native descriptor without inventing storage from its public field', () => {
-  const from: Extract<Representation, { kind: 'record' }> = { ...sourcePayloadRecord, kind: 'record', accessors: [], fields: [] }
+  // The source keeps a field of its own: a zero-field record is the bare
+  // `object` keyword's carrier, viewed as the open Document it is
+  // (`composedDocumentRecordViewPlanOf`), not a record whose added key this test reads.
+  const from: Extract<Representation, { kind: 'record' }> = {
+    ...sourcePayloadRecord,
+    kind: 'record',
+    accessors: [],
+    fields: [{ key: 'value', value: numberField(), required: true }]
+  }
   const into: Extract<Representation, { kind: 'record' }> = {
     ...from,
     shapeId: 'sidecar-target',

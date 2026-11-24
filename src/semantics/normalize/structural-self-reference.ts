@@ -508,7 +508,10 @@ const mentionsTypeParameter = (type: ts.Type): boolean => {
  * minted one `State[]` per copy -- five ids for one array -- and a callable
  * read out of one copy's cell could not enter another's slot.
  */
-export const createViewIndependentRecurrence = (checker: ts.TypeChecker): ((type: ts.Type) => string | null) => {
+export const createViewIndependentRecurrence = (
+  checker: ts.TypeChecker,
+  storageOf: (type: ts.Type) => ts.Type = (type) => type
+): ((type: ts.Type) => string | null) => {
   const keys = new Map<ts.Type, string | null>()
   // A signature written as a TYPE (`(x: T) => T` in an alias, an interface
   // method) binds its own parameters; only a declaration with a body, or a
@@ -529,6 +532,13 @@ export const createViewIndependentRecurrence = (checker: ts.TypeChecker): ((type
     if (seen.has(type)) return false
     if (seen.size >= budget) return true
     seen.add(type)
+    // A type laid out as another (`record-link-families.ts`) walks as that
+    // other one, so the view reaches whatever the storage mentions: a plain
+    // `EmptyNode` stores as `ListNode<T>` at the enclosing class's `T`, and a
+    // cycle through it closed at one shared anchor handed every copy of the
+    // class the first copy's node layout.
+    const stored = storageOf(type)
+    if (stored !== type && viewDependent(stored, seen)) return true
     if ((type.flags & ts.TypeFlags.TypeParameter) !== 0) {
       const owner = type.getSymbol()?.declarations?.[0]?.parent
       return owner !== undefined && viewBinds(owner)

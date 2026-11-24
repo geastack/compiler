@@ -421,7 +421,7 @@ export const createStructuralMapper = (
   // asks the same question.
   const instantiatedMembersFor = createInstantiatedMembers(checker, specializations)
   // And one recurrence key for every view-independent cycle, for the same reason.
-  const viewIndependentKeyOf = createViewIndependentRecurrence(checker)
+  const viewIndependentKeyOf = createViewIndependentRecurrence(checker, (type) => linkFamilies.storageOf(type))
   // The ids those cycles settled on, for every view: a view that enters the
   // same cycle at another member (`State` where the first entered at
   // `State[]`) closes it through these instead of interning a second copy.
@@ -1475,6 +1475,15 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
     // one other place a type enters from a source position: a binding whose
     // whole declared type is an absent host class, rather than one arm of a
     // union of them.
+    // See `readerLayoutOf` in `structural-mutable-field.ts`: the slot it
+    // fills is laid out at the same type.
+    name: 'array-literal-reader-layout',
+    forms: [ts.SyntaxKind.ArrayLiteralExpression],
+    resolve(node) {
+      return ts.isArrayLiteralExpression(node) ? this.mutableFields.readerLayoutOf(node) : null
+    }
+  },
+  {
     name: 'array-literal-implied-pattern',
     forms: [ts.SyntaxKind.ArrayLiteralExpression],
     resolve(node) {

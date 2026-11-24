@@ -24,7 +24,16 @@ execFileSync('clang++', [
 execFileSync(runtimeBinary, { stdio: 'inherit' })
 
 const entry = resolve(root, 'test/runtime/native-field-descriptor.ts')
-const result = compile({ rootFileNames: [entry], projectFileName: null, dynamicFallback: false })
+// Compiled as a Script: a lone root that cannot observe the difference is
+// given the module goal, where the closed fields no longer reach the dynamic
+// descriptor adapter this test is about. Mentioning `globalThis` keeps it one.
+const program = `void globalThis\n${readFileSync(entry, 'utf8')}`
+const result = compile({
+  rootFileNames: [entry],
+  projectFileName: null,
+  dynamicFallback: false,
+  sourceOverlay: new Map([[entry, program]])
+})
 assert.ok(result.certificate, JSON.stringify(result.diagnostics.diagnostics))
 assert.deepEqual(result.loweringBlockers, [])
 assert.deepEqual(result.emissionRefusals, [])
@@ -46,7 +55,7 @@ execFileSync('clang++', ['-std=c++20', ...nativeOptimization('correctness'), inc
   env: { ...process.env, TMPDIR: output }
 })
 const native = execFileSync(executable, { encoding: 'utf8' })
-const js = ts.transpileModule(readFileSync(entry, 'utf8'), {
+const js = ts.transpileModule(program, {
   compilerOptions: { target: ts.ScriptTarget.ES2022 }
 }).outputText
 const reference = execFileSync(process.execPath, ['--input-type=module'], { input: js, encoding: 'utf8' })

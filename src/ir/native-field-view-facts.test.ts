@@ -424,7 +424,18 @@ test('a same-shaped application ambient binding cannot claim the standard single
   assert.match(compiled.source, /extern gea::NativeHandle<gea_native_protocol_Console_v1> console;/)
 })
 
-test('generator parameter binding reads an original absent descriptor before entering its suspended body', () => {
+// `var c = new C()` is a classic script's top-level `var`: a property of the
+// global object. A closed script scope closes lexical bindings, not global-object
+// properties (`ProgramInput.closedScriptScope`), so code outside the program can
+// read `globalThis.c` and call `method` with any object. The parameter is
+// therefore refused (`function-escapes:uncounted-member-reference`), and its
+// defaulted key `x` is read through the escaped argument's dynamic entry as well
+// as through the `{}` default. That dynamic arm can hold `x`, or inherit it, so
+// the read may not claim original absence; the prologue read itself must still
+// carry a receipt whose `Object.prototype` miss is proved by the operation.
+// (Before b56293b70 a prior round's narrowing leaked into this body while the
+// ABI held the refusal, and the read claimed `originalAbsent` from that split.)
+test('an escaped generator parameter reads its defaulted key through the dynamic arm and never claims original absence', () => {
   const compiled = compile({
     rootFileNames: [resolve('test/runtime/generator-parameter-binding-at-call.runtime.js')],
     projectFileName: resolve('test/runtime/tsconfig.json'),
@@ -433,17 +444,23 @@ test('generator parameter binding reads an original absent descriptor before ent
   })
   assert.equal(compiled.diagnostics.clean, true, JSON.stringify(compiled.diagnostics.diagnostics))
   assert.notEqual(compiled.source, null, JSON.stringify(compiled.refusals))
+  assert.ok(
+    compiled.refusals.some(
+      (refusal) => refusal.reason === 'function-escapes:uncounted-member-reference' && refusal.owner?.startsWith('method(') === true
+    ),
+    JSON.stringify(compiled.refusals)
+  )
   const operations = (compiled.irBodies ?? []).flatMap((body) => [...body.blocks.values()].flatMap(allOperationsOf))
-  const reads = operations.filter((operation) => operation.kind === 'get' && operation.nativeFieldViewRead?.originalAbsent === true)
-  assert.ok(reads.length > 0)
+  const reads = operations.filter((operation) => operation.kind === 'get' && operation.nativeFieldViewRead?.key === 'x')
+  assert.equal(reads.length, 1)
   for (const operation of reads) {
     assert.ok(operation.kind === 'get')
     assert.equal(operation.ordinaryObjectPrototypeKeyAbsent, true)
     const receipt = operation.nativeFieldViewRead!
     assert.ok(receipt.sources.some(({ source }) => source.kind === 'undefined'))
-    const { originalAbsent: proof, ...unproved } = receipt
-    assert.equal(proof, true)
-    assert.equal(nativeFieldViewReceiptMatches(receipt, unproved), false)
+    assert.ok(receipt.sources.some(({ source }) => source.kind === 'dynamic'))
+    assert.equal(receipt.originalAbsent, undefined)
+    assert.equal(nativeFieldViewReceiptMatches(receipt, { ...receipt, originalAbsent: true }), false)
   }
 })
 

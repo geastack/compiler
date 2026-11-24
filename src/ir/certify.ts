@@ -57,7 +57,12 @@ import { nativeArrayDescriptorSnapshotMatches, nativeArrayDescriptorReinstallati
 import { operationOfResult } from '../identity/ids.js'
 import type { TargetRuntimeManifest } from '../preflight/obligations.js'
 import type { ClassLayout } from '../projection/classes.js'
-import { classFamilyMayAllocate, classMethodFamilyHasNativeBody, classMethodReadMayMissAbstractly } from '../projection/dispatch.js'
+import {
+  classAbstractMemberMissesAt,
+  classFamilyMayAllocate,
+  classMethodFamilyHasNativeBody,
+  classMethodReadMayMissAbstractly
+} from '../projection/dispatch.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import { forEachEmbeddedRepresentation } from '../representation/embedded-carriers.js'
 import { captureCapabilityOf, representationKey, type CallableAbi, type Representation } from '../representation/model.js'
@@ -1602,7 +1607,8 @@ const nativeFieldViewDemandsOf = (operation: IrOperation, ctx: CertifyContext): 
     ctx.nativeFieldViewTargets ?? new Set(),
     ctx.authenticatedHosts,
     key,
-    ctx.deriver
+    ctx.deriver,
+    ctx.nativeFieldViews
   )
   if (!required && receipt === undefined) return []
   const semantic = ctx.semanticOperationOf(operation.lineage)
@@ -1678,6 +1684,23 @@ const nativeDocumentEntryDemandsOf = (operation: IrOperation, ctx: CertifyContex
     ...(operation.nativeDocumentEntry.arrayEntry?.readers.map((reader) => reader.array) ?? []),
     operation.nativeDocumentEntry.conversion
   ].map((id) => ({ key: `conversion:${id}` }))
+}
+
+/** The value is a constructor's `prototype` read, seen through payload conversions only. */
+const receiverIsClassPrototype = (value: IrValueId, definitionOf: (value: IrValueId) => IrOperation | null): boolean => {
+  const seen = new Set<IrValueId>()
+  for (let current = value; !seen.has(current);) {
+    seen.add(current)
+    const definition = definitionOf(current)
+    if (definition?.kind === 'convert' && definition.rebuild === undefined) {
+      current = definition.source.value
+      continue
+    }
+    if (definition?.kind !== 'get' || definition.receiver.representation.kind !== 'constructor-family') return false
+    const key = definitionOf(definition.key.value)
+    return key?.kind === 'constant' && key.literal === 'string' && key.text === 'prototype'
+  }
+  return false
 }
 
 const internalConversionDemandsOf = (operation: IrOperation, ctx: CertifyContext): readonly CapabilityDemand[] => {
@@ -1797,6 +1820,21 @@ const internalConversionDemandsOf = (operation: IrOperation, ctx: CertifyContext
         key: 'property-access:computed-class-method-virtual',
         verdict: 'missing',
         detail: 'a native method read that misses on an abstract declaration has no carrier for undefined'
+      })
+    // The class's prototype object exists whether or not any instance does, so
+    // the allocation census cannot waive a read through it: an abstract key
+    // misses there (`Missing.prototype.process` is undefined), and the
+    // emitter's no-instance trap would abort where the language answers.
+    else if (
+      keyText !== null &&
+      operation.receiver.representation.kind === 'class-ref' &&
+      receiverIsClassPrototype(operation.receiver.value, ctx.definitionOf) &&
+      classAbstractMemberMissesAt(ctx.classes, operation.receiver.representation.declaration, keyText)
+    )
+      demands.push({
+        key: 'property-access:class-prototype:abstract-method',
+        verdict: 'missing',
+        detail: 'an abstract method read through the class prototype has no function object'
       })
     const abis =
       ctx.abis ??

@@ -581,7 +581,8 @@ export const projectBindingPlacements = (input: BindingPlacementInput): Readonly
 }
 
 /**
- * The block-scoped bindings of a run-once region that a closure captures.
+ * The block-scoped bindings of a run-once region: each lives in the region
+ * body's frame, never in a file-scope cell.
  *
  * A module-level `let`/`const` inside a loop is a new binding every time its
  * block is entered (ECMA-262 14.7.4.2 CreatePerIterationEnvironment for a
@@ -589,27 +590,24 @@ export const projectBindingPlacements = (input: BindingPlacementInput): Readonly
  * must hold its own. One file-scope cell cannot be that: every closure read
  * the last value written. Such a binding is visible only to the region's own
  * code and closures made inside its block, so it lives in the region body's
- * frame and is captured like any function local. One no closure names keeps
- * its file-scope cell -- a single cell is then unobservable.
+ * frame and is captured like any function local.
+ *
+ * One no closure names would be correct as a file-scope cell too, and was
+ * one, at a cost a module-level loop pays on every turn: a global counter is
+ * a `double` (only write-once cells narrow), a store through the `double*` the
+ * loop writes may alias it so it is reloaded every iteration, and the
+ * dense-window proof wants a local induction variable. Nothing outside the
+ * block can name the binding, so the frame is always available and is the
+ * only placement the loop optimizations see.
  */
 const regionFrameCells = (graph: SemanticGraph): ReadonlySet<DeclarationId> => {
-  const candidates = new Map<DeclarationId, RegionId>()
+  const cells = new Set<DeclarationId>()
   for (const operation of graph.operations.values()) {
     if (operation.family !== 'binding' || !operation.blockScoped || operation.caller.kind === 'function') continue
     if (operation.action !== 'initialize' && operation.action !== 'declare') continue
-    candidates.set(operation.declaration, operation.caller.regionId)
+    cells.add(operation.declaration)
   }
-  const captured = new Set<DeclarationId>()
-  if (candidates.size === 0) return captured
-  for (const operation of graph.operations.values()) {
-    const declaration =
-      operation.family === 'binding' ? operation.declaration : operation.family === 'property' ? operation.resolvedBinding : undefined
-    if (declaration === undefined) continue
-    const region = candidates.get(declaration)
-    if (region === undefined) continue
-    if (operation.caller.kind === 'function' || operation.caller.regionId !== region) captured.add(declaration)
-  }
-  return captured
+  return cells
 }
 
 /**

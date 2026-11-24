@@ -105,6 +105,31 @@ const stored = (
   return value
 }
 
+test('the emptiness goal rejects a direct store before expanding the forwarded parameter', () => {
+  const { file, checker, flow, ledger, closed } = setup(
+    'function fill(xs: any[]) { xs.push(1) } const items = []; fill(items); items[0];',
+    true
+  )
+  const array = receiverOf(file, 'items')
+  const base = authorityOf(checker, flow, closed)
+  let parameterQueries = 0
+  const authority: OriginAuthority = {
+    ...base,
+    parameterValuesOf: (parameter) => {
+      parameterQueries++
+      return base.parameterValuesOf(parameter)
+    }
+  }
+  assert.equal(ledger!.capture(() => arrayStoredValuesOf(checker, flow, array, authority, 'empty')).value, null)
+  assert.equal(parameterQueries, 0)
+  const full = ledger!.capture(() => arrayStoredValuesOf(checker, flow, array, authority))
+  assert.deepEqual(
+    full.value?.map((value) => value.getText(file)),
+    ['1']
+  )
+  assert.ok(parameterQueries > 0)
+})
+
 test('a local array enumerates literal elements, index stores and every storing method', () => {
   assert.deepEqual(
     stored(`const first = {}; const second = {}; const third = {}; const fourth = {}; const fifth = {}; const sixth = {};

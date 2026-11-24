@@ -102,44 +102,118 @@ export type ObjectToNumber = (text: string, carrier: Representation) => string |
 
 const nullableClassReceiver = 'gea_to_number_receiver'
 
+/** The conversion that consumes ToPrimitive's answer, applied to a primitive's text and carrier; `type` is its C++ result. */
+export type PrimitiveFinish = { readonly convert: (text: string, carrier: Representation) => string | null; readonly type: string }
+
+const isPrimitiveCarrier = (carrier: Representation): boolean =>
+  carrier.kind === 'scalar' || carrier.kind === 'string' || carrier.kind === 'undefined' || carrier.kind === 'null'
+
 /**
- * ToPrimitive(hint "number") of a program class instance, when it is decided
- * at compile time: the class's own direct `valueOf`, answering a primitive, with
- * no `@@toPrimitive` on its chain (the admission rules `classToNumberText`
- * states). `call` renders the `valueOf` call on a receiver spelling; `result`
- * is the primitive's carrier. Shared by every conversion that starts with
- * ToPrimitive(number) -- ToNumber and `BigInt(value)` (ECMA-262 21.2.1.1).
+ * A class's own direct method `key`, called with no arguments, when it is the
+ * method [[Get]] finds on every instance (no subclass override, no own slot
+ * written over it) and it answers a primitive carrier.
  */
-export const classToPrimitiveOf = (
+const directPrimitiveMethodOf = (
   ctx: EmitContext,
-  carrier: Extract<Representation, { kind: 'class-ref' }>
+  declaration: DeclarationId,
+  key: string
 ): { readonly call: (receiver: string) => string; readonly result: Representation } | null => {
-  const layouts = ctx.layouts
-  const direct = layouts.classDirectMethodFor?.(carrier.declaration, 'valueOf') ?? null
-  if (
-    direct === null ||
-    classMethodOverrideOf(ctx.classes, carrier.declaration, 'valueOf') !== null ||
-    classDynamicMethodShadowOf(ctx.classes, carrier.declaration, 'valueOf')
-  )
-    return null
+  const direct = ctx.layouts.classDirectMethodFor?.(declaration, key) ?? null
+  if (direct === null || classMethodOverrideOf(ctx.classes, declaration, key) !== null || !isPrimitiveCarrier(direct.result)) return null
+  // Each declared parameter is default-constructed, which for every carrier
+  // `classDirectMethodFor` admits IS the `undefined` a no-argument call binds.
+  const absent = direct.absentParameters.map((parameter) => `, ${cppTypeOf(parameter)}{}`).join('')
+  return { call: (receiver) => `${cppBodyName(direct.callable)}(${receiver}${absent})`, result: direct.result }
+}
+
+/** Whether any class on the chain declares a member keyed by the well-known symbol; `null` when a layout is missing. */
+const chainDeclaresWellKnown = (ctx: EmitContext, declaration: DeclarationId, symbol: string): boolean | null => {
   const seen = new Set<DeclarationId>()
-  for (let current: DeclarationId | null = carrier.declaration; current !== null && !seen.has(current);) {
+  for (let current: DeclarationId | null = declaration; current !== null && !seen.has(current);) {
     seen.add(current)
     const layout = ctx.classes.get(current)
     if (layout === undefined) return null
     const members = [...layout.methods, ...layout.fields, ...layout.accessors]
-    if (members.some((member) => layouts.wellKnownSymbolOfKey?.(member.key) === 'toPrimitive')) return null
+    if (members.some((member) => ctx.layouts.wellKnownSymbolOfKey?.(member.key) === symbol)) return true
     current = layout.base
   }
-  if (
-    direct.result.kind !== 'scalar' &&
-    direct.result.kind !== 'string' &&
-    direct.result.kind !== 'undefined' &&
-    direct.result.kind !== 'null'
+  return false
+}
+
+/**
+ * ToPrimitive(hint "number") of a program class instance `receiver`, finished
+ * by `finish` -- ToNumber and `BigInt(value)` (ECMA-262 21.2.1.1) both start
+ * here. Decided at compile time: the class's own direct `valueOf`, answering a
+ * primitive, with no `@@toPrimitive` on its chain (the admission rules
+ * `classToNumberText` states).
+ *
+ * A runtime-keyed write may put an own `valueOf` in the instance's expando
+ * table (`ClassLayout.dynamicMethodShadows`), and then OrdinaryToPrimitive
+ * (7.1.1.1) runs in full on the slow path: the own `valueOf` is called only if
+ * it is callable and its answer kept only if it is not an object; otherwise
+ * `toString` -- the instance's own expando entry, callable-checked the same
+ * way, or the prototype's -- and a TypeError when neither yields a primitive.
+ * What the shadow holds and answers is a `gea::Value` because the expando
+ * table stores exactly that: a function the program wrote under a computed
+ * key has no static type to recover. The prototype path stays native.
+ */
+export const classToPrimitiveTextOf = (
+  ctx: EmitContext,
+  carrier: Extract<Representation, { kind: 'class-ref' }>,
+  receiver: string,
+  finish: PrimitiveFinish
+): string | null => {
+  const valueOf = directPrimitiveMethodOf(ctx, carrier.declaration, 'valueOf')
+  if (valueOf === null || chainDeclaresWellKnown(ctx, carrier.declaration, 'toPrimitive') !== false) return null
+  if (!classDynamicMethodShadowOf(ctx.classes, carrier.declaration, 'valueOf'))
+    return finish.convert(valueOf.call(receiver), valueOf.result)
+  const self = 'gea_to_primitive_receiver'
+  const prototypeAnswer = finish.convert(valueOf.call(self), valueOf.result)
+  const dynamicAnswer = finish.convert('gea_primitive', { kind: 'dynamic', reason: 'untyped-callable' })
+  const prototypeToString = classPrototypeToStringOf(ctx, carrier, self, finish)
+  if (prototypeAnswer === null || dynamicAnswer === null || prototypeToString === null) return null
+  // An own entry that is not callable, or whose answer is an object, falls
+  // through to the next method name rather than failing.
+  const ownStep = (local: string): string =>
+    `if (${local}->tag() == gea::Value::Tag::Function) { ` +
+    `const gea::Value gea_primitive = ${local}->callWithReceiver(gea::NativeCallReceiver::object(${self}), {}); ` +
+    `if (gea_primitive.tag() != gea::Value::Tag::Object && gea_primitive.tag() != gea::Value::Tag::Function) return ${dynamicAnswer}; } `
+  return (
+    `[&](const auto& ${self}) -> ${finish.type} { if (gea::detail::nativeExpandoPresent(${self})) [[unlikely]] { ` +
+    `if (const auto gea_own_value_of = gea::detail::nativeExpandoOwnValue(${self}, "valueOf")) { ` +
+    ownStep('gea_own_value_of') +
+    `if (const auto gea_own_to_string = gea::detail::nativeExpandoOwnValue(${self}, "toString")) { ` +
+    ownStep('gea_own_to_string') +
+    `} else { ${prototypeToString} } ` +
+    `gea::host::throwRuntimeError("TypeError", "Cannot convert object to primitive value"); } } ` +
+    `return ${prototypeAnswer}; }(${receiver})`
   )
-    return null
-  const absent = direct.absentParameters.map((parameter) => `, ${cppTypeOf(parameter)}{}`).join('')
-  return { call: (receiver) => `${cppBodyName(direct.callable)}(${receiver}${absent})`, result: direct.result }
+}
+
+/**
+ * The `toString` step of OrdinaryToPrimitive reached through the prototype
+ * chain, as statements that return a finished answer or fall through when the
+ * method's answer is an object. A class with no `toString` anywhere on its
+ * chain inherits `Object.prototype.toString`, whose answer for a `class-ref`
+ * is "[object Object]" unless `@@toStringTag` changes it (`emit-tostring.ts`
+ * states why no other builtin tag can apply); a native base declines, since
+ * its own `toString` is the intrinsic's.
+ */
+const classPrototypeToStringOf = (
+  ctx: EmitContext,
+  carrier: Extract<Representation, { kind: 'class-ref' }>,
+  self: string,
+  finish: PrimitiveFinish
+): string | null => {
+  if (carrier.nativeBase !== undefined || chainDeclaresWellKnown(ctx, carrier.declaration, 'toStringTag') !== false) return null
+  if (!(ctx.layouts.classMethodFor?.(carrier.declaration, 'toString') ?? false)) {
+    const answer = finish.convert('std::string("[object Object]")', { kind: 'string' })
+    return answer === null ? null : `return ${answer};`
+  }
+  const toString = directPrimitiveMethodOf(ctx, carrier.declaration, 'toString')
+  if (toString === null) return null
+  const answer = finish.convert(toString.call(self), toString.result)
+  return answer === null ? null : `return ${answer};`
 }
 
 /**
@@ -167,9 +241,10 @@ export const classToNumberText =
   (ctx: EmitContext): ObjectToNumber =>
   (text, carrier) => {
     if (carrier.kind !== 'class-ref') return null
-    const primitive = classToPrimitiveOf(ctx, carrier)
-    if (primitive === null) return null
-    const converted = toNumberText(primitive.call(nullableClassReceiver), primitive.result)
+    const converted = classToPrimitiveTextOf(ctx, carrier, nullableClassReceiver, {
+      convert: (primitive, primitiveCarrier) => toNumberText(primitive, primitiveCarrier),
+      type: 'double'
+    })
     if (converted === null) return null
     const present = carrier.ownership === 'shared-refcount' ? `static_cast<bool>(${nullableClassReceiver}) ? ` : ''
     const absentNumber = carrier.ownership === 'shared-refcount' ? ` : gea::host::detail::toNumberNull()` : ''

@@ -6,7 +6,14 @@ import type { PrototypeKeyQuery } from '../host-mutation-keys.js'
 import { isVacuousOrigin } from './seeded-origins.js'
 import { sourceRecordDataWritePlanOf } from './source-record-data.js'
 import type { OriginAuthority } from './origin-authority.js'
-import { calleeDeclarationOf, isModuleExportedDeclaration, isTypePositionReference, resolveFlowSymbolAlias } from './targets.js'
+import {
+  calleeDeclarationOf,
+  exportIsUnimported,
+  isModuleExportedDeclaration,
+  isTypePositionReference,
+  resolveFlowSymbolAlias
+} from './targets.js'
+import { inProgramImportReferencesOf } from './export-importers.js'
 import { sourceClassFamilyOf } from './owned-class-receivers.js'
 
 /**
@@ -521,6 +528,40 @@ export const computedKeySetVerdictOf = (
   }
 
   // ---- The key's own origins. ----
+  /**
+   * The elements of the array a `const` names, when that array can only ever
+   * hold its literal's elements: the binding is never rebound, and every
+   * mention of it -- in its own module and, for an export, in every importer
+   * -- only iterates it or reads an element or its length. No mention can
+   * hand the array onward, so no alias exists through which an element could
+   * be replaced or one pushed.
+   */
+  const constArrayElementsOf = (name: ts.Identifier): readonly ts.Expression[] | null => {
+    const declaration = flow.targetOf(name)?.declaration
+    if (!declaration || !ts.isVariableDeclaration(declaration) || !ts.isIdentifier(declaration.name)) return null
+    if ((ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) === 0 || !declaration.initializer) return null
+    const literal = unwrapErasedExpression(declaration.initializer)
+    if (!ts.isArrayLiteralExpression(literal)) return null
+    if (literal.elements.some((element) => ts.isOmittedExpression(element) || ts.isSpreadElement(element))) return null
+    if (flow.writesToDeclaration(declaration).some((write) => write.slot !== 'whole' || write.edge !== 'declaration-initializer'))
+      return null
+    const exported = isModuleExportedDeclaration(checker, declaration, checker.getSymbolAtLocation(declaration.name) ?? null)
+    const importers =
+      !exported || exportIsUnimported(checker, flow, declaration) ? [] : inProgramImportReferencesOf(checker, flow, declaration)
+    if (importers === null) return null
+    const readOnly = (reference: ts.Expression): boolean => {
+      if (reference === declaration.name || isTypePositionReference(reference)) return true
+      if (ts.isTypeQueryNode(reference.parent) || (reference.flags & ts.NodeFlags.JSDoc) !== 0) return true
+      const positioned = outermostErasureOf(reference)
+      const parent = positioned.parent
+      if (ts.isForOfStatement(parent) && parent.expression === positioned) return true
+      if (isWriteTarget(parent) || ts.isDeleteExpression(parent.parent)) return false
+      if (ts.isPropertyAccessExpression(parent) && parent.expression === positioned)
+        return parent.name.text === 'length' && !ts.isCallExpression(parent.parent)
+      return ts.isElementAccessExpression(parent) && parent.expression === positioned && !ts.isCallExpression(parent.parent)
+    }
+    return [...flow.referencesToDeclaration(declaration), ...importers].every(readOnly) ? literal.elements : null
+  }
   const visiting = new Set<ts.Node>()
   const loopKeys = (loop: Loop): void => {
     if (ts.isForInStatement(loop)) return objectKeys(loop.expression, true)
@@ -535,6 +576,13 @@ export const computedKeySetVerdictOf = (
         return refuse('key-iteration-source-unsupported', source)
       requireIntrinsic('Array', undefined, source)
       for (const element of source.elements) keyValues(element)
+      return
+    }
+    if (ts.isIdentifier(source)) {
+      const elements = constArrayElementsOf(source)
+      if (!elements) return refuse('key-iteration-source-unsupported', loop.expression)
+      requireIntrinsic('Array', undefined, source)
+      for (const element of elements) keyValues(element)
       return
     }
     const object = ts.isCallExpression(source) && isObjectStatic(source, ['keys']) ? soleArgumentOf(source) : null

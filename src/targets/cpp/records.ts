@@ -608,8 +608,8 @@ const valueHeldStructNames = (representation: Representation, into: Set<string>,
   const node = representation as unknown as Readonly<Record<string, unknown>>
   const ownership = node['ownership']
   if (typeof ownership === 'string' && ownership !== 'owned') {
-    const element = probed && ownership === 'shared-refcount' ? traceProbedElementOf(representation) : null
-    if (element !== null) valueHeldStructNames(element, into, seen, probed)
+    if (probed && ownership === 'shared-refcount')
+      for (const element of traceProbedElementsOf(representation)) valueHeldStructNames(element, into, seen, probed)
     return
   }
   if (node['abi'] !== undefined) {
@@ -651,10 +651,18 @@ const valueHeldStructNames = (representation: Representation, into: Set<string>,
   for (const value of Object.values(node)) descend(value)
 }
 
-/** The element `RefTargetIsLeaf` judges a `Ref` to this container by, or `null` when it judges the container without one. */
-const traceProbedElementOf = (representation: Representation): Representation | null => {
-  if (representation.kind === 'array-object') return representation.recursive === undefined ? representation.element : null
-  return null
+/** The elements a holder's trace signature instantiates through a `Ref` to this container. */
+const traceProbedElementsOf = (representation: Representation): readonly Representation[] => {
+  // `RefTargetIsLeaf` judges a `Ref` to an Array by its element.
+  if (representation.kind === 'array-object') return representation.recursive === undefined ? [representation.element] : []
+  // `Ref<Map<K, V>>` is judged without its entries, but probing the holder's
+  // `geaTraceRefs` looks up the friends of every class among the template
+  // arguments, and that instantiates an entry carrier such as
+  // `TaggedUnion<double, Record>`, whose inline storage needs `Record`
+  // complete (a sort spec's `Map<string, 1 | -1 | { $meta: string }>`).
+  if (representation.kind === 'keyed-collection' && representation.recursive === undefined)
+    return representation.value ? [representation.key, representation.value] : [representation.key]
+  return []
 }
 
 /** Every struct one struct's own storage embeds by value -- or, `probed`, every struct its trace signature needs complete. */

@@ -229,6 +229,10 @@ export const effectOf = (operation: IrNonTerminatorOperation): OperationEffect =
     case 'commonjs-require':
     case 'commonjs-binding-set':
       return 'always'
+    // Only the realm's namespace slot changes, and an unread namespace makes
+    // that first-object identity unobservable.
+    case 'module-namespace':
+      return 'pure'
     // Everything else is kept: a property read may run an accessor or reach a
     // host, an iterator step runs the protocol, an element operation mutates a
     // host tree, a call runs the program, and a catch binding is the shape of
@@ -588,7 +592,7 @@ const sliceBody = (
         }
       }
     }
-    // `String(x)`, `Number(x)` and `Boolean(x)` run the same OrdinaryToPrimitive
+    // `String(x)`, `Number(x)`, `BigInt(x)` and `Boolean(x)` run the same OrdinaryToPrimitive
     // on their argument, and they are CALLS -- a `native-handle` callee named by
     // the host -- not the `convert`/`compute` the clause above sees. Without
     // this the method a class declares was shaken away while the printer's own
@@ -600,7 +604,12 @@ const sliceBody = (
     // the compilation -- the same narrowness the clause above is written for.
     if (operation.kind === 'call' && operation.callee.representation.kind === 'native-handle') {
       const protocol = operation.callee.representation.protocol
-      if (protocol === 'StringConstructor' || protocol === 'NumberConstructor' || protocol === 'BooleanConstructor') {
+      if (
+        protocol === 'StringConstructor' ||
+        protocol === 'NumberConstructor' ||
+        protocol === 'BigIntConstructor' ||
+        protocol === 'BooleanConstructor'
+      ) {
         for (const argument of operation.arguments) {
           for (const scope of receiverClassScopes(argument.representation, structuralViewScopes)) {
             spelledKeys.add(`${scope}#toString`)
@@ -832,11 +841,19 @@ const structuralViewScopesOf = (
   const targetShapes = new Set<string>()
   const documentViewers = new Set<string>()
   for (const body of bodies) {
-    for (const carrier of body.values.values()) {
-      if (carrier.kind === 'record' || carrier.kind === 'record-with-index' || carrier.kind === 'native-record-ref') {
+    // `receiverClassScopes` looks a record up through the optionals, unions
+    // and borrows that hold it, so a record reached only as an arm (a
+    // `parent?: { bsonOptions? } | Db` formal) is a target too: missing it
+    // left that arm's reads naming no class, and the getter a view of a
+    // class into it calls was pruned.
+    const addShapes = (carrier: Representation): void => {
+      if (carrier.kind === 'record' || carrier.kind === 'record-with-index' || carrier.kind === 'native-record-ref')
         targetShapes.add(carrier.shapeId)
-      }
+      else if (carrier.kind === 'optional') addShapes(carrier.payload)
+      else if (carrier.kind === 'borrowed-ref') addShapes(carrier.referent)
+      else if (carrier.kind === 'tagged-union') for (const arm of carrier.arms) addShapes(arm.value)
     }
+    for (const carrier of body.values.values()) addShapes(carrier)
     // A class instance converted into an open `any` document is that document
     // (`gea::dictionary::aliasOf`), so a key read through the document names
     // that class's member -- a prototype getter included.

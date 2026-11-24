@@ -1,5 +1,6 @@
 import ts from '#typescript'
 import { operationId, semanticResultId, type StructuralTypeId } from '../../../identity/ids.js'
+import type { StructuralIndexShape } from '../../model/structural-types.js'
 import type { NativeOwnAssignment, NativeOwnAssignmentValue, NativeOwnSlot } from '../../native-own-assignment.js'
 import type { SemanticOperand } from '../../model/operands.js'
 import type { ProducerContext } from '../producer-context.js'
@@ -11,7 +12,8 @@ const storedValueOf = (context: ProducerContext, value: ts.Expression | ts.Signa
     const absence = ts.isVoidExpression(value) && value.parent === undefined
     return {
       type: absence ? context.table.intern({ kind: 'primitive', primitive: 'undefined' }) : context.types.typeAt(value),
-      source: absence ? { kind: 'constant', text: 'undefined', literal: 'undefined' } : sourceForValue(context, value)
+      source: absence ? { kind: 'constant', text: 'undefined', literal: 'undefined' } : sourceForValue(context, value),
+      ...(absence ? { absence: true as const } : {})
     }
   }
   if ((ts.isFunctionDeclaration(value) || ts.isMethodDeclaration(value)) && value.body)
@@ -41,11 +43,15 @@ export const nativeOwnSlotOf = (context: ProducerContext, expression: ts.Express
 /** A source's own data keys, read from the structural type its
  * representation is laid out under -- the one key authority both the IR's
  * copy and the session's absence obligation range over. Nullish arms copy
- * nothing; any arm that is not a plain data record (an index, an accessor, a
- * symbol key, dropped callable members, a type parameter) bounds no key set.
+ * nothing; any arm that is not a plain data record (a typed index, an accessor,
+ * a symbol key, dropped callable members, a type parameter) bounds no key set.
  */
 const representedDataKeysOf = (context: ProducerContext, expression: ts.Expression): readonly string[] | null => {
   const keys = new Set<string>()
+  const declaredAnyStringIndex = (index: StructuralIndexShape): boolean => {
+    const value = context.table.get(index.value).shape
+    return index.key === 'string' && value.kind === 'primitive' && value.primitive === 'any'
+  }
   const visit = (id: StructuralTypeId, depth: number): boolean => {
     if (depth > 16) return false
     const shape = context.table.get(id).shape
@@ -60,7 +66,10 @@ const representedDataKeysOf = (context: ProducerContext, expression: ts.Expressi
       case 'intersection':
         return shape.resolved !== null && visit(shape.resolved, depth + 1)
       case 'object':
-        if (shape.index.length !== 0 || shape.membersDropped) return false
+        // A string index of declared `any` entries owes no typed storage for
+        // any key: each run-time key it holds is copied as the Value it
+        // already is (the described source's open, unknown-key write).
+        if (shape.index.some((index) => !declaredAnyStringIndex(index)) || shape.membersDropped) return false
         for (const member of shape.members) {
           if (member.accessor !== null || member.key.kind === 'symbol') return false
           keys.add(String(member.key.value))

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { compile } from '../compiler.js'
 import { createConversionNodes } from '../conversion/nodes.js'
@@ -147,13 +148,26 @@ test('installed Document entries follow local aliases independently of unknown a
   )
 })
 
+// `document-viewed-as-typed-options.runtime.ts` rebinds `options = filtered`
+// unconditionally, so only the Document reaches `return options!` and the
+// retained option allocation never meets it. Rebinding on one path keeps both
+// origins live at the read, which is the mix these assertions are about.
+const mixedOriginOptions = (): ReadonlyMap<string, string> => {
+  const entry = resolve('test/runtime/document-viewed-as-typed-options.runtime.ts')
+  const text = readFileSync(entry, 'utf8')
+  const rebound = text.replace('  options = filtered\n', '  if (seen === filtered) options = filtered\n')
+  assert.notEqual(rebound, text)
+  return new Map([[entry, rebound]])
+}
+
 for (const fixture of ['open-document-adopted-into-record-key-order.runtime.ts', 'document-viewed-as-typed-options.runtime.ts'])
   test(`the original Document remains the mutable enumerable owner in ${fixture}`, () => {
     const result = compile({
       rootFileNames: [resolve('test/runtime', fixture)],
       projectFileName: resolve('test/runtime/tsconfig.json'),
       closedScriptScope: true,
-      includeIr: true
+      includeIr: true,
+      ...(fixture === 'document-viewed-as-typed-options.runtime.ts' ? { sourceOverlay: mixedOriginOptions() } : {})
     })
     const details = JSON.stringify({
       diagnostics: result.diagnostics.diagnostics,

@@ -8,7 +8,7 @@ import { createConversionDerivationContext, deriveConversionCapability } from '.
 import { narrowingCapabilityFor } from './build.js'
 import type { CoercionOperation, ConversionRuntimeRegistry } from './registry.js'
 import type { FamilyMemberKeys } from './record-view.js'
-import { impossibleFieldReadOf, IMPOSSIBLE_FIELD_READ } from './impossible-field-read.js'
+import { absentOnlyFieldReadOf, impossibleFieldReadOf, ABSENT_ONLY_FIELD_READ, IMPOSSIBLE_FIELD_READ } from './impossible-field-read.js'
 import { nativeUnboundMethodContractOf, NATIVE_UNBOUND_METHOD_MATERIALIZER } from './native-method.js'
 import { nativeBufferUnboundMethodContractOf } from './native-buffer-method.js'
 import { siblingClassArgumentOf, SIBLING_CLASS_ARGUMENT } from './sibling-class.js'
@@ -224,6 +224,16 @@ export interface ConversionCensus {
    * other pair.
    */
   readonly nullishOptionalFor: (source: Representation, target: Representation) => ConversionNode | null
+  /**
+   * An optional value read where the checker has already proved it present,
+   * into a carrier with no absent state: `options[name]` after
+   * `options[name] != null`, a narrowing TypeScript keeps on the keyed read
+   * itself. The present payload takes its own conversion; an absent one is a
+   * `TypeError`, since the program's type says it cannot be there. `null` when
+   * the target can hold the absence (then the ordinary conversion answers) or
+   * the payload has no materializable route.
+   */
+  readonly presentPayloadFor: (source: Representation, target: Representation) => ConversionNode | null
   /** The node a `convert` instruction names, from whichever table minted it; `null` for an id no census minted. */
   readonly nodeById: (id: ConversionNodeId) => ConversionNode | null
   /** Every node minted through `nodeFor` that the eager graph did not already hold. */
@@ -399,9 +409,35 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     )
     if (structural) return { kind: 'static', materializer: structural }
     if (recipe) return { kind: 'static', materializer: recipe }
+    // The optional's payload has its own route, but no recipe takes both steps
+    // at once: a `let` read before any write carries its absence on every read
+    // (`unassigned-binding-cells.ts`), so `if (result) add(result)` hands
+    // `T | undefined` to a `Document` parameter. That is the same checked
+    // unwrap an `optional(T) -> T` load is, followed by the payload's own
+    // conversion; the absent case is the load's `TypeError`.
+    const present = checkedPresentPayloadOf(source, target)
+    if (present) return present
     const foreign = foreignReceiverOf(source, target)
     const missing = `no runtime conversion is installed from ${sourceKey} to ${targetKey}`
     return { kind: 'never', reason: foreign === null ? missing : `${missing}: ${foreign}` }
+  }
+
+  const checkedPresentPayloadOf = (source: Representation, target: Representation): ConversionCapability | null => {
+    if (source.kind !== 'optional' || target.kind === 'optional' || target.kind === 'dynamic') return null
+    if (target.kind === 'tagged-union' && target.arms.some((arm) => arm.value.kind === source.absence)) return null
+    const payload = nodeFor(source.payload, target)
+    if (!recipeIsMaterializableWithoutPriorSourceGuard(payload, nodeById)) return null
+    return {
+      kind: 'static',
+      materializer: {
+        id: PRESENT_PAYLOAD_MATERIALIZER,
+        domain: 'static:present-payload',
+        allocates: 'materializer' in payload.capability && payload.capability.materializer.allocates,
+        requiresSourceGuard: true,
+        executesSourceGuard: true,
+        dependencies: [payload]
+      }
+    }
   }
 
   const nodeFor = (source: Representation, target: Representation): ConversionNode => {
@@ -769,6 +805,42 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
       // certifying a read whose every present value is a run-time TypeError.
       return null
     }
+    // A union read out of an entry selects its arm by the wrapper's own
+    // classifiers, and then reads that arm exactly as a field of that carrier
+    // alone is read out of a Document: by the entry's own object, checked
+    // (`gea::dictionary::checkedPayloadEntry`), never a rebuilt one. The
+    // ordinary wrapper's Promise arm adopts a foreign thenable into a fresh
+    // promise -- right for an `any` value, but a Document view's read must
+    // hand back the entry it holds (a family layout's `metadata?: Document |
+    // Promise<ClientMetadata>` read through a `Db`'s filtered options).
+    if (
+      source.kind === 'dynamic' &&
+      target.kind === 'tagged-union' &&
+      ordinary.capability.kind === 'static' &&
+      ordinary.capability.materializer.dynamicWrapper?.kind === 'union'
+    ) {
+      const plan = ordinary.capability.materializer.dynamicWrapper
+      let changed = false
+      const arms = plan.arms.map((arm) => {
+        const value = plan.target.arms[arm.index]?.value
+        const read = value === undefined ? null : dictionaryReadFor(source, value)
+        if (
+          read === null ||
+          read === arm.conversion ||
+          !('materializer' in read.capability) ||
+          !read.capability.materializer.dictionaryRead
+        )
+          return arm
+        changed = true
+        return { ...arm, conversion: read }
+      })
+      if (changed)
+        return contextualNode(source, target, 'dictionary-entry-read', {
+          ...ordinary.capability.materializer,
+          dynamicWrapper: { ...plan, arms },
+          dependencies: arms.map((arm) => arm.conversion)
+        })
+    }
     if (source.kind === 'dynamic' && target.kind === 'optional') {
       const present = dictionaryReadFor(source, target.payload)
       const absent = nodeFor({ kind: target.absence }, target)
@@ -794,7 +866,15 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     const method = nativeMethodFor(source, target)
     if (method) return method
     const ordinary = nodeFor(source, target)
-    if (ordinary.capability.kind !== 'never' || !impossibleFieldReadOf(source, target)) return ordinary
+    if (ordinary.capability.kind !== 'never') return ordinary
+    if (absentOnlyFieldReadOf(source, target))
+      return contextualNode(source, target, 'absent-only-field-read', {
+        id: ABSENT_ONLY_FIELD_READ,
+        domain: 'static:absent-only-field-read',
+        allocates: false,
+        nativeFieldProtocol: 'unused'
+      })
+    if (!impossibleFieldReadOf(source, target)) return ordinary
     return contextualNode(source, target, 'field-read', {
       id: IMPOSSIBLE_FIELD_READ,
       domain: 'static:impossible-field-read',
@@ -1253,6 +1333,33 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     return node
   }
 
+  const presentPayloads = new Map<ConversionNodeId, ConversionNode>()
+  const presentPayloadFor = (source: Representation, target: Representation): ConversionNode | null => {
+    if (source.kind !== 'optional' || target.kind === 'optional' || target.kind === 'dynamic') return null
+    if (target.kind === 'tagged-union' && target.arms.some((arm) => arm.value.kind === source.absence)) return null
+    const id = `${representationKey(source)}->${representationKey(target)}#present-payload`
+    const remembered = presentPayloads.get(id)
+    if (remembered !== undefined) return remembered
+    const payload = nodeFor(source.payload, target)
+    if (!recipeIsMaterializableWithoutPriorSourceGuard(payload, nodeById)) return null
+    const node: ConversionNode = {
+      id,
+      source,
+      target,
+      capability: {
+        kind: 'static',
+        materializer: {
+          id: PRESENT_PAYLOAD_MATERIALIZER,
+          domain: 'static:present-payload',
+          allocates: 'materializer' in payload.capability && payload.capability.materializer.allocates,
+          dependencies: [payload]
+        }
+      }
+    }
+    presentPayloads.set(id, node)
+    return node
+  }
+
   const nodeById = (id: ConversionNodeId): ConversionNode | null =>
     minted.get(id) ??
     provisional.get(id)?.node ??
@@ -1268,6 +1375,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     caughtHandoffs.get(id) ??
     assertedClassDowncasts.get(id) ??
     nullishOptionals.get(id) ??
+    presentPayloads.get(id) ??
     null
 
   return {
@@ -1293,6 +1401,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     caughtHandoffFor,
     assertedClassDowncastFor,
     nullishOptionalFor,
+    presentPayloadFor,
     nodeById,
     minted
   }
@@ -1304,6 +1413,9 @@ export const IMPOSSIBLE_INDEX_READ = 'native:impossible-index-read'
 
 /** The materializer id every nullish-optional node carries; the printer dispatches its recipe on it. */
 export const NULLISH_OPTIONAL_MATERIALIZER = 'view:nullish-optional'
+
+/** The materializer id every present-payload node carries; the printer dispatches its recipe on it. */
+export const PRESENT_PAYLOAD_MATERIALIZER = 'view:present-payload'
 
 /** The materializer id every asserted-class-downcast node carries; the printer dispatches its recipe on it. */
 export const ASSERTED_CLASS_DOWNCAST_MATERIALIZER = 'gea::host::assertedDowncastClassRef'

@@ -122,7 +122,11 @@ export const cppRecursiveContainerDeclarations = (
     ...ordered.map(([type, representation]) => {
       const name = cppRecursiveContainerName(type)
       const base = baseTypeOf(representation)
-      return [`struct ${name} final : ${base} {`, `  using Base = ${base};`, '  using Base::Base;', '};'].join('\n')
+      // A callable wrapper also converts from its base: a read across the
+      // dynamic boundary (`DynamicCarrier<W>`) answers the base callable, and
+      // an inherited constructor never covers construction from the base.
+      const fromBase = representation.kind === 'function-value-dispatch' ? [`  ${name}(const Base& base) : Base(base) {}`] : []
+      return [`struct ${name} final : ${base} {`, `  using Base = ${base};`, '  using Base::Base;', ...fromBase, '};'].join('\n')
     })
   ]
 }

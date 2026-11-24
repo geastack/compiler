@@ -81,8 +81,17 @@ const preservesReadValue = (capability: ConversionCapability): boolean => {
       return true
     case 'atom':
     case 'static':
-      if (capability.materializer.dictionaryRead !== undefined)
-        return preservesReadValue(capability.materializer.dictionaryRead.conversion.capability)
+      if (capability.materializer.dictionaryRead !== undefined) {
+        const read = capability.materializer.dictionaryRead
+        // An exact payload or class read (`checkedPayloadEntry`,
+        // `checkedClassEntry`) hands back the entry's own object or throws;
+        // it never runs the ordinary conversion, which for a Promise adopts a
+        // foreign thenable into a fresh promise.
+        if (read.kind === 'dynamic-payload' || read.kind === 'dynamic-class' || read.kind === 'dynamic-absence') return true
+        // A present entry is read by `present`, not by the ordinary pair.
+        if (read.kind === 'dynamic-optional') return preservesReadValue(read.present.capability)
+        return preservesReadValue(read.conversion.capability)
+      }
       if (capability.materializer.documentRecordView !== undefined) return capability.materializer.nativeFieldViewProtocol === 'live'
       if (capability.materializer.nativeArrayView !== undefined) return true
       // A wrapper only tests the absence tag or an arm classifier before its

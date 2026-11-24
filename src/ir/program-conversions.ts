@@ -11,6 +11,7 @@ import type { RecordLayoutPolicy } from '../representation/policies.js'
 import { representationKey, walkRepresentation, type CallableAbi, type Representation } from '../representation/model.js'
 import { dynamicRecordLoadNeedsPlan } from '../conversion/document-record-view.js'
 import { recipeClosureOf } from '../conversion/recipe-closure.js'
+import { nativeViewOriginsOf, type NativeViewOrigin } from '../conversion/native-view-origins.js'
 import { capturesNothing } from './captures.js'
 import { asyncPromiseViewOf } from './coroutine-bodies.js'
 import type { IrBody } from './model.js'
@@ -112,9 +113,12 @@ export const prototypeSetterValue: Representation = { kind: 'dynamic', reason: '
  * A plan without one would refuse the whole program at certification; with no
  * plan the one operation that reaches the slot keeps its named refusal.
  */
-const dynamicLoadInstalled = (value: Representation, conversions: ConversionCensus): boolean => {
+const dynamicLoadInstalled = (value: Representation, conversions: ConversionCensus): boolean =>
+  dynamicPairInstalled(prototypeSetterValue, value, conversions)
+
+const dynamicPairInstalled = (source: Representation, value: Representation, conversions: ConversionCensus): boolean => {
   try {
-    const closure = recipeClosureOf([conversions.nodeFor(prototypeSetterValue, value)], conversions.nodeById)
+    const closure = recipeClosureOf([conversions.nodeFor(source, value)], conversions.nodeById)
     return [...closure.values()].every((node) => node.capability.kind !== 'never')
   } catch {
     // Conflicting citations are certification's `missing` verdict: no plan.
@@ -164,12 +168,17 @@ export const programConversionInputsOf = (input: ProgramConversionInputs): reado
   // Function boxed into `any`, a prototype method a boxed instance answers
   // with, and a callable own field a full-reflection receiver answers with.
   const boxedFrames: CallableAbi[] = []
+  const convertedNodes = new Set<ConversionNode>()
   for (const body of bodies) {
     const operations = [...body.blocks.values()].flatMap((block) => allOperationsOf(block))
     const definitions = new Map(
       operations.flatMap((operation) => (operation.kind === 'constant' ? [[operation.result.id, operation] as const] : []))
     )
     for (const operation of operations) {
+      if (operation.kind === 'convert') {
+        const node = input.conversions.nodeById(operation.conversionUse)
+        if (node !== null) convertedNodes.add(node)
+      }
       if (operation.kind === 'convert' && operation.result.representation.kind === 'dynamic') {
         const abi = abiOfCallee(operation.source.representation)
         if (abi !== null) boxedFrames.push(abi)
@@ -190,6 +199,11 @@ export const programConversionInputsOf = (input: ProgramConversionInputs): reado
     const boundary = { role, owner, slot, source, target }
     inputs.set(programConversionKey(boundary), boundary)
   }
+  let origins: readonly NativeViewOrigin[] | null = null
+  const viewOrigins = (): readonly NativeViewOrigin[] =>
+    (origins ??= [...nativeViewOriginsOf(convertedNodes, input.conversions.nodeById)].sort((left, right) =>
+      representationKey(left.source).localeCompare(representationKey(right.source))
+    ))
   const layouts = recordShapeLayoutsOf(input.deriver, input.classes)
   const retained = new Map<string, Representation>()
   for (const root of input.representations ?? [])
@@ -223,10 +237,17 @@ export const programConversionInputsOf = (input: ProgramConversionInputs): reado
         const callable = abiOfCallee(field.value)
         if (callable !== null && (demand.fieldOperations === undefined || operations?.has('read'))) boxedFrames.push(callable)
         if (demand.fieldOperations !== undefined && !operations?.has('write') && !operations?.has('define')) continue
+        // Full reflection publishes every field to dynamic writers whether or
+        // not one ever names it, so a field the census cannot load into (an
+        // intersection-typed options record whose overloaded callable member
+        // no Document entry reads into) gets no plan, exactly as a boxed
+        // frame's record argument gets none: its dispatcher arm keeps the
+        // runtime refusal (`refuseUnaddressableField`) instead of a recipe
+        // with no conversion refusing the whole program.
         if (
-          dynamicRecordLoadNeedsPlan(field.value, layouts) ||
-          dynamicTableLoadNeedsPlan(field.value, layouts) ||
-          dynamicCallableLoadInstalled(field.value, input.conversions)
+          dynamicRecordLoadNeedsPlan(field.value, layouts) || dynamicTableLoadNeedsPlan(field.value, layouts)
+            ? dynamicLoadInstalled(field.value, input.conversions)
+            : dynamicCallableLoadInstalled(field.value, input.conversions)
         )
           add('dynamic-field-write', owner, field.key, prototypeSetterValue, field.value)
       }
@@ -242,8 +263,22 @@ export const programConversionInputsOf = (input: ProgramConversionInputs): reado
       for (const record of argumentRecordsOf(parameter.value)) {
         const owner = dynamicFieldConversionOwnerOf(record)
         if (owner === null || inputs.has(programConversionKey({ role: 'dynamic-call-argument', owner, slot: '' }))) continue
-        if (dynamicRecordLoadNeedsPlan(record, layouts) && dynamicLoadInstalled(record, input.conversions))
-          add('dynamic-call-argument', owner, '', prototypeSetterValue, record)
+        if (!dynamicRecordLoadNeedsPlan(record, layouts) || !dynamicLoadInstalled(record, input.conversions)) continue
+        add('dynamic-call-argument', owner, '', prototypeSetterValue, record)
+        // A live view boxes as its original object (`record::boxNativeView`),
+        // so a view of this record handed through the box arrives as the
+        // ORIGINAL's layout, which the exact-payload load refuses. Each
+        // origin the program views as this record is read back through that
+        // same certified view (`connectionType ?? Connection` constructed
+        // with a pool's merged options viewed as `ConnectionOptions`).
+        if (!('shapeId' in record)) continue
+        for (const origin of viewOrigins())
+          if (
+            origin.target.shapeId === record.shapeId &&
+            origin.source.kind !== 'dictionary' &&
+            dynamicPairInstalled(origin.source, record, input.conversions)
+          )
+            add('dynamic-call-argument', owner, `origin:${representationKey(origin.source)}`, origin.source, record)
       }
   for (const body of bodies) {
     const view = asyncPromiseViewOf(body)

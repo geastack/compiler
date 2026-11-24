@@ -737,6 +737,216 @@ token().then((value) => {
   compileAndRun(result, 'commonjs-require-absent-peer-stub')
 })
 
+// The same loader with the driver's `makeErrorModule` Proxy in its `catch`:
+// the `return` of the required module never runs, so the loader returns only
+// the proxy and its call results carry the proxy alone, never the peer's
+// declared record arm beside it. With that arm still there, `peer.instance(...)`
+// after the guard was a logical receiver no erased protocol could dispatch.
+test('an absent optional peer loader returns only its error proxy, so the guarded call needs no record arm', () => {
+  const result = compile(
+    request({
+      'host-wrapper.d.ts': hostWrapper,
+      'peer.d.ts': `
+declare module 'gea-definitely-absent-peer' {
+  export function instance<T>(options: { property: string }): Promise<T>
+}
+`,
+      'entry.ts': `
+type Peer = typeof import('gea-definitely-absent-peer') | { kModuleError: Error }
+function makeErrorModule(error: any) {
+  const props = error ? { kModuleError: error } : {}
+  return new Proxy(props, {
+    get: (_: any, key: any) => {
+      if (key === 'kModuleError') return error
+      throw error
+    },
+    set: () => {
+      throw error
+    }
+  })
+}
+function getPeer(): Peer {
+  try {
+    const peer = require('gea-definitely-absent-peer')
+    return peer
+  } catch (error) {
+    return makeErrorModule(new Error('peer missing', { cause: error }))
+  }
+}
+async function token(): Promise<string> {
+  const peer = getPeer()
+  if ('kModuleError' in peer) return peer.kModuleError.message
+  const { token } = await peer.instance<{ token: string }>({ property: 'token' })
+  return token
+}
+token().then((value) => {
+  if (value !== 'peer missing') throw new Error(value)
+})
+`
+    })
+  )
+  assert.ok(result.certificate, JSON.stringify([result.certification?.refusals, result.loweringBlockers, result.emissionRefusals]))
+  compileAndRun(result, 'commonjs-require-absent-peer-proxy')
+})
+
+// The credential provider's shape: the loader's result is cached in a static
+// field declared without an initializer (`_sdk ??= getSdk()`) and read through a
+// static getter. The field's starting `undefined` is its absence, not another
+// value of its declared type, so the cache holds the proxy (or nothing) and
+// the guarded method call still needs no record arm.
+test('an absent optional peer cached in an uninitialized static field holds only its error proxy', () => {
+  const result = compile(
+    request({
+      'host-wrapper.d.ts': hostWrapper,
+      'peer.d.ts': `
+declare module 'gea-definitely-absent-sdk' {
+  export function fromChain(options: { region: string }): () => Promise<string>
+}
+`,
+      'entry.ts': `
+type Sdk = typeof import('gea-definitely-absent-sdk') | { kModuleError: Error }
+function makeErrorModule(error: any) {
+  const props = error ? { kModuleError: error } : {}
+  return new Proxy(props, {
+    get: (_: any, key: any) => {
+      if (key === 'kModuleError') return error
+      throw error
+    },
+    set: () => {
+      throw error
+    }
+  })
+}
+function getSdk(): Sdk {
+  try {
+    const sdk = require('gea-definitely-absent-sdk')
+    return sdk
+  } catch (error) {
+    return makeErrorModule(new Error('sdk missing', { cause: error }))
+  }
+}
+class Provider {
+  private static _sdk: ReturnType<typeof getSdk>
+  static get sdk() {
+    Provider._sdk ??= getSdk()
+    return Provider._sdk
+  }
+  credentials(region: string): () => Promise<string> {
+    if ('kModuleError' in Provider.sdk) throw Provider.sdk.kModuleError
+    return Provider.sdk.fromChain({ region })
+  }
+}
+let message = 'no throw'
+try {
+  new Provider().credentials('eu')
+} catch (error) {
+  message = (error as Error).message
+}
+if (message !== 'sdk missing') throw new Error(message)
+`
+    })
+  )
+  assert.ok(result.certificate, JSON.stringify([result.certification?.refusals, result.loweringBlockers, result.emissionRefusals]))
+  compileAndRun(result, 'commonjs-require-absent-peer-static-cache')
+})
+
+test('an absent optional peer behind a statically cached loader and an overloaded local type holds only its error proxy', () => {
+  const result = compile(
+    request({
+      'host-wrapper.d.ts': hostWrapper,
+      'entry.ts': `
+export {}
+type CredentialProvider = {
+  fromChain(this: void, options: { clientConfig: { region: string } }): () => Promise<string>
+  fromChain(this: void): () => Promise<string>
+}
+class MissingDependencyError extends Error {
+  dependencyName: string
+  constructor(message: string, options: { cause: unknown; dependencyName: string }) {
+    super(message, { cause: options.cause })
+    this.dependencyName = options.dependencyName
+  }
+}
+type ZstdLib = { compress(buf: Uint8Array, level?: number): Promise<Uint8Array> }
+function getZstd(): ZstdLib | { kModuleError: MissingDependencyError } {
+  let zstd: ZstdLib | { kModuleError: MissingDependencyError }
+  try {
+    zstd = require('gea-definitely-absent-zstd')
+  } catch (error) {
+    zstd = makeErrorModule(new MissingDependencyError('zstd missing', { cause: error, dependencyName: 'zstd' }))
+  }
+  return zstd
+}
+const zstd = getZstd()
+async function compress(bytes: Uint8Array): Promise<Uint8Array> {
+  if ('kModuleError' in zstd) throw zstd.kModuleError
+  return await zstd.compress(bytes, 3)
+}
+function makeErrorModule(error: any) {
+  const props = error ? { kModuleError: error } : {}
+  return new Proxy(props, {
+    get: (_: any, key: any) => {
+      if (key === 'kModuleError') return error
+      throw error
+    },
+    set: () => {
+      throw error
+    }
+  })
+}
+function getSdk(): CredentialProvider | { kModuleError: MissingDependencyError } {
+  try {
+    const sdk = require('gea-definitely-absent-sdk')
+    return sdk
+  } catch (error) {
+    return makeErrorModule(new MissingDependencyError('sdk missing', { cause: error, dependencyName: 'sdk' }))
+  }
+}
+class Provider {
+  private static _sdk: ReturnType<typeof getSdk>
+  private _provider?: () => Promise<string>
+  constructor(provider?: () => Promise<string>) {
+    if (provider) this._provider = provider
+  }
+  static get sdk() {
+    Provider._sdk ??= getSdk()
+    return Provider._sdk
+  }
+  private get provider(): () => Promise<string> {
+    if ('kModuleError' in Provider.sdk) throw Provider.sdk.kModuleError
+    if (this._provider) return this._provider
+    const region = String(Date.now() < 0 ? 'eu' : '')
+    this._provider = region.length !== 0 ? Provider.sdk.fromChain({ clientConfig: { region } }) : Provider.sdk.fromChain()
+    return this._provider
+  }
+  async credentials(): Promise<string> {
+    return await this.provider()
+  }
+}
+let message = 'no throw'
+// Unknown code receives an instance: it can reach the constructor's static
+// cell, but whatever it stores there is still one of this carrier's proxies.
+const provider = new Provider()
+const observe: any = JSON.parse('null')
+observe?.(provider)
+provider
+  .credentials()
+  .catch((error: unknown) => {
+    message = (error as Error).message
+  })
+  .finally(() => {
+    if (message !== 'sdk missing') throw new Error(message)
+  })
+compress(new Uint8Array(2)).catch((error: unknown) => {
+  if ((error as MissingDependencyError).dependencyName !== 'zstd') throw new Error('zstd: ' + String(error))
+})
+`
+    })
+  )
+  assert.ok(result.certificate, JSON.stringify([result.certification?.refusals, result.loweringBlockers, result.emissionRefusals]))
+  compileAndRun(result, 'commonjs-require-absent-peer-overloaded-provider')
+})
+
 test('a relative require that resolves nothing stays a refusal rather than MODULE_NOT_FOUND', () => {
   const result = compile(
     request({

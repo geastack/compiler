@@ -767,7 +767,12 @@ const liveRecordFieldsText = (
           ? `${type}{}`
           : undefinedArm >= 0
             ? `${type}::ofArm<${undefinedArm}>(gea::Undefined{})`
-            : null
+            : route.read.kind === 'dynamic'
+              ? // An optional `any` field carries no `Optional` wrapper, but the
+                // source may still lack it (net's `signal` on a connect options
+                // literal that never named it): absence reads `undefined`.
+                'gea::Value{}'
+              : null
       const absence =
         !read.held.required && absentValue !== null
           ? `bool gea_origin_present = false; if (!${actual}->gea_ownFieldPresent(gea_key, gea_origin_present)) ` +

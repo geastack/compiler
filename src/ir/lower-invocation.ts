@@ -30,9 +30,10 @@ import {
   enter,
   type LoweringContext,
   convertTo,
+  narrowedBindingRead,
   convertOrDrift
 } from './lower-operands.js'
-import type { CallOperation, IrBlockId, IrOperand } from './model.js'
+import type { CallOperation, IrBlockId, IrOperand, IrRecordFieldInit } from './model.js'
 import {
   operationOfResult,
   withoutFunctionSpecialization,
@@ -794,6 +795,19 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
     const receiver =
       unbound ?? (declared || callee.representation.kind === 'dynamic' ? supplied : absentableMethod ? resolvedReceiver : null)
     const representation = optionalResultRepresentation(ctx, operation, 'value')
+    // `getBuiltinModule('<literal>')` of an ES-module builtin yields that
+    // module's namespace object. The registry still evaluates the module (once,
+    // through its record) and answers its CommonJS exports cell, which an ES
+    // module never fills; the namespace is built from the export cells below.
+    const namespaceLookup = operation.builtinModuleLookup?.namespace === undefined ? null : operation.builtinModuleLookup
+    const namespaceShape =
+      namespaceLookup === null || representation === null
+        ? null
+        : representation.kind === 'record'
+          ? representation
+          : representation.kind === 'optional' && representation.payload.kind === 'record'
+            ? representation.payload
+            : null
     // The call yields what the convention returns; the plan may have selected
     // a narrowing of it for the result (`f()` read as `T` where `f` returns
     // `T | undefined` behind a guard). That narrowing is a `convert` the
@@ -862,7 +876,7 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
       callee,
       receiver,
       args,
-      yielded,
+      namespaceShape === null ? yielded : { kind: 'dynamic', reason: 'commonjs-module-boundary' },
       undefined,
       operation.builtinModuleLookup,
       wholeSpreadArgument !== null,
@@ -893,6 +907,33 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
         ? nativeObjectDataSlotSchemasOf(ctx.graph).namedDataDefinitions.get(operation.id)
         : undefined
     )
+    if (namespaceShape !== null && namespaceLookup !== null && representation !== null) {
+      if (namespaceShape.accessors.length > 0) throw new IrLoweringBlockedError('a builtin module namespace type declares accessors')
+      const cells = new Map((namespaceLookup.namespace ?? []).map((field) => [field.key, field.declaration]))
+      const fields: IrRecordFieldInit[] = namespaceShape.fields.map((field) => {
+        const declaration = cells.get(field.key)
+        if (declaration === undefined)
+          throw new IrLoweringBlockedError(`builtin module "${namespaceLookup.builtinModule}" exports no "${field.key}"`)
+        // A generic function has no cell; its value is which member of the
+        // choice it is, exactly as a bare read of its name lowers (`lower.ts`).
+        const member = field.value.kind === 'generic-function-set' ? field.value.members.indexOf(declaration) : -1
+        const value =
+          member >= 0
+            ? ctx.builder.constant(block, lineage, String(member), 'number', field.value)
+            : narrowedBindingRead(ctx, block, lineage, operation, declaration, field.value)
+        return { key: field.key, value: { value, representation: field.value } }
+      })
+      const fresh = ctx.builder.allocateRecord(block, lineage, fields, namespaceShape)
+      const namespace = {
+        value: ctx.builder.moduleNamespace(block, lineage, namespaceLookup.target, { value: fresh, representation: namespaceShape }),
+        representation: namespaceShape
+      }
+      const answered = convertTo(ctx, block, lineage, namespace, representation, 'builtin-module-namespace')
+      if (answered === null) throw new IrLoweringBlockedError('a builtin module namespace does not convert into the lookup result')
+      registerResult(ctx, operation, answered.value)
+      registerCallShortCircuit(ctx, block, operation, answered.value, representation)
+      return
+    }
     const returned =
       identityDefinition !== null && called !== null && identityTarget !== null && representation !== null
         ? (convertTo(ctx, block, lineage, { value: called, representation: identityTarget }, representation, 'intrinsic-return-identity')

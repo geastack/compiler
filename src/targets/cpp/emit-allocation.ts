@@ -1300,6 +1300,13 @@ const emitSpreadIntoFields = (
     // (unconditional) branch.
     const sourceFields = fields ?? []
     const skipMarks: string[] = []
+    // A shared source may be a live view whose struct slots are inert: its
+    // own keys and values live behind its routes. The same stores, each read
+    // through the view in the field's declared carrier, with presence from
+    // the view's own-key route (`copiesThroughNativeView`).
+    const viewSource =
+      'ownership' in from && from.ownership === 'shared-refcount' && (from.kind === 'record' || from.kind === 'native-record-ref')
+    const viewLines: string[] = []
     // The outlined line of each source field by layout position (null: no store).
     const outlinedByPosition: (string | null)[] = []
     for (const field of sourceFields) {
@@ -1324,6 +1331,20 @@ const emitSpreadIntoFields = (
           `a spread cannot preserve the source's own key "${field.key}" in a receiver with no field or sidecar for it`
         )
       staticLines.push(field.required ? write : `if (${member}${cppRecordFieldPresenceName(field.key)}) { ${write} }`)
+      if (viewSource) {
+        const plain = tailAwareFieldReadText(sourceFields, field.key, member)
+        const type = cppTypeOf(field.value)
+        const read =
+          `gea::record::readDeclaredField<${type}, ${nativeFieldPolicyType(field.value)}>(${text}, ${cppStringLiteral(field.key)}, ` +
+          `[&]() -> ${type} { return ${plain}; })`
+        const viewWrite = staticWrite(receiverText, field.key, field.value, read)
+        if (viewWrite !== null)
+          viewLines.push(
+            field.required
+              ? viewWrite
+              : `if (gea::record::hasOwnFieldView(gea::Ref<void>(${text}), gea::PropertyKey::string(${cppStringLiteral(field.key)}))) { ${viewWrite} }`
+          )
+      }
       const outlined = staticWrite(
         'gea_spread_target',
         field.key,
@@ -1342,6 +1363,7 @@ const emitSpreadIntoFields = (
     // source and receiver carrier and each site calls it (`unitFunctionName`),
     // as the walk's key routing already is: the same stores, one copy of the
     // code instead of one per site in the instruction cache.
+    const viewComplete = viewLines.length === staticLines.length
     const outlinedCall =
       receiver.ownership === 'shared-refcount' &&
       ownershipOfSpreadSource(from) === 'shared-refcount' &&
@@ -1382,8 +1404,11 @@ const emitSpreadIntoFields = (
           'and this source/receiver pair has none; a static copy would drop the accessor keys'
       )
     }
-    const copyLines = [...staticLines, ...skipMarks]
     const indexes = view?.indexes ?? []
+    const viewAware = viewSource && ordered === null && indexes.length === 0 && viewComplete
+    const copyLines = viewAware
+      ? [`if (gea::detail::copiesThroughNativeView(${text})) {`, ...viewLines, '} else {', ...staticLines, '}', ...skipMarks]
+      : [...staticLines, ...skipMarks]
     for (const sourceIndex of indexes) {
       const table = `${member}${cppRecordIndexSidecarNameFor(sourceIndex, indexes)}`
       const attributes = `${member}${cppRecordIndexAttributesNameFor(sourceIndex, indexes)}`

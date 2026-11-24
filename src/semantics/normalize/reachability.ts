@@ -798,6 +798,11 @@ const evaluatesNothing = (file: ts.SourceFile): boolean =>
 export const fileEvaluates = (reachable: ProgramReachability, file: ts.SourceFile): boolean =>
   reachable.statementsOf(file).some((statement) => {
     if (ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)) return false
+    // `export { a }` names bindings for importers and runs nothing, and
+    // `export {}` only marks the file a module. One that names a specifier is a
+    // module edge, which the evaluation order already accounts for, so none of
+    // them makes this file's own body run.
+    if (ts.isExportDeclaration(statement)) return false
     if (ts.isClassDeclaration(statement) && reachable.classIsLayoutOnly(statement)) return false
     return !(
       ts.canHaveModifiers(statement) &&
@@ -938,15 +943,19 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
     // parameters no call site ever
     // types -- a refusal inside a body no program reaches denied thousands of
     // cases their certificate.
-    const whole = entries.has(file) && ts.isExternalModule(file)
+    //
+    // So it is the EXPORTS that keep a module whole, not the goal symbol: an
+    // entry module that exports nothing -- `export {}`, or only imports -- has
+    // the script's roots exactly, and keeping it whole only brings back its
+    // never-called helpers with their refusals.
+    const entryModule = entries.has(file) && ts.isExternalModule(file) ? input.checker.getSymbolAtLocation(file) : undefined
+    const exports = entryModule ? input.checker.getExportsOfModule(entryModule) : []
+    const whole = exports.length > 0
     for (const statement of file.statements) if (whole || !isPrunableDeclaration(input.checker, statement)) openStatement(statement)
     for (const target of moduleTargetsOf(input.checker, file, { verbatim: input.verbatimModuleSyntax === true })) fileQueue.push(target)
-    if (entries.has(file) && ts.isExternalModule(file)) {
-      const module = input.checker.getSymbolAtLocation(file)
-      for (const exported of module ? input.checker.getExportsOfModule(module) : []) {
-        const value = input.runtimeExportOf?.(file, exported.getName())
-        if (value?.kind !== 'missing') markSymbol(value?.kind === 'binding' ? value.symbol : exported)
-      }
+    for (const exported of exports) {
+      const value = input.runtimeExportOf?.(file, exported.getName())
+      if (value?.kind !== 'missing') markSymbol(value?.kind === 'binding' ? value.symbol : exported)
     }
   }
 

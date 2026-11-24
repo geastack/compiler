@@ -1,6 +1,7 @@
 import type { GetOperation, SetOperation, IrOperand } from '../../ir/model.js'
 import type { NativeFieldViewRead } from '../../ir/native-field-view-facts.js'
 import { representationKey, type Representation } from '../../representation/model.js'
+import { canonicalIndexLiteral } from '../../representation/array-index.js'
 import { createCppEmitBlockedError, operandText, type EmitContext } from './emit-context.js'
 import { recipeText } from './emit-narrowing.js'
 import { nativeFieldPolicyType, staticKeyOrderText } from './records.js'
@@ -53,19 +54,25 @@ export const withFieldReceiver = (
   text: string,
   emit: (carrier: Representation) => string,
   dynamic?: (carrier: Representation, text: string) => string,
-  nativeData?: (carrier: Representation, text: string) => string
+  nativeData?: (carrier: Representation, text: string) => string,
+  array?: (carrier: Representation, text: string) => string,
+  dictionary?: (carrier: Representation, text: string) => string
 ): string => {
-  if (value.kind === 'borrowed-ref') return withFieldReceiver(value.referent, text, emit, dynamic, nativeData)
+  if (value.kind === 'borrowed-ref') return withFieldReceiver(value.referent, text, emit, dynamic, nativeData, array, dictionary)
   if (value.kind === 'optional')
     return (
       `if (!${text}.has_value()) gea::host::throwRuntimeError("TypeError", "Cannot access a nullish native view"); ` +
-      withFieldReceiver(value.payload, `(*${text})`, emit, dynamic, nativeData)
+      withFieldReceiver(value.payload, `(*${text})`, emit, dynamic, nativeData, array, dictionary)
     )
   // A `dynamic` arm is a `gea::Value` already; its own [[Get]] is the read.
   if (value.kind === 'dynamic' && dynamic !== undefined) return dynamic(value, text)
+  // A `Record<string, any>` arm answers a named key with its own entry.
+  if (value.kind === 'dictionary' && dictionary !== undefined) return dictionary(value, text)
   // A binary-view arm reads its own internal slot (`nativeData` routes).
   if ((value.kind === 'typed-array' || value.kind === 'data-view' || value.kind === 'array-buffer') && nativeData !== undefined)
     return nativeData(value, text)
+  // An Array arm reads its own element (`arrayElement` routes).
+  if (value.kind === 'array-object' && array !== undefined) return array(value, text)
   if (value.kind === 'tagged-union')
     return (
       value.arms
@@ -73,7 +80,7 @@ export const withFieldReceiver = (
         // templates are dependent names.
         .map(
           (arm, index) =>
-            `if (${text}.template is<${index}>()) { ${withFieldReceiver(arm.value, `${text}.template get<${index}>()`, emit, dynamic, nativeData)} }`
+            `if (${text}.template is<${index}>()) { ${withFieldReceiver(arm.value, `${text}.template get<${index}>()`, emit, dynamic, nativeData, array, dictionary)} }`
         )
         .join(' ') + ' gea::host::throwRuntimeError("TypeError", "No native field-view receiver arm");'
     )
@@ -153,6 +160,37 @@ export const nativeFieldViewReadForText = (
         ? 'gea::host::throwRuntimeError("TypeError", "a binary view arm has no certified native data route");'
         : `return ${renderedLeaf(ctx, route.conversion, read)};`
     }
+  const arrayRead =
+    (key: string) =>
+    (carrier: Representation, text: string): string => {
+      if (carrier.kind !== 'array-object' || canonicalIndexLiteral(key) === null)
+        return 'gea::host::throwRuntimeError("TypeError", "an Array arm has no certified element route");'
+      const source: Representation = { kind: 'optional', payload: carrier.element, absence: 'undefined' }
+      const route = receipt.sources.find((entry) => representationKey(entry.source) === representationKey(source))
+      const optional = cppTypeOf(source)
+      return route === undefined
+        ? 'gea::host::throwRuntimeError("TypeError", "an Array arm has no certified element route");'
+        : `return ${renderedLeaf(
+            ctx,
+            route.conversion,
+            // `readElement`, not `elementAt`: a Document arm's Array may be a live
+            // view over a dynamic array, whose cells only its source answers.
+            `(${text}->hasElementValue(${key}) ? ${optional}(${text}->readElement(${key})) : ${optional}())`
+          )};`
+    }
+  // `gea::Dictionary<gea::Value>::read`'s value-initialized miss IS `undefined`,
+  // so the entry read is the whole answer, routed like a `dynamic` arm's.
+  const dictionaryRead =
+    (key: string) =>
+    (carrier: Representation, text: string): string => {
+      const route =
+        carrier.kind === 'dictionary'
+          ? receipt.sources.find((entry) => representationKey(entry.source) === representationKey(carrier.value))
+          : undefined
+      return route === undefined
+        ? 'gea::host::throwRuntimeError("TypeError", "a dictionary arm has no certified entry route");'
+        : `return ${renderedLeaf(ctx, route.conversion, `${text}->read(${cppStringLiteral(key)})`)};`
+    }
   const forKey = (key: string): string =>
     withFieldReceiver(
       receiver.representation,
@@ -219,7 +257,9 @@ export const nativeFieldViewReadForText = (
         )
       },
       dynamicRead(key),
-      nativeDataRead(key)
+      nativeDataRead(key),
+      arrayRead(key),
+      dictionaryRead(key)
     )
   // The receiver is the statement-lambda's ARGUMENT, not a local bound inside
   // it: a withheld receiver can be `(*presentOrThrow(<element read>))`, a
@@ -264,6 +304,11 @@ export const nativeFieldViewReadForText = (
             return route === undefined
               ? 'gea::host::throwRuntimeError("TypeError", "Cannot access a non-object native view receiver");'
               : `return ${renderedLeaf(ctx, route.conversion, `${text}.getProperty(gea_field_key)`)};`
+          },
+          undefined,
+          undefined,
+          () => {
+            throw createCppEmitBlockedError('property-access:native-field-view-open-key', 'a dictionary arm has no open-key entry route')
           }
         )
       : 'gea::host::throwRuntimeError("TypeError", "No admitted native field-view key");'

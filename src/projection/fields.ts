@@ -2,7 +2,7 @@ import type { DeclarationId, FunctionId, StructuralTypeId } from '../identity/id
 import type { RepresentationDeriver } from '../representation/derive.js'
 import type { CallableAbi, RecordAccessor, RecordField, RecordIndexSidecar, Representation } from '../representation/model.js'
 import { walkRepresentation } from '../representation/model.js'
-import { classPresentMethodArmsOf, methodCopyHeldBy } from './dispatch.js'
+import { classDynamicMethodShadowOf, classPresentMethodArmsOf, methodCopyHeldBy } from './dispatch.js'
 import { abiOfCallee } from './callee.js'
 import type { RecordLayoutPolicy } from '../representation/policies.js'
 import { dynamicFieldAbsencePolicy } from '../representation/field-descriptor-policy.js'
@@ -537,6 +537,12 @@ export const nativeClassMethodValueSourcesOf = (
     sources.push({ kind: 'function-value-dispatch', abi })
     const own = classMethodOverrideOf(classes, arm.allocation, key)
     if (own !== null) sources.push(own.value)
+    // A shadow a runtime-keyed write installed is read out of the expando
+    // table as the slot would have held it: the method's own convention
+    // without a receiver -- the arm every method read selects beneath a
+    // missing own slot (`native-method-read.ts`, `native-method-frames.ts`).
+    else if (classDynamicMethodShadowOf(classes, arm.allocation, key))
+      sources.push({ kind: 'function-value-dispatch', abi: { ...abi, receiver: null } })
     const prototype = classMethodOverrideOf(classes, owner.declaration, key)
     if (prototype !== null) sources.push(prototype.value)
   }

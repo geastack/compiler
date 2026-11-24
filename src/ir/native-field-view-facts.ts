@@ -1,6 +1,6 @@
 import type { ConversionCensus } from '../conversion/nodes.js'
 import { recipeClosureOf, recipeIsMaterializableWithoutPriorSourceGuard } from '../conversion/recipe-closure.js'
-import type { ConversionNodeId, ConversionNode } from '../conversion/algebra.js'
+import { isMaterializable, type ConversionNodeId, type ConversionNode } from '../conversion/algebra.js'
 import type { IrValueId, StructuralTypeId } from '../identity/ids.js'
 import { abiOfCallee } from '../projection/callee.js'
 import { representationKey, type Representation } from '../representation/model.js'
@@ -215,12 +215,32 @@ export const nativeFieldViewOperationNeedsReceipt = (
   hostNamespaces: HostNamespaceCensus | undefined,
   /** The read's constant key, when it has one. */
   key?: string | null,
-  layoutOf?: Pick<RepresentationDeriver, 'layoutOf'> | null
+  layoutOf?: Pick<RepresentationDeriver, 'layoutOf'> | null,
+  flow?: Pick<FieldFlow, 'nativeFieldStorageValues' | 'nativeFieldViewOrigins'> | null
 ): boolean =>
   !(hostNamespaces?.reads.has(operation.receiver.value) || hostNamespaces?.values.has(operation.receiver.value)) &&
-  (operation.kind === 'get' && key !== null && key !== undefined && operation.receiver.representation.kind === 'tagged-union'
+  (operation.kind === 'get' &&
+  key !== null &&
+  key !== undefined &&
+  (operation.receiver.representation.kind === 'tagged-union' || plainAllocationsOnly(operation.receiver.value, key, flow))
     ? unionReadNeedsReceipt(operation.receiver.representation, key, targets, layoutOf)
     : nativeFieldViewCarrierNeedsReceipt(operation.receiver.representation, targets))
+
+/**
+ * A plain record receiver answers a key its layout lacks with the ordinary
+ * [[Get]] only where every allocation behind it is a known plain one: an
+ * installed live view forwards the key to native slots whose dynamic
+ * observation exists only through a receipt's adapter (`options = {}` handed an
+ * `Object.assign` result viewed as `{}`).
+ */
+const plainAllocationsOnly = (
+  receiver: IrValueId,
+  key: string,
+  flow: Pick<FieldFlow, 'nativeFieldStorageValues' | 'nativeFieldViewOrigins'> | null | undefined
+): boolean => {
+  const slots = flow?.nativeFieldStorageValues.get(receiver)
+  return slots !== undefined && !slots.has(key) && flow?.nativeFieldViewOrigins?.has(receiver) !== true
+}
 
 /**
  * A constant-key read off a union is the per-arm dispatch of
@@ -232,6 +252,10 @@ export const nativeFieldViewOperationNeedsReceipt = (
  * node-compat's `Request` reads `init.body.type` after a call that may write
  * `init.body`, so the read is off the whole `BodyInit` union, and its
  * Document-viewed `ArrayBufferView` arm declares no `type`.
+ *
+ * A plain record receiver is that arm on its own: `options?.session` inside a
+ * generic `resolveOptions<T>` copy whose `T` is a literal record lacking
+ * `session` is the same ordinary [[Get]].
  */
 const unionReadNeedsReceipt = (
   value: Representation,
@@ -283,7 +307,9 @@ const fieldSourcesOf = (
   if (physical === null) return carried ?? (at === undefined ? null : (flow.nativeFieldViewAbsentRoutesOf?.(receiver, key) ?? null))
   // Physical allocation slots are the whole answer where they exist; a union
   // arm's certified absence speaks only for a receiver with none.
-  const domains = carried?.some((entry) => entry.originalAbsent === true || entry.dynamicGet === true || entry.nativeData === true)
+  const domains = carried?.some(
+    (entry) => entry.originalAbsent === true || entry.dynamicGet === true || entry.nativeData === true || entry.arrayElement === true
+  )
     ? undefined
     : carried
   const routes = physical.flatMap((read) => {
@@ -312,6 +338,10 @@ export const nativeFieldViewReadFor = (
   // the operation's own source fact is what proves that lookup misses too.
   if (values.some((value) => value.originalAbsent === true) && at?.ordinaryObjectPrototypeKeyAbsent !== true) return null
   const sources = new Map<string, NativeFieldViewRead['sources'][number]>()
+  // Whether some route already merged under a source carried a checked read:
+  // the canonical-entry merge below must not depend on which of two routes
+  // over one Document entry happens to come first.
+  const checkedSources = new Set<string>()
   for (const { read: source, checkedRead, dynamicGet } of values) {
     // A `dynamic` arm's Value reads through whichever exact leaf already
     // converts that carrier (a Document entry's checked read): one source, one
@@ -339,11 +369,15 @@ export const nativeFieldViewReadFor = (
     // guard proved, a TypeError for any other -- never an unchecked `get<k>`.
     const selected = recipeIsMaterializableWithoutPriorSourceGuard(unguarded, conversions.nodeById)
       ? unguarded
-      : (conversions.assertedUnionFor(source, target, false) ?? conversions.checkedClassFieldReadFor(source, target))
+      : (conversions.assertedUnionFor(source, target, false) ??
+        conversions.checkedClassFieldReadFor(source, target) ??
+        conversions.presentPayloadFor(source, target))
     if (selected === null || !recipeIsMaterializableWithoutPriorSourceGuard(selected, conversions.nodeById)) return null
     const previous = sources.get(representationKey(source))
+    const checked = checkedRead !== undefined || checkedSources.has(representationKey(source))
+    if (checkedRead !== undefined) checkedSources.add(representationKey(source))
     if (previous !== undefined && previous.conversion !== selected.id) {
-      const canonical = documentEntryReadOf(source, target, previous.conversion, selected, checkedRead !== undefined, conversions)
+      const canonical = documentEntryReadOf(source, target, previous.conversion, selected, checked, conversions)
       if (canonical === null) return null
       sources.set(representationKey(source), { source, conversion: canonical })
       continue
@@ -468,7 +502,9 @@ export const nativeFieldViewWriteOf = (
   if (
     !data &&
     !accessor &&
-    descriptors?.some((entry) => entry.originalAbsent === true || entry.dynamicGet === true || entry.nativeData === true)
+    descriptors?.some(
+      (entry) => entry.originalAbsent === true || entry.dynamicGet === true || entry.nativeData === true || entry.arrayElement === true
+    )
   )
     return null
   const targets = new Map<string, NativeFieldViewWrite['targets'][number]>()
@@ -485,9 +521,9 @@ export const nativeFieldViewWriteOf = (
     // A plain allocation of the receiver's own record keeps the key in its slot.
     const own = ownRecordFieldOf(operation.receiver.representation, key)
     if (own !== null) {
-      const node = conversions.nodeFor(operation.value.representation, own)
-      if (!recipeIsMaterializableWithoutPriorSourceGuard(node, conversions.nodeById)) return null
-      targets.set(representationKey(own), { target: own, conversion: node.id })
+      const conversion = storeConversionOf(operation, key, own, conversions)
+      if (conversion === null) return null
+      targets.set(representationKey(own), { target: own, conversion })
     }
   }
   for (const target of data ?? accessor?.map((entry) => entry.write) ?? descriptors!.map((entry) => entry.write)) {
@@ -499,11 +535,11 @@ export const nativeFieldViewWriteOf = (
       const entries = descriptors?.filter((entry) => entry.write !== null && representationKey(entry.write) === representationKey(target))
       if (!entries?.length || entries.some((entry) => entry.declaredAnyEntry !== true)) return null
     }
-    const node = conversions.nodeFor(operation.value.representation, target)
-    if (!recipeIsMaterializableWithoutPriorSourceGuard(node, conversions.nodeById)) return null
+    const conversion = storeConversionOf(operation, key, target, conversions)
+    if (conversion === null) return null
     const previous = targets.get(representationKey(target))
-    if (previous !== undefined && previous.conversion !== node.id) return null
-    targets.set(representationKey(target), { target, conversion: node.id })
+    if (previous !== undefined && previous.conversion !== conversion) return null
+    targets.set(representationKey(target), { target, conversion })
   }
   return {
     receiver: operation.receiver.value,
@@ -514,6 +550,26 @@ export const nativeFieldViewWriteOf = (
     targets: [...targets.values()],
     ...(open === undefined ? {} : { open, forwardedKeys: [key] })
   }
+}
+
+/**
+ * A store's conversion into one key's slot. A correlated copy
+ * (`SetOperation.correlatedSourceFields`) holds, under `key`, only what the
+ * source's own field of that key holds; when that field converts into the slot
+ * without a check, so does every value the store can actually carry, and the
+ * check the union-wide carrier would otherwise need never fails.
+ */
+const storeConversionOf = (
+  operation: SetOperation,
+  key: string,
+  target: Representation,
+  conversions: ConversionCensus
+): ConversionNodeId | null => {
+  const node = conversions.nodeFor(operation.value.representation, target)
+  if (recipeIsMaterializableWithoutPriorSourceGuard(node, conversions.nodeById)) return node.id
+  const source = operation.correlatedSourceFields?.find((field) => field.key === key)?.source
+  if (source === undefined || !isMaterializable(node.capability)) return null
+  return recipeIsMaterializableWithoutPriorSourceGuard(conversions.nodeFor(source, target), conversions.nodeById) ? node.id : null
 }
 
 const ownRecordFieldOf = (receiver: Representation, key: string): Representation | null => {

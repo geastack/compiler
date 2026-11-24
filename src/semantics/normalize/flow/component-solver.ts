@@ -932,6 +932,9 @@ export abstract class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlo
    * mistaken for a collection (`isLoneFact`) is held as a one-element array.
    */
   private facts: V | readonly V[] | Set<V> | typeof NO_FACT = NO_FACT
+  // Only large states read through a delta cursor need random access to their
+  // insertion order. Each state owns its index even when it shares its Set.
+  private factOrder: V[] | undefined
   /**
    * Carried on the state so `dependents` and the propagation queue can hold
    * states directly instead of keys. Both used to hold `K`, and every drain
@@ -1016,13 +1019,17 @@ export abstract class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlo
       return
     }
     if (facts instanceof Set) {
-      if ((this.flags & SHARED_FACTS) === 0) {
+      if ((this.flags & SHARED_FACTS) !== 0) {
+        if (facts.has(value)) return
+        this.facts = new Set<V>(facts).add(value)
+        this.flags &= ~SHARED_FACTS
+      } else {
+        const size = facts.size
         facts.add(value)
-        return
+        if (facts.size === size) return
       }
-      if (facts.has(value)) return
-      this.facts = new Set<V>(facts).add(value)
-      this.flags &= ~SHARED_FACTS
+      // Match Set's canonicalization of -0 in iteration.
+      this.factOrder?.push(Object.is(value, -0) ? (0 as V) : value)
       return
     }
     if (this.has(value)) return
@@ -1032,6 +1039,20 @@ export abstract class FactState<K, V, R> implements ReadonlySet<V>, ComponentSlo
     const small: readonly V[] = Array.isArray(facts) ? (facts as readonly V[]) : [facts as V]
     this.facts = small.length < SMALL_EDGES ? small.concat([value]) : new Set<V>(small).add(value)
     this.flags &= ~SHARED_FACTS
+  }
+  *factsFrom(start: number): IterableIterator<V> {
+    const facts = this.facts
+    if (facts === NO_FACT || start >= this.size) return
+    if (facts instanceof Set) {
+      const order = (this.factOrder ??= [...facts])
+      for (let index = start; index < order.length; index++) yield order[index]!
+      return
+    }
+    if (Array.isArray(facts)) {
+      for (let index = start; index < facts.length; index++) yield facts[index] as V
+      return
+    }
+    yield facts as V
   }
   /**
    * Holds `other`'s fact collection when it is the same facts in the same

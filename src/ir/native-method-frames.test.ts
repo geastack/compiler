@@ -127,6 +127,14 @@ test('an unused concrete subclass cannot supply a missing method for a construct
       includeIr: true
     })
     assert.equal(result.diagnostics.clean, true, JSON.stringify(result.diagnostics.diagnostics))
+    if (!prototype) {
+      // An instance of the abstract class itself misses the lookup, so the
+      // call is the TypeError for calling `undefined` -- the read the
+      // abstract-miss route emits -- and never the unused subclass's body.
+      assert.notEqual(result.source, null, JSON.stringify(result.refusals))
+      assert.match(result.source!, /throwRuntimeError\("TypeError", "process is not a function"\)/)
+      continue
+    }
     assert.equal(result.source, null, 'the unused subclass must not fabricate a callable for the base')
     assert.ok(
       result.refusals.some(

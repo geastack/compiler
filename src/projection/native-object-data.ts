@@ -6,7 +6,7 @@ import { nativeObjectDataSlotSchemasOf } from '../semantics/native-object-data-s
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import { operandOf, resultOf } from '../semantics/model/operands.js'
 import {
-  nativeCallableDataCarrierHasStorageIdentity,
+  nativeCallableDataCarrierHasStorageIdentity as carrierHasStorageIdentity,
   nativeCallableDataValueRepresentationOf,
   storedSourceValueOf
 } from '../representation/native-callable-data-storage.js'
@@ -82,9 +82,18 @@ export const describedFieldRepresentationOf = (
  */
 export const nativeObjectDataStorageOf = (
   schema: NativeObjectDataSlotSchema,
-  deriver: Pick<RepresentationDeriver, 'deriveStored' | 'nativeCallableConventions'> & Partial<Pick<RepresentationDeriver, 'layoutOf'>>
+  deriver: Pick<RepresentationDeriver, 'deriveStored' | 'nativeCallableConventions'> & Partial<Pick<RepresentationDeriver, 'layoutOf'>>,
+  /**
+   * The key's storage is the object's dynamic own-property table, which open
+   * writers already fill with Values: a writer whose own carrier is a Value
+   * (`copy.$scope = deserializeValue(value.$scope)` with an `any` result)
+   * stores exactly that, with nothing boxed.
+   */
+  table = false
 ): NativeObjectDataStorage | null => {
   if (schema.blockers.length !== 0 || schema.writers.length === 0 || schema.key === '__proto__') return null
+  const nativeCallableDataCarrierHasStorageIdentity = (source: Representation): boolean =>
+    (table && source.kind === 'dynamic') || carrierHasStorageIdentity(source)
   const writers: NativeObjectDataStorage['writers'][number][] = []
   const bulkValueRepresentationOf = (value: NativeOwnAssignmentValue): Representation | null =>
     storedSourceValueOf(deriver, { callable: value.source.kind === 'function' ? value.source.callable : null, type: value.type })
@@ -133,9 +142,12 @@ export const nativeObjectDataStorageOf = (
   // The local semantic origin map intentionally does not invent parameter
   // aliases. When the source session closes that domain, its complete slot
   // inputs must agree with this storage too, including writes in the called
-  // body and values copied by other assignments to the same allocation.
+  // body and values copied by other assignments to the same allocation. A
+  // slot's possible absence is no stored value: a read answers it from the
+  // key's presence, as every extension read already does.
   if (schema.storedValues !== undefined)
     for (const value of schema.storedValues) {
+      if (value.absence === true) continue
       const source = bulkValueRepresentationOf(value)
       if (!source || !nativeCallableDataCarrierHasStorageIdentity(source) || representationKey(source) !== representationKey(storage))
         return null
@@ -165,7 +177,9 @@ export const nativeObjectDataTableStorageOf = (
 ): NativeObjectDataStorage | null =>
   schema.blockers.length === 0 || schema.blockers.some((blocker) => !dynamicTableBlockers.has(blocker.kind))
     ? null
-    : ((storage) => (storage === null ? null : { ...storage, schema }))(nativeObjectDataStorageOf({ ...schema, blockers: [] }, deriver))
+    : ((storage) => (storage === null ? null : { ...storage, schema }))(
+        nativeObjectDataStorageOf({ ...schema, blockers: [] }, deriver, true)
+      )
 
 /** Descriptor-object aliases and structural receiver aliases use the same
  * canonical allocation census. No shape-wide row grants source identity.

@@ -1944,6 +1944,11 @@ const emitOperationStatements = (
           : `${defineValue(ctx, operation.result)} = ${cppCommonJsModuleName(operation.target)}();`
       )
       return
+    case 'module-namespace':
+      lines.push(
+        `${defineValue(ctx, operation.result)} = gea::commonjs::moduleNamespace<&${cppCommonJsModuleName(operation.target)}>(${operandText(ctx, operation.fresh)});`
+      )
+      return
     case 'commonjs-binding':
       // Publication forces every unproved wrapper read to `dynamic`; a
       // non-dynamic module result is therefore the consumed source proof, not

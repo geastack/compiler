@@ -186,6 +186,8 @@ export const operandsOfIrOperation = (operation: IrOperation): readonly IrOperan
     case 'commonjs-require':
     case 'commonjs-binding':
       return []
+    case 'module-namespace':
+      return [operation.fresh]
     case 'commonjs-binding-set':
       return [operation.value]
     case 'super-initialize':

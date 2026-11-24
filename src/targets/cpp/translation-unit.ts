@@ -3087,9 +3087,24 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // declaration: the struct it returns is incomplete where the hook is.
   const dynamicArgumentViews = (): readonly string[] =>
     (input.programConversionRecipes ?? []).flatMap((recipe) => {
-      if (recipe.role !== 'dynamic-call-argument' || !('shapeId' in recipe.target)) return []
+      if (recipe.role !== 'dynamic-call-argument' || recipe.slot !== '' || !('shapeId' in recipe.target)) return []
       const { role, owner, slot, source, target } = recipe
-      const load = programConversionText(programSite, role, owner, slot, source, target, 'gea_value')
+      // A view boxed as its original arrives as the original's layout: each
+      // origin the program views as this record reads back through that view.
+      const origins = (input.programConversionRecipes ?? []).flatMap((candidate) => {
+        if (candidate.role !== role || candidate.owner !== owner || !candidate.slot.startsWith('origin:')) return []
+        const type = cppTypeOf(candidate.source)
+        const unboxed = `gea::detail::unboxValue<${type}>(gea_value, gea::Value::Tag::Object, "a dynamic call argument")`
+        const viewed = programConversionText(programSite, role, owner, candidate.slot, candidate.source, target, unboxed)
+        if (viewed === null)
+          throw createCppEmitBlockedError('runtime-helper:program-conversion-recipes', `${owner} has no view from ${type}`)
+        return [
+          `if (gea_value.tag() == gea::Value::Tag::Object && gea_value.payloadType() == gea::detail::payloadTypeTagFor<${type}>()) return ${viewed};`
+        ]
+      })
+      const exact = programConversionText(programSite, role, owner, slot, source, target, 'gea_value')
+      const load =
+        exact === null ? null : origins.length === 0 ? exact : `([&]() -> ${cppTypeOf(target)} { ${origins.join(' ')} return ${exact}; })()`
       const name = unitFunctionName(
         'gea_dynamic_argument',
         (named) => `${cppTypeOf(target)} ${named}(const gea::Value& gea_value)`,

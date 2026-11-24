@@ -92,9 +92,14 @@ export const nativeOwnAssignmentText = (ctx: EmitContext, operation: CallOperati
     // A described source's run-time key outside its typed fields is a Value
     // already (an expando, a document entry): it is copied as one, through
     // the target's own [[Set]] dispatch.
+    // A declared-any table's entry is that Value, read live off the table.
+    const unknownValue =
+      source.protocol === 'dictionary-entry'
+        ? 'gea_assign_source->read(gea_assign_key.text())'
+        : 'gea::nativeDynamicGet(gea_assign_source, gea_assign_key)'
     const unknown =
       source.described === true
-        ? `if (!gea::nativeDynamicSet(${owner}, gea_assign_key, gea::nativeDynamicGet(gea_assign_source, gea_assign_key))) ` +
+        ? `if (!gea::nativeDynamicSet(${owner}, gea_assign_key, ${unknownValue})) ` +
           'gea::host::throwRuntimeError("TypeError", "Cannot assign to read only property");'
         : 'gea::host::throwRuntimeError("TypeError", "a closed native copy source acquired an unauthenticated key");'
     const enumeration =
