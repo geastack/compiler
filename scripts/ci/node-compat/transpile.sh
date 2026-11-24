@@ -8,13 +8,20 @@
 # points at the checkout under test.
 #
 # The driver links with `-Os -flto` under clang, and LTO under clang on Linux
-# needs the gold plugin. A runner without LLVMgold.so still builds -- without
-# LTO, and says so -- rather than failing on a linker it never had.
+# needs both the gold plugin (LLVMgold.so) and the gold linker (ld.gold).
+# Ubuntu 26.04 ships the plugin with clang but leaves ld.gold out (it is in
+# binutils-gold). A runner without either still builds -- without LTO, and
+# says so -- rather than failing on a linker it never had.
 set -euo pipefail
 
-if [ "$(uname -s)" = Linux ] && [ "${GEA_LTO:-}" != 0 ] && ! ls /usr/lib/llvm-*/lib/LLVMgold.so >/dev/null 2>&1; then
-  echo '::notice::no LLVMgold.so on this runner; building without LTO'
-  export GEA_LTO=0
+if [ "$(uname -s)" = Linux ] && [ "${GEA_LTO:-}" != 0 ]; then
+  if ! ls /usr/lib/llvm-*/lib/LLVMgold.so >/dev/null 2>&1; then
+    echo '::notice::no LLVMgold.so on this runner; building without LTO'
+    export GEA_LTO=0
+  elif ! command -v ld.gold >/dev/null; then
+    echo '::notice::no ld.gold on this runner; building without LTO'
+    export GEA_LTO=0
+  fi
 fi
 
 cd "${NODE_COMPAT_DIR:-node-compat}"
