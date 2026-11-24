@@ -9,7 +9,7 @@ abstract-method-first-override-omits-parameters.runtime.ts.cpp b557a62453b6
 abstract-method-implementors-declaring-fewer-parameters.runtime.ts.cpp e71bc4c59d16
 abstract-method-returning-this-dispatches-across-siblings.runtime.ts.cpp 6eb5a047fa39
 abstract-method-with-no-implementation.ts.cpp 317567327f19
-ambient-record-global-unused-stays-harmless.runtime.ts.cpp 3b2db285007b
+ambient-record-global-unused-stays-harmless.runtime.ts.cpp 44cf2a4de015
 and-condition-over-optional-string-mode.runtime.ts.cpp be163360d348
 annotated-field-stores-an-any-value.runtime.ts.cpp 38ba82277f8e
 annotated-generic-function-alias.ts.cpp 0ba96f2c1d37
@@ -756,13 +756,13 @@ json-stringify-of-undefined-is-undefined.runtime.ts.cpp fda13be2d062
 json-stringify-record-with-dynamic-dictionary-field.runtime.ts.cpp c0aad49f5f6f
 json-stringify-replacer.ts.cpp 6a8b31e677e1
 json-stringify-tuples-are-arrays.ts.cpp 59d135329def
-jsx-class-component-inherited-props-unread-template.tsx.cpp cd1611b52d70
+jsx-class-component-inherited-props-unread-template.tsx.cpp a01ff4a1b3dc
 jsx-class-map.tsx.cpp 32c70926c421
-jsx-component-prop-record-field-tick.tsx.cpp 2b3da09e28fa
-jsx-component-timer-initialization.tsx.cpp 84df75903301
+jsx-component-prop-record-field-tick.tsx.cpp 9350ac7f8dfb
+jsx-component-timer-initialization.tsx.cpp 6e8b641d63e6
 jsx-conditional-reactive-class.tsx.cpp f5548faa2aa8
 jsx-derived-getter-local-binding.tsx.cpp 0dcaecdab259
-jsx-inline-event-parameter.tsx.cpp dcc9b17e8cdf
+jsx-inline-event-parameter.tsx.cpp 7eecdf879764
 jsx-inventory-reactive-fields.tsx.cpp 05b244c37663
 jsx-reactive-block-map.tsx.cpp d88141928754
 jsx-reactive-getter-branch.tsx.cpp ef95c3b79b49
@@ -1299,7 +1299,7 @@ stated-unknown-array-parameter-refused-in-a-later-round.runtime.ts.cpp ed661ddaf
 statement-splice-erases-without-a-removed-array.runtime.ts.cpp 6e75f9341c4c
 static-assignment-read-through-this-constructor-view.runtime.ts.cpp d8423a89680d
 static-factory-read-through-constructor-type-union.runtime.ts.cpp cb6cfd64f468
-static-factory-read-through-nullish-default-constructor.runtime.ts.cpp 7324fb01c8d5
+static-factory-read-through-nullish-default-constructor.runtime.ts.cpp 98b381d1e5ea
 static-field-without-initializer-reads-undefined-until-written.runtime.ts.cpp 944ea51e874b
 static-intrinsic-reflection.runtime.js.cpp d113c6a55873
 static-method-as-callback-value.ts.cpp 5943129ccfc7
