@@ -4364,10 +4364,9 @@ export const censusGlobalHostMutations = (
     const declaration = bindingOf(current)
     if (declaration === null) return
     const currentType = checker.getTypeAtLocation(current)
-    if (
-      (currentType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 &&
-      !writesOf(declaration).some((write) => write.slot === 'whole')
-    ) {
+    const untyped = (currentType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0
+    const hostSupplied = !declaration.getSourceFile().hasNoDefaultLib && isAmbientDeclaration(declaration as ts.Declaration)
+    if ((untyped || hostSupplied) && !writesOf(declaration).some((write) => write.slot === 'whole')) {
       // A mutation THROUGH an ambient cell (including Object.assign) does
       // not supply that cell's original identity. Only a whole binding write
       // can replace its externally supplied, otherwise unknown origin.
@@ -5971,7 +5970,8 @@ export const censusGlobalHostMutations = (
       if (ts.isFunctionLike(declaration)) return (declaration as ts.FunctionLikeDeclarationBase).body === undefined
       if (!ts.isVariableDeclaration(declaration) && !ts.isPropertyDeclaration(declaration) && !ts.isPropertySignature(declaration))
         return false
-      return checker.getSignaturesOfType(checker.getTypeOfSymbolAtLocation(symbol, declaration), ts.SignatureKind.Call).length > 0
+      const type = checker.getTypeOfSymbolAtLocation(symbol, declaration)
+      return (type.isUnion() ? type.types : [type]).some((arm) => checker.getSignaturesOfType(arm, ts.SignatureKind.Call).length > 0)
     })
     return callable ? symbol : null
   }
@@ -5982,7 +5982,8 @@ export const censusGlobalHostMutations = (
     if (known !== undefined) return known
     const proof = invocationLedger.capture(() => {
       const owner = sourceCallableObjectOf(checker, flow, read.expression)
-      const key = staticKeyOf(read)
+      const keys = ts.isElementAccessExpression(read) ? literalKeysOf(read.argumentExpression) : null
+      const key = staticKeyOf(read) ?? (keys?.length === 1 ? keys[0]! : null)
       if (owner === null || key === null || sourceCallableOwnDataWriteOf(checker, flow, owner, key, read) === null) return false
       const values = sourceValueSessionOf(checker, flow).valuesOf(read)
       return (
@@ -6001,21 +6002,50 @@ export const censusGlobalHostMutations = (
     ownCallableReadAnswers.set(read, proof.value)
     return proof.value
   }
-  const untaggedAmbientCallableSymbolOf = (node: ts.Identifier): ts.Symbol | null => {
-    const read = node.parent
-    if (ts.isPropertyAccessExpression(read) && read.name === node && sourceOwnCallableReadIsClosed(read)) return null
+  const literalKeysOf = (key: ts.Expression): readonly string[] | null => {
+    const type = checker.getTypeAtLocation(key)
+    const parts = type.isUnion() ? type.types : [type]
+    return parts.every((part) => part.isStringLiteral()) ? parts.map((part) => (part as ts.StringLiteralType).value) : null
+  }
+  const memberKeysOf = (key: ts.Identifier | ts.StringLiteralLike): readonly string[] | null => {
+    const access = key.parent
+    if (ts.isPropertyAccessExpression(access)) return access.name === key ? [key.text] : null
+    return ts.isElementAccessExpression(access) && access.argumentExpression === key ? literalKeysOf(key) : null
+  }
+  const memberAccessOf = (key: ts.Identifier | ts.StringLiteralLike): ts.PropertyAccessExpression | ts.ElementAccessExpression | null =>
+    memberKeysOf(key) === null ? null : (key.parent as ts.PropertyAccessExpression | ts.ElementAccessExpression)
+  const indexAcceptsKey = (index: ts.IndexInfo, key: string): boolean =>
+    checker.isTypeAssignableTo(checker.getStringLiteralType(key), index.keyType) ||
+    ((index.keyType.flags & ts.TypeFlags.NumberLike) !== 0 && key !== '' && String(Number(key)) === key)
+  const hostCallableReadsOf = (receiver: ts.Type, keys: readonly string[], at: ts.Node): readonly ts.Symbol[] => {
+    if (receiver.isUnionOrIntersection()) return receiver.types.flatMap((part) => hostCallableReadsOf(part, keys, at))
+    return keys.flatMap((key) => {
+      const property = actualSymbol(receiver.getProperty(key))
+      if (property === null || property.declarations?.every(ts.isIndexSignatureDeclaration)) {
+        const symbol = receiver.getSymbol()
+        return symbol !== undefined &&
+          checker
+            .getIndexInfosOfType(receiver)
+            .some((index) => indexAcceptsKey(index, key) && typeYieldsCallable(index.type, 1, new Set(), true))
+          ? [symbol]
+          : []
+      }
+      const callable = untaggedAmbientCallableSymbol(property, at)
+      return callable === null ? [] : [callable]
+    })
+  }
+  const untaggedAmbientCallablesOf = (node: ts.Identifier | ts.StringLiteralLike): readonly ts.Symbol[] => {
+    const access = memberAccessOf(node)
+    if (access !== null)
+      return sourceOwnCallableReadIsClosed(access)
+        ? []
+        : hostCallableReadsOf(checker.getTypeAtLocation(access.expression), memberKeysOf(node) ?? [], node)
+    if (!ts.isIdentifier(node)) return []
     const symbol = actualSymbol(checker.getSymbolAtLocation(node))
-    const readsThroughIndex =
-      ts.isPropertyAccessExpression(read) &&
-      read.name === node &&
-      (symbol === null || symbol.declarations?.every(ts.isIndexSignatureDeclaration))
-    if (readsThroughIndex) {
-      const receiver = checker.getTypeAtLocation(read.expression)
-      return unresolvedKeyYieldsAmbientCallable(receiver) ? (receiver.getSymbol() ?? null) : null
-    }
     const element = constDestructuredElementOf(symbol)
-    if (element !== null) return element.name === node ? null : destructuredCallableOf(element)
-    return untaggedAmbientCallableSymbol(symbol, node)
+    if (element !== null) return element.name === node ? [] : destructuredCallablesOf(element)
+    const callable = untaggedAmbientCallableSymbol(symbol, node)
+    return callable === null ? [] : [callable]
   }
   /**
    * `const { initialize } = peer` binds the member once and never again,
@@ -6038,43 +6068,12 @@ export const censusGlobalHostMutations = (
    * identifier scan cannot see, and both must count, so each resolves the
    * source property by key and fails closed when it cannot.
    */
-  /**
-   * For a key this walk could not resolve, can the READ yield an ambient
-   * callable at all?
-   *
-   * "Is the receiver declared in ambient text" was the wrong question:
-   * `Record< string, HandlerSet >` is an ambient ALIAS over a program value
-   * type, so it answered yes for every read of a router's trie nodes and
-   * nothing else. The question the position actually asks is what the read
-   * can HAND BACK -- the index-signature value types, or, when the type
-   * declares none, its properties -- and only an ambient callable there is a
-   * host function. `Record< string, ProgramType >` answers no.
-   */
-  const unresolvedKeyYieldsAmbientCallable = (receiver: ts.Type): boolean => {
-    const indexes = checker.getIndexInfosOfType(receiver)
-    if (indexes.length > 0) return indexes.some((index) => typeYieldsCallable(index.type, 1, new Set(), true))
-    return checker.getPropertiesOfType(receiver).some((property) => {
-      const declaration = property.valueDeclaration ?? property.declarations?.[0]
-      return declaration !== undefined && typeYieldsCallable(checker.getTypeOfSymbolAtLocation(property, declaration), 1, new Set(), true)
-    })
-  }
-  const literalElementAccessCallableOf = (node: ts.StringLiteralLike): ts.Symbol | null => {
-    const access = node.parent
-    if (!ts.isElementAccessExpression(access) || access.argumentExpression !== node) return null
-    if (sourceOwnCallableReadIsClosed(access)) return null
-    const outer = access.parent
-    if ((ts.isCallExpression(outer) || ts.isNewExpression(outer)) && outer.expression === access) return null
-    const receiver = checker.getTypeAtLocation(access.expression)
-    const property = receiver.getProperty(node.text)
-    if (!property) return unresolvedKeyYieldsAmbientCallable(receiver) ? (receiver.getSymbol() ?? null) : null
-    return untaggedAmbientCallableSymbol(actualSymbol(property), node)
-  }
-  const destructuredCallableOf = (element: ts.BindingElement): ts.Symbol | null => {
+  const destructuredCallablesOf = (element: ts.BindingElement): readonly ts.Symbol[] => {
     const pattern = element.parent
-    if (!ts.isObjectBindingPattern(pattern)) return null
+    if (!ts.isObjectBindingPattern(pattern)) return []
     const owner = pattern.parent
     const source = ts.isVariableDeclaration(owner) ? owner.initializer : undefined
-    if (!source) return null
+    if (!source) return []
     // The receiver rule `unknownCalleeStampIsNarrowed` applies to a spelled
     // `source.member`: a member taken off a value whose provenance is only
     // program allocations is a program value, whatever the declarations say.
@@ -6082,15 +6081,14 @@ export const censusGlobalHostMutations = (
     // program's own `{ kModuleError }` stub for a types-only peer package.
     // A source the alias graph never modelled proves nothing either way.
     const receiver = componentByExpression.has(unwrapErasedExpression(source)) ? aliasFacts(source) : null
-    if (receiver && !receiver.opaque && !receiver.global && !receiver.represented && receiver.prototypes.size === 0) return null
+    if (receiver && !receiver.opaque && !receiver.global && !receiver.represented && receiver.prototypes.size === 0) return []
     const name = element.propertyName ?? element.name
-    if (!ts.isIdentifier(name) && !ts.isStringLiteralLike(name)) return null
-    const property = checker.getTypeAtLocation(source).getProperty(name.text)
-    // A destructured member is always extracted as a value; there is no
-    // callee position to exempt.
-    const sourceType = checker.getTypeAtLocation(source)
-    if (!property) return unresolvedKeyYieldsAmbientCallable(sourceType) ? (sourceType.getSymbol() ?? null) : null
-    return untaggedAmbientCallableSymbol(actualSymbol(property), name)
+    const keys = ts.isComputedPropertyName(name)
+      ? literalKeysOf(name.expression)
+      : ts.isIdentifier(name) || ts.isStringLiteralLike(name)
+        ? [name.text]
+        : null
+    return keys === null ? [] : hostCallableReadsOf(checker.getTypeAtLocation(source), keys, name)
   }
   /**
    * Positions where naming an ambient callable hands out no value.
@@ -6117,7 +6115,17 @@ export const censusGlobalHostMutations = (
   // the function it returns has its receiver's body, not one the library
   // minted, and the receiver is counted here instead.
   const FORWARDING_MEMBERS: ReadonlySet<string> = new Set(['bind', 'call', 'apply'])
-  const isNonValuePosition = (node: ts.Identifier): boolean => {
+  const isNonValuePosition = (node: ts.Identifier | ts.StringLiteralLike): boolean => {
+    // `encrypted.sort = sort`: a plain store to (or `delete` of) a member
+    // never performs [[Get]] on it, so the library callable that member names
+    // on the receiver's type is not read, let alone handed out. A compound or
+    // logical assignment reads first, and stays a value position.
+    const access = memberAccessOf(node)
+    if (access !== null) {
+      const outer = access.parent
+      if (ts.isBinaryExpression(outer) && outer.left === access && outer.operatorToken.kind === ts.SyntaxKind.EqualsToken) return true
+      return ts.isDeleteExpression(outer) && outer.expression === access
+    }
     const parent = node.parent
     if (ts.isPropertyAccessExpression(parent) && parent.expression === node && FORWARDING_MEMBERS.has(parent.name.text)) return false
     if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === node) return true
@@ -6128,15 +6136,6 @@ export const censusGlobalHostMutations = (
     // its own, judged where it is written.
     if (ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isNamespaceImport(parent) || ts.isExportSpecifier(parent))
       return true
-    // `encrypted.sort = sort`: a plain store to (or `delete` of) a member
-    // never performs [[Get]] on it, so the library callable that member names
-    // on the receiver's type is not read, let alone handed out. A compound or
-    // logical assignment reads first, and stays a value position.
-    if (ts.isPropertyAccessExpression(parent) && parent.name === node) {
-      const outer = parent.parent
-      if (ts.isBinaryExpression(outer) && outer.left === parent && outer.operatorToken.kind === ts.SyntaxKind.EqualsToken) return true
-      if (ts.isDeleteExpression(outer) && outer.expression === parent) return true
-    }
     return false
   }
   /**
@@ -6159,15 +6158,22 @@ export const censusGlobalHostMutations = (
     const inherited = classChainMemberOfMergedSignature(symbol)
     if (inherited !== undefined)
       return inherited !== null && !seen.has(inherited) && ambientCallableIsProgramSupplied(inherited, new Set([...seen, symbol]))
-    const signatures = checker.getSignaturesOfType(checker.getTypeOfSymbolAtLocation(symbol, declaration), ts.SignatureKind.Call)
+    const type = checker.getNonNullableType(checker.getTypeOfSymbolAtLocation(symbol, declaration))
+    const arms = (type.isUnion() ? type.types : [type]).filter((arm) => (arm.flags & carriesNothing) === 0)
     return (
-      signatures.length > 0 &&
-      signatures.every((signature) => {
-        const supplied = signature.getDeclaration() as ts.SignatureDeclaration | undefined
+      arms.length > 0 &&
+      arms.every((arm) => {
+        const signatures = checker.getSignaturesOfType(arm, ts.SignatureKind.Call)
         return (
-          supplied !== undefined &&
-          !supplied.getSourceFile().isDeclarationFile &&
-          (supplied as ts.FunctionLikeDeclarationBase).body !== undefined
+          signatures.length > 0 &&
+          signatures.every((signature) => {
+            const supplied = signature.getDeclaration() as ts.SignatureDeclaration | undefined
+            return (
+              supplied !== undefined &&
+              !supplied.getSourceFile().isDeclarationFile &&
+              (supplied as ts.FunctionLikeDeclarationBase).body !== undefined
+            )
+          })
         )
       })
     )
@@ -6205,21 +6211,17 @@ export const censusGlobalHostMutations = (
     if (!base) return null
     return actualSymbol(checker.getTypeAtLocation(base).getProperty(name)) ?? null
   }
-  const forwardingLibraryMember = (node: ts.Identifier, symbol: ts.Symbol): boolean =>
+  const forwardingLibraryMember = (node: ts.Identifier | ts.StringLiteralLike, symbol: ts.Symbol): boolean =>
     FORWARDING_MEMBERS.has(node.text) && hasStandardLibraryDeclaration(symbol)
   const returnHandsBackCallable = (declaration: ts.Declaration): boolean => {
     if (!ts.isFunctionLike(declaration)) return false
     const annotation = (declaration as ts.SignatureDeclaration).type
     return annotation !== undefined && typeYieldsCallable(checker.getTypeFromTypeNode(annotation), 1, new Set())
   }
-  const isDirectCallee = (node: ts.Identifier): boolean => {
-    const parent = node.parent
-    if ((ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression === node) return true
-    if (ts.isPropertyAccessExpression(parent) && parent.name === node) {
-      const outer = parent.parent
-      return (ts.isCallExpression(outer) || ts.isNewExpression(outer)) && outer.expression === parent
-    }
-    return false
+  const isDirectCallee = (node: ts.Identifier | ts.StringLiteralLike): boolean => {
+    const callee = memberAccessOf(node) ?? node
+    const outer = callee.parent
+    return (ts.isCallExpression(outer) || ts.isNewExpression(outer)) && outer.expression === callee
   }
   /**
    * `kind` decides the mutator classification, not just the row's label: the
@@ -6348,10 +6350,7 @@ export const censusGlobalHostMutations = (
   const retainedLibraryEscapeIsClosed = (escape: HostCallableEscape): boolean => {
     if (!escape.library || !escape.mutator || escape.kind === 'ReturnsCallable') return false
     const node = escape.source
-    if (ts.isIdentifier(node)) {
-      const parent = node.parent
-      return retainedLibraryCallableIsClosed(ts.isPropertyAccessExpression(parent) && parent.name === node ? parent : node)
-    }
+    if (ts.isIdentifier(node)) return retainedLibraryCallableIsClosed(memberAccessOf(node) ?? node)
     return ts.isStringLiteralLike(node) && ts.isElementAccessExpression(node.parent) ? retainedLibraryCallableIsClosed(node.parent) : false
   }
   let hostCallableEscapeAnswer: boolean | null = null
@@ -6360,47 +6359,43 @@ export const censusGlobalHostMutations = (
     hostCallableEscapeAnswer = true
     const returnsCallable = new Set<ts.Symbol>()
     for (const node of nodes) {
-      if (ts.isStringLiteralLike(node) && !insideTypeContext(node)) {
-        const keyed = literalElementAccessCallableOf(node)
-        if (keyed) noteHostCallableEscape(node, keyed, 'ElementAccess')
-        continue
-      }
       if (ts.isBindingElement(node)) {
         // A const local's mentions are judged one by one below.
         if (constDestructuredElementOf(actualSymbol(checker.getSymbolAtLocation(node.name))) === node) continue
-        const destructured = destructuredCallableOf(node)
-        if (destructured) noteHostCallableEscape(node, destructured, 'Destructured')
+        for (const destructured of destructuredCallablesOf(node))
+          if (!ambientCallableIsProgramSupplied(destructured)) noteHostCallableEscape(node, destructured, 'Destructured')
         continue
       }
-      if (!ts.isIdentifier(node) || insideTypeContext(node)) continue
-      const symbol = untaggedAmbientCallableSymbolOf(node)
-      if (!symbol || ambientCallableIsProgramSupplied(symbol)) continue
-      if (!isDirectCallee(node)) {
-        if (!isNonValuePosition(node)) noteHostCallableEscape(node, symbol, ts.SyntaxKind[node.parent.kind])
-        continue
+      if ((!ts.isIdentifier(node) && !ts.isStringLiteralLike(node)) || insideTypeContext(node)) continue
+      for (const symbol of untaggedAmbientCallablesOf(node)) {
+        if (ambientCallableIsProgramSupplied(symbol)) continue
+        if (!isDirectCallee(node)) {
+          if (!isNonValuePosition(node)) noteHostCallableEscape(node, symbol, ts.SyntaxKind[node.parent.kind])
+          continue
+        }
+        // A referenced host callable that can HAND BACK a callable is counted
+        // once, at the declaration, not once per call site.
+        if (returnsCallable.has(symbol)) continue
+        returnsCallable.add(symbol)
+        const declaration = symbol.declarations?.[0]
+        if (!declaration) continue
+        // The DECLARED return type, read off the declaration's own type node --
+        // not the instantiated one at the use site. `handlers.splice( ... )`
+        // resolves to a symbol whose type is already `Handler[]`, so asking the
+        // use site made `splice(): T[]` look like a library function that hands
+        // back whatever `Handler` is; asking the declaration sees `T[]` and the
+        // type-parameter rule above answers it.
+        // NEVER for `bind`/`call`/`apply`: the function they hand back has their
+        // RECEIVER's body, not one the library minted, and rule B already counts
+        // that receiver as a value. `CallableFunction.bind`'s later overloads
+        // return `( ...args: A ) => R` -- a concrete function type built from
+        // type parameters, which no type-parameter or top-type rule can retire
+        // -- so `.some( ... )` matched an overload the printed `lib.es5.d.ts:357`
+        // row did not even name, and `bind` alone refused every call in a
+        // program that binds its handlers.
+        if (forwardingLibraryMember(node, symbol)) continue
+        if (symbol.declarations?.some(returnHandsBackCallable)) noteHostCallableEscape(declaration, symbol, 'ReturnsCallable')
       }
-      // A referenced host callable that can HAND BACK a callable is counted
-      // once, at the declaration, not once per call site.
-      if (returnsCallable.has(symbol)) continue
-      returnsCallable.add(symbol)
-      const declaration = symbol.declarations?.[0]
-      if (!declaration) continue
-      // The DECLARED return type, read off the declaration's own type node --
-      // not the instantiated one at the use site. `handlers.splice( ... )`
-      // resolves to a symbol whose type is already `Handler[]`, so asking the
-      // use site made `splice(): T[]` look like a library function that hands
-      // back whatever `Handler` is; asking the declaration sees `T[]` and the
-      // type-parameter rule above answers it.
-      // NEVER for `bind`/`call`/`apply`: the function they hand back has their
-      // RECEIVER's body, not one the library minted, and rule B already counts
-      // that receiver as a value. `CallableFunction.bind`'s later overloads
-      // return `( ...args: A ) => R` -- a concrete function type built from
-      // type parameters, which no type-parameter or top-type rule can retire
-      // -- so `.some( ... )` matched an overload the printed `lib.es5.d.ts:357`
-      // row did not even name, and `bind` alone refused every call in a
-      // program that binds its handlers.
-      if (forwardingLibraryMember(node, symbol)) continue
-      if (symbol.declarations?.some(returnHandsBackCallable)) noteHostCallableEscape(declaration, symbol, 'ReturnsCallable')
     }
     // A STANDARD-LIBRARY callable escaping as a value is inert for this stamp
     // unless it is one of the built-ins ECMA-262 specifies to write a property
@@ -6476,10 +6471,16 @@ export const censusGlobalHostMutations = (
     // outright, with no cell in between. It must not be the gate -- see
     // `untaggedHostCallableEscapesAsValue` for the program that proves why.
     const callee = unwrapErasedExpression(call.expression)
-    const named = ts.isPropertyAccessExpression(callee) ? callee.name : callee
-    if (!ts.isIdentifier(named)) return true
-    const symbol = untaggedAmbientCallableSymbolOf(named)
-    if (symbol === null) return true
+    const named = ts.isPropertyAccessExpression(callee)
+      ? callee.name
+      : ts.isElementAccessExpression(callee) &&
+          (ts.isStringLiteralLike(callee.argumentExpression) || ts.isIdentifier(callee.argumentExpression)) &&
+          memberAccessOf(callee.argumentExpression) === callee
+        ? callee.argumentExpression
+        : callee
+    if (!ts.isIdentifier(named) && !ts.isStringLiteralLike(named)) return true
+    const symbols = untaggedAmbientCallablesOf(named)
+    if (symbols.length === 0) return true
     // Classified by the RESOLVED SIGNATURE's declaration, not by the symbol.
     // A host overload merged onto a library symbol -- `declare global {
     // function fetch( url: string, init: HostInit ): HostResponse }` on top of
@@ -6491,8 +6492,9 @@ export const censusGlobalHostMutations = (
     // bounding what runs.
     const resolved = checker.getResolvedSignature(call)?.declaration
     const library = resolved !== undefined && resolved.getSourceFile().hasNoDefaultLib
-    const supplied = ambientCallableIsProgramSupplied(symbol)
-    const row = `${supplied ? 'program-supplied' : library ? 'lib' : resolved === undefined ? 'unresolved' : 'host'} ${symbol.getName()}`
+    const unsupplied = symbols.filter((symbol) => !ambientCallableIsProgramSupplied(symbol))
+    const supplied = unsupplied.length === 0
+    const row = `${supplied ? 'program-supplied' : library ? 'lib' : resolved === undefined ? 'unresolved' : 'host'} ${(unsupplied[0] ?? symbols[0])?.getName()}`
     hostNativeCallees.set(row, (hostNativeCallees.get(row) ?? 0) + 1)
     // A direct call of a STANDARD-LIBRARY declaration is not a reason to stamp
     // `every`, by decision D's argument applied to the callee position. The
