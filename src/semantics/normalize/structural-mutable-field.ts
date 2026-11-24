@@ -69,7 +69,6 @@ export const createMutableFieldResolver = (
 ): {
   readonly storageTypeOf: (symbol: ts.Symbol, stated: StructuralTypeId) => StructuralTypeId | null
   readonly readTypeAt: (node: ts.Node) => StructuralTypeId | null
-  readonly readerLayoutOf: (node: ts.ArrayLiteralExpression) => StructuralTypeId | null
 } => {
   const session = flow && sourceValueSessionOf(checker, flow)
   const indexed = flow === undefined ? undefined : writesByKeyOf(flow)
@@ -88,91 +87,9 @@ export const createMutableFieldResolver = (
     values.forEach(include)
     return members.size === 1 ? [...members][0]! : table.intern({ kind: 'union', members: [...members] })
   }
-  // Every access that names a key, indexed once: the readers an uncontextual
-  // array literal's slot is checked against below.
-  let accessesByKey: Map<string, Access[]> | undefined
-  const accessesOf = (key: string): readonly Access[] => {
-    if (accessesByKey === undefined) {
-      accessesByKey = new Map()
-      for (const access of flow?.propertyAccesses ?? []) {
-        const accessKey = keyOf(access)
-        if (accessKey === null) continue
-        const entries = accessesByKey.get(accessKey) ?? []
-        entries.push(access)
-        accessesByKey.set(accessKey, entries)
-      }
-    }
-    return accessesByKey.get(key) ?? []
-  }
-  const readerLayouts = new Map<ts.ArrayLiteralExpression, StructuralTypeId | null>()
-  /**
-   * The array type a fresh array literal is laid out at when it fills a slot
-   * of an object literal nothing gives a contextual type, and every read of
-   * that slot states one wider array type the literal is assignable to.
-   *
-   * `Object.assign({ relaxed: true }, options, { seenObjects: [{ propertyName:
-   * '(root)', obj: null }] })` handed to a parameter typed
-   * `{ seenObjects: { obj: unknown; propertyName: string }[] }` is the shape.
-   * The assign source has no contextual type, so the checker types the array
-   * `{ propertyName: string; obj: null }[]`, while every function that reads
-   * the slot reads `{ obj: unknown; ... }[]` and pushes such entries into it.
-   * Two element layouts for one array have no conversion between them: an
-   * array is shared storage, and a copy would drop the reader's pushes. The
-   * literal is fresh, so no other name holds it at its own narrower type, and
-   * the readers' type IS the array the program uses. Laid out there, the
-   * literal and its slot agree with every reader.
-   *
-   * Every reader whose receiver reaches this literal through the source
-   * session must agree on one array type; disagreeing readers, or a reader
-   * whose element is open at the top, keep the literal's own type.
-   */
-  const readerLayoutOf = (node: ts.ArrayLiteralExpression): StructuralTypeId | null => {
-    if (!session || node.elements.length === 0) return null
-    if (readerLayouts.has(node)) return readerLayouts.get(node)!
-    readerLayouts.set(node, null)
-    let arm: ts.Node = node
-    while (arm.parent && ts.isParenthesizedExpression(arm.parent)) arm = arm.parent
-    const property = arm.parent
-    if (!property || !ts.isPropertyAssignment(property) || property.initializer !== arm || !ts.isObjectLiteralExpression(property.parent))
-      return null
-    const contextual = checker.getContextualType(node)
-    if (contextual !== undefined && !openType(checker, contextual)) return null
-    const key = ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) ? property.name.text : null
-    if (key === null) return null
-    const own = checker.getTypeAtLocation(node)
-    if (!checker.isArrayType(own) || openType(checker, own)) return null
-    const ownId = typeOf(own)
-    let chosen: StructuralTypeId | null = null
-    for (const access of accessesOf(key)) {
-      const roots = session.valuesOf(access.expression)
-      if (roots === null) continue
-      const reaches = roots.some((root) => {
-        if (!ts.isObjectLiteralExpression(root) && !ts.isCallExpression(root) && !ts.isNewExpression(root)) return false
-        const values = session.memberValuesOf(root, key)
-        return values !== null && values.some((value) => value === node || value === arm)
-      })
-      if (!reaches) continue
-      const readType = checker.getNonNullableType(checker.getTypeAtLocation(access))
-      if (!checker.isArrayType(readType)) return null
-      const readId = typeOf(readType)
-      if (readId === ownId) continue
-      const [element] = checker.getTypeArguments(readType as ts.TypeReference)
-      if (element === undefined || openType(checker, element) || !checker.isTypeAssignableTo(own, readType)) return null
-      if (chosen !== null && chosen !== readId) return null
-      chosen = readId
-    }
-    readerLayouts.set(node, chosen)
-    return chosen
-  }
   const storageTypeOf = (symbol: ts.Symbol, stated: StructuralTypeId): StructuralTypeId | null => {
     const declaration = dataDeclarationOf(symbol)
     if (!session || !declaration || pending.has(declaration)) return null
-    if (ts.isPropertyAssignment(declaration)) {
-      let initializer = declaration.initializer
-      while (ts.isParenthesizedExpression(initializer)) initializer = initializer.expression
-      const readers = ts.isArrayLiteralExpression(initializer) ? readerLayoutOf(initializer) : null
-      if (readers !== null && typeOf(checker.getTypeAtLocation(initializer)) === stated) return readers
-    }
     const known = cache.get(declaration)
     if (known?.has(stated)) return known.get(stated) ?? null
     const key = symbol.getName()
@@ -256,7 +173,6 @@ export const createMutableFieldResolver = (
   }
   return {
     storageTypeOf,
-    readerLayoutOf,
     readTypeAt: (node) => {
       if (!session || (!ts.isPropertyAccessExpression(node) && !ts.isElementAccessExpression(node))) return null
       const key = keyOf(node)
