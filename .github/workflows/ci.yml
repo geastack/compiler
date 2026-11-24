@@ -54,6 +54,8 @@ jobs:
           cache-dependency-path: |
             compiler/package-lock.json
             core/packages/geatsc-plugin-gea/package-lock.json
+      - name: Install the gold linker
+        run: compiler/scripts/ci/node-compat/install-gold-linker.sh
       - name: Build core's geatsc plugin
         working-directory: core/packages/geatsc-plugin-gea
         run: npm ci --ignore-scripts && npm run build
