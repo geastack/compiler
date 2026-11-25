@@ -126,18 +126,18 @@ const structuralUnionLoadText = (ctx: EmitContext, held: Representation, read: R
  * knows is wrong.
  */
 export const emitBindingRead = (ctx: EmitContext, lines: string[], operation: BindingReadOperation): void => {
-  // A cell that names a stable field (`EmitContext.stableFieldCells`). Const,
-  // so a consumer that moves from it copies instead of emptying the field.
+  // A stable field is borrowed storage. Defer the read so the transfer
+  // emitter knows there is no local cell to move from.
   const fieldCell = ctx.stableFieldCellTexts.get(operation.declaration)
   if (fieldCell !== undefined) {
-    defineValueAlias(ctx, operation.result, `std::as_const(${fieldCell})`)
+    ctx.deferredTexts.set(operation.result.id, `std::as_const(${fieldCell})`)
     return
   }
   // A cell that points at its window cell (`EmitContext.borrowedWindowCells`).
-  // Const for the same reason: a consumer that moves must not empty the array.
+  // Its storage is borrowed for the same reason.
   const windowCell = ctx.borrowedWindowCellNames.get(operation.declaration)
   if (windowCell !== undefined) {
-    defineValueAlias(ctx, operation.result, `std::as_const(*${windowCell})`)
+    ctx.deferredTexts.set(operation.result.id, `std::as_const(*${windowCell})`)
     return
   }
   // A char-code buffer is read by naming the string, never by copying it: a push appends to the cell itself.
