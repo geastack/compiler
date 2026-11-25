@@ -188,21 +188,19 @@ inline void collectReferenceCycles(bool full);
  */
 class RuntimeRealm {
  public:
-  RuntimeRealm() : identity_(nextIdentity().fetch_add(1, std::memory_order_relaxed)) {}
+  RuntimeRealm() = default;
   RuntimeRealm(const RuntimeRealm&) = delete;
   RuntimeRealm& operator=(const RuntimeRealm&) = delete;
   ~RuntimeRealm() { clear(); }
 
-  std::uint64_t identity() const { return identity_; }
-
   template <typename T, typename Factory>
-  T& slot(const void* key, Factory factory, int lifetime) {
-    auto found = values_.find(key);
-    if (found != values_.end()) return *static_cast<T*>(found->second);
-    T* value = factory();
-    values_.emplace(key, value);
-    destructors_.push_back({key, value, [](void* value) { delete static_cast<T*>(value); }, lifetime});
-    return *value;
+  T& slot(std::size_t index, Factory factory, int lifetime) {
+    if (index < values_.size() && values_[index]) return *static_cast<T*>(values_[index]);
+    std::unique_ptr<T> value(factory());
+    if (index >= values_.size()) values_.resize(index + 1);
+    destructors_.push_back({index, [](void* value) { delete static_cast<T*>(value); }, lifetime});
+    values_[index] = value.release();
+    return *static_cast<T*>(values_[index]);
   }
 
   // Called on the owner task after event sources stop. Keep supporting slots
@@ -210,13 +208,8 @@ class RuntimeRealm {
   void clear();
 
  private:
-  struct Destructor { const void* key; void* value; void (*destroy)(void*); int lifetime; };
-  static std::atomic<std::uint64_t>& nextIdentity() {
-    static std::atomic<std::uint64_t> next{1};
-    return next;
-  }
-  std::uint64_t identity_;
-  std::unordered_map<const void*, void*> values_;
+  struct Destructor { std::size_t index; void (*destroy)(void*); int lifetime; };
+  std::vector<void*> values_;
   std::vector<Destructor> destructors_;
 };
 
@@ -260,29 +253,24 @@ inline void RuntimeRealm::clear() {
     destructors_.erase(destructors_.begin() + static_cast<std::ptrdiff_t>(next));
     // A later native destructor may consult a previously cleared sidecar. Let
     // it recreate an empty table, rather than leave a cached dangling pointer.
-    values_.erase(destructor.key);
-    identity_ = nextIdentity().fetch_add(1, std::memory_order_relaxed);
-    destructor.destroy(destructor.value);
+    auto* value = std::exchange(values_[destructor.index], nullptr);
+    destructor.destroy(value);
     needsCollection = needsCollection || destructor.lifetime < 2;
   }
   values_.clear();
-  identity_ = nextIdentity().fetch_add(1, std::memory_order_relaxed);
+}
+
+inline std::size_t allocateRuntimeRealmSlot() {
+  static std::atomic<std::size_t> next{0};
+  return next.fetch_add(1, std::memory_order_relaxed);
 }
 
 template <typename Tag, typename T, int Lifetime = 0, typename Factory>
 T& realmSlot(Factory factory) {
-  // Only the first access in a realm hashes. Audio processing's steady path
-  // reads a TLS cache and one identity, without a lock or allocation.
-  // Mutable: its address is the slot's identity (see `PayloadTypeTag`).
-  static char key = 0;
-  static thread_local std::uint64_t identity = 0;
-  static thread_local T* value = nullptr;
-  RuntimeRealm& realm = currentRuntimeRealm();
-  if (identity != realm.identity()) {
-    value = &realm.slot<T>(&key, factory, Lifetime);
-    identity = realm.identity();
-  }
-  return *value;
+  // Allocate one index per specialization across all realms. Hot lookups
+  // read the current realm's table without hashing, locking, or allocating.
+  static const std::size_t index = allocateRuntimeRealmSlot();
+  return currentRuntimeRealm().slot<T>(index, factory, Lifetime);
 }
 
 template <typename Tag, typename T, int Lifetime = 0>
