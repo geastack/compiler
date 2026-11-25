@@ -1,6 +1,6 @@
 import type { NativeFieldViewPlan } from '../../conversion/native-field-view.js'
 import type { Representation } from '../../representation/model.js'
-import { cppRecordStructName, cppStringLiteral, cppTypeOf } from './types.js'
+import { cppRecordStructName, cppStringViewLiteral, cppTypeOf } from './types.js'
 import { nativeFieldPolicyType } from './records.js'
 
 export interface LiveFieldViewAccess {
@@ -21,7 +21,7 @@ export interface LiveFieldViewAccess {
 export const liveFieldViewText = (plan: NativeFieldViewPlan, text: string, accesses: readonly LiveFieldViewAccess[]): string => {
   const readArms = accesses.map((access) => {
     if (access.descriptorForward)
-      return `if (gea_key.text() == ${cppStringLiteral(access.key)}) return gea::nativeObjectDataReadNative(gea_live_source, gea_key, gea_read);`
+      return `if (gea_name == ${cppStringViewLiteral(access.key)}) return gea::nativeObjectDataReadNative(gea_live_source, gea_key, gea_read);`
     if (access.read === null) throw new Error('a native live field route has no read protocol')
     const type = cppTypeOf(access.read.value)
     const policy = nativeFieldPolicyType(access.read.value)
@@ -31,7 +31,7 @@ export const liveFieldViewText = (plan: NativeFieldViewPlan, text: string, acces
         : `if (gea_read.accepts<${cppTypeOf(access.declared.value)}, ${nativeFieldPolicyType(access.declared.value)}>()) ` +
           `return gea_read.assign<${nativeFieldPolicyType(access.declared.value)}>(${access.declared.text}); `
     return (
-      `if (gea_key.text() == ${cppStringLiteral(access.key)}) { ` +
+      `if (gea_name == ${cppStringViewLiteral(access.key)}) { ` +
       `if (!gea_read.accepts<${type}, ${policy}>()) ${declared === '' ? 'return false;' : `{ ${declared}return false; }`} ` +
       `return gea_read.assign<${policy}>(${access.read.text}); }`
     )
@@ -42,15 +42,20 @@ export const liveFieldViewText = (plan: NativeFieldViewPlan, text: string, acces
     // source by a write naming its carrier (`nativeLiveViewForwardedWrite`),
     // as its read already answers from the source's expando.
     if (access.write === null && access.descriptorForward && nativeExtensions)
-      return `if (gea_key.text() == ${cppStringLiteral(access.key)}) return gea::nativeLiveViewForwardedWrite(gea_live_source, gea_key, gea_write);`
-    if (access.write === null) return `if (gea_key.text() == ${cppStringLiteral(access.key)}) return false;`
+      return `if (gea_name == ${cppStringViewLiteral(access.key)}) return gea::nativeLiveViewForwardedWrite(gea_live_source, gea_key, gea_write);`
+    if (access.write === null) return `if (gea_name == ${cppStringViewLiteral(access.key)}) return false;`
     const type = cppTypeOf(access.write.value)
     const policy = nativeFieldPolicyType(access.write.value)
     return (
-      `if (gea_key.text() == ${cppStringLiteral(access.key)}) { ` +
+      `if (gea_name == ${cppStringViewLiteral(access.key)}) { ` +
       `std::optional<${type}> gea_value; if (!gea_write.read<${policy}>(gea_value)) return false; ${access.write.statement} }`
     )
   })
+  // One view of the key for every arm, compared with its length known: a
+  // `std::string == "literal"` measures the literal again at each arm, and a
+  // method read through a view of a module's function table walks the arms
+  // on every call (bson's ByteUtils, once per decoded field).
+  const keyName = accesses.length === 0 ? '' : 'const std::string_view gea_name = gea_key.text(); '
   const sourceType = cppTypeOf(plan.source)
   const source = `const auto gea_live_source = gea_immediate.staticCast<typename ${sourceType}::element_type>();`
   const ordinaryRead = `return gea::nativeLiveViewSourceRead<${nativeExtensions}>(gea_live_source, gea_key, gea_read);`
@@ -58,11 +63,11 @@ export const liveFieldViewText = (plan: NativeFieldViewPlan, text: string, acces
   const read =
     '+[](const gea::Ref<void>& gea_immediate, const gea::PropertyKey& gea_key, const gea::NativeFieldRead& gea_read) -> bool { ' +
     'if (gea::record::hasLiveFieldView(gea_immediate)) return gea::record::readFieldView(gea_immediate, gea_key, gea_read); ' +
-    `${source} if (gea_key.isSymbol()) return false; ${readArms.join(' ')} ${ordinaryRead} }`
+    `${source} if (gea_key.isSymbol()) return false; ${keyName}${readArms.join(' ')} ${ordinaryRead} }`
   const write =
     '+[](const gea::Ref<void>& gea_immediate, const gea::PropertyKey& gea_key, const gea::NativeFieldWrite& gea_write) -> bool { ' +
     'if (gea::record::hasLiveFieldView(gea_immediate)) return gea::record::writeFieldView(gea_immediate, gea_key, gea_write); ' +
-    `${source} if (gea_key.isSymbol()) return false; ${writeArms.join(' ')} ${ordinaryWrite} }`
+    `${source} if (gea_key.isSymbol()) return false; ${keyName}${writeArms.join(' ')} ${ordinaryWrite} }`
   const define =
     '+[](const gea::Ref<void>& gea_immediate, const gea::PropertyKey& gea_key, const gea::PropertyDescriptor& gea_descriptor) -> bool { ' +
     'if (gea::record::hasLiveFieldView(gea_immediate)) return gea::record::defineFieldView(gea_immediate, gea_key, gea_descriptor); ' +
