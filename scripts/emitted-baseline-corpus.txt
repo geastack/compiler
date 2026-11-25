@@ -124,7 +124,7 @@ optional-collection-cell.ts.cpp 55d6260faeaf
 optional-slot-holds-null.ts.cpp 711bf812eea6
 optional-union-to-discriminated-repro.ts.cpp 6d2ff867a266
 overload-implementation-signature.ts.cpp 6be0b63bdb8f
-owned-record-union.ts.cpp fe7611919bd7
+owned-record-union.ts.cpp db4b8dc4c56c
 physical-class-ancestry-declared.ts.cpp 793e0c02132b
 printer-drift.txt bbdd9917900c
 property-access-unresolved-repro.ts.cpp 212b3bf28bfa
