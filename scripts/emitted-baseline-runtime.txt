@@ -770,11 +770,12 @@ jsx-derived-getter-local-binding.tsx.cpp 0dcaecdab259
 jsx-inline-event-parameter.tsx.cpp 7eecdf879764
 jsx-inventory-reactive-fields.tsx.cpp 0c66c6822ce4
 jsx-reactive-block-map.tsx.cpp d88141928754
-jsx-reactive-getter-branch.tsx.cpp ef95c3b79b49
+jsx-reactive-getter-branch.tsx.cpp f505424bd1d7
 jsx-reactive-indexed-alias.tsx.cpp 3821a16963b8
 jsx-reactive-list-row-style.tsx.cpp 5373eaf76e78
+jsx-reactive-string-field-reads.tsx.cpp c7ec177515e2
 jsx-reactive-style-slot.tsx.cpp 8bceb3568396
-jsx-shared-store-drawing-math.tsx.cpp b1c42e0df077
+jsx-shared-store-drawing-math.tsx.cpp b5cefe26156b
 jsx-shared-store-forty-methods.tsx.cpp 3e4a393f41f5
 jsx-stateless-component.tsx.cpp 7150790eaa7d
 jump-threading.ts.cpp e91fd0d24489

@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noUncheckedIndexedAccess": false,
+    "paths": {
+      "@geastack/core": ["../../node_modules/@geastack/core/runtime.ts"]
+    }
+  }
+}
