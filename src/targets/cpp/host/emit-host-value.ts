@@ -4,7 +4,7 @@ import type { IntrinsicAccessorGetter } from '../../../semantics/model/intrinsic
 import { cppAbiParameterType, cppResultTypeOf, cppStringLiteral, cppTypeOf } from '../types.js'
 import { toStringTextOver } from '../emit-tostring.js'
 import { booleanTestText } from '../emit-presence.js'
-import { hostArgumentText } from './emit-host-arity.js'
+import { hostArgumentText, hostArityCallLines } from './emit-host-arity.js'
 import type { HostCallSpelling, HostMember } from './host-members.js'
 import { fillHostTemplate } from './host-members.js'
 import { dateGetters, dateSetters, dateStringForms } from '../prototype/emit-prototype-date.js'
@@ -35,7 +35,14 @@ import { dateGetters, dateSetters, dateStringForms } from '../prototype/emit-pro
  */
 export const hostFunctionValueText = (representation: Representation, spelling: HostCallSpelling): string | null => {
   if (spelling.kind !== 'path') return null
-  return capturelessHostThunkText(representation, (names) => `${spelling.text}(${names.join(', ')})`)
+  return capturelessHostThunkText(representation, (names, abi) => {
+    if (!abi.parameters.some((parameter) => parameter.value.kind === 'tagged-union')) return `${spelling.text}(${names.join(', ')})`
+    const fixed = abi.parameters.map((parameter, index) => ({ text: names[index] as string, representation: parameter.value }))
+    if (abi.result.kind === 'void') return `[&]() { ${hostArityCallLines({ spelling, fixed, optionals: [], result: null }).join(' ')} }()`
+    const result = { name: 'gea_host_value_result', representation: abi.result }
+    const lines = hostArityCallLines({ spelling, fixed, optionals: [], result })
+    return `[&]() { ${cppTypeOf(abi.result)} ${result.name}{}; ${lines.join(' ')} return ${result.name}; }()`
+  })
 }
 
 /**
