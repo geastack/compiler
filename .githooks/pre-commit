@@ -4,11 +4,12 @@
 #
 # A file with edits that are not staged is left exactly as staged: formatting
 # it and adding it again would commit the whole working-tree file, unstaged
-# work included.
+# work included. Files go 100 at a time: Windows caps a command line at 32K
+# characters, which one large commit exceeds.
 unstaged=$(git diff --name-only)
 files=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx|mts|mjs|js|json|md)$' | grep -vxF "$unstaged")
 if [ -n "$files" ]; then
-  echo "$files" | xargs npx --no-install prettier --write --log-level warn --ignore-unknown || exit 1
-  echo "$files" | xargs git add
+  echo "$files" | xargs -n 100 npx --no-install prettier --write --log-level warn --ignore-unknown || exit 1
+  echo "$files" | xargs -n 100 git add
 fi
 node scripts/architecture.mjs > /dev/null || exit 1
