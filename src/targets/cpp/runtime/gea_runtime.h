@@ -9801,6 +9801,8 @@ struct IsRefElement : std::false_type {};
 template <typename T>
 struct IsRefElement<Ref<T>> : std::true_type {};
 
+struct Undefined;
+
 template <typename Element>
 struct ArrayObject {
   static constexpr bool gea_native_view_identity = true;
@@ -9927,6 +9929,19 @@ struct ArrayObject {
   bool lengthWritable = true;
   Ref<NativeArrayViewSource<Element>> liveSource;
   Ref<DynamicObject> indexedDescriptors;
+  /**
+   * A `never[]`'s typed stand-in (`emptyArraySentinel`): the `E[]` this
+   * array becomes in an `E[]` slot, made on its first conversion and the
+   * answer to every later one, so each `[]` keeps one identity of its own.
+   * Only `ArrayObject<Undefined>` (the `never[]` carrier) has the slot; for
+   * any other element it is an empty member that takes no space.
+   */
+  struct NeverTwin {
+    Ref<void> array;
+    const void* element = nullptr;
+  };
+  struct NoNeverTwin {};
+  [[no_unique_address]] std::conditional_t<std::is_same_v<Element, Undefined>, NeverTwin, NoNeverTwin> neverTwin;
   /**
    * How an index accessor's `this` boxes this array, recorded by the only
    * paths that create `indexedDescriptors` -- every one of them already
@@ -10839,10 +10854,55 @@ class Value;
 struct ConsumedSource {};
 inline constexpr ConsumedSource consumedSource{};
 
+// A `never[]` a record slot holds, read through a live view of the record's
+// declared type (the view adapter is the only emitter of the tag). The read
+// runs on every access, so it cannot consume the slot; the sentinel made
+// every record built as `{ items: [] }` (`xs.map(() => ({ items: [] }))`
+// stored as `Holder[]`) answer the one array, and a push into one record's
+// list showed in all of them. A held source is a real object with its own
+// identity, so it converts to its own twin (`detail::neverTwinOf`): the
+// same array on every read, a different one for every other `[]`. Any other
+// read keeps the sentinel -- the emitter may spell a binding read as its
+// literal initializer, a fresh `[]` each time, and only the sentinel makes
+// those one object.
+struct HeldSource {};
+inline constexpr HeldSource heldSource{};
+
 namespace detail {
 template <typename Source>
 inline bool consumedEmptyArrayIsUnshared(const gea::Ref<ArrayObject<Source>>& source) {
   return detail::refCountsOf(source.get())->strong <= 1;
+}
+
+template <typename Element>
+inline const void* neverTwinTag() {
+  static const char tag = 0;
+  return &tag;
+}
+
+// The `E[]` one empty `never[]` converts to, the same array every time it is
+// asked. Every `[]` reaching an `E[]` slot used to become the one sentinel, so
+// two records built with `{ items: [] }` and read through a view of their
+// declared type (`xs.map(() => ({ items: [] }))` stored as `Holder[]`) shared
+// a single array and a push into one showed in all of them. The twin keeps
+// what the sentinel was for -- one `never[]` read twice is one array, so
+// tsc's `=== emptyArray` holds -- while two different `[]`s stay two arrays,
+// as in JS. The `never[]` itself stays empty: no program typed `never[]` can
+// add to it, and every typed reader reaches the twin. A source asked for a
+// second element type answers with that type's sentinel, the old behaviour.
+template <typename Element, typename Source>
+inline gea::Ref<ArrayObject<Element>> neverTwinOf(const gea::Ref<ArrayObject<Source>>& source) {
+  if constexpr (std::is_same_v<Source, Undefined>) {
+    auto& twin = source.get()->neverTwin;
+    if (twin.element == nullptr) {
+      auto made = makeRef<ArrayObject<Element>>();
+      twin.array = made;
+      twin.element = neverTwinTag<Element>();
+      return made;
+    }
+    if (twin.element == neverTwinTag<Element>()) return twin.array.template staticCast<ArrayObject<Element>>();
+  }
+  return emptyArraySentinel<Element>();
 }
 }  // namespace detail
 
@@ -10862,6 +10922,13 @@ inline gea::Ref<ArrayObject<Element>> emptyArraySentinel(const gea::Ref<ArrayObj
   return emptyArraySentinel<Element>();
 }
 
+/** A `never[]` held in a slot and read through a live view of its declared type (`HeldSource` above). */
+template <typename Element, typename Source>
+inline gea::Ref<ArrayObject<Element>> emptyArraySentinel(const gea::Ref<ArrayObject<Source>>& source, HeldSource) {
+  if (source && source->length() != 0) bigint_detail::fail("TypeError", "a never[] value holds elements; its static type lied");
+  return source ? detail::neverTwinOf<Element>(source) : emptyArraySentinel<Element>();
+}
+
 /**
  * `never[]` (or a real `undefined[]`) into `E[]` whose element carrier holds
  * `undefined` natively (a shared class or record reference): the carrier
@@ -10872,10 +10939,10 @@ inline gea::Ref<ArrayObject<Element>> emptyArraySentinel(const gea::Ref<ArrayObj
  * `undefined` in `E` too.
  */
 template <typename Element, typename Source>
-inline gea::Ref<ArrayObject<Element>> emptyArraySentinelOrAbsent(const gea::Ref<ArrayObject<Source>>& source, bool consumed = false) {
+inline gea::Ref<ArrayObject<Element>> emptyArraySentinelOrAbsent(const gea::Ref<ArrayObject<Source>>& source, bool consumed = false, bool held = false) {
   if (!source) return emptyArraySentinel<Element>();
   if (source->length() == 0)
-    return consumed && detail::consumedEmptyArrayIsUnshared(source) ? makeRef<ArrayObject<Element>>() : emptyArraySentinel<Element>();
+    return consumed && detail::consumedEmptyArrayIsUnshared(source) ? makeRef<ArrayObject<Element>>() : held ? detail::neverTwinOf<Element>(source) : emptyArraySentinel<Element>();
   auto converted = makeRef<ArrayObject<Element>>();
   converted->reserve(static_cast<std::size_t>(source->length()));
   for (const auto& slot : source->slots()) {
@@ -10890,16 +10957,21 @@ inline gea::Ref<ArrayObject<Element>> emptyArraySentinelOrAbsent(const gea::Ref<
   return emptyArraySentinelOrAbsent<Element>(source, true);
 }
 
+template <typename Element, typename Source>
+inline gea::Ref<ArrayObject<Element>> emptyArraySentinelOrAbsent(const gea::Ref<ArrayObject<Source>>& source, HeldSource) {
+  return emptyArraySentinelOrAbsent<Element>(source, false, true);
+}
+
 /** `never[]` (or a real `undefined[]`) into `any[]`: the sentinel when empty, a boxed copy otherwise. */
 // `Boxed` is only ever `Value`; it is a parameter so the return type stays
 // dependent and `ArrayObject<Value>` is instantiated at the use, where `Value`
 // is complete, rather than here, where it is only declared.
 template <typename Source, typename Boxed = Value>
-inline gea::Ref<ArrayObject<Boxed>> emptyArraySentinelOrBoxed(const gea::Ref<ArrayObject<Source>>& source, bool consumed = false) {
+inline gea::Ref<ArrayObject<Boxed>> emptyArraySentinelOrBoxed(const gea::Ref<ArrayObject<Source>>& source, bool consumed = false, bool held = false) {
   if (!source) return emptyArraySentinel<Boxed>();
   // A consumed, unshared `[]` gets its own array, as in `emptyArraySentinel` above.
   if (source->length() == 0)
-    return consumed && detail::consumedEmptyArrayIsUnshared(source) ? makeRef<ArrayObject<Boxed>>() : emptyArraySentinel<Boxed>();
+    return consumed && detail::consumedEmptyArrayIsUnshared(source) ? makeRef<ArrayObject<Boxed>>() : held ? detail::neverTwinOf<Boxed>(source) : emptyArraySentinel<Boxed>();
   auto boxed = makeRef<ArrayObject<Boxed>>();
   boxed->reserve(static_cast<std::size_t>(source->length()));
   // `Value()` is `undefined`; a populated `never[]`/`undefined[]` source
@@ -10914,6 +10986,11 @@ inline gea::Ref<ArrayObject<Boxed>> emptyArraySentinelOrBoxed(const gea::Ref<Arr
 template <typename Source, typename Boxed = Value>
 inline gea::Ref<ArrayObject<Boxed>> emptyArraySentinelOrBoxed(const gea::Ref<ArrayObject<Source>>& source, ConsumedSource) {
   return emptyArraySentinelOrBoxed<Source, Boxed>(source, true);
+}
+
+template <typename Source, typename Boxed = Value>
+inline gea::Ref<ArrayObject<Boxed>> emptyArraySentinelOrBoxed(const gea::Ref<ArrayObject<Source>>& source, HeldSource) {
+  return emptyArraySentinelOrBoxed<Source, Boxed>(source, false, true);
 }
 
 namespace detail {
@@ -31047,7 +31124,12 @@ bool nativeObjectDataReadNative(const gea::Ref<Receiver>& object, const Property
   if (!object) host::throwRuntimeError("TypeError", "Cannot read native object data on a nullish receiver");
   const auto table = detail::expandoFor(nativePropertyAnchor(object), false);
   const PropertyDescriptor* found = table ? table->ownProperty(key) : nullptr;
-  if (found == nullptr) return read.assign(Undefined{});
+  // A missing key is `undefined` to [[Get]]. A reader certified only for the
+  // expando's `Value` route (a source the census knows can carry keys its
+  // layout lacks) takes that `undefined` boxed, as it takes a stored one below.
+  if (found == nullptr)
+    return read.assign(Undefined{}) ||
+           (read.acceptsExact<Value, NativeFieldLeafPolicy>() && read.assign(Value::box(Value::Tag::Undefined, Undefined{})));
   // A key the source layout lacks was installed by a write through a dynamic
   // receiver, so no reader's routes can name the carrier it was stored in.
   // The stored carrier answers when the reader takes it; otherwise a reader

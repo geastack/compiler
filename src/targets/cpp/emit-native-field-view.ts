@@ -3,7 +3,7 @@ import type { NativeFieldViewRead } from '../../ir/native-field-view-facts.js'
 import { representationKey, type Representation } from '../../representation/model.js'
 import { canonicalIndexLiteral } from '../../representation/array-index.js'
 import { createCppEmitBlockedError, operandText, type EmitContext } from './emit-context.js'
-import { recipeText } from './emit-narrowing.js'
+import { emptyArraySentinelText, recipeText } from './emit-narrowing.js'
 import { nativeFieldPolicyType, staticKeyOrderText } from './records.js'
 import { tracksKeyOrder } from './key-order-tracking.js'
 import {
@@ -56,6 +56,13 @@ const unhomedAssertedLeaf = (ctx: EmitContext, node: ConversionNode, text: strin
   node.source.kind === 'tagged-union' &&
   node.source.arms.every((arm) => ctx.conversions.nodeFor(arm.value, node.target).capability.kind === 'never')
     ? `gea::host::unhomedUnionArm<${cppTypeOf(node.target)}>((${text}).index())`
+    : null
+
+// A view read of a `never[]` slot converts the slot's own array, so it takes
+// that array's twin (`gea::HeldSource`), not the one shared empty array.
+const heldEmptyArrayLeaf = (node: ConversionNode | null, text: string): string | null =>
+  node !== null && node.capability.kind === 'atom' && node.capability.materializer.id === 'gea::emptyArraySentinel'
+    ? emptyArraySentinelText(node.source, node.target, text, false, true)
     : null
 
 const renderedLeaf = (ctx: EmitContext, id: string, text: string): string => {
@@ -568,7 +575,8 @@ export const nativeHeldFieldViewReadText = (
  */
 const fieldViewRoutesText = (ctx: EmitContext, receipt: NativeFieldViewRead, result: string): { adapter: string; accepted: string } => {
   const arms = receipt.sources.map(({ source, conversion }) => {
-    const converted = renderedLeaf(ctx, conversion, `(*static_cast<const ${cppTypeOf(source)}*>(gea_native))`)
+    const native = `(*static_cast<const ${cppTypeOf(source)}*>(gea_native))`
+    const converted = heldEmptyArrayLeaf(ctx.conversions.nodeById(conversion), native) ?? renderedLeaf(ctx, conversion, native)
     return `if (${routeTokenOf(source)}) { static_cast<std::optional<${result}>*>(gea_out)->emplace(${converted}); return true; }`
   })
   const accepts = receipt.sources.map(({ source }) => `(${routeTokenOf(source)})`).join(' || ') || 'false'
