@@ -20,7 +20,7 @@ export const primitivePropertyIsAbsent = (
 ): boolean => {
   const { checker, globalHostMutationTaint: mutations } = context
   if (objectPrototypeMemberNames.has(name)) return false
-  if (mutations.has('*') || !context.isStandardLibraryDeclaration) return false
+  if (mutations.hasEntry('*') || !context.isStandardLibraryDeclaration) return false
   // Read the same canonical receiver type that the property operation uses.
   // rawTypeAt precedes structural rules such as local-union, so asking it
   // here could recover checker `any` after those rules already proved the

@@ -210,7 +210,7 @@ export const lowerProxyConstruct = (
 }
 
 /** Whether a carrier is a union one of whose arms is a proxy. */
-export const holdsProxyArm = (carrier: Representation): carrier is Extract<Representation, { kind: 'tagged-union' }> =>
+export const holdsProxyArm = (carrier: Representation): boolean =>
   carrier.kind === 'tagged-union' && carrier.arms.some((arm) => arm.value.kind === 'proxy-object')
 
 /**

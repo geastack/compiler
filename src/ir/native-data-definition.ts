@@ -14,7 +14,15 @@ import type { SemanticOperation } from '../semantics/model/operations.js'
 import { symbolPropertyKeyText } from '../semantics/model/structural-types.js'
 import { authenticatedTemplateCallEntry } from './call-entry.js'
 import { censusConstructorViewShapes, constructorViewFieldsOf } from './class-static-fields.js'
-import { allOperationsOf, type CallOperation, type IrBody, type IrOperation } from './model.js'
+import {
+  allOperationsOf,
+  type CallOperation,
+  type IrBlock,
+  type IrBlockId,
+  type IrBody,
+  type IrNonTerminatorOperation,
+  type IrOperation
+} from './model.js'
 import { nativeFieldViewBodyCitationsOf, nativeFieldViewCarrierNeedsReceipt, nativeFieldViewTargetsOf } from './native-field-view-facts.js'
 import { resultOfIrOperation } from './queries.js'
 import { objectValueConversionsOf } from './object-value-conversions.js'
@@ -108,7 +116,7 @@ export const nativeDataDefinitionOf = (
   )
     return null
   const shapes = censusConstructorViewShapes([...input.bodies.values()])
-  const liveTargets = nativeFieldViewTargetsOf(input.bodies.values(), input.conversions)
+  const liveTargets = nativeFieldViewTargetsOf([...input.bodies.values()], input.conversions)
   const delegatesView = nativeFieldViewCarrierNeedsReceipt(receiver.representation, liveTargets)
   if (operation.fixedDataDefinition && !delegatesView) return null
   // Only a live view needs the symbol member's delegation receipt; a plain
@@ -120,12 +128,14 @@ export const nativeDataDefinitionOf = (
       const node = input.conversions.nodeById(id)
       return node === null ? [] : [node]
     })
-  const origins = nativeFieldViewPlansOf(recipeClosureOf(nodes, input.conversions.nodeById).values())
+  const origins = nativeFieldViewPlansOf([...recipeClosureOf(nodes, input.conversions.nodeById).values()])
   const layouts = recordShapeLayoutsOf(input.deriver, input.classes)
   const destinations: Array<{ carrier: string; shape: string; field: RecordField }> = []
-  let held: Representation | null = null
+  // A box, not a captured `let`: `visit` assigns it, and the narrowing of the
+  // initial `null` would otherwise outlive those closure writes.
+  const heldStorage: { value: Representation | null } = { value: null }
   let observedDynamically = false
-  const visit = (carrier: Representation, ancestors: ReadonlySet<string> = new Set()): boolean => {
+  const visit = (carrier: Representation, ancestors: ReadonlySet<string> = new Set<string>()): boolean => {
     if (carrier.kind === 'tagged-union') return carrier.arms.every((arm) => visit(arm.value, ancestors))
     // A union's `dynamic` arm defines through its own Value's
     // [[DefineOwnProperty]]; a live view's original Document receives the
@@ -164,8 +174,8 @@ export const nativeDataDefinitionOf = (
       )
       storage = declaredFieldRepresentationOf(input.deriver, carrier, keyText, input.classes)
     } else return false
-    if (!field || !storage || (held && representationKey(held) !== representationKey(storage))) return false
-    held = storage
+    if (!field || !storage || (heldStorage.value && representationKey(heldStorage.value) !== representationKey(storage))) return false
+    heldStorage.value = storage
     if (!destinations.some((destination) => destination.carrier === identity)) destinations.push({ carrier: identity, shape, field })
     if (nativeFieldViewCarrierNeedsReceipt(carrier, liveTargets)) {
       const sources = origins.filter((origin) => origin.target.shapeId === shape)
@@ -173,7 +183,8 @@ export const nativeDataDefinitionOf = (
     }
     return true
   }
-  if (!visit(receiver.representation) || held === null || destinations.length === 0) return null
+  const held = visit(receiver.representation) ? heldStorage.value : null
+  if (held === null || destinations.length === 0) return null
   const conversion = input.conversions.nodeFor(value.value, held)
   if (
     !transfersNativeStorage(conversion.capability) ||
@@ -225,8 +236,8 @@ export const publishNativeDataDefinitions = (
   input: NativeDataDefinitionInput & { readonly graph: SemanticGraph }
 ): ReadonlyMap<PhysicalBodyId, IrBody> => {
   const attributes = fixedDataDefinitionAttributesOf(input)
-  return new Map(
-    [...input.bodies].map(([id, body]) => {
+  return new Map<PhysicalBodyId, IrBody>(
+    [...input.bodies].map(([id, body]): readonly [PhysicalBodyId, IrBody] => {
       const definitions = new Map<IrValueId, IrOperation>()
       for (const block of body.blocks.values())
         for (const operation of allOperationsOf(block)) {
@@ -239,11 +250,16 @@ export const publishNativeDataDefinitions = (
         const semantic = semanticId === undefined ? null : (input.graph.operations.get(semanticId) ?? null)
         const { nativeDataDefinition: previous, ...original } = operation
         const attributeRecipe = attributes.get(operation)
-        const ordinary: CallOperation = attributeRecipe
-          ? { ...original, fixedDataDefinition: attributeRecipe }
-          : original.fixedDataDefinition?.attributesOnly !== undefined
-            ? (({ fixedDataDefinition: _stale, ...rest }) => rest)(original)
-            : original
+        // One branch per assignment, not a conditional: the conditional's
+        // value is a union of the two rest layouts, and a native build recast
+        // the `original` arm into the layout without `fixedDataDefinition`,
+        // dropping the recipe every later pass reads.
+        let ordinary: CallOperation = original
+        if (attributeRecipe) ordinary = { ...original, fixedDataDefinition: attributeRecipe }
+        else if (original.fixedDataDefinition?.attributesOnly !== undefined) {
+          const { fixedDataDefinition: _stale, ...rest } = original
+          ordinary = rest
+        }
         const recipe = nativeDataDefinitionOf(ordinary, semantic, input, (value) => definitions.get(value) ?? null)
         if (recipe === null)
           return previous === undefined
@@ -270,10 +286,13 @@ export const publishNativeDataDefinitions = (
         id,
         {
           ...body,
-          blocks: new Map(
-            [...body.blocks].map(([blockId, block]) => [
+          blocks: new Map<IrBlockId, IrBlock>(
+            [...body.blocks].map(([blockId, block]): readonly [IrBlockId, IrBlock] => [
               blockId,
-              { ...block, operations: block.operations.map((operation) => publish(operation) as typeof operation) }
+              {
+                ...block,
+                operations: block.operations.map((operation): IrNonTerminatorOperation => publish(operation) as typeof operation)
+              }
             ])
           )
         }

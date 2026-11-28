@@ -1,5 +1,5 @@
 import type { ComposedDictionaryViewPlan, DictionaryReadContract, DictionaryViewStep } from '../../conversion/dictionary-view.js'
-import type { Representation } from '../../representation/model.js'
+import { absenceCarrier, type Representation } from '../../representation/model.js'
 import type { ConversionNode } from '../../conversion/algebra.js'
 import { recipeText, type ConversionSite } from './emit-narrowing.js'
 import { cppClassName, cppTypeOf, cppUndefinedValue } from './types.js'
@@ -84,7 +84,12 @@ export const dictionaryViewText = (ctx: ConversionSite, plan: ComposedDictionary
       case 'optional': {
         if (source.kind !== 'optional') return null
         const present = render(step.present, source.payload, target, `*(${value})`)
-        const absent = render(step.absent, { kind: source.absence }, target, source.absence === 'null' ? 'nullptr' : cppUndefinedValue)
+        const absent = render(
+          step.absent,
+          absenceCarrier(source.absence),
+          target,
+          source.absence === 'null' ? 'nullptr' : cppUndefinedValue
+        )
         return present === null || absent === null ? null : `((${value}).has_value() ? (${present}) : (${absent}))`
       }
       case 'dispatch': {

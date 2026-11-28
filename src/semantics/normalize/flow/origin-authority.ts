@@ -63,4 +63,4 @@ export interface OriginAuthority extends SourceRecordOriginAuthority, ClosedCall
 }
 
 /** Structural cache identity is the complete caller authority object itself. */
-export const originAuthorityIdentity = (authority: OriginAuthority): object => authority
+export const originAuthorityIdentity = (authority: OriginAuthority): OriginAuthority => authority

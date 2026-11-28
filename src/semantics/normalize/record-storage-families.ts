@@ -19,8 +19,25 @@ export const recordStorageFamilies = (
   // Fresh and widened views of a literal share its symbol, although the
   // checker gives them distinct Type objects. They still name one allocation.
   const symbolParents = new Map<ts.Symbol, ts.Type>()
-  const root = (type: ts.Type): ts.Type => {
+  // Except a literal whose own type is a union: `{ ...capability, materializer }`
+  // over a `static | atom` capability is one symbol for one object per spread
+  // arm, and sharing the symbol's parent sent the `static` arm to the record
+  // the `atom` arm adopted -- every such literal then allocated as the `atom`
+  // layout and entered the union under the `atom` tag whatever its kind.
+  const viewsShareSymbol = new Map<ts.Symbol, boolean>()
+  const sharedSymbolOf = (type: ts.Type): ts.Symbol | undefined => {
     const symbol = type.getSymbol()
+    if (!symbol) return undefined
+    let shares = viewsShareSymbol.get(symbol)
+    if (shares === undefined) {
+      const declaration = symbol.declarations?.[0]
+      shares = !(declaration && ts.isObjectLiteralExpression(declaration) && checker.getTypeAtLocation(declaration).isUnion())
+      viewsShareSymbol.set(symbol, shares)
+    }
+    return shares ? symbol : undefined
+  }
+  const root = (type: ts.Type): ts.Type => {
+    const symbol = sharedSymbolOf(type)
     const parent = parents.get(type) ?? (symbol ? symbolParents.get(symbol) : undefined)
     if (!parent || parent === type) return type
     const result = root(parent)
@@ -67,13 +84,36 @@ export const recordStorageFamilies = (
       return
     }
     if (!plain(source) || !plain(target)) return
+    // The holder's slot must give back what the source view declares, not
+    // merely accept it: a read through the source view is the slot's value
+    // narrowed by absence, and a literal reads back as its own primitive. A
+    // slot typed by a looser record -- `{ element?: { kind: string } }` holding
+    // a union arm's `element: Rep` -- accepts every arm yet has dropped the
+    // rest of `Rep`, so the source view's own field read would need a
+    // conversion from the looser record back to the union, which cannot exist.
+    const givesBack = (to: ts.Type, property: ts.Symbol): boolean => {
+      const slot = to.getProperty(property.name)
+      if (!slot) return false
+      const declared = checker.getBaseTypeOfLiteralType(checker.getTypeOfSymbol(property))
+      const held = checker.getTypeOfSymbol(slot)
+      const arms = held.isUnion() ? held.types : [held]
+      // An absent arm -- `undefined`, or the `null` a nullable slot holds -- is
+      // the absence the view's read already answers, not a value to give back.
+      return arms.every(
+        (arm) => (arm.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null)) !== 0 || checker.isTypeAssignableTo(arm, declared)
+      )
+    }
     const retains = (from: ts.Type, to: ts.Type): boolean => {
       const keys = new Set(to.getProperties().map((p) => p.name))
-      return from.getProperties().every((p) => keys.has(p.name)) && checker.isTypeAssignableTo(from, to)
+      return (
+        from.getProperties().every((p) => keys.has(p.name)) &&
+        checker.isTypeAssignableTo(from, to) &&
+        from.getProperties().every((p) => givesBack(to, p))
+      )
     }
     const adopt = (from: ts.Type, to: ts.Type): void => {
       parents.set(from, to)
-      const symbol = from.getSymbol()
+      const symbol = sharedSymbolOf(from)
       if (symbol && symbol !== to.getSymbol()) symbolParents.set(symbol, to)
     }
     if (retains(source, target)) adopt(source, target)

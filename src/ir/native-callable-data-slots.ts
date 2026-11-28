@@ -18,10 +18,12 @@ import type { SemanticGraph } from '../semantics/model/graph.js'
 import { identityOperandOf, immutableBindingInitializerOf, operandOf } from '../semantics/model/operands.js'
 import type { SemanticOperation } from '../semantics/model/operations.js'
 import {
-  allOperationsOf,
   type CallOperation,
   type GetOperation,
+  type IrBlock,
+  type IrBlockId,
   type IrBody,
+  type IrNonTerminatorOperation,
   type IrOperand,
   type IrOperation,
   type SetOperation
@@ -29,7 +31,7 @@ import {
 import { ordinaryFunctionStoreResultMatches } from './native-callable-own-property.js'
 import { nativeCallableFlowOf, type NativeCallableFlow } from './callable-class-flow.js'
 import type { ProgramConversionRecipe } from './program-conversions.js'
-import { resultOfIrOperation } from './queries.js'
+import { bodyOperationIndexOf } from './body-operation-index.js'
 import { nativeCallableDataWritesOf } from './native-callable-data-write.js'
 import { nativeCallableIntegrityAuthorityOf } from './native-callable-integrity.js'
 import { nativeCallableOptionalDataReadsOf, nativeCallableUninstalledKeyOf } from './native-callable-data-reads.js'
@@ -119,10 +121,7 @@ const argumentsOf = (
 
 /** Discover from actual SSA aliases and dominating stores, never from public nil ABI or structural signature equality. */
 export const nativeCallableDataSlotsOf = (input: NativeCallableDataSlotInput): ReadonlyMap<IrOperation, NativeCallableDataSlot> => {
-  const definitions = new Map<IrValueId, IrOperation>()
-  const positions = new Map<IrOperation, { readonly block: object; readonly index: number }>()
-  const writes = new Map<DeclarationId, Extract<IrOperation, { kind: 'binding-write' }>[]>()
-  const operations: IrOperation[] = []
+  const { definitions, positions, writes, operations } = bodyOperationIndexOf(input.bodies)
   const semanticWrites = new Map<DeclarationId, Extract<SemanticOperation, { family: 'binding' }>[]>()
   for (const operation of input.graph.operations.values()) {
     if (operation.family !== 'binding' || (operation.action !== 'initialize' && operation.action !== 'write')) continue
@@ -147,19 +146,6 @@ export const nativeCallableDataSlotsOf = (input: NativeCallableDataSlotInput): R
     }
     return aliases
   }
-  for (const body of input.bodies.values())
-    for (const block of body.blocks.values())
-      for (const [index, operation] of allOperationsOf(block).entries()) {
-        positions.set(operation, { block, index })
-        operations.push(operation)
-        const result = resultOfIrOperation(operation)
-        if (result) definitions.set(result.id, operation)
-        if (operation.kind === 'binding-write') {
-          const bucket = writes.get(operation.declaration) ?? []
-          bucket.push(operation)
-          writes.set(operation.declaration, bucket)
-        }
-      }
   const roots = new Map<IrValueId, IrValueId | null>()
   const identityOf = (producer: Extract<IrOperation, { kind: 'convert' }>): boolean => {
     const node = input.conversions.nodeById(producer.conversionUse)
@@ -431,8 +417,8 @@ export const publishNativeCallableDataSlots = (published: PublishNativeCallableD
   const prototypes = nativeCallablePrototypeReadsOf(input).receipts
   const observations = nativeCallablePrototypeObservationsOf(input)
   const descriptors = nativeCallablePrototypeDescriptorsOf(input).receipts
-  return new Map(
-    [...input.bodies].map(([id, body]) => {
+  return new Map<PhysicalBodyId, IrBody>(
+    [...input.bodies].map(([id, body]): readonly [PhysicalBodyId, IrBody] => {
       const constants = new Map<IrValueId, IrOperation>()
       for (const block of body.blocks.values())
         for (const operation of block.operations) if (operation.kind === 'constant') constants.set(operation.result.id, operation)
@@ -440,12 +426,12 @@ export const publishNativeCallableDataSlots = (published: PublishNativeCallableD
         id,
         {
           ...body,
-          blocks: new Map(
-            [...body.blocks].map(([key, block]) => [
+          blocks: new Map<IrBlockId, IrBlock>(
+            [...body.blocks].map(([key, block]): readonly [IrBlockId, IrBlock] => [
               key,
               {
                 ...block,
-                operations: block.operations.map((operation) => {
+                operations: block.operations.map((operation): IrNonTerminatorOperation => {
                   if (operation.kind === 'convert') {
                     const { nativeCallablePrototypeObservation: _observation, ...current } = operation
                     const observation = observations.get(operation)
@@ -473,26 +459,13 @@ export const publishNativeCallableDataSlots = (published: PublishNativeCallableD
                       return { ...current, nativeCallableReadonlySet: proof }
                     }
                   }
-                  const { nativeCallableDataSlot: _previous, ...ordinarySlot } = operation
-                  const ordinary =
-                    operation.kind === 'get'
-                      ? ordinarySlot
-                      : (() => {
-                          const { nativeCallableDataWrite: _write, ...rest } = operation
-                          if (operation.kind === 'set') {
-                            const { nativeCallableReadonlySet: _readonly, ...held } = rest as SetOperation
-                            return held
-                          }
-                          return rest
-                        })()
+                  // One rest per operation kind: a rest over the `get | set |
+                  // call` union has no single record layout to copy into.
                   const receipt = receipts.get(operation)
-                  if (receipt !== undefined) return { ...ordinary, nativeCallableDataSlot: receipt }
                   if (operation.kind === 'get') {
-                    const {
-                      nativeCallablePrototype: _prototype,
-                      nativeCallableUninstalledKey: _uninstalled,
-                      ...current
-                    } = ordinary as GetOperation
+                    const { nativeCallableDataSlot: _previous, ...ordinary } = operation
+                    if (receipt !== undefined) return { ...ordinary, nativeCallableDataSlot: receipt }
+                    const { nativeCallablePrototype: _prototype, nativeCallableUninstalledKey: _uninstalled, ...current } = ordinary
                     const prototype = prototypes.get(operation)
                     if (prototype !== undefined) return { ...current, nativeCallablePrototype: prototype }
                     const keyProducer = constants.get(current.key.value)
@@ -505,6 +478,18 @@ export const publishNativeCallableDataSlots = (published: PublishNativeCallableD
                     return uninstalled === null ? current : { ...current, nativeCallableUninstalledKey: uninstalled }
                   }
                   const write = writes.get(operation)
+                  if (operation.kind === 'set') {
+                    const {
+                      nativeCallableDataSlot: _previous,
+                      nativeCallableDataWrite: _write,
+                      nativeCallableReadonlySet: _readonly,
+                      ...ordinary
+                    } = operation
+                    if (receipt !== undefined) return { ...ordinary, nativeCallableDataSlot: receipt }
+                    return write === undefined ? ordinary : { ...ordinary, nativeCallableDataWrite: write }
+                  }
+                  const { nativeCallableDataSlot: _previous, nativeCallableDataWrite: _write, ...ordinary } = operation
+                  if (receipt !== undefined) return { ...ordinary, nativeCallableDataSlot: receipt }
                   return write === undefined ? ordinary : { ...ordinary, nativeCallableDataWrite: write }
                 })
               }

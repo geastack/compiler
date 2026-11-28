@@ -14,6 +14,7 @@ import type { ConstantLiteral } from '../../semantics/model/operands.js'
 import { representationKey, type RecordField, type Representation } from '../../representation/model.js'
 import { programConversionText, callableObjectAbi, type ConversionSite } from './emit-narrowing.js'
 import { cppBodyName, cppClassName, cppRecordFieldName, cppRecordFieldPresenceName, cppRecordStructName } from './types.js'
+import { mapKeys } from '../../collection-lists.js'
 
 /**
  * Reading a `ClassLayout` the way the language reads a class: down the
@@ -739,7 +740,7 @@ export const classStaticFieldStorageOf = (
 export const classStaticFieldStorageKeysOf = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   declaration: DeclarationId
-): readonly string[] => [...(classStaticFieldSidecar.get(classes)?.get(staticStorageOwnerOf(classes, declaration))?.keys() ?? [])]
+): readonly string[] => [...mapKeys(classStaticFieldSidecar.get(classes)?.get(staticStorageOwnerOf(classes, declaration)))]
 
 /**
  * This compilation's own mangled global for one `ClassName.KEY` storage
@@ -774,21 +775,19 @@ export const censusClassStaticFieldStorage = (
 } => {
   const census = censusClassStaticFieldSlots(bodies, classes)
   const storage = new Map<DeclarationId, Map<string, ClassStaticFieldStorage>>()
-  for (const [declaration, slots] of census.slots)
-    storage.set(
-      declaration,
-      new Map(
-        [...slots].map(([key, representation]) => [
-          key,
-          {
-            name: cppClassStaticFieldName(declaration, key) + (realm ? '()' : ''),
-            viewStruct: `${cppClassStaticFieldName(declaration, key)}_view`,
-            storageName: cppClassStaticFieldName(declaration, key),
-            representation
-          }
-        ])
-      )
-    )
+  // Filled entry by entry into a declared map: a map built from inferred
+  // literal entries is a different record carrier than `ClassStaticFieldStorage`.
+  for (const [declaration, slots] of census.slots) {
+    const fields = new Map<string, ClassStaticFieldStorage>()
+    for (const [key, representation] of slots)
+      fields.set(key, {
+        name: cppClassStaticFieldName(declaration, key) + (realm ? '()' : ''),
+        viewStruct: `${cppClassStaticFieldName(declaration, key)}_view`,
+        storageName: cppClassStaticFieldName(declaration, key),
+        representation
+      })
+    storage.set(declaration, fields)
+  }
   // A typed own-property view is shared along one inheritance/property
   // family, while each evaluated constructor owns a separate runtime record.
   // Otherwise an inherited read would search Base with Derived's unrelated

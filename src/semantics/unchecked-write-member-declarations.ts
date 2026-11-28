@@ -197,20 +197,29 @@ export const uncheckedWriteMemberDeclarations = (program: ts.Program, checker: t
       const op = condition.operatorToken.kind
       const equal = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken
       if (!equal && op !== ts.SyntaxKind.ExclamationEqualsEqualsToken && op !== ts.SyntaxKind.ExclamationEqualsToken) return undefined
-      const [probe, literal] = ts.isTypeOfExpression(condition.left)
-        ? [condition.left, condition.right]
+      const probe = ts.isTypeOfExpression(condition.left)
+        ? condition.left
         : ts.isTypeOfExpression(condition.right)
-          ? [condition.right, condition.left]
-          : [undefined, undefined]
+          ? condition.right
+          : undefined
+      const literal = probe === undefined ? undefined : probe === condition.left ? condition.right : condition.left
       if (!probe || !literal || !ts.isStringLiteral(literal) || probe.expression.getText() !== text) return undefined
       return { name: literal.text, equal }
     }
     for (let child: ts.Node = occurrence, parent = occurrence.parent; parent; child = parent, parent = parent.parent) {
-      const [condition, whenTrue, whenFalse] = ts.isConditionalExpression(parent)
-        ? [parent.condition, parent.whenTrue, parent.whenFalse]
+      // Three bindings rather than one pattern over `cond ? [..] : [..]`: the
+      // tuples differ per arm, and a pattern over that sum has no native read.
+      const condition = ts.isConditionalExpression(parent) ? parent.condition : ts.isIfStatement(parent) ? parent.expression : undefined
+      const whenTrue: ts.Node | undefined = ts.isConditionalExpression(parent)
+        ? parent.whenTrue
         : ts.isIfStatement(parent)
-          ? [parent.expression, parent.thenStatement, parent.elseStatement]
-          : [undefined, undefined, undefined]
+          ? parent.thenStatement
+          : undefined
+      const whenFalse: ts.Node | undefined = ts.isConditionalExpression(parent)
+        ? parent.whenFalse
+        : ts.isIfStatement(parent)
+          ? parent.elseStatement
+          : undefined
       const test = condition ? typeofTest(condition) : undefined
       if (!test || (child !== whenTrue && child !== whenFalse)) continue
       const inTrue = child === whenTrue

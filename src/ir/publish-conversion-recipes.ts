@@ -13,7 +13,7 @@ import { publishDenseLoopPlan } from './dense-loops.js'
 import { codeFreeFieldReadOf } from './field-read-reuse.js'
 import { plainFieldReadOf } from './plain-field-read.js'
 import { hostNamespaceReadsOf } from './host-namespace-reads.js'
-import { allOperationsOf, type GetOperation, type IrBody, type IrOperation } from './model.js'
+import { allOperationsOf, type GetOperation, type IrBlock, type IrBlockId, type IrBody, type IrOperation } from './model.js'
 import { operationConversionInputsOf, operationConversionsOf } from './operation-conversions.js'
 import { deferredMethodValuesOf, nativeMethodSourceInputsOf } from './native-method-frames.js'
 import { spreadCopyConversionPlanOf } from './spread-conversions.js'
@@ -166,7 +166,8 @@ export const publishConversionRecipes = (input: PublishConversionRecipesInput): 
   // Solved before the first body is published, when any call will ask for it:
   // asked lazily, the solve ran beside the half-built output generation, the
   // largest thing alive in this pass.
-  const asksCallableFlow = [...nativeBodies.values()].some((body) =>
+  const nativeBodyList = [...nativeBodies.values()]
+  const asksCallableFlow = nativeBodyList.some((body) =>
     [...body.blocks.values()].some((block) =>
       allOperationsOf(block).some((operation) => {
         if (operation.kind !== 'call') return false
@@ -176,11 +177,11 @@ export const publishConversionRecipes = (input: PublishConversionRecipesInput): 
     )
   )
   let callableFlow: ReturnType<typeof nativeCallableFlowOf> | undefined = asksCallableFlow
-    ? nativeCallableFlowOf([...nativeBodies.values()], input.placements, input.classes, input.conversions, undefined, input.deriver)
+    ? nativeCallableFlowOf(nativeBodyList, input.placements, input.classes, input.conversions, undefined, input.deriver)
     : undefined
-  const virtualFrames = settledVirtualCallFramesOf(input.bodies.values(), input.classes, input.conversions)
+  const virtualFrames = settledVirtualCallFramesOf([...input.bodies.values()], input.classes, input.conversions)
   const plainFieldRead = plainFieldReadOf(input.classes, input.deriver)
-  const codeFreeFieldRead = codeFreeFieldReadOf(input.bodies.values(), input.classes, input.deriver)
+  const codeFreeFieldRead = codeFreeFieldReadOf([...input.bodies.values()], input.classes, input.deriver)
   const hostMethodAliases = buildHostMethodAliasIndex([...input.bodies.values()], input.placements, input.hosts)
   const bodies = new Map<PhysicalBodyId, IrBody>()
   for (const [id, body] of nativeBodies) {
@@ -242,10 +243,10 @@ export const publishConversionRecipes = (input: PublishConversionRecipesInput): 
             ? undefined
             : nonNormalReceiverProofOf(operation, {
                 body,
-                bodies: nativeBodies.values(),
+                bodies: nativeBodyList,
                 conversions: input.conversions,
                 callables: (callableFlow ??= nativeCallableFlowOf(
-                  [...nativeBodies.values()],
+                  nativeBodyList,
                   input.placements,
                   input.classes,
                   input.conversions,
@@ -316,12 +317,12 @@ export const publishConversionRecipes = (input: PublishConversionRecipesInput): 
     conversions: input.conversions
   })
   return new Map(
-    [...bodies].map(([id, body]) => [
+    [...bodies].map(([id, body]): [PhysicalBodyId, IrBody] => [
       id,
       {
         ...body,
         blocks: new Map(
-          [...body.blocks].map(([blockId, block]) => [
+          [...body.blocks].map(([blockId, block]): [IrBlockId, IrBlock] => [
             blockId,
             {
               ...block,

@@ -17,6 +17,7 @@ import {
 import { operandsOfIrOperation, resultOfIrOperation } from '../../ir/queries.js'
 import type { HoistPlan } from '../../ir/hoist.js'
 import { representationKey, type Representation } from '../../representation/model.js'
+import { isMapEntryPairCarrier } from '../../representation/collections.js'
 import type { RecordToArrayPlan } from '../../conversion/structural-plan.js'
 import { admittedDenseLoopPlanOf, type DenseArray, type DenseReference } from '../../ir/dense-loops.js'
 import {
@@ -48,6 +49,7 @@ import { alignedText } from './emit-callable.js'
 import { cppConstantLiteral, cppNarrowedIntegerType, cppRecordFieldName, cppTypeOf, cppScalarType } from './types.js'
 import { alignedValueText, namedConversionText, type ConversionSite } from './emit-narrowing.js'
 import { arrayBulkAppendMethodName } from './prototype/emit-prototype-array.js'
+import { setValues } from '../../collection-lists.js'
 
 /**
  * How many constant elements make a static table the better spelling.
@@ -373,22 +375,10 @@ export const emitAllocateArrayObject = (ctx: EmitContext, lines: string[], opera
       }
       // A `Map` spreads as one freshly built `[K, V]` pair per entry (ECMA-262
       // 24.1.5.1), so the destination's element carrier must be that pair's
-      // record -- checked here by field key and by the collection's own key and
-      // value carriers, the same three facts `publish.ts`'s
-      // `mapPairCursorElementOf` checks before publishing the cursor.
+      // record or shared two-element Array -- the same check `publish.ts`'s
+      // `mapPairCursorElementOf` makes before publishing the cursor.
       if (spread.kind === 'keyed-collection' && spread.family === 'map') {
-        const pair = representation.element.kind === 'record' ? representation.element : null
-        const first = pair?.fields[0]
-        const second = pair?.fields[1]
-        const matches =
-          pair !== null &&
-          pair.fields.length === 2 &&
-          first?.key === '0' &&
-          second?.key === '1' &&
-          spread.value !== null &&
-          representationKey(first.value) === representationKey(spread.key) &&
-          representationKey(second.value) === representationKey(spread.value) &&
-          slot.from === 0
+        const matches = spread.value !== null && isMapEntryPairCarrier(representation.element, spread.key, spread.value) && slot.from === 0
         if (!matches) {
           throw createCppEmitBlockedError(
             `conversion:map-pair->${representationKey(representation.element)}`,
@@ -437,6 +427,29 @@ export const emitAllocateArrayObject = (ctx: EmitContext, lines: string[], opera
           )
         }
         lines.push(`gea::appendIteratorRange(*${name}, ${operandText(ctx, slot.value)});`)
+        continue
+      }
+      // A union of range-copyable arms (`ir/lower-allocation.ts` proved each
+      // arm's element is this array's own): the live arm's own bulk append.
+      if (spread.kind === 'tagged-union' && slot.from === 0) {
+        const element = representationKey(representation.element)
+        const appends = spread.arms.map(({ value }, index) => {
+          if (value.kind === 'array-object' && representationKey(value.element) === element)
+            return `${name}->appendRange(*gea_spread_union.get<${index}>(), 0);`
+          if (value.kind === 'keyed-collection' && value.family === 'set' && representationKey(value.key) === element)
+            return `gea::appendSetRange(*${name}, *gea_spread_union.get<${index}>());`
+          return null
+        })
+        if (appends.some((append) => append === null)) {
+          throw createCppEmitBlockedError(
+            `conversion:${representationKey(spread)}->${representationKey(representation.element)}`,
+            `a spread union's arm is not a range-copyable array or Set of this array's "${element}" element carrier`
+          )
+        }
+        const branches = appends.map((append, index) =>
+          index === appends.length - 1 ? `{ ${append} }` : `if (gea_spread_union.is<${index}>()) { ${append} } else `
+        )
+        lines.push(`{ const auto& gea_spread_union = ${operandText(ctx, slot.value)}; ${branches.join('')} }`)
         continue
       }
       if (spread.kind !== 'array-object') {
@@ -833,7 +846,7 @@ const collectFillLoop = (ctx: EmitContext, body: IrBody, loop: NaturalLoop, fact
     if (blockId !== loop.header && block.terminator.kind !== 'jump') return null
     for (const operation of block.operations) {
       const result = resultOfIrOperation(operation)
-      if (result !== null && [...(facts.useBlocks.get(result.id) ?? [])].some((where) => !loop.blocks.has(where))) return null
+      if (result !== null && [...setValues(facts.useBlocks.get(result.id))].some((where) => !loop.blocks.has(where))) return null
       if (operation.kind === 'get') {
         if (!facts.pushLookups.has(operation.result.id)) return null
         continue

@@ -958,7 +958,7 @@ const scanOf = (filePath: string, text: string): PackageFileScan => {
   const digest = createHash('sha1').update(text).digest('base64')
   const held = fileScans.get(filePath)
   if (held !== undefined && held.digest === digest) return held.scan
-  const scan = compactScan(structuredClone(scanPackageFile(filePath, text)))
+  const scan = compactScan(detachedScan(scanPackageFile(filePath, text)))
   fileScans.set(filePath, { digest, scan })
   return scan
 }
@@ -985,6 +985,35 @@ const sharedName = (name: string): string => {
   scannedNames.set(name, name)
   return name
 }
+// A copy of a scan that shares no string storage with the file it read:
+// V8 keeps a sliced string's whole parent alive, so a cached scan of a large
+// file would otherwise hold that file's text. `structuredClone` did this, but
+// it is a host global a native build has no reason to provide; the copy below
+// says exactly what it detaches.
+const detachedText = (text: string): string => (' ' + text).slice(1)
+const detachedTexts = (texts: readonly string[]): string[] => texts.map(detachedText)
+const detachedClass = (info: ClassInfo): ClassInfo => ({
+  name: detachedText(info.name),
+  filePath: detachedText(info.filePath),
+  exportName: info.exportName === null ? null : detachedText(info.exportName),
+  baseName: info.baseName === null ? null : detachedText(info.baseName),
+  declaredNames: new Set(detachedTexts([...info.declaredNames])),
+  callableNames: new Set(detachedTexts([...info.callableNames])),
+  ownMembers: new Map([...info.ownMembers].map(([name, texts]) => [detachedText(name), detachedTexts(texts)])),
+  ownObjectShapes: new Map(
+    [...info.ownObjectShapes].map(([name, shape]) => [
+      detachedText(name),
+      new Map([...shape].map(([key, text]) => [detachedText(key), detachedText(text)]))
+    ])
+  )
+})
+const detachedScan = (scan: PackageFileScan): PackageFileScan => ({
+  untrustedClassNames: detachedTexts(scan.untrustedClassNames),
+  externallyReadNames: detachedTexts(scan.externallyReadNames),
+  unresolvedHeritageTexts: detachedTexts(scan.unresolvedHeritageTexts),
+  constants: scan.constants.map((constant) => ({ name: detachedText(constant.name), domain: detachedText(constant.domain) })),
+  classes: scan.classes.map(detachedClass)
+})
 const compactScan = (scan: PackageFileScan): PackageFileScan => {
   if (
     scan.untrustedClassNames.length === 0 &&
@@ -1227,9 +1256,12 @@ const withConstantDomains = (index: PackageIndex, text: string): string =>
 
 /** Every identifier token in `text` that is not an ambient/global name -- the names a caller must bring into scope, or refuse over. */
 const foreignNamesIn = (text: string): readonly string[] => {
-  const tokens = text.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? []
   const out: string[] = []
-  for (const token of tokens) {
+  // Indexed, not iterated: a match array has no native iterator.
+  const tokens = text.match(/[A-Za-z_$][A-Za-z0-9_$]*/g)
+  if (tokens === null) return out
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index]!
     if (AMBIENT_TOKENS.has(token)) continue
     if (!out.includes(token)) out.push(token)
   }

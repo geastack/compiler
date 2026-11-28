@@ -150,6 +150,12 @@ export type GateLink =
 export interface GatedOperations {
   readonly operations: readonly OperationId[]
   readonly chains: readonly (readonly GateLink[])[]
+  /**
+   * Orderings a gate chain cannot state: a `default` clause reached by falling
+   * through runs after the clause it falls from, yet sits on no arm of that
+   * clause's test (`gating.ts`'s switch walk).
+   */
+  readonly ordered?: readonly EvaluationEdge[]
 }
 
 /**
@@ -273,8 +279,8 @@ export class SemanticEdgeTable implements SemanticEdges {
     this.length = length
   }
 
-  *[Symbol.iterator](): Iterator<SemanticEdge> {
-    yield* this.statedEdges()
+  *[Symbol.iterator](): Generator<SemanticEdge> {
+    for (const delegated of this.statedEdges()) yield delegated
     const { operations, innermost } = this.gated
     const chain: GateScope[] = []
     for (let index = 0; index < operations.length; index++) {
@@ -292,13 +298,13 @@ export class SemanticEdgeTable implements SemanticEdges {
   }
 
   /** The producers' own edges of one kind no value run or gate stands for, in table order. */
-  edgesOfKind<K extends PlainStatedKind>(kind: K): readonly Extract<SemanticEdge, { readonly kind: K }>[] {
+  plainEdgesOfKind(kind: PlainStatedKind): readonly SemanticEdge[] {
     let found = this.byKind.get(kind)
     if (found === undefined) {
       found = this.stated.filter((entry): entry is SemanticEdge => !('family' in entry) && entry.kind === kind)
       this.byKind.set(kind, found)
     }
-    return found as readonly Extract<SemanticEdge, { readonly kind: K }>[]
+    return found
   }
 
   /** The producers' own edges: the table's head, in table order. */
@@ -321,8 +327,17 @@ export class SemanticEdgeTable implements SemanticEdges {
  * of the whole table would -- without minting every gate edge, most of a large
  * program's table, only to look at it and throw it away.
  */
-export const producerEdges = (edges: SemanticEdges): Iterable<SemanticEdge> =>
-  edges instanceof SemanticEdgeTable ? edges.statedEdges() : edges
+//
+// One generator rather than a choice between the table's generator and the
+// edges themselves: a native build has no iterator protocol for a value that
+// is one of two iterable kinds.
+export function* producerEdges(edges: SemanticEdges): Generator<SemanticEdge> {
+  if (edges instanceof SemanticEdgeTable) {
+    for (const edge of edges.statedEdges()) yield edge
+    return
+  }
+  for (const edge of edges) yield edge
+}
 
 /** Kinds only a producer states and no value run stands for. */
 type PlainStatedKind = 'evaluation' | 'effect' | 'completion'
@@ -332,13 +347,28 @@ type PlainStatedKind = 'evaluation' | 'effect' | 'completion'
  * index it builds on first use -- a list of the edges it already holds -- so a
  * lookup per `break` or per destructured element no longer walks the table.
  */
-export const edgesOfKind = <K extends PlainStatedKind>(
-  edges: SemanticEdges,
-  kind: K
-): Iterable<Extract<SemanticEdge, { readonly kind: K }>> =>
-  edges instanceof SemanticEdgeTable
-    ? edges.edgesOfKind(kind)
-    : [...edges].filter((edge): edge is Extract<SemanticEdge, { readonly kind: K }> => edge.kind === kind)
+const plainEdgesOfKind = (edges: SemanticEdges, kind: PlainStatedKind): readonly SemanticEdge[] => {
+  if (edges instanceof SemanticEdgeTable) return edges.plainEdgesOfKind(kind)
+  const kept: SemanticEdge[] = []
+  for (const edge of edges) if (edge.kind === kind) kept.push(edge)
+  return kept
+}
+
+// One accessor per kind a caller reads, each with its concrete edge type:
+// a generic over the kind left `Extract<SemanticEdge, { kind: K }>` open over
+// `K`, a type no native layout can be given until every caller is known.
+// Each list is rebuilt element by element: a native build has no conversion
+// from an array of the edge union to an array of one of its arms.
+export const completionEdgesOf = (edges: SemanticEdges): readonly CompletionEdge[] => {
+  const kept: CompletionEdge[] = []
+  for (const edge of plainEdgesOfKind(edges, 'completion')) if (edge.kind === 'completion') kept.push(edge)
+  return kept
+}
+export const evaluationEdgesOf = (edges: SemanticEdges): readonly EvaluationEdge[] => {
+  const kept: EvaluationEdge[] = []
+  for (const edge of plainEdgesOfKind(edges, 'evaluation')) if (edge.kind === 'evaluation') kept.push(edge)
+  return kept
+}
 
 /**
  * The producers' edges with every run that restates an operation's value
@@ -346,8 +376,10 @@ export const edgesOfKind = <K extends PlainStatedKind>(
  * that operation, appended to `stated`. Anything that differs in the
  * slightest stays an edge.
  */
-export const compactStatedEdges = (
-  edges: readonly StatedEdge[],
+// Generic in the element: callers hold plain edge lists as well as stated
+// ones, and neither array converts to the other natively.
+export const compactStatedEdges = <Edge extends StatedEdge>(
+  edges: readonly Edge[],
   operationOf: (operation: OperationId) => SemanticOperation | undefined,
   stated: StatedEdge[] = []
 ): StatedEdge[] => {
@@ -355,7 +387,10 @@ export const compactStatedEdges = (
   while (index < edges.length) {
     const edge = edges[index]!
     if ('family' in edge) {
-      stated.push(edge)
+      // Re-read, not the narrowed `edge`: in a plain-edge instantiation this
+      // arm is dead, and `in` narrows a plain edge to an operation record a
+      // native build has no conversion into.
+      stated.push(edges[index]!)
       index++
       continue
     }
@@ -380,8 +415,8 @@ export const compactStatedEdges = (
         run++
       }
     }
-    if (run > 0) {
-      stated.push(operation!)
+    if (run > 0 && operation !== undefined) {
+      stated.push(operation)
       index += run
     } else {
       stated.push(edge)

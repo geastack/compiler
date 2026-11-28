@@ -32,6 +32,8 @@ export interface IntrinsicProtocolRequirement {
 /** @semanticCategory generic-primitive */
 export interface DeferredIntrinsicProtocolLedger {
   readonly capture: <T>(work: () => T) => { readonly value: T; readonly requirements: readonly IntrinsicProtocolRequirement[] }
+  /** The requirements `work` raises; its answer stays with the caller (`captureAnswer`). */
+  readonly captureRequirements: (work: () => void) => readonly IntrinsicProtocolRequirement[]
   readonly guard: <T>(work: () => T, accepts: (value: T) => boolean) => T
   readonly require: (intrinsic: IntrinsicProtocolRequirement['intrinsic'], location: ts.Node) => boolean
   readonly requireStandardGlobalBinding: (intrinsic: 'Proxy', location: ts.Node) => boolean
@@ -91,6 +93,7 @@ export const createDeferredIntrinsicProtocolLedger = (): DeferredIntrinsicProtoc
   }
   return {
     capture,
+    captureRequirements: (work) => capture(work).requirements,
     guard: (work, accepts) => {
       if (captures.length === 0) return work()
       const result = capture(work)
@@ -125,6 +128,24 @@ export const createDeferredIntrinsicProtocolLedger = (): DeferredIntrinsicProtoc
 }
 
 /** What distinguishes two obligations on one intrinsic at one location: a static member, a key set, or the whole prototype. */
+/**
+ * `ledger.capture(work)` for one caller. The ledger's `capture` is a generic
+ * function stored on an interface, which a native build lays out once for
+ * every caller, so its `value` merged every caller's answer type; here the
+ * answer stays in a list of `work`'s own type and only the requirements cross
+ * the ledger. `work` runs exactly once, inside the ledger's capture.
+ */
+export const captureAnswer = <T>(
+  ledger: DeferredIntrinsicProtocolLedger,
+  work: () => T
+): { readonly value: T; readonly requirements: readonly IntrinsicProtocolRequirement[] } => {
+  const answers: T[] = []
+  const requirements = ledger.captureRequirements(() => {
+    answers.push(work())
+  })
+  return { value: answers[0]!, requirements }
+}
+
 export const intrinsicProtocolRequirementKind = (requirement: IntrinsicProtocolRequirement): string | undefined =>
   requirement.standardGlobalBinding === true
     ? 'standard-global-binding'
@@ -205,7 +226,9 @@ export const failedIntrinsicProtocolRequirements = (
       if (!symbol?.valueDeclaration || context.isStandardLibraryDeclaration?.(symbol.valueDeclaration) !== true) return true
       const id = context.identities.symbolValueDeclarationId(symbol, requirement.location)
       const taint = context.globalHostMutationTaint
-      return id === null || taint.has('*') || taint.keysOf(id)?.every === true || keySetTouches(taint.surfaceKeys, { names: ['Proxy'] })
+      return (
+        id === null || taint.hasEntry('*') || taint.keysOf(id)?.every === true || keySetTouches(taint.surfaceKeys, { names: ['Proxy'] })
+      )
     }
     if (requirement.sourceGlobalBinding !== undefined) {
       const declaration = requirement.sourceGlobalBinding
@@ -227,7 +250,7 @@ export const failedIntrinsicProtocolRequirements = (
       // its callable/descriptor effects are the consumer's separate closure.
       return (
         id === null ||
-        taint.has('*') ||
+        taint.hasEntry('*') ||
         taint.keysOf(id)?.every === true ||
         keySetTouches(taint.surfaceKeys, { names: [declaration.name.text] })
       )

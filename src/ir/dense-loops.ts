@@ -310,7 +310,12 @@ export interface DenseLoopPlan {
   readonly regions?: readonly DenseRegion[]
 }
 
-export const emptyDenseLoopPlan: DenseLoopPlan = { arrays: [], groups: [], accesses: new Map(), lengths: new Map() }
+export const emptyDenseLoopPlan: DenseLoopPlan = {
+  arrays: [],
+  groups: [],
+  accesses: new Map<IrNonTerminatorOperation, DenseAccess>(),
+  lengths: new Map<IrValueId, number>()
+}
 
 const denseStorageConversionIsOrdinary = (node: ConversionNode, conversions: ConversionCensus): boolean =>
   nativeArrayViewPlansOf(recipeClosureOf([node], conversions.nodeById).values()).length === 0
@@ -347,9 +352,15 @@ export const publishDenseLoopPlan = (
     const target = reference.kind === 'cell' ? reference.representation : reference.operand.representation
     if (source === undefined || source === null) return null
     const conversion = conversions.nodeFor(source, target)
-    return conversion.capability.kind === 'never' || !denseStorageConversionIsOrdinary(conversion, conversions)
-      ? null
-      : { ...reference, conversion }
+    if (conversion.capability.kind === 'never' || !denseStorageConversionIsOrdinary(conversion, conversions)) return null
+    // One spread per kind: a native build has no allocation for one literal
+    // spread from a `cell | value` union (`conversion/nodes.ts`, `sealedCapabilityOf`).
+    if (reference.kind === 'cell') {
+      const cell: Extract<DenseReference, { kind: 'cell' }> = { ...reference, conversion }
+      return cell
+    }
+    const value: Extract<DenseReference, { kind: 'value' }> = { ...reference, conversion }
+    return value
   }
   const arrays = raw.arrays.flatMap((array) => {
     const reference = seal(array.reference)
@@ -489,7 +500,14 @@ export const admittedDenseLoopPlanOf = (
   admitsCell: DenseCellPolicy,
   relocated: ReadonlySet<IrValueId>
 ): AdmittedDenseLoopPlan => {
-  if (plan.arrays.length === 0) return { arrays: [], groups: new Map(), accesses: new Map(), lengths: new Map(), regions: [] }
+  if (plan.arrays.length === 0)
+    return {
+      arrays: [],
+      groups: new Map<number, DenseGroup>(),
+      accesses: new Map<IrNonTerminatorOperation, DenseAccess>(),
+      lengths: new Map<IrValueId, number>(),
+      regions: []
+    }
   const admitted = new Set<number>(
     plan.arrays
       .filter(

@@ -326,12 +326,15 @@ const usedBeforeDefinedGuard = (body: IrBody, graph: ControlFlowGraph): readonly
     block.operations.forEach((operation, index) => {
       if (operation.kind === 'phi') {
         for (const edge of operation.incoming)
-          checkOperand(
-            edge.value.value,
-            edge.block,
-            atBlockExit,
-            `phi ${operation.result.id} in block ${blockId} from predecessor ${edge.block}`
-          )
+          // An edge from a block nothing reaches never runs, so the value it
+          // would carry is never read -- the same claim dead code makes above.
+          if (dominance.reachable.has(edge.block))
+            checkOperand(
+              edge.value.value,
+              edge.block,
+              atBlockExit,
+              `phi ${operation.result.id} in block ${blockId} from predecessor ${edge.block}`
+            )
         return
       }
       for (const operand of operandsOfIrOperation(operation))

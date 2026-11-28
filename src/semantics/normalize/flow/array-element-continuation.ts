@@ -4,7 +4,7 @@ import { isGlobalObjectConstructor, isStandardGlobalValue, literalMemberNameOf }
 import { isAssignmentPattern } from '../assignment-patterns.js'
 import { createPropertyKeyDomains, everyWriteReachable } from '../property-key-domain.js'
 import { isClassSpelledSourceClass, type SourceClass, type ValueFlowIndex, type ValueWrite } from './model.js'
-import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from '../deferred-intrinsic-protocols.js'
+import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement, captureAnswer } from '../deferred-intrinsic-protocols.js'
 import { invocationValueUsesOf } from './invocation-facts.js'
 import { collectionStoredValuesOf, collectionValueContinuationsOf } from './collection-value-continuation.js'
 import { arrayIterationKeys, computedKeySetOf, type ComputedKeySetAuthority } from './computed-key-set.js'
@@ -109,11 +109,11 @@ interface Frame {
   readonly key: OriginKey
   tainted: boolean
 }
-const computing = new WeakMap<object, WeakMap<ValueFlowIndex, Frame[]>>()
+const computing = new WeakMap<OriginAuthority, WeakMap<ValueFlowIndex, Frame[]>>()
 const computingFramesOf = (authority: OriginAuthority, flow: ValueFlowIndex): Frame[] => {
   const identity = originAuthorityIdentity(authority)
   let byFlow = computing.get(identity)
-  if (!byFlow) computing.set(identity, (byFlow = new WeakMap()))
+  if (!byFlow) computing.set(identity, (byFlow = new WeakMap<ValueFlowIndex, Frame[]>()))
   let frames = byFlow.get(flow)
   if (!frames) byFlow.set(flow, (frames = []))
   return frames
@@ -124,7 +124,7 @@ const NO_WRITES: readonly ValueWrite[] = []
 const writesNamedBy = (flow: ValueFlowIndex, naming: ts.Node): readonly ValueWrite[] => {
   let inventory = namedWrites.get(flow)
   if (!inventory) {
-    inventory = new Map()
+    inventory = new Map<ts.Node, ValueWrite[]>()
     for (const write of flow.allWrites) {
       if (!write.naming || write.slot === 'whole') continue
       const writes = inventory.get(write.naming)
@@ -214,7 +214,7 @@ const isUpdate = (node: ts.Node): boolean =>
 /** The class an instance type is an instance of -- never `typeof C`, whose symbol is the same class symbol. */
 const sourceClassOf = (type: ts.Type): SourceClass | null => {
   if ((type.flags & ts.TypeFlags.Object) === 0) return null
-  const target: ts.Type = ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) !== 0 ? (type as ts.TypeReference).target : type
+  const target: ts.Type = ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) !== 0 ? (type as ts.TypeReference).target! : type
   if (!target.isClassOrInterface() || (target.objectFlags & ts.ObjectFlags.Class) === 0) return null
   const declaration = target.getSymbol()?.valueDeclaration
   if (!declaration || (!ts.isClassDeclaration(declaration) && !ts.isClassExpression(declaration))) return null
@@ -498,10 +498,15 @@ const holdingOfType = (checker: ts.TypeChecker, family: FieldFamily, type: ts.Ty
  */
 const visitedByFlow = (checker: ts.TypeChecker, flow: ValueFlowIndex, node: ts.Node): boolean => {
   const state = fieldStateOf(flow)
-  const recorded = (key: ts.Symbol | ts.Node, mentions: () => readonly ts.Node[]): ReadonlySet<ts.Node> => {
-    let held = state.recorded.get(key)
-    if (!held) state.recorded.set(key, (held = new Set(mentions())))
-    return held
+  // Generic in the mention type and filled element by element: the receiver
+  // and identifier lists are not `ts.Node` lists for a native build.
+  const recorded = <N extends ts.Node>(key: ts.Symbol | ts.Node, mentions: () => readonly N[]): ReadonlySet<ts.Node> => {
+    const held = state.recorded.get(key)
+    if (held) return held
+    const built = new Set<ts.Node>()
+    for (const mention of mentions()) built.add(mention)
+    state.recorded.set(key, built)
+    return built
   }
   const receiverVisited = (receiver: ts.Node): boolean | null => {
     let branch: ts.Node = receiver
@@ -704,28 +709,28 @@ interface FieldProofState {
   readonly hypotheses: WeakMap<FieldCell, readonly ts.Expression[]>
   readonly provisional: WeakSet<FieldCell>
 }
-const authorityProofs = new WeakMap<object, WeakMap<ValueFlowIndex, FieldProofState>>()
+const authorityProofs = new WeakMap<OriginAuthority, WeakMap<ValueFlowIndex, FieldProofState>>()
 const fieldProofStateOf = (authority: OriginAuthority, flow: ValueFlowIndex): FieldProofState => {
   const identity = originAuthorityIdentity(authority)
   let byFlow = authorityProofs.get(identity)
-  if (!byFlow) authorityProofs.set(identity, (byFlow = new WeakMap()))
+  if (!byFlow) authorityProofs.set(identity, (byFlow = new WeakMap<ValueFlowIndex, FieldProofState>()))
   let state = byFlow.get(flow)
   if (!state) byFlow.set(flow, (state = { proving: new Set(), hypotheses: new WeakMap(), provisional: new WeakSet() }))
   return state
 }
 
 /** Complete authority identity scopes every cached provenance answer. */
-const authorityFacts = new WeakMap<object, WeakMap<ValueFlowIndex, Map<FieldCell, FieldFacts | null>>>()
-const authorityInventories = new WeakMap<object, WeakMap<ValueFlowIndex, Map<OriginKey, ArrayInventory | null>>>()
+const authorityFacts = new WeakMap<OriginAuthority, WeakMap<ValueFlowIndex, Map<FieldCell, FieldFacts | null>>>()
+const authorityInventories = new WeakMap<OriginAuthority, WeakMap<ValueFlowIndex, Map<OriginKey, ArrayInventory | null>>>()
 const scopedCache = <V>(
-  caches: WeakMap<object, WeakMap<ValueFlowIndex, V>>,
+  caches: WeakMap<OriginAuthority, WeakMap<ValueFlowIndex, V>>,
   authority: OriginAuthority,
   flow: ValueFlowIndex,
   make: () => V
 ): V => {
   const identity = originAuthorityIdentity(authority)
   let byFlow = caches.get(identity)
-  if (!byFlow) caches.set(identity, (byFlow = new WeakMap()))
+  if (!byFlow) caches.set(identity, (byFlow = new WeakMap<ValueFlowIndex, V>()))
   let cache = byFlow.get(flow)
   if (!cache) byFlow.set(flow, (cache = make()))
   return cache
@@ -764,10 +769,12 @@ const fieldFactsOf = (checker: ts.TypeChecker, flow: ValueFlowIndex, cell: Field
   proof.proving.add(cell)
   try {
     const ledger = deferredIntrinsicProtocolLedgerOf(flow)
-    const captured = ledger?.capture(() => {
-      const family = fieldFamilyOf(checker, flow, cell)
-      return family ? computeFieldFacts(checker, flow, cell, family, authority) : null
-    })
+    const captured = ledger
+      ? captureAnswer(ledger, () => {
+          const family = fieldFamilyOf(checker, flow, cell)
+          return family ? computeFieldFacts(checker, flow, cell, family, authority) : null
+        })
+      : undefined
     const result = captured
       ? captured.value
       : (() => {
@@ -892,7 +899,13 @@ const computeFieldFacts = (
     }
   }
   const state = fieldStateOf(flow)
-  const keys = (state.keys ??= createPropertyKeyDomains(checker, flow, everyWriteReachable))
+  // Read, tested and stored as three steps: a native build lowered the
+  // `state.keys ??= ...` spelling to a presence assertion ahead of its test.
+  let keys = state.keys
+  if (keys === undefined) {
+    keys = createPropertyKeyDomains(checker, flow, everyWriteReachable)
+    state.keys = keys
+  }
   const keyMayName = (expression: ts.Expression | undefined): boolean => {
     if (expression === undefined || ts.isSpreadElement(expression)) return true
     if (numericType(checker, expression) || !keys.mayName(keys.of(expression), cell.key)) return false
@@ -1113,13 +1126,13 @@ const computeInventory = (
       for (const requirement of facts.requirements) requirements.add(requirement)
       cells.add(node)
       pending.push(node)
-      return through(facts.origins.map(original))
+      return through(facts.origins.map((origin): OriginKey => original(origin)))
     }
     if (ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)) {
       if (isModuleExportedDeclaration(checker, node, checker.getSymbolAtLocation(node.name) ?? null)) return REFUSED
       const writes = flow.writesToDeclaration(node).filter((write) => write.slot === 'whole')
       if (!writes.every((write) => write.value !== null && CELL_WRITES.has(write.edge))) return REFUSED
-      const origins = writes.map((write) => original(write.value!))
+      const origins = writes.map((write): OriginKey => original(write.value!))
       // A private name is not an expression the index can target, so a
       // `#items = []` initializer reaches no declaration there; read it here.
       if (ts.isPropertyDeclaration(node) && node.initializer && !writes.some((write) => write.value === node.initializer))
@@ -1136,7 +1149,7 @@ const computeInventory = (
       if (values.length === 0) return VACUOUS
       cells.add(node)
       pending.push(node)
-      return through(values.map(original))
+      return through(values.map((one): OriginKey => original(one)))
     }
     const value = node as ts.Expression
     if (isVacuousOrigin(flow, value)) return VACUOUS
@@ -1188,7 +1201,7 @@ const computeInventory = (
       const stored = collectionStoredValuesOf(checker, flow, value, assume)
       if (!stored) return REFUSED
       pending.push(value)
-      return through(stored.map(original))
+      return through(stored.map((one): OriginKey => original(one)))
     }
     return REFUSED
   }
@@ -1471,7 +1484,7 @@ const inventoryOf = (
           () => !frame.tainted
         )
       : ledger
-        ? ledger.capture(compute)
+        ? captureAnswer(ledger, compute)
         : { value: compute(), requirements: [] }
     const computed = captured.value
     const inventory = computed

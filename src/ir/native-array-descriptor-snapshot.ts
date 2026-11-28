@@ -2,7 +2,7 @@ import type { ConversionNodeId } from '../conversion/algebra.js'
 import { nativeArrayRootViewPlansOf } from '../conversion/array-view.js'
 import { nativeDescriptorSnapshotPlanOf, type NativeDescriptorSnapshotPlan } from '../conversion/native-descriptor-snapshot.js'
 import type { ConversionCensus } from '../conversion/nodes.js'
-import type { DeclarationId, IrValueId, PhysicalBodyId } from '../identity/ids.js'
+import type { DeclarationId, IrValueId, PhysicalBodyId, SemanticResultId } from '../identity/ids.js'
 import type { BindingPlacement } from '../projection/bindings.js'
 import type { CalleeRenderingInput } from '../projection/callee.js'
 import type { ClassLayout } from '../projection/classes.js'
@@ -14,7 +14,16 @@ import { nativeCallableFlowOf, type NativeCallableFlow } from './callable-class-
 import type { HostMethodAlias } from './host-method-aliases.js'
 import { hostTemplateMemberOf } from './host-template-conversions.js'
 import { authenticatedNativeHostMethodReadOf, intrinsicCallArgumentMatches } from './intrinsic-call-facts.js'
-import { allOperationsOf, type CallOperation, type IrBody, type IrOperand, type IrOperation } from './model.js'
+import {
+  allOperationsOf,
+  type CallOperation,
+  type IrBlock,
+  type IrBlockId,
+  type IrBody,
+  type IrNonTerminatorOperation,
+  type IrOperand,
+  type IrOperation
+} from './model.js'
 import { nativePropertyPrototypeAbsenceMatches } from './native-property-presence.js'
 import { nativeCallableSourceAliasesOf } from './native-callable-argument.js'
 import { observesNativeCarrierOnly, operandsOfIrOperation, resultOfIrOperation } from './queries.js'
@@ -54,9 +63,12 @@ const definitionMapOf = (body: IrBody): ReadonlyMap<IrValueId, IrOperation> =>
     )
   )
 
-type ArrayOperand = IrOperand & { readonly representation: Extract<Representation, { kind: 'array-object' }> }
+// The narrowed receiver representation travels in its own field: an operand
+// intersected with a narrowed member has no single native record layout.
+type ArrayRepresentation = Extract<Representation, { kind: 'array-object' }>
 interface NativeArrayDescriptorCall {
-  readonly receiver: ArrayOperand
+  readonly receiver: IrOperand
+  readonly array: ArrayRepresentation
   readonly key: IrOperand
   readonly keyText: string
 }
@@ -95,7 +107,7 @@ const nativeArrayDescriptorCallOf = (
     (constant.text !== 'length' && canonicalIndexLiteral(constant.text) === null)
   )
     return null
-  return { receiver: { ...receiver, representation: receiver.representation }, key, keyText: constant.text }
+  return { receiver, array: receiver.representation, key, keyText: constant.text }
 }
 
 interface NativeArrayDescriptorCapture extends NativeArrayDescriptorCall {
@@ -132,7 +144,7 @@ const nativeArrayDescriptorCaptureOf = (
     payload.kind === 'record' ? payload : input.deriver.layoutOf(payload.shapeId as import('../identity/ids.js').StructuralTypeId)
   if (!layout || physical.kind !== 'record' || physical.accessors.length !== 0 || ('indexes' in layout && layout.indexes.length !== 0))
     return null
-  return { ...frame, target, fields: layout.fields }
+  return { receiver: frame.receiver, array: frame.array, key: frame.key, keyText: frame.keyText, target, fields: layout.fields }
 }
 
 /** Reinstallation reads the captured descriptor, never its former source.
@@ -159,7 +171,9 @@ export const nativeArrayDescriptorReinstallationOf = (
   const { receiver, key } = frame
   const receiverProducer = definitionOf(receiver.value)
   const receiverOrigins =
-    receiverProducer?.lineage == null ? new Set() : nativeCallableSourceAliasesOf(rendering.graph, receiverProducer.lineage)
+    receiverProducer?.lineage == null
+      ? new Set<SemanticResultId>()
+      : nativeCallableSourceAliasesOf(rendering.graph, receiverProducer.lineage)
   for (const capture of captures) {
     const original = [...input.bodies.values()]
       .flatMap((body) => [...definitionMapOf(body).values()])
@@ -191,13 +205,10 @@ export const nativeArrayDescriptorSnapshotOf = (
 ): NativeArrayDescriptorSnapshot | null => {
   const capture = nativeArrayDescriptorCaptureOf(operation, definitionOf, input)
   if (!capture) return null
-  const { receiver, key, keyText, target } = capture
+  const { receiver, array, key, keyText, target } = capture
   const payload = target.payload
   if (payload.kind !== 'record' && payload.kind !== 'native-record-ref') return null
-  const storages = new Map<string, Representation>().set(
-    representationKey(receiver.representation.element),
-    receiver.representation.element
-  )
+  const storages = new Map<string, Representation>().set(representationKey(array.element), array.element)
   const roots = flow.nativeArrayViewOrigins?.get(receiver.value) ?? []
   for (const root of roots) {
     const plans = nativeArrayRootViewPlansOf(root, input.conversions.nodeById)
@@ -267,7 +278,9 @@ export const nativeArrayDescriptorSnapshotOf = (
  */
 const snapshotUsesAreClosed = (capture: IrValueId, input: NativeArrayDescriptorSnapshotInput, flow: NativeCallableFlow): boolean => {
   const aliases = new Set(
-    [...(flow.nativeDescriptorSnapshotValues ?? [])].filter(([, captures]) => captures.includes(capture)).map(([value]) => value)
+    [...(flow.nativeDescriptorSnapshotValues == null ? [] : [...flow.nativeDescriptorSnapshotValues])]
+      .filter(([, captures]) => captures.includes(capture))
+      .map(([value]) => value)
   )
   if (!aliases.has(capture)) return false
   if ([...aliases].some((alias) => flow.nativeDescriptorSnapshotOpenValues?.has(alias))) return false
@@ -341,16 +354,20 @@ export const nativeArrayDescriptorSnapshotMatches = (
 
 const withoutSnapshotReceipts = (bodies: ReadonlyMap<PhysicalBodyId, IrBody>): ReadonlyMap<PhysicalBodyId, IrBody> => {
   let changed = false
-  const next = new Map(
-    [...bodies].map(([id, body]) => {
+  const next = new Map<PhysicalBodyId, IrBody>(
+    [...bodies].map(([id, body]): readonly [PhysicalBodyId, IrBody] => {
       let bodyChanged = false
-      const blocks = new Map(
-        [...body.blocks].map(([blockId, block]) => {
+      const blocks = new Map<IrBlockId, IrBlock>(
+        [...body.blocks].map(([blockId, block]): readonly [IrBlockId, IrBlock] => {
           let blockChanged = false
-          const operations = block.operations.map((operation) => {
+          const operations = block.operations.map((operation): IrNonTerminatorOperation => {
+            // Asked by value, not by `in`: a native build's object rest marks
+            // every declared optional key present, so `in` held for every
+            // call there and rebuilt each one through a rest view that lost
+            // its other optional fields.
             if (
               operation.kind !== 'call' ||
-              (!('nativeArrayDescriptorSnapshot' in operation) && !('nativeArrayDescriptorReinstallation' in operation))
+              (operation.nativeArrayDescriptorSnapshot === undefined && operation.nativeArrayDescriptorReinstallation === undefined)
             )
               return operation
             blockChanged = true
@@ -358,11 +375,12 @@ const withoutSnapshotReceipts = (bodies: ReadonlyMap<PhysicalBodyId, IrBody>): R
             return ordinary
           })
           bodyChanged ||= blockChanged
-          return [blockId, blockChanged ? { ...block, operations } : block] as const
+          // Field by field: a spread would copy the old operations array into the new element type.
+          return [blockId, blockChanged ? { id: block.id, operations, terminator: block.terminator } : block]
         })
       )
       changed ||= bodyChanged
-      return [id, bodyChanged ? { ...body, blocks } : body] as const
+      return [id, bodyChanged ? { ...body, blocks } : body]
     })
   )
   return changed ? next : bodies
@@ -391,19 +409,20 @@ export const publishNativeArrayDescriptorSnapshots = (
     undefined,
     input.deriver
   )
-  const candidates = new Map(
-    [...input.bodies].map(([id, body]) => {
+  const candidates = new Map<PhysicalBodyId, IrBody>(
+    [...input.bodies].map(([id, body]): readonly [PhysicalBodyId, IrBody] => {
       const definitions = definitionMapOf(body)
       return [
         id,
         {
           ...body,
-          blocks: new Map(
-            [...body.blocks].map(([blockId, block]) => [
+          blocks: new Map<IrBlockId, IrBlock>(
+            [...body.blocks].map(([blockId, block]): readonly [IrBlockId, IrBlock] => [
               blockId,
               {
-                ...block,
-                operations: block.operations.map((operation) => {
+                id: block.id,
+                terminator: block.terminator,
+                operations: block.operations.map((operation): IrNonTerminatorOperation => {
                   if (operation.kind !== 'call') return operation
                   const { nativeArrayDescriptorSnapshot: previous, ...ordinary } = operation
                   const receipt = nativeArrayDescriptorSnapshotOf(operation, (value) => definitions.get(value) ?? null, flow, input)
@@ -418,8 +437,8 @@ export const publishNativeArrayDescriptorSnapshots = (
               }
             ])
           )
-        } as IrBody
-      ] as const
+        }
+      ]
     })
   )
   const captureFlow = nativeCallableFlowOf(
@@ -430,19 +449,20 @@ export const publishNativeArrayDescriptorSnapshots = (
     undefined,
     input.deriver
   )
-  const reinstallations = new Map(
-    [...candidates].map(([id, body]) => {
+  const reinstallations = new Map<PhysicalBodyId, IrBody>(
+    [...candidates].map(([id, body]): readonly [PhysicalBodyId, IrBody] => {
       const definitions = definitionMapOf(body)
       return [
         id,
         {
           ...body,
-          blocks: new Map(
-            [...body.blocks].map(([blockId, block]) => [
+          blocks: new Map<IrBlockId, IrBlock>(
+            [...body.blocks].map(([blockId, block]): readonly [IrBlockId, IrBlock] => [
               blockId,
               {
-                ...block,
-                operations: block.operations.map((operation) => {
+                id: block.id,
+                terminator: block.terminator,
+                operations: block.operations.map((operation): IrNonTerminatorOperation => {
                   if (operation.kind !== 'call') return operation
                   const { nativeArrayDescriptorReinstallation: previous, ...ordinary } = operation
                   const receipt = nativeArrayDescriptorReinstallationOf(operation, (value) => definitions.get(value) ?? null, captureFlow, {
@@ -456,8 +476,8 @@ export const publishNativeArrayDescriptorSnapshots = (
               }
             ])
           )
-        } as IrBody
-      ] as const
+        }
+      ]
     })
   )
   const candidateInput = { ...input, bodies: reinstallations }
@@ -481,17 +501,18 @@ export const publishNativeArrayDescriptorSnapshots = (
           : []
       )
   )
-  return new Map(
-    [...reinstallations].map(([id, body]) => [
+  return new Map<PhysicalBodyId, IrBody>(
+    [...reinstallations].map(([id, body]): readonly [PhysicalBodyId, IrBody] => [
       id,
       {
         ...body,
-        blocks: new Map(
-          [...body.blocks].map(([blockId, block]) => [
+        blocks: new Map<IrBlockId, IrBlock>(
+          [...body.blocks].map(([blockId, block]): readonly [IrBlockId, IrBlock] => [
             blockId,
             {
-              ...block,
-              operations: block.operations.map((operation) => {
+              id: block.id,
+              terminator: block.terminator,
+              operations: block.operations.map((operation): IrNonTerminatorOperation => {
                 if (operation.kind !== 'call') return operation
                 const { nativeArrayDescriptorSnapshot, nativeArrayDescriptorReinstallation, ...ordinary } = operation
                 return {

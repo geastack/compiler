@@ -141,19 +141,21 @@ export const withStableTypeQueries = (checker: ts.TypeChecker, program?: ts.Prog
   // keeps maps its optimized code embedded alive, prototypes included, for a
   // GC or two after last use, so the checker, the program and every AST
   // (0.27 GB on a 48K-line app) outlived the frontend into the backend.
-  const stable = Object.assign(
-    { ...checker },
-    {
-      getTypeAtLocation,
-      getSymbolAtLocation,
-      getApparentType,
-      getNonNullableType,
-      getPropertiesOfType,
-      getBaseTypes,
-      getPropertyOfType,
-      getSignaturesOfType
-    }
-  )
+  //
+  // One literal rather than `Object.assign` onto the copy: the same own members
+  // in the same order, but a native build has no bulk assignment onto a
+  // declared checker record.
+  const stable: ts.TypeChecker = {
+    ...checker,
+    getTypeAtLocation,
+    getSymbolAtLocation,
+    getApparentType,
+    getNonNullableType,
+    getPropertiesOfType,
+    getBaseTypes,
+    getPropertyOfType,
+    getSignaturesOfType
+  }
   typeMemos.set(stable, types)
   return stable
 }

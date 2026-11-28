@@ -1,4 +1,5 @@
 import ts from '#typescript'
+import { checkerUnionOf } from '../checker-union.js'
 import { implementationSignatureOf } from './structural-declarations.js'
 import { inheritedImplementationOf } from './merged-declaration.js'
 
@@ -137,8 +138,7 @@ export const physicalInheritedCallableResultAt = (checker: ts.TypeChecker, node:
   // not, so the expression keeps that arm and only the present branch is the
   // body's. `getUnionType` is not on the checker's public surface; without it
   // the chain stays on the checker's view.
-  const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
-  return typeof constructing.getUnionType === 'function' ? constructing.getUnionType([physical, checker.getUndefinedType()]) : null
+  return checkerUnionOf(checker, [physical, checker.getUndefinedType()])
 }
 
 /**

@@ -205,6 +205,7 @@ const boxesCallables = (representation: Representation, seen: Set<Representation
     case 'tagged-union':
       return representation.arms.some((arm) => arm.runtimeDiscriminator.kind === 'callable-tag' || boxesCallables(arm.value, seen))
     case 'array-object':
+      return boxesCallables(representation.element, seen)
     case 'native-sequence':
       return boxesCallables(representation.element, seen)
     case 'record':
@@ -235,12 +236,28 @@ interface LeafWalk {
   opaque: boolean
 }
 
+/**
+ * Everything one class instance or shape layout reaches, walked once. Every
+ * carrier holding the class re-walked its whole instance graph -- and every
+ * class that graph names -- because a walk's visited sets are its own; a
+ * walk's answer is only the union of what it reaches, so the union of a
+ * class's own closure is the same answer. Keyed by the shape's recursive flag
+ * too, since the policy is handed it.
+ */
+type ClosureOf = (key: string, root: Representation) => LeafWalk
+
+const mergeClosure = (into: LeafWalk, closure: LeafWalk): void => {
+  for (const key of closure.keys) into.keys.add(key)
+  if (closure.opaque) into.opaque = true
+}
+
 const walkLeaves = (
   representation: Representation,
   into: LeafWalk,
   policy: CallableIdentityDemandPolicy,
   seenClasses: Set<string>,
-  seen: Set<Representation>
+  seen: Set<Representation>,
+  closureOf: ClosureOf | null
 ): void => {
   const leaf = callableLeafKey(representation)
   if (leaf !== null) {
@@ -249,7 +266,7 @@ const walkLeaves = (
   }
   if (seen.has(representation)) return
   seen.add(representation)
-  const walk = (inner: Representation): void => walkLeaves(inner, into, policy, seenClasses, seen)
+  const walk = (inner: Representation): void => walkLeaves(inner, into, policy, seenClasses, seen, closureOf)
   switch (representation.kind) {
     case 'optional':
       walk(representation.payload)
@@ -258,6 +275,8 @@ const walkLeaves = (
       for (const arm of representation.arms) walk(arm.value)
       return
     case 'array-object':
+      walk(representation.element)
+      return
     case 'native-sequence':
       walk(representation.element)
       return
@@ -293,6 +312,10 @@ const walkLeaves = (
       const declaration = String(representation.declaration)
       if (seenClasses.has(declaration)) return
       seenClasses.add(declaration)
+      if (closureOf !== null) {
+        mergeClosure(into, closureOf(declaration, representation))
+        return
+      }
       const instance = policy.classInstanceOf(representation.declaration)
       if (instance === null) into.opaque = true
       else walk(instance)
@@ -306,6 +329,10 @@ const walkLeaves = (
       const shapeKey = `shape:${representation.shapeId}`
       if (seenClasses.has(shapeKey)) return
       seenClasses.add(shapeKey)
+      if (closureOf !== null) {
+        mergeClosure(into, closureOf(`${shapeKey}|${representation.recursive !== undefined}`, representation))
+        return
+      }
       const layout = policy.shapeLayoutOf(representation.shapeId, representation.recursive !== undefined)
       if (layout === null || layout.kind === 'native-record-ref' || layout.kind === 'unresolved') {
         into.opaque = true
@@ -324,7 +351,7 @@ const walkLeaves = (
 }
 
 /** Whether the value ITSELF is a callable (through `optional`/union wrappers), as opposed to a container that holds some. */
-const isDirectlyCallable = (representation: Representation, seen: Set<Representation> = new Set()): boolean => {
+const isDirectlyCallable = (representation: Representation, seen: Set<Representation> = new Set<Representation>()): boolean => {
   if (seen.has(representation)) return false
   seen.add(representation)
   if (callableLeafKey(representation) !== null) return true
@@ -397,9 +424,24 @@ export const callableIdentityDemandOf = (bodies: readonly IrBody[], policy: Call
         if (prototype) prototypeOwners.add(prototype.allocation)
       }
   let all = false
+  // A walk is a function of the carrier alone under this one policy, and the
+  // same few carriers are linked at every call site and cell that holds them.
+  const walks = new Map<Representation, LeafWalk>()
+  const closures = new Map<string, LeafWalk>()
+  const closureOf = (key: string, root: Representation): LeafWalk => {
+    const remembered = closures.get(key)
+    if (remembered !== undefined) return remembered
+    const closure: LeafWalk = { keys: new Set(), opaque: false }
+    walkLeaves(root, closure, policy, new Set(), new Set(), null)
+    closures.set(key, closure)
+    return closure
+  }
   const leavesOf = (representation: Representation): LeafWalk => {
+    const remembered = walks.get(representation)
+    if (remembered !== undefined) return remembered
     const walk: LeafWalk = { keys: new Set(), opaque: false }
-    walkLeaves(representation, walk, policy, new Set(), new Set())
+    walkLeaves(representation, walk, policy, new Set(), new Set(), closureOf)
+    walks.set(representation, walk)
     return walk
   }
   const observe = (operand: IrOperand | Representation): void => {
@@ -595,7 +637,10 @@ export const callableIdentityDemandOf = (bodies: readonly IrBody[], policy: Call
               linkEntry(operation.target.target.functionId, operation.arguments, result)
               break
             }
-            if (operation.target.kind === 'closed-family' && operation.target.targets.every((target) => target.kind === 'function')) {
+            if (
+              operation.target.kind === 'closed-family' &&
+              operation.target.targets.every((target): boolean => target.kind === 'function')
+            ) {
               for (const target of operation.target.targets)
                 if (target.kind === 'function') linkEntry(target.functionId, operation.arguments, result)
               break

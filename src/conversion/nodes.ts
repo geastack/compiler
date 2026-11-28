@@ -1,11 +1,13 @@
 import type { DeclarationId } from '../identity/ids.js'
 import type { Representation, TaggedUnionArm } from '../representation/model.js'
-import { isOpenDocument, representationKey, standInRefuses } from '../representation/model.js'
-import type { ConversionCapability, ConversionNode, ConversionNodeId } from './algebra.js'
+// The walk, not the key text: a tagged union's key spells each arm by its
+// discriminant, and a discriminant may itself read "unresolved".
+import { absenceCarrier, containsUnresolved, isOpenDocument, representationKey, standInRefuses } from '../representation/model.js'
+import type { ConversionCapability, ConversionNode, ConversionNodeId, MaterializerContract } from './algebra.js'
 import { transfersNativeStorage, validateCapability } from './algebra.js'
 import { recipeClosureOf, recipeIsMaterializableWithoutPriorSourceGuard } from './recipe-closure.js'
 import { createConversionDerivationContext, deriveConversionCapability } from './derive.js'
-import { narrowingCapabilityFor } from './build.js'
+import { ConversionNodeTable, narrowingCapabilityFor } from './build.js'
 import type { CoercionOperation, ConversionRuntimeRegistry } from './registry.js'
 import type { FamilyMemberKeys } from './record-view.js'
 import { absentOnlyFieldReadOf, impossibleFieldReadOf, ABSENT_ONLY_FIELD_READ, IMPOSSIBLE_FIELD_READ } from './impossible-field-read.js'
@@ -242,7 +244,8 @@ export interface ConversionCensus {
 
 export interface ConversionCensusInput {
   readonly registry: ConversionRuntimeRegistry
-  readonly nodes: ReadonlyMap<ConversionNodeId, ConversionNode>
+  /** The eager graph's table, or a plain map where a caller builds the census without one. */
+  readonly nodes: ConversionNodeTable | ReadonlyMap<ConversionNodeId, ConversionNode>
 }
 
 /**
@@ -290,7 +293,18 @@ export const conversionNodeIdOf = (source: Representation, target: Representatio
 export const coercionTargetOf = (operation: CoercionOperation): Representation =>
   operation === 'ToNumber' ? { kind: 'scalar', domain: 'number' } : { kind: 'string' }
 
-const containsUnresolved = (representation: Representation): boolean => representationKey(representation).includes('unresolved')
+/** A `static` or `atom` capability carrying a new materializer, built one literal per kind. */
+const sealedCapabilityOf = (
+  capability: Extract<ConversionCapability, { kind: 'static' | 'atom' }>,
+  materializer: MaterializerContract
+): ConversionCapability => {
+  if (capability.kind === 'atom') {
+    const atom: Extract<ConversionCapability, { kind: 'atom' }> = { ...capability, materializer }
+    return atom
+  }
+  const fixed: Extract<ConversionCapability, { kind: 'static' }> = { ...capability, materializer }
+  return fixed
+}
 
 const exactAccessorPayloadOf = (capability: ConversionCapability): boolean =>
   capability.kind === 'optional'
@@ -329,6 +343,13 @@ const registeredRecordPayloadOf = (
 }
 
 export const createConversionNodes = (input: ConversionCensusInput): ConversionCensus => {
+  // The eager table is a class or a plain map; one branch per class rather
+  // than a method call through the union, which has no single native receiver.
+  const eagerTable = input.nodes
+  const eagerNodeOf = (id: ConversionNodeId): ConversionNode | undefined =>
+    eagerTable instanceof ConversionNodeTable ? eagerTable.get(id) : eagerTable.get(id)
+  const eagerHolds = (id: ConversionNodeId): boolean =>
+    eagerTable instanceof ConversionNodeTable ? eagerTable.has(id) : eagerTable.has(id)
   const minted = new Map<ConversionNodeId, ConversionNode>()
   /** Every pair being derived, at the depth of its derivation frame. */
   const deriving = new Map<ConversionNodeId, number>()
@@ -376,7 +397,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
       // The eager graph keys its dynamic-source nodes by the target alone and
       // mints them from one generic dynamic carrier; a dynamic source with a
       // different reason is the same conversion, so the same node answers.
-      const eager = input.nodes.get(targetKey)
+      const eager = eagerNodeOf(targetKey)
       if (eager !== undefined) return eager.capability
       return deriveConversionCapability(target, context)
     }
@@ -462,7 +483,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     shallowestReentry = Infinity
     let capability: ConversionCapability
     try {
-      const eager = input.nodes.get(id)
+      const eager = eagerNodeOf(id)
       capability =
         eager !== undefined &&
         !((eager.capability.kind === 'static' || eager.capability.kind === 'atom') && eager.capability.materializer.staticRecipeFallback)
@@ -537,39 +558,56 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
         !exactAccessorPayloadOf(capability)
       ) {
         const plan = dynamicWrapperPlanOf(source, target, capability, nodeFor, nodeById)
-        capability = plan
-          ? {
-              kind: 'static',
-              materializer: {
-                id: 'dynamic-wrapper',
-                domain: `dynamic-wrapper:${targetKey}`,
-                allocates:
-                  plan.kind === 'promise' ||
-                  dynamicWrapperDependenciesOf(plan).some(
-                    (child) => 'materializer' in child.capability && child.capability.materializer.allocates
-                  ),
-                executesSourceGuard: true,
-                dynamicWrapper: plan,
-                dependencies: dynamicWrapperDependenciesOf(plan)
-              }
+        if (plan) {
+          // Typed as the `static` arm, not left to a conditional's literal
+          // union: a native build gave that union its own twin `static` layout
+          // and recast it into `ConversionCapability` through a view, whose
+          // fields the recast then read as empty -- the `kind` came out ''.
+          const wrapper: Extract<ConversionCapability, { kind: 'static' }> = {
+            kind: 'static',
+            materializer: {
+              id: 'dynamic-wrapper',
+              domain: `dynamic-wrapper:${targetKey}`,
+              allocates:
+                plan.kind === 'promise' ||
+                dynamicWrapperDependenciesOf(plan).some(
+                  (child) => 'materializer' in child.capability && child.capability.materializer.allocates
+                ),
+              executesSourceGuard: true,
+              dynamicWrapper: plan,
+              dependencies: dynamicWrapperDependenciesOf(plan)
             }
-          : { kind: 'never', reason: `dynamic wrapper ${id} has no selected native structural payload readers` }
+          }
+          capability = wrapper
+        } else {
+          capability = { kind: 'never', reason: `dynamic wrapper ${id} has no selected native structural payload readers` }
+        }
       }
       if (capability.kind === 'static' || capability.kind === 'atom') {
         const targetReceiver = source.kind === 'dynamic' ? abiOfCallee(target)?.receiver : null
         if (capability.materializer.wrapperKind === 'dynamic-carrier-in' && targetReceiver) {
           const receiver = nativeLogicalReceiverRecipeOf(targetReceiver, nodeFor, nodeById)
-          capability =
-            receiver === null
-              ? { kind: 'never', reason: `dynamic callable ${id} has no native physical receiver transport` }
-              : {
-                  ...capability,
-                  materializer: {
-                    ...capability.materializer,
-                    nativeLogicalReceiver: receiver,
-                    dependencies: [...(capability.materializer.dependencies ?? []), ...receiver.materializers]
-                  }
-                }
+          if (receiver === null) {
+            capability = { kind: 'never', reason: `dynamic callable ${id} has no native physical receiver transport` }
+          } else {
+            const materializer: MaterializerContract = {
+              ...capability.materializer,
+              nativeLogicalReceiver: receiver,
+              dependencies: [
+                ...(capability.materializer.dependencies == null ? [] : [...capability.materializer.dependencies]),
+                ...receiver.materializers
+              ]
+            }
+            // One spread per kind: a spread of the static-or-atom union builds
+            // a union-typed literal, which a native build has no allocation for.
+            if (capability.kind === 'atom') {
+              const atom: Extract<ConversionCapability, { kind: 'atom' }> = { ...capability, materializer }
+              capability = atom
+            } else {
+              const fixed: Extract<ConversionCapability, { kind: 'static' }> = { ...capability, materializer }
+              capability = fixed
+            }
+          }
         }
         // The constructed object is read back the way any boxed value of the
         // frame's result carrier is: by this census's own reader, never a
@@ -580,17 +618,23 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
           target.kind === 'constructor-value-dispatch'
         ) {
           const result = nodeFor({ kind: 'dynamic', reason: 'declared-any-never-narrowed' }, target.abi.result)
-          capability =
-            result.capability.kind === 'never' || !recipeIsMaterializableWithoutPriorSourceGuard(result, nodeById)
-              ? { kind: 'never', reason: `dynamic constructor ${id} has no checked reader of its constructed result` }
-              : {
-                  ...capability,
-                  materializer: {
-                    ...capability.materializer,
-                    constructedResult: result,
-                    dependencies: [...(capability.materializer.dependencies ?? []), result]
-                  }
-                }
+          if (result.capability.kind === 'never' || !recipeIsMaterializableWithoutPriorSourceGuard(result, nodeById)) {
+            capability = { kind: 'never', reason: `dynamic constructor ${id} has no checked reader of its constructed result` }
+          } else {
+            const materializer: MaterializerContract = {
+              ...capability.materializer,
+              constructedResult: result,
+              dependencies: [...(capability.materializer.dependencies == null ? [] : [...capability.materializer.dependencies]), result]
+            }
+            // One spread per kind, as above.
+            if (capability.kind === 'atom') {
+              const atom: Extract<ConversionCapability, { kind: 'atom' }> = { ...capability, materializer }
+              capability = atom
+            } else {
+              const fixed: Extract<ConversionCapability, { kind: 'static' }> = { ...capability, materializer }
+              capability = fixed
+            }
+          }
         }
       }
       if (capability.kind === 'static' || capability.kind === 'atom') {
@@ -670,21 +714,30 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
                 // contract. A missing unused-field claim is meaningful: merging
                 // the old claim would hide a live dynamic accessor's receiver
                 // exposure. Only the atom's classifier identity remains fixed.
-                { ...capability, materializer: { ...sealed, id: materializer.id, domain: materializer.domain } }
-              : { kind: 'never', reason: `structural conversion ${id} has no admitted leaf plan` }
+                // One spread per kind, as above: a native build viewed the
+                // union-typed literal as whichever twin arm matched its layout
+                // first, so a `static` capability read as `class-family`.
+                sealedCapabilityOf(capability, { ...sealed, id: materializer.id, domain: materializer.domain })
+              : { kind: 'never' as const, reason: `structural conversion ${id} has no admitted leaf plan` }
         } else if (materializer.id === 'gea::Promise::adopt-converted' && source.kind === 'promise' && target.kind === 'promise') {
           const plan = promiseAdoptionPlanOf(source, target, nodeFor, nodeById)
-          capability =
-            plan === null
-              ? { kind: 'never', reason: `promise conversion ${id} has no admitted completion plan` }
-              : {
-                  ...capability,
-                  materializer: {
-                    ...materializer,
-                    promiseAdoption: plan,
-                    dependencies: plan.kind === 'payload-transfer' ? [plan.conversion] : []
-                  }
-                }
+          if (plan === null) {
+            capability = { kind: 'never', reason: `promise conversion ${id} has no admitted completion plan` }
+          } else {
+            const adopted: MaterializerContract = {
+              ...materializer,
+              promiseAdoption: plan,
+              dependencies: plan.kind === 'payload-transfer' ? [plan.conversion] : []
+            }
+            // One spread per kind, as above.
+            if (capability.kind === 'atom') {
+              const atom: Extract<ConversionCapability, { kind: 'atom' }> = { ...capability, materializer: adopted }
+              capability = atom
+            } else {
+              const fixed: Extract<ConversionCapability, { kind: 'static' }> = { ...capability, materializer: adopted }
+              capability = fixed
+            }
+          }
         }
       }
     } finally {
@@ -696,7 +749,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     // once per minted pair, quadratic in the census, and was the single
     // largest lowering cost on a large program (over half of it).
     validateCapability(capability, {
-      has: (known) => known === id || input.nodes.has(known) || minted.has(known) || provisional.has(known)
+      has: (known) => known === id || eagerHolds(known) || minted.has(known) || provisional.has(known)
     })
     const node: ConversionNode = { id, source, target, capability }
     if (assumes < depth) {
@@ -843,7 +896,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     }
     if (source.kind === 'dynamic' && target.kind === 'optional') {
       const present = dictionaryReadFor(source, target.payload)
-      const absent = nodeFor({ kind: target.absence }, target)
+      const absent = nodeFor(absenceCarrier(target.absence), target)
       if (
         !present ||
         !recipeIsMaterializableWithoutPriorSourceGuard(present, nodeById) ||
@@ -1130,7 +1183,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     const native =
       union.kind === 'tagged-union' &&
       union.arms.every((arm) => homeIsNative(arm.value)) &&
-      (source.kind !== 'optional' || homeIsNative({ kind: source.absence }))
+      (source.kind !== 'optional' || homeIsNative(absenceCarrier(source.absence)))
     const node: ConversionNode = {
       id,
       source,
@@ -1165,7 +1218,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     if (!isStructuralRecordCarrier(record)) return null
     const classArms = assertedViewClassArmsOf(target)
     if (classArms.length === 0) return null
-    const absent = source.kind === 'optional' ? nodeFor({ kind: source.absence }, target) : null
+    const absent = source.kind === 'optional' ? nodeFor(absenceCarrier(source.absence), target) : null
     if (absent !== null && absent.capability.kind === 'never') return null
     const id = `${representationKey(source)}->${representationKey(target)}#asserted-view`
     const remembered = assertedViews.get(id)
@@ -1364,7 +1417,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     minted.get(id) ??
     provisional.get(id)?.node ??
     contextual.get(id) ??
-    input.nodes.get(id) ??
+    eagerNodeOf(id) ??
     coercions.get(id) ??
     exactArms.get(id) ??
     nativeBaseViews.get(id) ??

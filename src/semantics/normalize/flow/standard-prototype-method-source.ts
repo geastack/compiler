@@ -64,15 +64,17 @@ export const standardPrototypeMethodSourceOf = (
   // return interface, rather than a use-site assertion, owns the method table.
   const candidates = direct ? [direct] : instances.map((instance) => checker.getPropertyOfType(instance, key))
   if (candidates.length === 0 || candidates.some((one) => one === undefined)) return null
-  const declarations = [...new Set(candidates.flatMap((one) => one?.declarations ?? []))]
-  if (
-    declarations.length === 0 ||
-    !declarations.every((one): one is ts.MethodSignature => {
-      if (!ts.isMethodSignature(one) || !ts.isInterfaceDeclaration(one.parent) || !isLibrary(one)) return false
-      const owner = checker.getSymbolAtLocation(one.parent.name)
-      return owner !== undefined && owners.has(owner)
-    })
-  )
-    return null
+  const found = [...new Set(candidates.flatMap((one) => one?.declarations ?? []))]
+  if (found.length === 0) return null
+  // Collected as method signatures one by one rather than narrowed by an
+  // `every` predicate: a native build has no conversion from the declaration
+  // list to the signature list that predicate claims it is.
+  const declarations: ts.MethodSignature[] = []
+  for (const one of found) {
+    if (!ts.isMethodSignature(one) || !ts.isInterfaceDeclaration(one.parent) || !isLibrary(one)) return null
+    const owner = checker.getSymbolAtLocation(one.parent.name)
+    if (owner === undefined || !owners.has(owner)) return null
+    declarations.push(one)
+  }
   return { access, intrinsic, key, declarations }
 }

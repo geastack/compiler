@@ -23,7 +23,7 @@ export const isAuthenticatedObjectTag = (context: ProducerContext, node: ts.Node
   const owner = prototype.expression
   if (!isGlobalObjectConstructor(context.checker, owner, context.checker.getTypeAtLocation(owner))) return false
   const taint = context.globalHostMutationTaint
-  if (taint.has('*')) return false
+  if (taint.hasEntry('*')) return false
   // Function.call and CallableFunction.call have distinct checker declarations
   // but borrow the same runtime prototype. Ask its shared mutation identity,
   // for the one key this borrowing reads from it.
@@ -51,7 +51,7 @@ export const isAuthenticatedObjectTag = (context: ProducerContext, node: ts.Node
     // The owner and `Object.prototype` are objects read through by key; the
     // member declarations are values that must not have been replaced.
     const objectIntact = next === undefined || intrinsicObjectKeysIntact(taint, identity, { names: [next] })
-    const replaced = location !== owner && location !== prototype.name && taint.has(identity)
+    const replaced = location !== owner && location !== prototype.name && taint.hasEntry(identity)
     if (!objectIntact || replaced) return false
   }
   const primitivePrototypesIntact = (type: ts.Type): boolean => {

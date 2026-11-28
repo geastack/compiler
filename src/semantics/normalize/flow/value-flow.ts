@@ -246,7 +246,9 @@ const toExactLists = <K, V>(table: Map<K, V[]>): void => {
   for (const [key, list] of table) if (list.length > 1) table.set(key, list.slice())
 }
 
-const sameNodes = (a: readonly ts.Node[], b: readonly ts.Node[]): boolean => {
+// Generic in the element, as `sameList` is: a native build has no conversion
+// from a list of one node type to a list of `ts.Node`.
+const sameNodes = <N extends ts.Node>(a: readonly N[], b: readonly N[]): boolean => {
   if (a.length !== b.length) return false
   for (let index = 0; index < a.length; index++) if (a[index] !== b[index]) return false
   return true
@@ -352,7 +354,7 @@ export const sameValueFlowContent = (a: ValueFlowIndex, b: ValueFlowIndex): bool
 const flowTargetsByChecker = new WeakMap<ts.TypeChecker, Map<ts.Symbol, FlowTarget>>()
 const flowTargetsOf = (checker: ts.TypeChecker): Map<ts.Symbol, FlowTarget> => {
   let bySymbol = flowTargetsByChecker.get(checker)
-  if (!bySymbol) flowTargetsByChecker.set(checker, (bySymbol = new Map()))
+  if (!bySymbol) flowTargetsByChecker.set(checker, (bySymbol = new Map<ts.Symbol, FlowTarget>()))
   return bySymbol
 }
 const internedTarget = (bySymbol: Map<ts.Symbol, FlowTarget>, target: FlowTarget | null): FlowTarget | null => {
@@ -456,7 +458,9 @@ const rememberSyntaxFacts = (
   recordedSyntaxFacts.set(checker, { reachable, files: [...files], facts, prior })
 }
 
-const sameList = (a: readonly unknown[], b: readonly unknown[]): boolean => {
+// Generic in the element rather than over `unknown[]`: a native build has no
+// conversion from a typed list to a list of untyped values.
+const sameList = <E>(a: readonly E[], b: readonly E[]): boolean => {
   if (a.length !== b.length) return false
   for (let index = 0; index < a.length; index++) if (a[index] !== b[index]) return false
   return true
@@ -493,10 +497,10 @@ const lookupOver = <K, V>(table: ReadonlyMap<K, V>, earlier: ReadonlyMap<K, V> |
  * its key with that list -- of the table's own element type, being those very
  * elements.
  */
-const shareLists = <K, L extends readonly unknown[]>(table: Map<K, L>, prior: ReadonlyMap<K, readonly unknown[]>): void => {
+const shareLists = <K, E, L extends readonly E[]>(table: Map<K, L>, prior: ReadonlyMap<K, readonly E[]>): void => {
   for (const [key, list] of table) {
     const earlier = prior.get(key)
-    if (earlier !== undefined && earlier !== list && sameList(earlier, list)) table.set(key, earlier as L)
+    if (earlier !== undefined && earlier !== list && sameList<E>(earlier, list)) table.set(key, earlier as L)
   }
 }
 
@@ -510,15 +514,15 @@ const shareLists = <K, L extends readonly unknown[]>(table: Map<K, L>, prior: Re
  * held twice for the life of the index. No reader mutates a list or tells two
  * equal ones apart.
  */
-const shareSymbolLists = <L extends readonly unknown[]>(
-  byDeclaration: Map<ts.Node, L>,
-  bySymbol: ReadonlyMap<ts.Symbol, L>,
-  symbolsOf: (list: L) => readonly (ts.Symbol | null | undefined)[]
+const shareSymbolLists = <E>(
+  byDeclaration: Map<ts.Node, E[]>,
+  bySymbol: ReadonlyMap<ts.Symbol, E[]>,
+  symbolsOf: (list: readonly E[]) => readonly (ts.Symbol | null | undefined)[]
 ): void => {
   for (const [declaration, list] of byDeclaration)
     for (const symbol of symbolsOf(list)) {
       const named = symbol ? bySymbol.get(symbol) : undefined
-      if (named === undefined || named === list || !sameList(named, list)) continue
+      if (named === undefined || named === list || !sameList<E>(named, list)) continue
       byDeclaration.set(declaration, named)
       break
     }
@@ -1140,10 +1144,10 @@ export const indexValueFlow = (
       const target = targetOf(list[0]!)
       return [target?.symbol, target?.nameSymbol]
     })
-    // A variable's every mention is one identifier naming it, which both
-    // walks file under its symbol: three in four member lists on a 48K-line
-    // app are the symbol's reference list, entry for entry.
-    shareLists(memberReferences, referencesBySymbol)
+    // Not shared into `memberReferences`, although three in four of its lists
+    // on a 48K-line app equal the symbol's reference list entry for entry: a
+    // native build lays out a `ts.Expression[]` and a `ts.MemberName[]`
+    // differently, so one list cannot be both, and the table keeps its own.
   }
   toExactLists(state.bySymbol)
   toExactLists(state.byDeclaration)
@@ -1162,7 +1166,9 @@ export const indexValueFlow = (
   invocationOperands.clear()
   reusedWrites.clear()
   const NO_REFERENCES: readonly ts.Expression[] = []
-  const callSites = new Map(calls.map((site) => [site.call, site]))
+  // Keyed as the index publishes it: a native build does not convert a table
+  // keyed by the call's own node union into one keyed by `ts.Node`.
+  const callSites = new Map<ts.Node, FlowCallSite>(calls.map((site): [ts.Node, FlowCallSite] => [site.call, site]))
   const writesBySite = new Map<ts.Node, ValueWrite[]>()
   for (const write of state.allWrites) {
     // A site's first write as a one-element literal: `[]` grown by `push`

@@ -44,6 +44,11 @@ import type { ProgramConversionRecipe } from './program-conversions.js'
 import { nativeAbsentPropertyReadOf } from './native-absent-property.js'
 import { isPrivateNameKey } from '../semantics/model/structural-types.js'
 import { createUnobservedCallableInputs } from './unobserved-callable-inputs.js'
+import { mapValues } from '../collection-lists.js'
+
+// Not a type guard on purpose: narrowing `abi.result` by its `kind` would hand
+// the later `Representation` consumers a void-less sub-union of the carrier.
+const returnsVoid = (abi: CallableAbi): boolean => abi.result.kind === 'void'
 
 /** A constructor carrier's own construct convention, seen through presence and borrowing; see its use in `closedConstructOperations`. */
 const constructorCarrierOf = (
@@ -249,6 +254,7 @@ const directChildrenOf = (
     case 'promise':
       return [representation.value]
     case 'native-sequence':
+      return [representation.element]
     case 'dense-buffer':
       return [representation.element]
     case 'proxy-object':
@@ -299,11 +305,7 @@ const directChildrenOf = (
   }
 }
 
-const callableChildrenOf = (abi: {
-  readonly result: Representation
-  readonly receiver: Representation | null
-  readonly parameters: readonly { readonly value: Representation }[]
-}): readonly Representation[] => [
+const callableChildrenOf = (abi: CallableAbi): readonly Representation[] => [
   abi.result,
   ...(abi.receiver ? [abi.receiver] : []),
   ...abi.parameters.map((parameter) => parameter.value)
@@ -540,10 +542,9 @@ const storesIntoDeclaredSlot = (operation: IrOperation): boolean =>
     operation.attributes.configurable)
 
 const callMatchesAbi = (operation: Extract<IrOperation, { readonly kind: 'call' }>, abi: CallableAbi): boolean => {
-  const resultMatches =
-    abi.result.kind === 'void'
-      ? operation.result === null
-      : operation.result !== null && representationKey(operation.result.representation) === representationKey(abi.result)
+  const resultMatches = returnsVoid(abi)
+    ? operation.result === null
+    : operation.result !== null && representationKey(operation.result.representation) === representationKey(abi.result)
   const receiverMatches =
     abi.receiver === null
       ? operation.receiver === null
@@ -1229,7 +1230,7 @@ export const reflectionExposureOf = (
   const callableFlow = options.shakeComplete
     ? nativeCallableFlowOf(
         bodies,
-        options.placements ?? new Map(),
+        options.placements ?? new Map<DeclarationId, BindingPlacement>(),
         classes,
         options.conversions,
         options.trace ? (operation, reason) => callableReads.push({ operation, reason }) : undefined,
@@ -1358,7 +1359,8 @@ export const reflectionExposureOf = (
       // into a live view (a regular-expression router maps routes to `[handler, any]`
       // tuples stored as `[handler, ParamIndexMap]`) read through a source
       // protocol nothing demanded.
-      const node = operation.rebuild !== undefined ? options.conversions?.nodeById(operation.conversionUse) : null
+      const conversions = operation.rebuild !== undefined ? options.conversions : undefined
+      const node = conversions === undefined ? undefined : conversions.nodeById(operation.conversionUse)
       if (node) citeViewNode(node.id, node.source, node.target, operation)
       else citeViewNode(operation.conversionUse, operation.source.representation, operation.result.representation, operation)
     }
@@ -1400,14 +1402,16 @@ export const reflectionExposureOf = (
       for (const recipe of operation.nativeFieldViewWrite?.targets ?? [])
         if (recipe.target !== null && recipe.conversion !== null)
           citeViewNode(recipe.conversion, operation.value.representation, recipe.target, operation)
-    const methodRead =
-      operation.kind === 'get-iterator'
-        ? operation.nativeNextMethodRead
-        : operation.kind === 'iterator-next' || operation.kind === 'iterator-close'
-          ? operation.nativeMethodRead
-          : undefined
-    if (methodRead)
+    // Each read cited on its own: the two receipt kinds are different records,
+    // and one merged `methodRead` had no single carrier.
+    if (operation.kind === 'get-iterator' && operation.nativeNextMethodRead) {
+      const methodRead = operation.nativeNextMethodRead
       for (const recipe of methodRead.read.sources) citeViewNode(recipe.conversion, recipe.source, methodRead.value, operation)
+    }
+    if ((operation.kind === 'iterator-next' || operation.kind === 'iterator-close') && operation.nativeMethodRead) {
+      const methodRead = operation.nativeMethodRead
+      for (const recipe of methodRead.read.sources) citeViewNode(recipe.conversion, recipe.source, methodRead.value, operation)
+    }
   }
   const closeReadSites: {
     readonly receiver: Representation
@@ -1436,7 +1440,9 @@ export const reflectionExposureOf = (
   for (const [root, operation] of viewNodeOperations)
     for (const node of recipeClosureOf([root], options.conversions?.nodeById).values()) {
       if (!nativeFieldViewIdentityTransportOf(node) || !('materializer' in node.capability)) continue
-      for (const [plan, routes] of node.capability.materializer.recordView?.fieldViews ?? []) {
+      const fieldViews = node.capability.materializer.recordView?.fieldViews
+      if (fieldViews === undefined) continue
+      for (const [plan, routes] of fieldViews) {
         if (plan.kind !== 'fields') continue
         for (const field of plan.fields)
           if (field.read.kind === 'held' || field.read.kind === 'view' || field.read.kind === 'record-accessor') {
@@ -1448,10 +1454,17 @@ export const reflectionExposureOf = (
     }
   for (const operation of retainedOperations) {
     if (enteredOperations.has(operation)) continue
-    if ((operation.kind === 'get' && operation.nativeFieldViewRead) || (operation.kind === 'set' && operation.nativeFieldViewWrite)) {
-      const receipt = operation.kind === 'get' ? operation.nativeFieldViewRead! : operation.nativeFieldViewWrite!
+    // One branch per receipt kind: a `?:` over the two merged carriers that
+    // need not agree, each still holding its field's absent state.
+    if (operation.kind === 'get' && operation.nativeFieldViewRead != null) {
+      const receipt = operation.nativeFieldViewRead
       for (const key of receipt.keyDomain ?? [receipt.key])
-        promoteNamedField(operation.receiver.representation, key, operation, operation.kind === 'get' ? 'native-read' : 'native-write')
+        promoteNamedField(operation.receiver.representation, key, operation, 'native-read')
+    }
+    if (operation.kind === 'set' && operation.nativeFieldViewWrite != null) {
+      const receipt = operation.nativeFieldViewWrite
+      for (const key of receipt.keyDomain ?? [receipt.key])
+        promoteNamedField(operation.receiver.representation, key, operation, 'native-write')
     }
   }
   const viewSources = new Map<string, Map<string, Representation>>()
@@ -1473,8 +1486,10 @@ export const reflectionExposureOf = (
         if (
           (surface.kind === 'record' || surface.kind === 'record-with-index' || surface.kind === 'native-record-ref') &&
           surface.ownership === 'shared-refcount'
-        )
-          pending.push(...(viewSources.get(surface.shapeId)?.values() ?? []))
+        ) {
+          const sources = viewSources.get(surface.shapeId)
+          if (sources) for (const viewSource of sources.values()) pending.push(viewSource)
+        }
     }
   }
   // A live view's own keys ARE its original's, filtered for enumerability by
@@ -1494,7 +1509,9 @@ export const reflectionExposureOf = (
           surface.ownership !== 'shared-refcount'
         )
           continue
-        for (const source of viewSources.get(surface.shapeId)?.values() ?? []) {
+        const sources = viewSources.get(surface.shapeId)
+        if (sources === undefined) continue
+        for (const source of sources.values()) {
           const identity = representationKey(source)
           if (seen.has(identity)) continue
           seen.add(identity)
@@ -1638,7 +1655,7 @@ export const reflectionExposureOf = (
         )
       )
         return false
-      if (operation.result === null || abi.result.kind === 'void') return true
+      if (operation.result === null || returnsVoid(abi)) return true
       const into = operation.result.representation
       return (
         representationKey(abi.result) === representationKey(into) ||
@@ -1653,7 +1670,8 @@ export const reflectionExposureOf = (
     if (
       operation.callee.representation.kind === 'generic-function-set' &&
       selectorOrigins !== undefined &&
-      nativeGenericCallEntriesOf(operation, new Set(selectorOrigins), (id) => bodyByFunction.get(String(id)), options.conversions) !== null
+      nativeGenericCallEntriesOf(operation, [...new Set(selectorOrigins)], (id) => bodyByFunction.get(String(id)), options.conversions) !==
+        null
     ) {
       closedCallOperations.add(operation)
       continue
@@ -1854,7 +1872,7 @@ export const reflectionExposureOf = (
     if (field !== null && unwrappedCallableAbi(field)?.receiver?.kind === 'dynamic') return true
     return (
       (receiver.kind === 'record' || receiver.kind === 'native-record-ref') &&
-      [...(viewSources.get(receiver.shapeId)?.values() ?? [])].some((source) => iteratorMemberHasDynamicReceiver(source, member, seen))
+      [...mapValues(viewSources.get(receiver.shapeId))].some((source) => iteratorMemberHasDynamicReceiver(source, member, seen))
     )
   }
   const promoteIteratorRead = (
@@ -1871,7 +1889,10 @@ export const reflectionExposureOf = (
       seen.add(identity)
       promoteNamedField(source, method.read.key, operation, 'native-read')
       for (const surface of objectSurfacesOf(source))
-        if ('shapeId' in surface) pending.push(...(viewSources.get(surface.shapeId)?.values() ?? []))
+        if ('shapeId' in surface) {
+          const sources = viewSources.get(surface.shapeId)
+          if (sources) for (const viewSource of sources.values()) pending.push(viewSource)
+        }
     }
     const dynamic = method.read.sources.some(({ source, conversion }) => {
       if (source.kind === 'dynamic' || unwrappedCallableAbi(source)?.receiver?.kind === 'dynamic') return true
@@ -2017,7 +2038,7 @@ export const reflectionExposureOf = (
     if (body.abi === null) continue
     for (const blockId of body.blockOrder) {
       const block = body.blocks.get(blockId)
-      if (block?.terminator.kind === 'return' && block.terminator.value !== null && body.abi.result.kind !== 'void') {
+      if (block?.terminator.kind === 'return' && block.terminator.value !== null && !returnsVoid(body.abi)) {
         const returned = representationKey(block.terminator.value.representation)
         // An async body settles its promise with the returned value itself
         // (`emit-return.ts`'s `coroutineReturnOf` hands a payload-keyed value
@@ -2068,7 +2089,9 @@ export const reflectionExposureOf = (
     if (operation.kind === 'compute' && operation.form === 'unary' && operation.operator === 'ObjectTag') {
       // The authenticated algorithm reads one well-known symbol. It neither
       // reads ordinary toString nor publishes unrelated fields or tag objects.
-      const tagDeclaration = [...(options.wellKnownSymbols ?? [])].find(([, name]) => name === 'toStringTag')?.[0]
+      const tagDeclaration = [...(options.wellKnownSymbols == null ? [] : [...options.wellKnownSymbols])].find(
+        ([, name]) => name === 'toStringTag'
+      )?.[0]
       const receiver = operation.operands[0]
       if (tagDeclaration !== undefined && receiver !== undefined) {
         if (deriver && nativeRecordIndexHasPropertyOf(deriver, receiver.representation, { kind: 'symbol' })) continue
@@ -2142,7 +2165,10 @@ export const reflectionExposureOf = (
           if (seen.has(identity)) continue
           seen.add(identity)
           if (destinations.has(identity)) promoteNamedField(surface, recipe.keyText, operation, 'define')
-          if ('shapeId' in surface) pending.push(...(viewSources.get(surface.shapeId)?.values() ?? []))
+          if ('shapeId' in surface) {
+            const sources = viewSources.get(surface.shapeId)
+            if (sources) for (const viewSource of sources.values()) pending.push(viewSource)
+          }
         }
       }
       continue
@@ -2150,8 +2176,13 @@ export const reflectionExposureOf = (
     if (nativeAbsentPropertyReadOf(operation) !== null) continue
     if ((operation.kind === 'get' && operation.nativeFieldViewRead) || (operation.kind === 'set' && operation.nativeFieldViewWrite)) {
       const receiver = operation.receiver.representation
-      const receipt = operation.kind === 'get' ? operation.nativeFieldViewRead! : operation.nativeFieldViewWrite!
-      const keys = receipt.keyDomain ?? [receipt.key]
+      // Read per receipt kind: a `?:` over the two receipts merged carriers that
+      // need not agree, each still holding its field's absent state.
+      let keys: readonly string[] = []
+      if (operation.kind === 'get' && operation.nativeFieldViewRead != null)
+        keys = operation.nativeFieldViewRead.keyDomain ?? [operation.nativeFieldViewRead.key]
+      if (operation.kind === 'set' && operation.nativeFieldViewWrite != null)
+        keys = operation.nativeFieldViewWrite.keyDomain ?? [operation.nativeFieldViewWrite.key]
       const pending: Representation[] = [receiver]
       const seen = new Set<string>()
       while (pending.length) {
@@ -2160,7 +2191,10 @@ export const reflectionExposureOf = (
         if (seen.has(identity)) continue
         seen.add(identity)
         for (const key of keys) promoteNamedField(source, key, operation, operation.kind === 'get' ? 'native-read' : 'native-write')
-        if ('shapeId' in source) pending.push(...(viewSources.get(source.shapeId)?.values() ?? []))
+        if ('shapeId' in source) {
+          const sources = viewSources.get(source.shapeId)
+          if (sources) for (const viewSource of sources.values()) pending.push(viewSource)
+        }
       }
       if (operation.kind === 'get' && operation.result.representation.kind === 'dynamic')
         for (const source of operation.nativeFieldViewRead!.sources) promoteLogicalReceiver(source.source, 'native-view-dynamic-result')
@@ -2749,7 +2783,7 @@ export const reflectionExposureOf = (
       key,
       Object.freeze({
         level: row.level,
-        ...(unrestricted.has(key) ? {} : { fieldOperations: fieldOperations.get(key) ?? new Map() }),
+        ...(unrestricted.has(key) ? {} : { fieldOperations: fieldOperations.get(key) ?? new Map<string, Set<ReflectionFieldOperation>>() }),
         reasons: new Set(row.reasons),
         representations: new Set(row.representations)
       })

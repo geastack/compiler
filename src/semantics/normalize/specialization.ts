@@ -1,10 +1,12 @@
 import ts from '#typescript'
+import { checkerUnionOf } from '../checker-union.js'
 import { genericFunctionChoiceMembersOf } from './generic-function-choice.js'
 import type { ProgramReachability } from './reachability.js'
 import type { NamespacePathCensus } from './namespace-paths.js'
 import { layoutRelevantParameterIndices, parametersInInstanceStorage, storedDataDiffers } from './structural-layout-relevance.js'
 import { isAmbientDeclaration } from '../ambient.js'
 import { mergedDeclarationOf } from './merged-declaration.js'
+import { declaredNameOf } from './declared-name.js'
 
 /**
  * Monomorphization: one copy of a generic body per distinct instantiation.
@@ -243,8 +245,13 @@ export const emptySpecializationCensus: SpecializationCensus = {
 }
 
 const typeParametersOf = (declaration: ts.Declaration): readonly ts.TypeParameterDeclaration[] => {
-  const withParameters = declaration as ts.Declaration & { readonly typeParameters?: ts.NodeArray<ts.TypeParameterDeclaration> }
-  return withParameters.typeParameters ?? []
+  // Narrowed rather than read through a structural cast: a natively compiled
+  // compiler builds a cast's view from the static (base node) class, which
+  // declares no `typeParameters`, so every declaration read as declaring none.
+  if (ts.isFunctionLike(declaration) || ts.isClassLike(declaration)) return declaration.typeParameters ?? []
+  if (ts.isInterfaceDeclaration(declaration) || ts.isTypeAliasDeclaration(declaration)) return declaration.typeParameters ?? []
+  if (ts.isJSDocTemplateTag(declaration)) return declaration.typeParameters
+  return []
 }
 
 /**
@@ -327,9 +334,44 @@ const containsHoleIn = (checker: ts.TypeChecker, type: ts.Type, depth = 0): bool
   // `update` -- 171 tsc self-compile rows, every one a callee whose carrier
   // was the constraint image while the call wanted the instantiation.
   const reference = type as ts.TypeReference
-  const args = [...(reference.typeArguments ?? []), ...(type.aliasTypeArguments ?? [])]
+  const args = [
+    ...(reference.typeArguments == null ? [] : [...reference.typeArguments]),
+    ...(type.aliasTypeArguments == null ? [] : [...type.aliasTypeArguments])
+  ]
   if (args.some((one) => containsHoleIn(checker, one, depth + 1))) return true
   return literalMembersHoldHole(checker, type)
+}
+
+/**
+ * The holes `containsHoleIn` finds, collected rather than tested: the same walk
+ * over the same positions, so a filling that one calls open names exactly the
+ * holes this returns. An open copy's residual bindings (`censusSpecializations`'
+ * `residuals`) are keyed by these.
+ */
+const holesIn = (
+  checker: ts.TypeChecker,
+  type: ts.Type,
+  into = new Set<ts.Type>(),
+  depth = 0,
+  literals = new Set<ts.Type>()
+): Set<ts.Type> => {
+  if (isHole(type)) {
+    into.add(type)
+    return into
+  }
+  if (depth > 6) return into
+  if (type.isUnionOrIntersection()) {
+    for (const one of type.types) holesIn(checker, one, into, depth + 1, literals)
+    return into
+  }
+  const reference = type as ts.TypeReference
+  for (const one of reference.typeArguments == null ? [] : reference.typeArguments) holesIn(checker, one, into, depth + 1, literals)
+  for (const one of type.aliasTypeArguments == null ? [] : type.aliasTypeArguments) holesIn(checker, one, into, depth + 1, literals)
+  if (isObjectLiteralType(type) && !literals.has(type)) {
+    literals.add(type)
+    for (const property of checker.getPropertiesOfType(type)) holesIn(checker, checker.getTypeOfSymbol(property), into, 1, literals)
+  }
+  return into
 }
 
 /**
@@ -443,7 +485,10 @@ const openFilling = (type: ts.Type | undefined, depth = 0): boolean => {
   if ((type.flags & ts.TypeFlags.Index) !== 0) return openFilling((type as ts.IndexType).type, depth + 1)
   if ((type.flags & ts.TypeFlags.Substitution) !== 0) return openFilling((type as ts.SubstitutionType).baseType, depth + 1)
   const reference = type as ts.TypeReference
-  return [...(reference.typeArguments ?? []), ...(type.aliasTypeArguments ?? [])].some((one) => openFilling(one, depth + 1))
+  return [
+    ...(reference.typeArguments == null ? [] : [...reference.typeArguments]),
+    ...(type.aliasTypeArguments == null ? [] : [...type.aliasTypeArguments])
+  ].some((one) => openFilling(one, depth + 1))
 }
 
 /** A type parameter's declaration, the class's where a class and interface merge -- see `mergedDeclarationOf`. */
@@ -613,13 +658,56 @@ const unify = (
   // corresponds -- but a member can collapse under instantiation (`T |
   // undefined` with `T` bound to `undefined` is one member), and a pairing
   // across a collapse would bind a hole to a member that is not its own.
+  //
+  // Position alone is not correspondence, though: a union's members are
+  // ordered by type id, and ids are handed out in creation order, which the
+  // two sides need not share -- and a different checker (typescript-go) hands
+  // them out differently again. `S | readonly S[] | null | Set<S>` against
+  // `State | readonly State[] | null | Set<State>` paired `S` with
+  // `readonly State[]` there, minting `edgeHas` at an array of states that its
+  // callers then refused to convert to. So a member is first matched by what
+  // the instantiation cannot change: an identical closed member is itself, and
+  // a reference matches the one concrete member with the same target. Only
+  // what is left is paired by position, as before.
   if (generic.isUnion() && concrete.isUnion() && generic.types.length === concrete.types.length) {
-    for (let index = 0; index < generic.types.length; index += 1) {
-      const left = generic.types[index]
-      const right = concrete.types[index]
+    const remaining = [...concrete.types]
+    const pending: ts.Type[] = []
+    for (const left of generic.types) {
+      const same = remaining.indexOf(left)
+      if (same >= 0) {
+        remaining.splice(same, 1)
+        continue
+      }
+      const target = (left as ts.TypeReference).target
+      const matches = target === undefined ? [] : remaining.filter((right) => (right as ts.TypeReference).target === target)
+      const match = matches.length === 1 ? matches[0] : undefined
+      if (match !== undefined) {
+        remaining.splice(remaining.indexOf(match), 1)
+        unify(checker, left, match, depth + 1, record, recordPair)
+        continue
+      }
+      pending.push(left)
+    }
+    for (let index = 0; index < pending.length; index += 1) {
+      const left = pending[index]
+      const right = remaining[index]
       if (left && right) unify(checker, left, right, depth + 1, record, recordPair)
     }
     return
+  }
+  // An object LITERAL type with a hole in a property, member for member by
+  // name. It has no type arguments of its own -- `{ readonly fields: readonly
+  // F[] }` keeps `F` only in `fields` -- so none of the walks above reach the
+  // hole, and a generic whose sole mention of a parameter sits in such a
+  // parameter type was recorded with that parameter bound by nothing: no
+  // copy, and every call refused its read as a declaration this program never
+  // introduces. The concrete side is the checker's instantiation of the same
+  // literal, so each property's type is exactly its image.
+  if (literalMembersHoldHole(checker, generic) && (concrete.flags & ts.TypeFlags.Object) !== 0) {
+    for (const property of checker.getPropertiesOfType(generic)) {
+      const image = checker.getPropertyOfType(concrete, property.name)
+      if (image) unify(checker, checker.getTypeOfSymbol(property), checker.getTypeOfSymbol(image), depth + 1, record, recordPair)
+    }
   }
   unifySignatures(checker, generic.getCallSignatures(), concrete.getCallSignatures(), depth, record, recordPair)
   unifySignatures(checker, generic.getConstructSignatures(), concrete.getConstructSignatures(), depth, record, recordPair)
@@ -777,6 +865,27 @@ export const censusSpecializations = (
    * but a bare type-reference annotation counts as one.
    */
   const constructions = new Map<ts.Declaration, boolean[]>()
+  /**
+   * Per ordinal: what an OPEN copy's residual holes are bound to, or `null`
+   * for every copy whose tuple is closed (or whose holes the callee's own
+   * enclosing copy binds -- see `openFillingsOf`).
+   *
+   * `engine<K, Slot<K>>(...)` inside `solver<K>` instantiates `engine` at
+   * `Slot<string>` in the copy `solver<string>`, but nothing in the program
+   * ever spells `Slot<string>`, so the checker never built it and the public
+   * API cannot be asked to. The copy is recorded at the OPEN filling
+   * `Slot<K>` instead, beside `K -> string`: the open type and its residual
+   * binding together are the instantiation, exactly as a type and a mapper
+   * are inside the checker. Two copies of `solver` therefore mint two copies
+   * of `engine` with one tuple and different residuals, so the residual is
+   * part of the copy's identity. `bindingOf` answers the residual holes too,
+   * which is what lets a substitution of `S` to `Slot<K>` keep going to
+   * `Slot<string>` inside the copy.
+   */
+  const residuals = new Map<ts.Declaration, (ReadonlyMap<ts.Type, ts.Type> | null)[]>()
+  const sameResidual = (left: ReadonlyMap<ts.Type, ts.Type> | null, right: ReadonlyMap<ts.Type, ts.Type> | null): boolean =>
+    left === right ||
+    (left !== null && right !== null && left.size === right.size && [...left].every(([hole, value]) => right.get(hole) === value))
 
   const deferredSpellingFor = (declaration: ts.Declaration, tuple: readonly ts.Type[]): ts.Type | null =>
     deferredSpellings.get(declaration)?.find((entry) => entry.tuple.length === tuple.length && entry.tuple.every((t, i) => t === tuple[i]))
@@ -788,14 +897,19 @@ export const censusSpecializations = (
     instantiated: ts.Type | null = null,
     signatures: readonly [ts.Signature, ts.Signature] | null = null,
     fillings: ReadonlyMap<ts.Type, ts.Type> | null = null,
-    constructs = true
+    constructs = true,
+    residual: ReadonlyMap<ts.Type, ts.Type> | null = null
   ): number => {
     const minted = constructions.get(declaration) ?? []
     const seen = tuples.get(declaration) ?? []
     const spelled = spellings.get(declaration) ?? []
     const paired = signaturePairs.get(declaration) ?? []
     const filled = compositeFillings.get(declaration) ?? []
-    const existing = seen.findIndex((candidate) => candidate.length === tuple.length && candidate.every((t, i) => t === tuple[i]))
+    const held = residuals.get(declaration) ?? []
+    const existing = seen.findIndex(
+      (candidate, ordinal) =>
+        candidate.length === tuple.length && candidate.every((t, i) => t === tuple[i]) && sameResidual(held[ordinal] ?? null, residual)
+    )
     // A spelling this site does not carry may still have been computed for this
     // exact tuple somewhere the program never instantiated from; see
     // `deferredSpellings`.
@@ -850,6 +964,9 @@ export const censusSpecializations = (
     signaturePairs.set(declaration, paired)
     filled.push(fillings)
     compositeFillings.set(declaration, filled)
+    held.length = seen.length - 1
+    held.push(residual)
+    residuals.set(declaration, held)
     return seen.length - 1
   }
 
@@ -871,9 +988,19 @@ export const censusSpecializations = (
   }
 
   /** The copy whose arguments are exactly these, or `null` when the program makes no such instantiation. */
-  const ordinalOfArguments = (declaration: ts.Declaration, args: readonly ts.Type[]): number | null => {
+  const ordinalOfArguments = (
+    declaration: ts.Declaration,
+    args: readonly ts.Type[],
+    residual: ReadonlyMap<ts.Type, ts.Type> | null = null
+  ): number | null => {
     const seen = tuples.get(declaration) ?? []
-    const found = seen.findIndex((candidate) => candidate.length === args.length && candidate.every((t, index) => t === args[index]))
+    const held = residuals.get(declaration) ?? []
+    const found = seen.findIndex(
+      (candidate, ordinal) =>
+        candidate.length === args.length &&
+        candidate.every((t, index) => t === args[index]) &&
+        sameResidual(held[ordinal] ?? null, residual)
+    )
     return found >= 0 ? found : null
   }
 
@@ -959,10 +1086,7 @@ export const censusSpecializations = (
    * substitutes them; a clause whose argument keeps a hole nested inside it
    * names no tuple, and answers "no" rather than guessing one.
    */
-  const baseCopiesDiffer = (
-    declaration: ts.ClassLikeDeclaration,
-    copies: readonly { readonly arguments: readonly ts.Type[] }[]
-  ): boolean => {
+  const baseCopiesDiffer = (declaration: ts.ClassLikeDeclaration, copies: readonly Specialization[]): boolean => {
     const base = declaration.heritageClauses?.find((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword)?.types[0]
     if (!base) return false
     const reference = checker.getTypeAtLocation(base) as ts.TypeReference
@@ -984,6 +1108,28 @@ export const censusSpecializations = (
     if (baseTuples.some((tuple) => tuple.some((filling) => filling === null))) return false
     const [first, ...rest] = baseTuples
     return first !== undefined && rest.some((tuple) => tuple.some((filling, index) => filling !== first[index]))
+  }
+
+  /**
+   * The class instance type a polymorphic `this` filling stands for, when
+   * that type is closed.
+   *
+   * `prepare(rules, this)` in a class field initializer infers `View` as the
+   * class's polymorphic `this` -- a type parameter, so the call was a hole no
+   * copy fills (no generic encloses it; its symbol is the class, which owns no
+   * copy) and the callee was read at its root. Every value of that type is an
+   * instance of the class, and `structural.ts` types it as the class's
+   * declared type for exactly that reason, so the copy is the one at that
+   * type. A generic class's declared type still names its own parameters and
+   * is left open.
+   */
+  const closedThisOf = (filling: ts.Type): ts.Type | null => {
+    if (!isHole(filling)) return null
+    const symbol = filling.getSymbol()
+    const declaration = symbol ? mergedDeclarationOf(symbol) : null
+    if (!symbol || !declaration || !(ts.isClassLike(declaration) || (symbol.flags & ts.SymbolFlags.Class) !== 0)) return null
+    const declared = checker.getDeclaredTypeOfSymbol(symbol)
+    return declared !== filling && !containsHole(declared) ? declared : null
   }
 
   /** Record one instantiation, given the owner and the fillings keyed by parameter symbol. */
@@ -1030,6 +1176,7 @@ export const censusSpecializations = (
       // instantiation, it is no instantiation: nothing downstream could fill
       // it, so neither the tuple nor the site is worth recording.
       if (!filling) return
+      filling = closedThisOf(filling) ?? filling
       tuple.push(filling)
       if (symbol) resolved.set(symbol, filling)
     }
@@ -1699,7 +1846,12 @@ export const censusSpecializations = (
     // refused `function-value-dispatch((dynamic) -> array-object(dynamic))
     // -> function-value-dispatch((scalar(number)) -> array-object(number))`.
     if (ts.isVariableDeclaration(parent) && parent.initializer === node && parent.type === undefined) return null
-    if ((parent as { readonly name?: ts.Node }).name === node && !ts.isPropertyAccessExpression(parent)) return null
+    // A shorthand property's name is also the REFERENCE: `{ call }` reads the
+    // generic `call` as a value exactly as `{ call: call }` does, and left
+    // unrecorded the name kept the open generic, whose declaration no copy
+    // places -- emission refused it as a binding this program never introduces.
+    const shorthand = ts.isShorthandPropertyAssignment(parent) && parent.name === node
+    if (declaredNameOf(parent) === node && !ts.isPropertyAccessExpression(parent) && !shorthand) return null
     if (ts.isPropertyAccessExpression(parent) && parent.name === node) return null
     if (ts.isExportSpecifier(parent) || ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isNamespaceImport(parent))
       return null
@@ -1724,7 +1876,7 @@ export const censusSpecializations = (
       top = top.parent
     }
     if (genericFunctionChoiceMembersOf(checker, top)) return null
-    let symbol = qualifiedMember ?? checker.getSymbolAtLocation(node)
+    let symbol = qualifiedMember ?? (shorthand ? checker.getShorthandAssignmentValueSymbol(parent) : checker.getSymbolAtLocation(node))
     if (symbol && (symbol.flags & ts.SymbolFlags.Alias) !== 0) symbol = checker.getAliasedSymbol(symbol)
     const value = symbol?.valueDeclaration
     if (!value || value.getSourceFile().isDeclarationFile) return null
@@ -1927,6 +2079,67 @@ export const censusSpecializations = (
   }
 
   /**
+   * A CALL still open because its holes belong to a function TYPE the program
+   * instantiates several ways, closed over those holes' constraints.
+   *
+   * `guard: (work, accepts) => { ... capture(work) ... }` is a non-generic
+   * arrow contextually typed by `guard: <T>(work: () => T, ...) => T`, so
+   * `capture`'s `T` is filled with the function type's `T`. That arrow is one
+   * body however many instantiations call through the type, and no copy binds
+   * a body-less signature's parameter, so `structural.ts` types every mention
+   * of it inside the arrow as the parameter's own constraint. The callee copy
+   * the arrow calls is therefore the one at that same constraint -- anything
+   * else would pass a value of one layout to a parameter typed another. Only
+   * after `uniquelyInstantiatedTypeOwnersOf` declined: one instantiation is a
+   * single exact answer and is taken there.
+   */
+  const closeCallableTypeHoles = (): boolean => {
+    let minted = false
+    for (const [node, site] of sites) {
+      if (!(ts.isCallExpression(node) || ts.isNewExpression(node))) continue
+      // Narrowed through one read: a second read of the field is a second
+      // [[Get]], which a live view answers unnarrowed.
+      const declaration = site.declaration
+      if (!ts.isFunctionLike(declaration)) continue
+      if (!site.fillings.some((filling) => containsHole(filling))) continue
+      const parameters = typeParametersOf(declaration)
+      if (parameters.length !== site.fillings.length) continue
+      const closed: ts.Type[] = []
+      for (const filling of site.fillings) {
+        if (!containsHole(filling)) {
+          closed.push(filling)
+          continue
+        }
+        const owner = isHole(filling) ? holeOwnerOf(filling) : null
+        if (
+          !owner ||
+          !(
+            ts.isFunctionTypeNode(owner) ||
+            ts.isConstructorTypeNode(owner) ||
+            ts.isCallSignatureDeclaration(owner) ||
+            ts.isConstructSignatureDeclaration(owner) ||
+            ts.isMethodSignature(owner)
+          )
+        )
+          break
+        const constraint = checker.getBaseConstraintOfType(filling) ?? checker.getUnknownType()
+        if (containsHole(constraint)) break
+        closed.push(constraint)
+      }
+      if (closed.length !== parameters.length) continue
+      const bound = new Map<ts.Symbol, ts.Type>()
+      parameters.forEach((parameter, index) => {
+        const symbol = checker.getSymbolAtLocation(parameter.name)
+        const filling = closed[index]
+        if (symbol && filling) bound.set(symbol, filling)
+      })
+      if (ordinalOfArguments(declaration, closed) === null) minted = true
+      recordTuple(declaration, bound, node)
+    }
+    return minted
+  }
+
+  /**
    * A value use still open after the fixpoint -- its contextual type's holes
    * had no single instantiation to fill them from -- becomes the copy over
    * the constraints: one closure, the only thing the value can be.
@@ -1934,7 +2147,10 @@ export const censusSpecializations = (
   const closeOpenValueUses = (): void => {
     for (const [node, site] of sites) {
       if (!(ts.isIdentifier(node) || ts.isArrowFunction(node) || ts.isFunctionExpression(node))) continue
-      if (!ts.isFunctionLike(site.declaration)) continue
+      // Narrowed through one read: a second read of the field is a second
+      // [[Get]], which a live view answers unnarrowed.
+      const declaration = site.declaration
+      if (!ts.isFunctionLike(declaration)) continue
       if (!site.fillings.some((filling) => containsHole(filling))) continue
       if (site.fillings.some((filling) => !isHole(filling) && containsHole(filling))) continue
       // ⛔ A hole an ENCLOSING generic owns is not an open value use: the
@@ -1946,8 +2162,8 @@ export const censusSpecializations = (
       // equateValues`), where every copy of the enclosing function then refused
       // the conversion from a closure over `any` to its own comparer.
       if (fillsFromEnclosingCopy(node, site.fillings)) continue
-      const bound = constraintBindingsOf(site.declaration)
-      if (bound) recordTuple(site.declaration, bound, node)
+      const bound = constraintBindingsOf(declaration)
+      if (bound) recordTuple(declaration, bound, node)
     }
   }
 
@@ -2239,6 +2455,89 @@ export const censusSpecializations = (
   }
 
   /**
+   * Whether `callee` may hold an OPEN copy (`residuals`). A plain function
+   * only: its copies are entered through the site that names them, so a
+   * second copy at an instantiation some other site spells closed is a second
+   * body, never a second layout. A class copy is a layout every value of that
+   * type must share; a method's copies are unioned across its override group
+   * (`mintOverrideCopies`), which closed tuples alone can satisfy; and a
+   * function literal stored in a field or property is one cell whose copies
+   * are joined (`joinedArguments` below). None of those is opened.
+   */
+  const admitsOpenCopy = (callee: ts.Declaration): boolean => {
+    if (ts.isFunctionDeclaration(callee)) return true
+    if (!(ts.isArrowFunction(callee) || ts.isFunctionExpression(callee))) return false
+    const holder = callee.parent
+    return !((ts.isPropertyDeclaration(holder) || ts.isPropertyAssignment(holder)) && holder.initializer === callee)
+  }
+
+  /**
+   * A site's fillings substituted for one copy of an enclosing generic, where
+   * `filledBy` leaves a hole nested inside a composite (`Slot<K>`) or the
+   * enclosing copy is itself open. The fillings keep the open types; what the
+   * copy binds their holes to goes into the residual (`residuals`). `null`
+   * when some hole belongs to neither.
+   *
+   * A hole is closed one of three ways. Owned by a generic FUNCTION that
+   * lexically encloses the callee, it needs no residual: every copy of the
+   * callee is walked inside a copy of that function, whose step on the path
+   * binds it -- so the copy's tuple is the same for every enclosing copy, and
+   * recording a residual would only mint the callee once per enclosing copy
+   * and walk each under the others too. Owned by `owner`, the copy being
+   * substituted binds it. Otherwise it must be one the enclosing copy's own
+   * residual already binds -- the chain `engine` -> `inner<S>` with `S` bound
+   * to `Slot<K>` in an open copy of `engine`. A residual value can itself be
+   * open, so its holes are closed by the same rules until none is left.
+   */
+  const openFillingsOf = (
+    callee: ts.Declaration,
+    fillings: readonly ts.Type[],
+    owner: ts.Declaration,
+    ordinal: number,
+    tuple: readonly ts.Type[]
+  ): { readonly fillings: readonly ts.Type[]; readonly residual: ReadonlyMap<ts.Type, ts.Type> | null } | null => {
+    const ownerParameters = typeParametersOf(owner)
+    const ownerResidual = residuals.get(owner)?.[ordinal] ?? null
+    const residual = new Map<ts.Type, ts.Type>()
+    const enclosesCallee = (hole: ts.Type): boolean => {
+      const declaration = holeOwnerOf(hole)
+      return declaration !== null && ts.isFunctionLike(declaration) && enclosesNode(declaration, callee)
+    }
+    const valueOf = (hole: ts.Type): ts.Type | null => {
+      const parameter = typeParameterDeclarationOf(hole)
+      const index = parameter ? ownerParameters.indexOf(parameter) : -1
+      return index >= 0 ? (tuple[index] ?? null) : (ownerResidual?.get(hole) ?? null)
+    }
+    const close = (type: ts.Type): boolean => {
+      for (const hole of holesIn(checker, type)) {
+        if (residual.has(hole) || enclosesCallee(hole)) continue
+        const value = valueOf(hole)
+        if (value === null) return false
+        residual.set(hole, value)
+        if (containsHole(value) && !close(value)) return false
+      }
+      return true
+    }
+    const substituted: ts.Type[] = []
+    for (const filling of fillings) {
+      const closed = filledBy(filling, owner, tuple)
+      if (closed !== null) {
+        substituted.push(closed)
+        continue
+      }
+      // A bare hole `owner` binds to an open filling is replaced by that
+      // filling, whose holes the residual then closes; any other open filling
+      // stays as written.
+      const parameter = isHole(filling) ? typeParameterDeclarationOf(filling) : undefined
+      const index = parameter ? ownerParameters.indexOf(parameter) : -1
+      const open = index >= 0 ? (tuple[index] ?? null) : filling
+      if (open === null || !close(open)) return null
+      substituted.push(open)
+    }
+    return { fillings: substituted, residual: residual.size > 0 ? residual : null }
+  }
+
+  /**
    * Close the enumeration under SUBSTITUTION, not just under what one source
    * line spells out.
    *
@@ -2260,7 +2559,7 @@ export const censusSpecializations = (
    * rather than replacing one, never the thing that makes this stop.
    */
   const openSites = function* (): Generator<readonly [ts.Node, { declaration: ts.Declaration; fillings: readonly ts.Type[] }]> {
-    yield* sites
+    for (const delegated of sites) yield delegated
     for (const [node, members] of setSites) for (const site of members) yield [node, site] as const
   }
   for (let round = 0; round < 8; round += 1) {
@@ -2300,8 +2599,23 @@ export const censusSpecializations = (
         }
       }
       for (const owner of enclosingGenericsOf(node)) {
-        for (const tuple of tuples.get(owner) ?? []) {
+        for (const [ordinal, tuple] of (tuples.get(owner) ?? []).entries()) {
           const substituted = site.fillings.map((filling) => filledBy(filling, owner, tuple))
+          // Still open after substitution -- a hole nested in a composite, or
+          // one an open copy of `owner` binds to an open filling: record the
+          // open copy with its residual. See `residuals`.
+          if (substituted.some((filling) => filling === null) && admitsOpenCopy(site.declaration)) {
+            const opened = openFillingsOf(site.declaration, site.fillings, owner, ordinal, tuple)
+            if (opened === null || opened.fillings.length !== parameters.length) continue
+            const existing = ordinalOfArguments(site.declaration, opened.fillings, opened.residual)
+            if (existing !== null) {
+              markConstructed(site.declaration, existing)
+              continue
+            }
+            tupleOrdinal(site.declaration, opened.fillings, null, null, null, true, opened.residual)
+            minted = true
+            continue
+          }
           if (substituted.length !== parameters.length || substituted.some((filling) => filling === null)) continue
           const already = ordinalOfArguments(site.declaration, substituted as ts.Type[])
           if (already !== null) {
@@ -2325,6 +2639,11 @@ export const censusSpecializations = (
     }
     if (mintReinterpretationCopies()) minted = true
     if (mintOverrideCopies()) minted = true
+    // Last, and only once the substitutions above are exhausted: it closes a
+    // site for good, so it must not pre-empt a unique instantiation a later
+    // round would still have found. Inside the loop so the copies it mints
+    // induce their own bodies' instantiations like any other.
+    if (!minted && closeCallableTypeHoles()) minted = true
     if (!minted) break
   }
   closeOpenValueUses()
@@ -2339,11 +2658,10 @@ export const censusSpecializations = (
   // `isGeneric` able to say so; `specializationsOf` still answers `[]`, which is
   // what it answered before.
   for (const declaration of declared) built.set(declaration, [])
-  const constructingUnion = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
   const joinOf = (types: readonly ts.Type[]): ts.Type | null => {
     const distinct = [...new Set(types)]
     if (distinct.length === 1) return distinct[0] ?? null
-    return typeof constructingUnion.getUnionType === 'function' ? constructingUnion.getUnionType(distinct) : null
+    return checkerUnionOf(checker, distinct)
   }
   for (const [declaration, seen] of tuples) {
     const parameters = typeParametersOf(declaration)
@@ -2377,7 +2695,8 @@ export const censusSpecializations = (
     }
     built.set(
       declaration,
-      seen.map((tuple, ordinal) =>
+      // Stated, so both arms build the one record type the table holds.
+      seen.map((tuple, ordinal): Specialization =>
         joinedArguments
           ? {
               ordinal,
@@ -2397,12 +2716,46 @@ export const censusSpecializations = (
               instantiatedSignature: signaturePairs.get(declaration)?.[ordinal] ?? null,
               bindingOf: (parameter: ts.Declaration) => {
                 const index = parameters.indexOf(parameter as ts.TypeParameterDeclaration)
-                return index >= 0 ? (tuple[index] ?? null) : null
+                if (index >= 0) return tuple[index] ?? null
+                // An open copy also binds the holes its fillings still name,
+                // so substituting `S` to `Slot<K>` continues to `K`.
+                const residual = residuals.get(declaration)?.[ordinal]
+                if (!residual) return null
+                for (const [hole, value] of residual) if (typeParameterDeclarationOf(hole) === parameter) return value
+                return null
               },
               fillingOf: (open: ts.Type) => compositeImageOf(declaration, ordinal, open)
             }
       )
     )
+  }
+
+  /**
+   * The copy a site names under the asking copy's substitution, or `null`.
+   *
+   * A filling still open after substituting is a hole this program never
+   * fills at this site -- unless the census recorded an OPEN copy for exactly
+   * those open fillings (`residuals`). That copy is the answer when every
+   * residual hole is one the asking copy binds to the very value the copy was
+   * minted with: the residual is the substitution the minting copy made, so
+   * agreeing on it is agreeing on the instantiation. A copy with no residual
+   * left its holes to the callee's own enclosing copy, which binds them
+   * wherever the callee is walked.
+   */
+  const ordinalAtSite = (
+    site: { readonly declaration: ts.Declaration; readonly fillings: readonly ts.Type[] },
+    substitute: ((type: ts.Type) => ts.Type) | undefined
+  ): number | null => {
+    const resolved = substitute ? site.fillings.map(substitute) : site.fillings
+    if (!resolved.some((filling) => containsHole(filling))) return ordinalOfArguments(site.declaration, resolved)
+    const held = residuals.get(site.declaration) ?? []
+    const found = (tuples.get(site.declaration) ?? []).findIndex((candidate, ordinal) => {
+      if (candidate.length !== resolved.length || !candidate.every((one, index) => one === resolved[index])) return false
+      const residual = held[ordinal]
+      if (!residual) return true
+      return substitute !== undefined && [...residual].every(([hole, value]) => substitute(hole) === value)
+    })
+    return found >= 0 ? found : null
   }
 
   /** Whether the program mints this copy at all, rather than only naming it. See `constructions`. */
@@ -2733,11 +3086,7 @@ export const censusSpecializations = (
     specializationAt: (node, substitute) => {
       const site = sites.get(node)
       if (!site) return null
-      const resolved = substitute ? site.fillings.map(substitute) : site.fillings
-      // A filling still open after the asking copy substituted is a hole this
-      // program never fills at this site, and an unfilled hole names no copy.
-      if (resolved.some((filling) => containsHole(filling))) return null
-      const ordinal = ordinalOfArguments(site.declaration, resolved)
+      const ordinal = ordinalAtSite(site, substitute)
       return ordinal === null ? null : { declaration: site.declaration, ordinal: canonicalOrdinalOf(site.declaration, ordinal) }
     },
     setSpecializationsAt: (node, substitute) => {
@@ -2745,9 +3094,7 @@ export const censusSpecializations = (
       if (!members) return null
       const copies: { declaration: ts.Declaration; ordinal: number }[] = []
       for (const site of members) {
-        const resolved = substitute ? site.fillings.map(substitute) : site.fillings
-        if (resolved.some((filling) => containsHole(filling))) return null
-        const ordinal = ordinalOfArguments(site.declaration, resolved)
+        const ordinal = ordinalAtSite(site, substitute)
         if (ordinal === null) return null
         copies.push({ declaration: site.declaration, ordinal: canonicalOrdinalOf(site.declaration, ordinal) })
       }

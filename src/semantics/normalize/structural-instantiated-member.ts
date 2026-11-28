@@ -75,7 +75,7 @@ const memberNameOf = (member: ts.ClassElement | ts.TypeElement): string | null =
 
 const isDefaultLibraryReference = (reference: ts.TypeReference): boolean => {
   if ((reference.objectFlags & ts.ObjectFlags.Reference) === 0) return false
-  const declarations = reference.target.getSymbol()?.declarations ?? []
+  const declarations = reference.target!.getSymbol()?.declarations ?? []
   return declarations.length > 0 && declarations.every((declaration) => declaration.getSourceFile().hasNoDefaultLib)
 }
 
@@ -92,9 +92,13 @@ const isStatic = (member: ts.Node): boolean =>
  * for a name a class declares both ways -- answer with the wrong one.
  */
 const membersOf = (declaration: ts.Declaration): readonly (ts.ClassElement | ts.TypeElement)[] => {
-  if (ts.isClassLike(declaration)) return declaration.members.filter((member) => !isStatic(member))
-  if (ts.isInterfaceDeclaration(declaration)) return declaration.members
-  return []
+  // Collected element by element: neither member array converts natively to
+  // this list of either element kind.
+  const members: (ts.ClassElement | ts.TypeElement)[] = []
+  if (ts.isClassLike(declaration)) {
+    for (const member of declaration.members) if (!isStatic(member)) members.push(member)
+  } else if (ts.isInterfaceDeclaration(declaration)) for (const member of declaration.members) members.push(member)
+  return members
 }
 
 export const createInstantiatedMembers = (checker: ts.TypeChecker, specializations: SpecializationCensus) => {
@@ -219,7 +223,7 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
    */
   const closedReference = (reference: ts.TypeReference, owner: ts.Declaration): boolean => {
     if ((reference.objectFlags & ts.ObjectFlags.Reference) === 0) return false
-    const declarations = reference.target.getSymbol()?.declarations
+    const declarations = reference.target!.getSymbol()?.declarations
     if (declarations === undefined) return true
     for (let ancestor: ts.Node | undefined = owner; ancestor !== undefined; ancestor = ancestor.parent)
       if (declarations.includes(ancestor as ts.Declaration)) return false
@@ -240,7 +244,7 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     // An instantiated mapped or anonymous type also has a `target`, but its
     // holes live in its mapper, not in arguments the walk above has read.
     if ((reference.objectFlags & ts.ObjectFlags.Reference) === 0) return false
-    const declarations = reference.target.getSymbol()?.declarations ?? []
+    const declarations = reference.target!.getSymbol()?.declarations ?? []
     return (
       declarations.length > 0 &&
       declarations.every((declaration) => {
@@ -435,10 +439,12 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     // declared result. The arms themselves are matched safely, so nothing is
     // lost by stopping here.
     if (open.isUnion() || closed.isUnion()) {
-      if (open.isUnion() && closed.isUnion()) yield* pairArms(open.types, closed.types, into, depth, seen, owner)
+      if (open.isUnion() && closed.isUnion())
+        for (const delegated of pairArms(open.types, closed.types, into, depth, seen, owner)) yield delegated
       return
     }
-    if (open.isIntersection() && closed.isIntersection()) yield* pairArms(open.types, closed.types, into, depth, seen, owner)
+    if (open.isIntersection() && closed.isIntersection())
+      for (const delegated of pairArms(open.types, closed.types, into, depth, seen, owner)) yield delegated
     // The ARGUMENTS of a reference, so `Promise<Keyed<T>>` records an
     // entry for `Keyed<T>` too. The target is checked, not just the
     // count: two references of the same arity to different generics have
@@ -453,7 +459,7 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
         for (let index = 0; index < openArguments.length; index += 1) {
           const one = openArguments[index]
           const other = closedArguments[index]
-          if (one && other) yield* pair(one, other, into, depth + 1, seen, owner)
+          if (one && other) for (const delegated of pair(one, other, into, depth + 1, seen, owner)) yield delegated
         }
       }
       // A default-library generic (`Array`, `Map`, `Promise`, the iterators)
@@ -477,7 +483,8 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
       if (!admits(openMember, into, depth + 1, owner)) continue
       const counterpart = checker.getPropertyOfType(closed, property.getName())
       if (!counterpart) continue
-      yield* pair(openMember, checker.getTypeOfSymbolAtLocation(counterpart, at), into, depth + 1, seen, owner)
+      for (const delegated of pair(openMember, checker.getTypeOfSymbolAtLocation(counterpart, at), into, depth + 1, seen, owner))
+        yield delegated
     }
     // Index signatures BY KEY TYPE, the same exact correspondence a name is:
     // `Result<T>.ids` typed `{ [key: number]: InferId<T> }` has its only hole
@@ -487,10 +494,12 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     const closedIndexes = checker.getIndexInfosOfType(closed)
     for (const index of checker.getIndexInfosOfType(open)) {
       const counterpart = closedIndexes.find((candidate) => candidate.keyType === index.keyType)
-      if (counterpart && admits(index.type, into, depth + 1, owner)) yield* pair(index.type, counterpart.type, into, depth + 1, seen, owner)
+      if (counterpart && admits(index.type, into, depth + 1, owner))
+        for (const delegated of pair(index.type, counterpart.type, into, depth + 1, seen, owner)) yield delegated
     }
-    yield* pairSignatures(open.getCallSignatures(), closed.getCallSignatures(), into, depth, seen, owner)
-    yield* pairSignatures(open.getConstructSignatures(), closed.getConstructSignatures(), into, depth, seen, owner)
+    for (const delegated of pairSignatures(open.getCallSignatures(), closed.getCallSignatures(), into, depth, seen, owner)) yield delegated
+    for (const delegated of pairSignatures(open.getConstructSignatures(), closed.getConstructSignatures(), into, depth, seen, owner))
+      yield delegated
   }
 
   /**
@@ -547,11 +556,11 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
         continue
       }
       remaining.splice(remaining.indexOf(image), 1)
-      yield* pair(arm, image, into, depth + 1, seen, owner)
+      for (const delegated of pair(arm, image, into, depth + 1, seen, owner)) yield delegated
     }
     const sole = leftover.length === 1 ? leftover[0] : undefined
     const image = remaining.length === 1 ? remaining[0] : undefined
-    if (sole && image) yield* pair(sole, image, into, depth + 1, seen, owner)
+    if (sole && image) for (const delegated of pair(sole, image, into, depth + 1, seen, owner)) yield delegated
   }
 
   function* pairSignatures(
@@ -568,7 +577,8 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
       const right = closed[index]
       if (!left || !right) continue
       const openReturn = left.getReturnType()
-      if (admits(openReturn, into, depth + 1, owner)) yield* pair(openReturn, right.getReturnType(), into, depth + 1, seen, owner)
+      if (admits(openReturn, into, depth + 1, owner))
+        for (const delegated of pair(openReturn, right.getReturnType(), into, depth + 1, seen, owner)) yield delegated
       if (left.parameters.length !== right.parameters.length) continue
       for (let position = 0; position < left.parameters.length; position += 1) {
         const leftParameter = left.parameters[position]
@@ -577,7 +587,8 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
         if (!leftParameter || !rightParameter || !at) continue
         const openParameter = checker.getTypeOfSymbolAtLocation(leftParameter, at)
         if (!admits(openParameter, into, depth + 1, owner)) continue
-        yield* pair(openParameter, checker.getTypeOfSymbolAtLocation(rightParameter, at), into, depth + 1, seen, owner)
+        for (const delegated of pair(openParameter, checker.getTypeOfSymbolAtLocation(rightParameter, at), into, depth + 1, seen, owner))
+          yield delegated
       }
     }
   }
@@ -605,7 +616,8 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     const table = new Map<ts.Type, ts.Type>()
     if (copy.arguments.some((argument) => (argument.flags & ts.TypeFlags.Any) !== 0)) anyFilledTables.add(table)
     function* walk(): Generator<void> {
-      if (signatures) yield* pairSignatures([signatures[0]], [signatures[1]], table, 0, new Set(), declaration)
+      if (signatures)
+        for (const delegated of pairSignatures([signatures[0]], [signatures[1]], table, 0, new Set(), declaration)) yield delegated
       if (!closedParent) return
       for (const member of membersOf(declaration)) {
         const name = memberNameOf(member)
@@ -616,7 +628,8 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
         if (!admits(openMember, table, 0, declaration)) continue
         const closedSymbol = checker.getPropertyOfType(closedParent, name)
         if (!closedSymbol) continue
-        yield* pair(openMember, checker.getTypeOfSymbolAtLocation(closedSymbol, member), table, 0, new Set(), declaration)
+        for (const delegated of pair(openMember, checker.getTypeOfSymbolAtLocation(closedSymbol, member), table, 0, new Set(), declaration))
+          yield delegated
       }
     }
     return { entries: table, owner: declaration, steps: walk(), done: false }

@@ -1,4 +1,4 @@
-import { representationKey, type Representation } from '../../../representation/model.js'
+import { absenceCarrier, representationKey, type Representation } from '../../../representation/model.js'
 import { awaitedRepresentation, holdsThenable } from '../../../representation/promise-resolution.js'
 export { awaitedRepresentation } from '../../../representation/promise-resolution.js'
 import { type ConversionSite, alignedValueText } from '../emit-narrowing.js'
@@ -190,7 +190,7 @@ const awaitedOptionalText = (
   // the derivation with no name for the cell, which is a real hole rather than
   // a spelling gap.
   if (resolved === null || resolved.kind === 'void') return null
-  const absence: Representation = { kind: carrier.absence }
+  const absence: Representation = absenceCarrier(carrier.absence)
   const absenceText = cppConstantLiteral(carrier.absence, carrier.absence, absence)
   const absent = alignedValueText(ctx, site, absence, resolved, absenceText)
   if (absent === null) return null
@@ -338,7 +338,7 @@ const armStatements = (
     return itselfInto(ctx, site, arm, armText, cell)
   }
   if (carrier.kind === 'optional') {
-    const absence: Representation = { kind: carrier.absence }
+    const absence: Representation = absenceCarrier(carrier.absence)
     const absenceText = cppConstantLiteral(carrier.absence, carrier.absence, absence)
     lines.push(`if (${held}.has_value()) {`, ...resolveArm(carrier.payload, `(*${held})`), '} else {')
     lines.push(...itselfInto(ctx, site, absence, absenceText, cell), '}')

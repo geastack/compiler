@@ -89,10 +89,13 @@ const isOptionalNumber = (representation: IrOperand['representation']): boolean 
  * but-undefined end renders through the identical downstream clamp to `len`
  * rather than a second, possibly-disagreeing spelling of the same default.
  */
-const numericArgumentText = (ctx: EmitContext, operand: IrOperand, position: number): string => {
+const numericArgumentText = (ctx: EmitContext, operand: IrOperand, position: number, member: string): string => {
   const text = operandText(ctx, operand)
   if (!isOptionalNumber(operand.representation)) return text
-  const fallback = position === 0 ? '0.0' : 'std::numeric_limits<double>::infinity()'
+  // `split`'s limit is the one trailing number whose undefined is NOT
+  // +Infinity: 22.1.3.21 step 4 states 2^32 - 1 outright, and ToUint32 would
+  // map +Infinity to 0.
+  const fallback = position === 0 ? '0.0' : member === 'split' ? '4294967295.0' : 'std::numeric_limits<double>::infinity()'
   return `(${text}.has_value() ? *${text} : ${fallback})`
 }
 
@@ -111,6 +114,18 @@ const numericArgumentText = (ctx: EmitContext, operand: IrOperand, position: num
  * render natively while a RegExp one refuses by name instead of being forced
  * through a carrier this file does not implement.
  */
+/** The members whose string argument 0 is passed straight to ToString (no undefined default). */
+const toStringsSearchArgument: ReadonlySet<string> = new Set([
+  'indexOf',
+  'lastIndexOf',
+  'includes',
+  'startsWith',
+  'endsWith',
+  'localeCompare',
+  'replace',
+  'replaceAll'
+])
+
 const shapedStringMethodText =
   (member: string, shape: StringMethodShape): StringCallRenderer =>
   (ctx, receiverText, args, result, metadata): string | NativeScalarCall => {
@@ -126,6 +141,14 @@ const shapedStringMethodText =
           ? regexpReplaceText(member, ctx, receiverText, args)
           : null
     if (byPattern !== null) return byPattern
+    // ReplaceValue is `callable ? callback : ToString(value)`: a callable is
+    // CALLED per match. ToString of it is its source text, which spliced
+    // `() => replacement` into the output instead of `replacement`.
+    const replacer = member === 'replace' || member === 'replaceAll' ? args[1] : undefined
+    if (args.length === 2 && args[0] && replacer?.representation.kind === 'function-value-dispatch' && carrierMatches(args[0], 'string')) {
+      const spelling = member === 'replace' ? 'replaceWithCallback' : 'replaceAllWithCallback'
+      return `gea::runtime::string::${spelling}(${receiverText}, ${operandText(ctx, args[0])}, ${operandText(ctx, replacer)})`
+    }
     if (!shape.arities.includes(args.length)) {
       throw createCppEmitBlockedError(
         `runtime-helper:element:${member}:string`,
@@ -141,10 +164,23 @@ const shapedStringMethodText =
       // operand still records the concrete non-callable value this call uses.
       // Reuse the language's one ToString table so numbers and other proven
       // carriers reach GetSubstitution without a dynamic box.
+      // A search string that may be absent is ToString'd too: these members'
+      // first step is ToString(searchString), whose answer for an absent value
+      // is "undefined" or "null". `split` and `padStart`/`padEnd` are not
+      // here: an undefined separator or fillString selects a default instead.
+      const optionalSearchText =
+        argument &&
+        wanted === 'string' &&
+        index === 0 &&
+        toStringsSearchArgument.has(member) &&
+        argument.representation.kind === 'optional' &&
+        argument.representation.payload.kind === 'string'
+          ? toStringText(operandText(ctx, argument), argument.representation, ctx.classes, ctx.deriver)
+          : null
       const replacementText =
         argument && wanted === 'string' && (member === 'replace' || member === 'replaceAll') && index === 1
           ? toStringText(operandText(ctx, argument), argument.representation, ctx.classes, ctx.deriver)
-          : null
+          : optionalSearchText
       if (!argument || !wanted || (!carrierMatches(argument, wanted) && replacementText === null)) {
         throw createCppEmitBlockedError(
           `runtime-helper:element:${member}:string`,
@@ -156,7 +192,9 @@ const shapedStringMethodText =
               : '')
         )
       }
-      rendered.push(wanted === 'number' ? numericArgumentText(ctx, argument, index) : (replacementText ?? operandText(ctx, argument)))
+      rendered.push(
+        wanted === 'number' ? numericArgumentText(ctx, argument, index, member) : (replacementText ?? operandText(ctx, argument))
+      )
     }
     if (member === 'charCodeAt' && metadata !== undefined) {
       return {

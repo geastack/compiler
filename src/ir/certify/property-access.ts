@@ -170,8 +170,10 @@ const deleteNamesRecordExpandoKey = (representation: Representation, keyText: st
 }
 
 const deleteNamesNativeIndexEntry = (representation: Representation, keyText: string | null, deriver: RepresentationDeriver): boolean => {
-  if (!nativeRecordRefHasIndexSidecar(representation, deriver) || keyText === null) return false
-  const layout = deriver.layoutOf((representation as Extract<Representation, { kind: 'native-record-ref' }>).shapeId as StructuralTypeId)
+  // A narrowing test, not an `as Extract<...>` cast: the cast reads a live view with no slot receipt natively.
+  if (representation.kind !== 'native-record-ref' || !nativeRecordRefHasIndexSidecar(representation, deriver) || keyText === null)
+    return false
+  const layout = deriver.layoutOf(representation.shapeId as StructuralTypeId)
   if (layout.kind !== 'record-with-index') return false
   return !layout.fields.some((field) => field.key === keyText)
 }
@@ -560,7 +562,11 @@ const hasPropertyRuntimeHelperKey = (operation: HasPropertyOperation, ctx: Certi
   // though presence AND absence are both provable here.
   if (key === null && keyForm === 'symbol' && generatedSharedObjectCarrier(payload)) {
     const layout = resolvedLayoutOf(payload, ctx.deriver).layout
-    const fields = layout.kind === 'record' || layout.kind === 'record-with-index' ? layout.fields : null
+    // Keys only, copied: a RecordField array does not flow into the narrower `{ key }` element type natively.
+    const fields =
+      layout.kind === 'record' || layout.kind === 'record-with-index'
+        ? layout.fields.map((field): { readonly key: string } => ({ key: field.key }))
+        : null
     const declaration = payload.kind === 'class-ref' ? payload.declaration : null
     if (!symbolKeyedMemberIsDeclared(ctx.classes, fields, declaration)) {
       return `computation:in:${keyForm}:${optionalPrefix('record(symbol-sidecar)')}`

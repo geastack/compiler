@@ -134,15 +134,21 @@ type StorageMember = ts.PropertyDeclaration | ts.PropertySignature | ts.Paramete
  * nothing to convert through. A class METHOD is deliberately not here -- it
  * dispatches statically and occupies no slot in the instance.
  */
-const storageMembersOf = (declaration: ts.ClassLikeDeclaration | ts.InterfaceDeclaration): readonly StorageMember[] => [
-  ...declaration.members.filter(
-    (member): member is ts.PropertyDeclaration | ts.PropertySignature | ts.MethodSignature =>
-      ts.isPropertyDeclaration(member) || ts.isPropertySignature(member) || ts.isMethodSignature(member)
-  ),
-  ...declaration.members
-    .filter(ts.isConstructorDeclaration)
-    .flatMap((constructor) => constructor.parameters.filter((parameter) => ts.getModifiers(parameter)?.length))
-]
+const storageMembersOf = (declaration: ts.ClassLikeDeclaration | ts.InterfaceDeclaration): readonly StorageMember[] => {
+  // Built element by element from one plain node list: the two declarations'
+  // member arrays are different array types, which a native build cannot
+  // filter as one.
+  const elements: ts.Node[] = []
+  if (ts.isInterfaceDeclaration(declaration)) for (const member of declaration.members) elements.push(member)
+  else for (const member of declaration.members) elements.push(member)
+  const storage: StorageMember[] = []
+  for (const member of elements)
+    if (ts.isPropertyDeclaration(member) || ts.isPropertySignature(member) || ts.isMethodSignature(member)) storage.push(member)
+  for (const member of elements)
+    if (ts.isConstructorDeclaration(member))
+      for (const parameter of member.parameters) if (ts.getModifiers(parameter)?.length) storage.push(parameter)
+  return storage
+}
 
 /** Class state, not instance state -- a static holds no value shaped by an instantiation's arguments. */
 const isStaticMember = (member: StorageMember): boolean =>

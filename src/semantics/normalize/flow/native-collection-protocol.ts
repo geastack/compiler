@@ -1,6 +1,6 @@
 import ts from '#typescript'
 import { outermostErasureOf, unwrapErasedExpression } from '../producers/erasure.js'
-import type { ValueFlowIndex } from './model.js'
+import { firstMemberOf, type ValueFlowIndex } from './model.js'
 import { deferredIntrinsicProtocolLedgerOf } from '../deferred-intrinsic-protocols.js'
 import type { PrototypeKeyQuery } from '../host-mutation-keys.js'
 import { isModuleExportedDeclaration, isTypePositionReference, resolveFlowSymbolAlias } from './targets.js'
@@ -114,7 +114,7 @@ const buildNativeCollectionProtocolPlan = (
     return ts.isTypeOfExpression(parent)
   }
   if (!deferred && global && !flow.referencesToSymbol(global).every(globalUse)) return null
-  const anchor = arrayAnchor ?? (constructions.values().next().value as ts.Expression | undefined)
+  const anchor: ts.Expression | undefined = arrayAnchor ?? firstMemberOf(constructions)
   if (!anchor) return null
   const nativeType = checker.getTypeAtLocation(anchor)
   const members = new Set(checker.getPropertiesOfType(nativeType).flatMap((symbol) => symbol.declarations ?? []))
@@ -259,12 +259,12 @@ export const nativeCollectionProtocolPlanOf = (
   family: 'Map' | 'WeakMap',
   constructions: ReadonlySet<ts.NewExpression>
 ): NativeCollectionProtocolPlan | null => {
-  const anchor = constructions.values().next().value as ts.NewExpression | undefined
+  const anchor = firstMemberOf(constructions)
   if (!anchor) return null
   const constructor = resolveFlowSymbolAlias(checker, checker.getSymbolAtLocation(unwrapErasedExpression(anchor.expression)))
   if (!constructor) return null
   let cache = plans.get(flow)
-  if (!cache) plans.set(flow, (cache = new Map()))
+  if (!cache) plans.set(flow, (cache = new Map<ts.Symbol, NativeCollectionProtocolPlan | null>()))
   if (cache.has(constructor)) return cache.get(constructor)!
   const plan = buildNativeCollectionProtocolPlan(checker, flow, publication, family, constructions)
   cache.set(constructor, plan)

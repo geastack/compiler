@@ -3,7 +3,7 @@ import { runtimeClassLayoutsOf } from '../../projection/classes.js'
 import { representationKey, type Representation } from '../../representation/model.js'
 import { createCppEmitBlockedError, operandText, type EmitContext } from './emit-context.js'
 import { alignedValueText } from './emit-narrowing.js'
-import { dispatchedLeafExpression, unionPropertyLeaves } from './emit-union-properties.js'
+import { dispatchedLeafExpression, unionPropertyLeaves, type UnionPropertyLeaf } from './emit-union-properties.js'
 import { isNativeError } from './error-types.js'
 import { cppClassName, cppStringLiteral } from './types.js'
 
@@ -35,7 +35,11 @@ export const errorConstructorGetText = (ctx: EmitContext, operation: GetOperatio
     )
   const receiver = operation.receiver.representation
   const text = operandText(ctx, operation.receiver)
-  const leaves = receiver.kind === 'tagged-union' ? unionPropertyLeaves(receiver, text) : [{ representation: receiver, text, test: 'true' }]
+  // Filled rather than joined: the helper's leaves and a literal leaf are two
+  // native layouts of `UnionPropertyLeaf[]`, and a join selected one unchecked.
+  const leaves: UnionPropertyLeaf[] = []
+  if (receiver.kind === 'tagged-union') leaves.push(...unionPropertyLeaves(receiver, text))
+  else leaves.push({ representation: receiver, text, test: 'true' })
   const texts = leaves.map((leaf) => errorInstanceText(leaf.representation, leaf.text))
   const unhandled = leaves.find((_, index) => texts[index] === null)
   if (unhandled !== undefined)

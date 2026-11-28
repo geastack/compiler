@@ -3,7 +3,7 @@ import { operationNativeCallReceiverText } from './emit-native-method.js'
 import { genericNativeLogicalReceiverOf, hostConstructFrameOf, receivableArguments } from '../../ir/call-entry.js'
 import { stableBorrowEntryAccepts, stableBorrowEntryCopies, type StableBorrowEntry } from './borrowed-call-entry.js'
 import { callableMemberAlternateSlot, callableMemberSlot } from '../../ir/callable-member-candidates.js'
-import { transferOf } from '../../ir/transfer.js'
+import { transferWhere } from '../../ir/transfer.js'
 import { boxedValueText } from './emit-dynamic-properties.js'
 import { operationConversionText } from './emit-certified-conversion.js'
 import { functionConstructorArgumentKindOf } from '../../representation/function-constructor.js'
@@ -26,7 +26,15 @@ import { classDynamicMethodShadowOf, classFamilyOverridesOf, virtualDispatchKey 
 import { cppVirtualMemberName } from './virtual-methods.js'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import { abiKey, representationKey } from '../../representation/model.js'
-import { alignedValueText, callableObjectAbi, movedValueText, namedConversionText, recipeText, unboxedLoadText } from './emit-narrowing.js'
+import {
+  alignedValueText,
+  callableObjectAbi,
+  emptyArraySentinelText,
+  movedValueText,
+  namedConversionText,
+  recipeText,
+  unboxedLoadText
+} from './emit-narrowing.js'
 import { SIBLING_CLASS_ARGUMENT } from '../../conversion/sibling-class.js'
 import { memberAccessOperator, reactiveRevisionText } from './emit-carrier-members.js'
 import { frameHandleText, sharedGroupMemberText } from './emit-binding-reference.js'
@@ -65,7 +73,7 @@ import { classMemberOf, cppFieldInitializerStatements, lazyArrowFieldPlanOf } fr
 import { cellValueText } from './emit-bindings.js'
 import { declaredRecordFieldOf } from './records.js'
 import { hostArityCallLines, hostResultText } from './host/emit-host-arity.js'
-import { hostMemberOf } from './host/host-members.js'
+import { hostMemberOf, type HostCallSpelling } from './host/host-members.js'
 import { hostCallText, nativeHandleInvocationText } from './host/emit-host-invoke.js'
 import { nativeReflectCallText } from './host/emit-host-reflect.js'
 import { jsonStringifyFillLines } from './emit-json.js'
@@ -161,6 +169,17 @@ export const emitBindCallable = (ctx: EmitContext, lines: string[], operation: B
     return
   }
   lines.push(...guardedBindLines(ctx, operation, source, native))
+}
+
+// Annotated with the path arm so the literal allocates that arm's own layout:
+// an unannotated spread gets a twin record that no arm of `HostCallSpelling`
+// is, and a native build refuses to select it into the union.
+const withArrayArguments = (
+  spelling: Extract<HostCallSpelling, { readonly kind: 'path' }>,
+  arrayArguments: 'snapshot' | 'native'
+): HostCallSpelling => {
+  const widened: Extract<HostCallSpelling, { readonly kind: 'path' }> = { ...spelling, arrayArguments }
+  return widened
 }
 
 /**
@@ -656,7 +675,14 @@ const borrowEvidenceOf = (
     operation.arguments
       .filter(
         (argument) =>
-          transferOf(ctx.dyingArguments, ctx.ownedValues, ctx.transferDyingValues, argument.value, ctx.receiverRenames) === 'move'
+          !ctx.hoistedResults.has(argument.value) &&
+          transferWhere(
+            ctx.dyingArguments,
+            (owned) => ctx.ownedValues.has(owned),
+            ctx.transferDyingValues,
+            argument.value,
+            ctx.receiverRenames
+          ) === 'move'
       )
       .map((argument) => argument.value)
   )
@@ -1601,9 +1627,9 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
       ...hostArityCallLines({
         spelling:
           hostFunction.kind === 'path' && ctx.hosts.nativeArrayFunctions?.has(hostFunction.text)
-            ? { ...hostFunction, arrayArguments: 'native' }
+            ? withArrayArguments(hostFunction, 'native')
             : hostFunction.kind === 'path' && ctx.hosts.arraySnapshotFunctions?.has(hostFunction.text)
-              ? { ...hostFunction, arrayArguments: 'snapshot' }
+              ? withArrayArguments(hostFunction, 'snapshot')
               : hostFunction,
         fixed: passed.slice(0, passed.length - optionals),
         optionals: passed.slice(passed.length - optionals),
@@ -1987,7 +2013,9 @@ const hostPayloadIdentity = (source: Representation, target: Representation): bo
   return false
 }
 
-const trailingOptionalCount = (args: readonly { readonly representation: Representation }[]): number => {
+// Generic in the argument record so a caller's richer `{ text, representation }` array
+// is read as itself rather than converted to this narrower element.
+const trailingOptionalCount = <A extends { readonly representation: Representation }>(args: readonly A[]): number => {
   let count = 0
   for (let index = args.length - 1; index >= 0; index -= 1) {
     if (args[index]?.representation.kind !== 'optional') break
@@ -2266,11 +2294,11 @@ const isNumberScalarCarrier = (representation: Representation): boolean =>
     representation.domain === 'float64')
 
 /** An ordinary numeric Array whose elements `TypedArray.fromValues` can apply ToNumber to without a dynamic boundary. */
-const isNumericArrayCarrier = (representation: Representation): representation is Extract<Representation, { kind: 'array-object' }> =>
+const isNumericArrayCarrier = (representation: Representation): boolean =>
   representation.kind === 'array-object' && representation.ownership === 'shared-refcount' && isNumberScalarCarrier(representation.element)
 
 /** A typed-array source with the reference ownership needed to preserve and read its view identity. */
-const isSharedTypedArrayCarrier = (representation: Representation): representation is Extract<Representation, { kind: 'typed-array' }> =>
+const isSharedTypedArrayCarrier = (representation: Representation): boolean =>
   representation.kind === 'typed-array' && representation.ownership === 'shared-refcount'
 
 /**
@@ -2779,10 +2807,12 @@ const emitArrayConstruct = (
  * - a Set seeded from any iterable that is not an Array needs the dynamic
  *   `@@iterator` protocol this backend does not lower at all
  *   (`emit-iterator.ts`);
- * - `new WeakSet(array)` is refused with the others rather than folded in with
- *   `new Set(array)`: it is genuinely rare, and admitting it would mean
- *   claiming the weak-key precondition holds for every element of an array
- *   whose own element carrier this function would have to re-check.
+ * - `new WeakSet(array)` only over an Array of the set's own key carrier
+ *   (`collectionSeedText`), whose weak-key precondition the certified set
+ *   type already states; any other WeakSet seed is refused.
+ *
+ * An optional source of any rendered form seeds the empty collection when
+ * absent (`collectionSeedText`).
  */
 /**
  * The four ambient constructor PROTOCOL NAMES this renderer is written for --
@@ -2878,6 +2908,16 @@ const emitKeyedCollectionConstruct = (
       )
     }
   }
+  // An absent iterable (`new Map(options.entries)` with the field omitted) and
+  // a WeakSet seeded from an Array: `collectionSeedText`.
+  if (carrier.kind === 'optional' || result.family === 'weak-set') {
+    const seeded = collectionSeedText(ctx, result, carrier, 'gea_seed_source', operation.nativeEntryFieldReads)
+    if (seeded !== null) {
+      return void lines.push(
+        `${name} = ([&](const ${cppTypeOf(carrier)}& gea_seed_source) -> ${cppTypeOf(result)} { ${seeded} })(${operandText(ctx, argument)});`
+      )
+    }
+  }
   throw createCppEmitBlockedError(
     'call-abi:construct:keyed-collection',
     `constructs a ${result.family}<${representationKey(result.key)}> from a "${representationKey(carrier)}" argument; only the zero-argument form is implemented for every ` +
@@ -2926,15 +2966,52 @@ const mapSeedText = (
       `while (const auto* gea_entry = ${text}->entryAfter(gea_serial)) gea_seeded->set(${keyText}, ${valueText}); } return gea_seeded;`
     )
   }
+  // A sum of seedable sources (`new Map(held ?? [])` over `Map<K, V> | [K, V][]`):
+  // each arm is walked as its own source, dispatched on the live one.
+  if (source.kind === 'tagged-union' && source.arms.length > 0) {
+    const arms = source.arms.map((arm, index) => {
+      const body = mapSeedText(ctx, result, value, arm.value, `gea_seed_arm_${index}`, reads)
+      return body === null
+        ? null
+        : `if (${text}.template is<${index}>()) { const auto& gea_seed_arm_${index} = ${text}.template get<${index}>(); ${body} }`
+    })
+    if (arms.some((arm) => arm === null)) return null
+    return `${arms.join(' ')} gea::detail::refusePayloadMismatch("a Map seed whose live arm is none of its own"); return {};`
+  }
   if (source.kind !== 'array-object' || source.ownership !== 'shared-refcount') return null
   const pair = source.element
+  // A homogeneous pair (`[id, text] as const` over two strings) is carried as
+  // an Array of its one element carrier rather than a positional record.
+  // `entry[0]`/`entry[1]` are then ordinary element reads, which -- under a
+  // non-absent element carrier, exactly as for `a[i]` -- abort by name on a
+  // missing slot rather than invent the `undefined` no carrier here can hold.
+  if (pair.kind === 'array-object' && pair.ownership === 'shared-refcount') {
+    const site = 'emit-callable.ts:mapSeedText:array-pair'
+    const keyText = alignedValueText(ctx, site, pair.element, result.key, 'gea_pair->readElementAtIndex(0)')
+    const valueText = alignedValueText(ctx, site, pair.element, value, 'gea_pair->readElementAtIndex(1)')
+    if (keyText === null || valueText === null) return null
+    const mapType = cppTypeOf({ ...result, ownership: 'owned' })
+    return (
+      `auto gea_seeded = gea::makeRef<${mapType}>(); if (${text}) for (const auto& gea_slot : ${text}->readSlots()) { ` +
+      `if (!gea_slot.present) gea::host::throwRuntimeError("TypeError", "Iterator value undefined is not an entry object"); ` +
+      `const auto& gea_pair = gea_slot.value; gea_seeded->set(${keyText}, ${valueText}); } return gea_seeded;`
+    )
+  }
   if (pair.kind !== 'record' || pair.fields.length !== 2) return null
   const [first, second] = pair.fields
   if (first?.key !== '0' || second?.key !== '1' || !first.required || !second.required) return null
   const site = 'emit-callable.ts:mapSeedText'
   const access = pair.ownership === 'shared-refcount' ? '->' : '.'
   const plainKey = alignedValueText(ctx, site, first.value, result.key, `gea_pair${access}${cppRecordFieldName('0')}`)
-  const plainValue = alignedValueText(ctx, site, second.value, value, `gea_pair${access}${cppRecordFieldName('1')}`)
+  // `new Map(ids.map((id) => [id, []]))`: each `[]` is typed `never[]`, and
+  // every entry gets its own array in JS. The shared sentinel would make all of
+  // them one array, so a push into one entry's list lands in every entry's (a
+  // loop over one list while pushing into another never ends). A `never[]` only
+  // its pair holds is fresh; one held elsewhere (a shared `emptyArray`) keeps
+  // the sentinel's identity, which is the runtime test `consumedSource` makes.
+  const valueField = `gea_pair${access}${cppRecordFieldName('1')}`
+  const plainValue =
+    emptyArraySentinelText(second.value, value, valueField, true) ?? alignedValueText(ctx, site, second.value, value, valueField)
   if (plainKey === null || plainValue === null) return null
   // A live view's own slots are never filled: certify proved its routes.
   const keyText = reads ? nativeHeldFieldViewReadText(ctx, reads.key, result.key, 'gea_pair', plainKey) : plainKey
@@ -2945,6 +3022,53 @@ const mapSeedText = (
     `if (!gea_slot.present) gea::host::throwRuntimeError("TypeError", "Iterator value undefined is not an entry object"); ` +
     `const auto& gea_pair = gea_slot.value; gea_seeded->set(${keyText}, ${valueText}); } return gea_seeded;`
   )
+}
+
+/**
+ * The body of a lambda returning a keyed collection seeded from `source`, over
+ * every family and every source form the seeders above prove, plus the two
+ * that only wrap them:
+ *
+ * - an OPTIONAL source: 24.1.1.1 / 24.2.1.1 step 3 return the new, empty
+ *   collection when the iterable is `undefined` or `null`, and walk the
+ *   present payload otherwise;
+ * - `new WeakSet(array)` (24.4.1.1) over an Array of the set's own key
+ *   carrier: that carrier already passed the weak-key test when the set's
+ *   type was certified, so every PRESENT element is a valid key, and a hole is
+ *   `undefined`, which `add` rejects with the TypeError CanBeHeldWeakly
+ *   requires.
+ */
+const collectionSeedText = (
+  ctx: EmitContext,
+  result: Extract<Representation, { kind: 'keyed-collection' }>,
+  source: Representation,
+  text: string,
+  reads?: NativeEntryFieldReads
+): string | null => {
+  if (source.kind === 'optional') {
+    const present = `${text}_present`
+    const body = collectionSeedText(ctx, result, source.payload, present, reads)
+    if (body === null) return null
+    return (
+      `if (!${text}.has_value()) return gea::makeRef<${cppTypeOf({ ...result, ownership: 'owned' })}>(); ` +
+      `const auto& ${present} = *${text}; ${body}`
+    )
+  }
+  if (result.family === 'set') return setSeedText(ctx, result, source, text)
+  if (result.family === 'map') return result.value === null ? null : mapSeedText(ctx, result, result.value, source, text, reads)
+  if (
+    result.family === 'weak-set' &&
+    source.kind === 'array-object' &&
+    source.ownership === 'shared-refcount' &&
+    representationKey(source.element) === representationKey(result.key)
+  ) {
+    return (
+      `auto gea_seeded = gea::makeRef<${cppTypeOf({ ...result, ownership: 'owned' })}>(); if (${text}) for (const auto& gea_slot : ${text}->readSlots()) { ` +
+      `if (!gea_slot.present) gea::host::throwRuntimeError("TypeError", "Invalid value used in weak set"); gea_seeded->add(gea_slot.value); } ` +
+      'return gea_seeded;'
+    )
+  }
+  return null
 }
 
 const setSeedText = (

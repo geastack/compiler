@@ -332,10 +332,12 @@ const alreadyDeclaredMembersOf = (classNode: ts.ClassLikeDeclaration): ReadonlyS
  * here becomes a second authority on what a descriptor's value type is:
  * `typeof` names the very binding the definition below consumes.
  */
-const thisFieldDeclarations = (
+// Generic in the entry: the caller's evaluated entries are their own record
+// type, and an array of them does not convert to an array of this shape.
+const thisFieldDeclarations = <Entry extends { readonly entry: { readonly key: string }; readonly binding: string }>(
   call: ts.CallExpression,
   receiver: ts.Expression,
-  entries: readonly { readonly entry: { readonly key: string }; readonly binding: string }[]
+  entries: readonly Entry[]
 ): readonly string[] => {
   if (receiver.kind !== ts.SyntaxKind.ThisKeyword) return []
   const classNode = declaringClassOf(call)

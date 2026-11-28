@@ -45,7 +45,7 @@ import {
   cppTypeOf,
   withoutUnitFunctions
 } from './types.js'
-import { createCppEmitBlockedError, storedEnvironmentText } from './emit-context.js'
+import { cppClassIndexProtocols, createCppEmitBlockedError, storedEnvironmentText } from './emit-context.js'
 import {
   boxedText,
   dynamicCarrierBoxText,
@@ -56,10 +56,10 @@ import {
 } from './emit-narrowing.js'
 import { dynamicFieldConversionOwnerOf, programConversionKey, prototypeSetterValue } from '../../ir/program-conversions.js'
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
-import { recordLayoutPolicyOf, recordLayoutOfShapeId } from '../../projection/fields.js'
-import { classIndexProtocolsOf } from '../../projection/index-protocols.js'
+import { recordLayoutPolicyOf } from '../../projection/fields.js'
 import { nativeAccessorAccessOf } from '../../projection/native-accessor-access.js'
 import { classAccessorShadowedFieldKeysOf } from '../../projection/dispatch.js'
+import { setValues } from '../../collection-lists.js'
 
 /**
  * The value carrier of a struct's dynamic-property sidecar, plus its key
@@ -165,8 +165,10 @@ export interface CppRecordRefusal {
  * reason is recorded rather than dropped, so the struct refuses by name instead
  * of silently emitting flat and colliding with a base body later.
  */
-export const classBaseLinks = (
-  classes: ReadonlyMap<DeclarationId, Pick<ClassLayout, 'declaration' | 'base' | 'nativeBase' | 'instance'>>
+// Generic in the row so a caller's own class map flows in as it is: a map of
+// one record type has no native conversion to a map of a narrower one.
+export const classBaseLinks = <C extends Pick<ClassLayout, 'declaration' | 'base' | 'nativeBase' | 'instance'>>(
+  classes: ReadonlyMap<DeclarationId, C>
 ): { readonly links: ReadonlyMap<string, ClassBaseLink>; readonly unlinkable: ReadonlyMap<string, string> } => {
   const links = new Map<string, ClassBaseLink>()
   const unlinkable = new Map<string, string>()
@@ -244,8 +246,8 @@ export const classBaseLinks = (
  * makes the struct itself, and every field lookup against it, read the same
  * one, so a class has exactly one layout everywhere.
  */
-export const classInstanceShapes = (
-  classes: ReadonlyMap<DeclarationId, Pick<ClassLayout, 'declaration' | 'instance'>>
+export const classInstanceShapes = <C extends Pick<ClassLayout, 'declaration' | 'instance'>>(
+  classes: ReadonlyMap<DeclarationId, C>
 ): ReadonlyMap<string, string> => {
   const byStruct = new Map<string, string>()
   for (const layout of classes.values()) {
@@ -458,7 +460,7 @@ const collectRequiredStructs = (
     // means never emitting a struct for an ordinary named interface.
     const raw = layout ?? recordLayoutOfShape(deriver, shapeId)
     const nativeFields = classFields.get(structName)
-    const resolved = typeof raw === 'string' || nativeFields === undefined ? raw : { ...raw, fields: nativeFields }
+    const resolved = typeof raw === 'string' || nativeFields === undefined ? raw : layoutWithFields(raw, nativeFields)
     if (typeof resolved === 'string') {
       unlayoutable.set(structName, `${shapeId} carries ${resolved}`)
       return
@@ -495,7 +497,7 @@ const collectRequiredStructs = (
       unlayoutable.set(structName, own)
       return
     }
-    fieldsByStruct.set(structName, deriver.isTupleShape(shapeId as StructuralTypeId) ? { ...own, tuple: true } : own)
+    fieldsByStruct.set(structName, deriver.isTupleShape(shapeId as StructuralTypeId) ? tupleLayout(own) : own)
     // Every field the shape has, inherited ones included: the carriers they name
     // still have to be required here, and the base struct's own expansion is not
     // guaranteed to reach a nested shape this one holds by a different route.
@@ -538,6 +540,14 @@ const collectRequiredStructs = (
  * `narrowedFieldReadText` (emit-properties.ts) already does and still refuses
  * by name when it cannot.
  */
+// A conditional between a value and a spread of it is a union of two record
+// types, and the native build has no structural conversion between union arms
+// to narrow it back to the declared one; a spread returned as the declared
+// type converts on its own.
+const layoutWithFields = (layout: RecordLayout, fields: readonly RecordField[]): RecordLayout => ({ ...layout, fields })
+const tupleLayout = (layout: RecordLayout): RecordLayout => ({ ...layout, tuple: true })
+const accessorPrecededBy = (accessor: RecordAccessor, precedingFields: number): RecordAccessor => ({ ...accessor, precedingFields })
+
 const ownFieldsOf = (
   deriver: RepresentationDeriver,
   derived: RecordLayout,
@@ -571,9 +581,6 @@ export const cppStructNameOf = (representation: Representation): string | null =
   return null
 }
 
-const isRepresentationNode = (value: unknown): value is Representation =>
-  typeof value === 'object' && value !== null && typeof (value as { readonly kind?: unknown }).kind === 'string'
-
 /**
  * The struct names a carrier requires the COMPLETE definition of.
  *
@@ -585,10 +592,9 @@ const isRepresentationNode = (value: unknown): value is Representation =>
  * by carrying an `abi` -- never requires its parameter or result types to be
  * complete either, for the same reason and with the same cycle risk.
  *
- * Everything else is walked STRUCTURALLY rather than by enumerating the thirty
- * representation kinds: a kind added to `model.ts` tomorrow is then ordered by
- * this walk automatically instead of silently falling out of it, which is the
- * failure mode a `switch` over kinds would have. The walk stops at each struct
+ * Everything else is walked through every carrier it holds, per kind, with an
+ * exhaustive switch: a kind added to `model.ts` tomorrow fails to compile here
+ * instead of silently falling out of the order. The walk stops at each struct
  * it names -- that struct's own dependencies are placed when IT is ordered.
  *
  * `probed` widens the first stopping rule for the one question that looks
@@ -605,21 +611,20 @@ const isRepresentationNode = (value: unknown): value is Representation =>
 const valueHeldStructNames = (representation: Representation, into: Set<string>, seen: Set<object>, probed = false): void => {
   if (seen.has(representation)) return
   seen.add(representation)
-  const node = representation as unknown as Readonly<Record<string, unknown>>
-  const ownership = node['ownership']
-  if (typeof ownership === 'string' && ownership !== 'owned') {
+  const ownership = storedOwnershipOf(representation)
+  if (ownership !== null && ownership !== 'owned') {
     if (probed && ownership === 'shared-refcount')
       for (const element of traceProbedElementsOf(representation)) valueHeldStructNames(element, into, seen, probed)
     return
   }
-  if (node['abi'] !== undefined) {
+  const abi = signatureAbiOf(representation)
+  if (abi !== null) {
     // A bare record in a function-pointer signature may remain incomplete,
     // but a by-value carrier BUILT AROUND that record may not. In
     // `CallableObject<TaggedUnion<Record, Ref<T>>()>`, naming the callable
     // instantiates `TaggedUnion`, whose inline storage immediately asks for
     // `sizeof(Record)`. Walk those composite parameter/result/receiver
     // carriers while continuing to skip a record named directly by the ABI.
-    const abi = node['abi'] as CallableAbi
     const nested = [...abi.parameters.map((parameter) => parameter.value), abi.result, ...(abi.receiver ? [abi.receiver] : [])]
     for (const value of nested) {
       if (cppStructNameOf(value) === null) valueHeldStructNames(value, into, seen, probed)
@@ -631,24 +636,201 @@ const valueHeldStructNames = (representation: Representation, into: Set<string>,
     into.add(named)
     return
   }
-  const descend = (value: unknown): void => {
-    if (isRepresentationNode(value)) {
-      valueHeldStructNames(value, into, seen, probed)
+  // The children in the order the carrier's own fields hold them: the order
+  // reached is the order `definitionOrder` places independent structs in.
+  switch (representation.kind) {
+    case 'array-object':
+      valueHeldStructNames(representation.element, into, seen, probed)
+      // A holder of exactly one carrier -- an extension's `RecordField`, a
+      // tagged-union arm, a signature parameter -- needs no mark of its own:
+      // its carrier is marked on entry, so a second visit stops there anyway.
+      for (const field of representation.extension ?? []) valueHeldStructNames(field.value, into, seen, probed)
       return
-    }
-    if (Array.isArray(value)) {
-      for (const entry of value) descend(entry)
+    case 'keyed-collection':
+      valueHeldStructNames(representation.key, into, seen, probed)
+      if (representation.value !== null) valueHeldStructNames(representation.value, into, seen, probed)
       return
-    }
-    // A plain carrier-holding record -- `RecordField`, a tagged-union arm --
-    // is not itself a representation, so reaching the carriers inside it is
-    // what keeps a struct nested one level down from being missed.
-    if (typeof value === 'object' && value !== null && !seen.has(value)) {
-      seen.add(value)
-      for (const nested of Object.values(value)) descend(nested)
+    case 'dictionary':
+    case 'promise':
+      valueHeldStructNames(representation.value, into, seen, probed)
+      return
+    case 'native-handle':
+      // Unlike an `abi`, a host signature is walked whole: a record it names
+      // directly is a dependency too.
+      if (representation.call !== null) heldSignatureStructNames(representation.call, into, seen, probed)
+      if (representation.construct !== null) heldSignatureStructNames(representation.construct, into, seen, probed)
+      return
+    case 'function-and-constructor':
+      heldSignatureStructNames(representation.call, into, seen, probed)
+      heldSignatureStructNames(representation.construct, into, seen, probed)
+      return
+    case 'proxy-object':
+      valueHeldStructNames(representation.target, into, seen, probed)
+      valueHeldStructNames(representation.handler, into, seen, probed)
+      return
+    case 'borrowed-ref':
+      valueHeldStructNames(representation.referent, into, seen, probed)
+      return
+    case 'dense-buffer':
+    case 'native-sequence':
+      valueHeldStructNames(representation.element, into, seen, probed)
+      return
+    case 'iterator':
+    case 'async-generator':
+      // Completion before resume: the order a generator's carrier is built in.
+      valueHeldStructNames(representation.element, into, seen, probed)
+      valueHeldStructNames(representation.completion, into, seen, probed)
+      valueHeldStructNames(representation.resume, into, seen, probed)
+      return
+    case 'optional':
+      valueHeldStructNames(representation.payload, into, seen, probed)
+      return
+    case 'tagged-union':
+      for (const arm of representation.arms) valueHeldStructNames(arm.value, into, seen, probed)
+      return
+    case 'record':
+    case 'record-with-index':
+    case 'class-ref':
+    case 'native-record-ref':
+    case 'typed-array':
+    case 'array-buffer':
+    case 'shared-array-buffer':
+    case 'data-view':
+    case 'function':
+    case 'function-family':
+    case 'constructor-family':
+    case 'constructor-value-dispatch':
+    case 'function-value-family':
+    case 'function-value-dispatch':
+    case 'unresolved':
+    case 'void':
+    case 'scalar':
+    case 'string':
+    case 'symbol':
+    case 'null':
+    case 'undefined':
+    case 'dynamic':
+    case 'generic-function-set':
+    case 'callable-identity':
+    case 'constructor-identity':
+    case 'error-constructor':
+      return
+    default: {
+      // A kind added to `model.ts` fails to compile here instead of silently
+      // falling out of the definition order.
+      const unhandled: [typeof representation] extends [never] ? 'unhandled' : never = 'unhandled'
+      throw new Error(`${unhandled} representation in struct dependency walk`)
     }
   }
-  for (const value of Object.values(node)) descend(value)
+}
+
+/**
+ * Every carrier of a host or dual-role signature. The signature is marked like
+ * a carrier: it holds several, and one shared by two carriers must not have
+ * its later carriers reached ahead of its earlier ones on a second visit.
+ */
+const heldSignatureStructNames = (abi: CallableAbi, into: Set<string>, seen: Set<object>, probed: boolean): void => {
+  if (seen.has(abi)) return
+  seen.add(abi)
+  for (const parameter of abi.parameters) valueHeldStructNames(parameter.value, into, seen, probed)
+  valueHeldStructNames(abi.result, into, seen, probed)
+  if (abi.receiver !== null) valueHeldStructNames(abi.receiver, into, seen, probed)
+}
+
+/** The ownership a carrier states in its own `ownership` field, `null` for a kind without one. */
+const storedOwnershipOf = (representation: Representation): string | null => {
+  switch (representation.kind) {
+    case 'class-ref':
+    case 'record':
+    case 'record-with-index':
+    case 'native-record-ref':
+    case 'array-object':
+    case 'typed-array':
+    case 'array-buffer':
+    case 'shared-array-buffer':
+    case 'data-view':
+    case 'keyed-collection':
+    case 'dictionary':
+      return representation.ownership
+    case 'unresolved':
+    case 'void':
+    case 'scalar':
+    case 'string':
+    case 'symbol':
+    case 'null':
+    case 'undefined':
+    case 'native-handle':
+    case 'proxy-object':
+    case 'borrowed-ref':
+    case 'dense-buffer':
+    case 'native-sequence':
+    case 'iterator':
+    case 'async-generator':
+    case 'promise':
+    case 'function':
+    case 'function-family':
+    case 'constructor-family':
+    case 'constructor-value-dispatch':
+    case 'function-and-constructor':
+    case 'function-value-family':
+    case 'function-value-dispatch':
+    case 'callable-identity':
+    case 'constructor-identity':
+    case 'error-constructor':
+    case 'generic-function-set':
+    case 'optional':
+    case 'tagged-union':
+    case 'dynamic':
+      return null
+  }
+}
+
+/** The `abi` a callable carrier is spelled by, `null` for a carrier that has none. */
+const signatureAbiOf = (representation: Representation): CallableAbi | null => {
+  switch (representation.kind) {
+    case 'function':
+    case 'function-family':
+    case 'constructor-family':
+    case 'constructor-value-dispatch':
+    case 'function-value-family':
+    case 'function-value-dispatch':
+      return representation.abi
+    case 'unresolved':
+    case 'void':
+    case 'scalar':
+    case 'string':
+    case 'symbol':
+    case 'null':
+    case 'undefined':
+    case 'class-ref':
+    case 'native-handle':
+    case 'record':
+    case 'record-with-index':
+    case 'proxy-object':
+    case 'native-record-ref':
+    case 'borrowed-ref':
+    case 'array-object':
+    case 'dense-buffer':
+    case 'typed-array':
+    case 'array-buffer':
+    case 'shared-array-buffer':
+    case 'data-view':
+    case 'native-sequence':
+    case 'iterator':
+    case 'async-generator':
+    case 'promise':
+    case 'keyed-collection':
+    case 'dictionary':
+    case 'function-and-constructor':
+    case 'callable-identity':
+    case 'constructor-identity':
+    case 'error-constructor':
+    case 'generic-function-set':
+    case 'optional':
+    case 'tagged-union':
+    case 'dynamic':
+      return null
+  }
 }
 
 /** The elements a holder's trace signature instantiates through a `Ref` to this container. */
@@ -980,7 +1162,7 @@ const definitionOrder = (
       walked.add(next)
       const base = bases.get(next)
       if (base) pending.push(base.structName)
-      pending.push(...(valueDependencies.get(next) ?? []))
+      pending.push(...setValues(valueDependencies.get(next)))
     }
     return false
   }
@@ -1633,7 +1815,7 @@ const reflectedClassLayout = (layout: RecordLayout): RecordLayout => {
   const accessors = layout.accessors
     .filter((accessor) => !isPrivateNameKey(accessor.key))
     .map((accessor) =>
-      accessor.precedingFields === undefined ? accessor : { ...accessor, precedingFields: keptBefore(accessor.precedingFields) }
+      accessor.precedingFields === undefined ? accessor : accessorPrecededBy(accessor, keptBefore(accessor.precedingFields))
     )
   return { ...layout, fields, accessors }
 }
@@ -1729,7 +1911,7 @@ const renderFieldDispatcher = (
   classDispatch: boolean,
   storageTypeOf: (field: RecordField) => string,
   /** Which of this layout's fields `renderStructDefinition` placed behind the tail block (`tailFieldsOf`) -- see `dynamicFieldAccessOf`'s `isTailField`. */
-  tailFields: ReadonlySet<string> = new Set(),
+  tailFields: ReadonlySet<string> = new Set<string>(),
   wellKnownSymbols: ReadonlyMap<DeclarationId, string>,
   definitions?: string[],
   dynamicProtocol = true,
@@ -1756,7 +1938,7 @@ const renderFieldDispatcher = (
    * before anything deriving from it, so a derived struct reads its base's
    * entry and adds its own.
    */
-  virtualDeclarations: Map<string, ReadonlySet<string>> = new Map(),
+  virtualDeclarations: Map<string, ReadonlySet<string>> = new Map<string, ReadonlySet<string>>(),
   /** The program's record layouts, which name the checked conversion a boxed write into an object-carrying field takes (`objectFieldWriteLoadText`). */
   layouts: RecordLayoutPolicy | undefined = undefined,
   /** Filled with every field operation a sealed demand names whose arm can only refuse -- see `record` below. */
@@ -3091,6 +3273,27 @@ const fieldCellPayloadType = (
   return narrowed ? cppNarrowedIntegerType : cppTypeOf(field.value)
 }
 
+/**
+ * A class field nothing has assigned yet holds `undefined` (ES2022 define
+ * semantics), including a definite one (`parent!: Node`) the program only
+ * promises to assign: the TypeScript API's own `SourceFile.parent` is such a
+ * field, typed `Node` and walked up to with `parent !== undefined`. A
+ * class-handle carrier has that state (`Ref::undefined()`), distinct from the
+ * `null` a default-constructed `Ref` means, so it starts there; every
+ * constructor store overwrites it, and a carrier without the state keeps its
+ * own default.
+ */
+const classFieldUndefinedDefault = (classDispatch: boolean, field: RecordField, storage: string): string => {
+  if (!classDispatch) return ''
+  const value = field.value
+  const isHandle = (carrier: Representation): boolean => carrier.kind === 'class-ref' && carrier.ownership === 'shared-refcount'
+  if (storage !== cppTypeOf(value)) return ''
+  if (isHandle(value)) return `{${storage}::undefined()}`
+  const first = value.kind === 'tagged-union' ? value.arms[0]?.value : undefined
+  if (first !== undefined && isHandle(first)) return `{${storage}::ofArm<0>(${cppTypeOf(first)}::undefined())}`
+  return ''
+}
+
 const fieldStorageType = (field: RecordField, reactive: ReactiveCellPlan, celled: ReadonlySet<string>, narrowed: boolean): string => {
   const inner = narrowed ? cppNarrowedIntegerType : cppTypeOf(field.value)
   const payload = fieldCellPayloadType(field, reactive, celled, narrowed)
@@ -3146,7 +3349,7 @@ const sparseLayoutOptionalFraction = 0.5
  * anywhere would only add indirection with no offsetting byte ever left
  * unreserved.
  */
-export const sparseLayoutFieldsOf = (layout: { readonly fields: readonly FieldLike[] }): ReadonlySet<string> => {
+export const sparseLayoutFieldsOf = <F extends FieldLike>(layout: { readonly fields: readonly F[] }): ReadonlySet<string> => {
   if (sparseLayoutDisabled()) return emptyStringSet
   if (layout.fields.length <= sparseLayoutFieldThreshold) return emptyStringSet
   const optionalFields = layout.fields.filter((field) => field.value.kind === 'optional')
@@ -3204,11 +3407,11 @@ const sparseFieldFitsInline = (payload: Representation): boolean => {
  * itself uses, so a reader outside this file's own rendering pass can never
  * compute a different answer for the same field.
  */
-export const tailFieldsOf = (
-  layout: { readonly fields: readonly FieldLike[] },
+export const tailFieldsOf = <F extends FieldLike>(
+  layout: { readonly fields: readonly F[] },
   celled: ReadonlySet<string> = emptyStringSet,
   cellName: string | null = null,
-  isNarrowed: (field: FieldLike) => boolean = () => false
+  isNarrowed: (field: F) => boolean = () => false
 ): ReadonlySet<string> => {
   const candidates = sparseLayoutFieldsOf(layout)
   if (candidates.size === 0) return emptyStringSet
@@ -3296,7 +3499,7 @@ export const staticKeyOrderText = (receiver: string, keys: readonly string[]): s
     .map((key) => `std::string_view(${cppStringLiteral(key)}, ${Buffer.byteLength(key, 'utf8')})`)
     .join(', ')}}; gea::detail::pendNativeKeyOrder(${receiver}, gea_key_order, ${keys.length}); }`
 
-export const tailAwareFieldWriteText = (fields: readonly FieldLike[], fieldName: string): string =>
+export const tailAwareFieldWriteText = <F extends FieldLike>(fields: readonly F[], fieldName: string): string =>
   tailFieldsOf({ fields }).has(fieldName)
     ? `${cppRecordTailMemberName}.ensure().${cppRecordFieldName(fieldName)}`
     : cppRecordFieldName(fieldName)
@@ -3321,7 +3524,7 @@ export const tailAwareFieldWriteText = (fields: readonly FieldLike[], fieldName:
  * and "how do I read/write it", so a caller never has to ask the first
  * question itself before choosing which of these two functions to call.
  */
-export const tailAwareFieldReadText = (fields: readonly FieldLike[], fieldName: string, prefix: string): string => {
+export const tailAwareFieldReadText = <F extends FieldLike>(fields: readonly F[], fieldName: string, prefix: string): string => {
   if (!tailFieldsOf({ fields }).has(fieldName)) return `${prefix}${cppRecordFieldName(fieldName)}`
   const member = cppRecordFieldName(fieldName)
   return (
@@ -3604,7 +3807,7 @@ const renderStructDefinition = (
   /** This class's own lazily-materialized arrow fields, by key -- see `renderFieldDispatcher`'s parameter of the same name. */
   lazyArrowFields: ReadonlyMap<string, LazyArrowFieldPlan> | undefined = undefined,
   /** See `renderFieldDispatcher`'s parameter of the same name. */
-  virtualDeclarations: Map<string, ReadonlySet<string>> = new Map(),
+  virtualDeclarations: Map<string, ReadonlySet<string>> = new Map<string, ReadonlySet<string>>(),
   /** See `renderFieldDispatcher`'s parameter of the same name. */
   layouts: RecordLayoutPolicy | undefined = undefined,
   /** `traceLeafStructsOf` proved this struct a leaf of the cycle collector: written down for `gea::detail::RefTargetIsLeaf`. */
@@ -3637,7 +3840,7 @@ const renderStructDefinition = (
   /** See `renderFieldDispatcher`'s parameter of the same name. */
   shadowedKeys: readonly string[] = []
 ): string | CppRecordRefusal => {
-  const isNarrowed = (field: FieldLike): boolean => narrowedSlots.has(integerStorageSlot(structName, field.key))
+  const isNarrowed = (field: RecordField): boolean => narrowedSlots.has(integerStorageSlot(structName, field.key))
   // A class keeps every field inline. Its fields are stored by the
   // constructor views, the property-store emitter and callable frames, which
   // all address a class member by name; only the record paths spell a tail
@@ -3731,7 +3934,8 @@ const renderStructDefinition = (
     if (tailFields.has(field.key)) continue
     fieldLineAt.set(field.key, lines.length)
     members.push(cppRecordFieldName(field.key))
-    lines.push(`  ${fieldStorageType(field, reactive, celled, isNarrowed(field))} ${cppRecordFieldName(field.key)};`)
+    const storage = fieldStorageType(field, reactive, celled, isNarrowed(field))
+    lines.push(`  ${storage} ${cppRecordFieldName(field.key)}${classFieldUndefinedDefault(classDispatch, field, storage)};`)
     // A reactive field whose own carrier cannot be a cell gets the companion
     // revision cell instead -- see `cppReactiveRevisionFieldName`.
     if (reactive.cell !== null && celled.has(field.key) && !representationCanCell(field.value)) {
@@ -3979,6 +4183,23 @@ const renderStructDefinition = (
  * has a perfectly good report to give, which is the same objection
  * `renderTranslationUnit` already answers for a refused body.
  */
+type CppPhysicalClass = Pick<ClassLayout, 'declaration' | 'base' | 'nativeBase' | 'instance' | 'nativeStorage'>
+/** Generic in the layout so a map of full or physical class layouts is projected entry by entry, never converted whole. */
+export const cppPhysicalClassesOf = <C extends CppPhysicalClass>(
+  classes: ReadonlyMap<DeclarationId, C>
+): ReadonlyMap<DeclarationId, CppPhysicalClass> => {
+  const projected = new Map<DeclarationId, CppPhysicalClass>()
+  for (const [declaration, layout] of classes)
+    projected.set(declaration, {
+      declaration: layout.declaration,
+      base: layout.base,
+      nativeBase: layout.nativeBase,
+      instance: layout.instance,
+      ...(layout.nativeStorage !== undefined ? { nativeStorage: layout.nativeStorage } : {})
+    })
+  return projected
+}
+
 export const cppRecordDeclarations = (
   plan: SealedRepresentationPlan,
   deriver: RepresentationDeriver,
@@ -3987,9 +4208,9 @@ export const cppRecordDeclarations = (
   /** Which record members a JSX slot binds -- `reactiveBoundRecordFields`. */
   boundRecordFields: ReadonlyMap<string, ReadonlySet<string>>,
   /** Dispatch member declarations by struct name -- `virtualMethodEmission().membersByStruct`. */
-  virtualMembersByStruct: ReadonlyMap<string, readonly string[]> = new Map(),
+  virtualMembersByStruct: ReadonlyMap<string, readonly string[]> = new Map<string, readonly string[]>(),
   /** The members that may be declared `long long` -- `integerStorageCensusOf().slots`. */
-  narrowedSlots: ReadonlySet<string> = new Set(),
+  narrowedSlots: ReadonlySet<string> = new Set<string>(),
   /**
    * The frontend's declaration-identity census of `SymbolConstructor`'s own
    * members (`host-protocols.ts`'s `wellKnownSymbolDeclarationsOf`) -- what
@@ -4003,10 +4224,7 @@ export const cppRecordDeclarations = (
   splitFieldDefinitions = false,
   reflection: ReflectionExposure | undefined,
   representations: readonly Representation[] = [...plan.selected.values()],
-  physicalClasses: ReadonlyMap<
-    DeclarationId,
-    Pick<ClassLayout, 'declaration' | 'base' | 'nativeBase' | 'instance' | 'nativeStorage'>
-  > = classes,
+  givenPhysicalClasses: ReadonlyMap<DeclarationId, CppPhysicalClass> | undefined = undefined,
   /**
    * Whether an accessor body carries an environment -- `captures.ts`'s
    * admission, asked rather than re-derived, so the member this struct
@@ -4016,13 +4234,13 @@ export const cppRecordDeclarations = (
   /** `program-facts.ts`'s `fixedFieldStateConstant` -- see `renderStructDefinition`'s parameter of the same name. */
   fixedFieldStateConstant = false,
   /** `program-facts.ts`'s `singleEvaluationClasses` -- which classes may hold their method state statically. */
-  singleEvaluationClasses: ReadonlySet<DeclarationId> = new Set(),
+  singleEvaluationClasses: ReadonlySet<DeclarationId> = new Set<DeclarationId>(),
   /** `integrity-restrictions.ts`'s `restrictsRecordShape` -- see `renderStructDefinition`'s `attributesConstant`. */
   recordShapeRestricted: (shapeId: string, hasSymbolField: boolean) => boolean = () => true,
   /** `construction-only-fields.ts`'s `holdsOlder`: the class fields that can only ever point at an older object. */
   holdsOlder: (declaration: DeclarationId, key: string) => boolean = () => false,
   /** Certified structural targets may own a traced native origin beyond their declared fields. */
-  nativeViewTargets: ReadonlySet<string> = new Set(),
+  nativeViewTargets: ReadonlySet<string> = new Set<string>(),
   /** Getter/setter body ABIs authenticate erased native descriptor leaves. Required: no frame is not an answer. */
   accessorAbiOf: (body: FunctionId) => CallableAbi | null,
   /** Generated dynamic writes consume the selected artifact's certified pair. */
@@ -4059,7 +4277,12 @@ export const cppRecordDeclarations = (
   /** Which struct members this renderer actually put in a `Signal<T>`, by struct name. */
   readonly celledFields: ReadonlyMap<string, ReadonlySet<string>>
 } => {
-  const classIndexProtocols = classIndexProtocolsOf(physicalClasses, (shapeId) => recordLayoutOfShapeId(deriver, shapeId))
+  // Projected, not defaulted to `classes` itself: a whole `ClassLayout` map
+  // standing in for this narrower record's map is a carrier change no native
+  // conversion makes.
+  const physicalClasses: ReadonlyMap<DeclarationId, CppPhysicalClass> =
+    givenPhysicalClasses !== undefined ? givenPhysicalClasses : cppPhysicalClassesOf(classes)
+  const classIndexProtocols = cppClassIndexProtocols(physicalClasses, deriver)
   const { links, unlinkable } = classBaseLinks(physicalClasses)
   const { requiredStructs, fieldsByStruct, unlayoutable, shapesByStruct } = collectRequiredStructs(
     representations,
@@ -4102,17 +4325,17 @@ export const cppRecordDeclarations = (
   if (missing.length > 0) {
     return {
       declarations: [],
-      fieldDefinitionsByStruct: new Map(),
+      fieldDefinitionsByStruct: new Map<string, readonly string[]>(),
       runtimeClassBases: [],
       classIndexProtocols,
       refused: missing.map((structName) => ({
         structName,
         reason: `no record layout: ${unlayoutable.get(structName) ?? 'named by no reachable shape'}`
       })),
-      revisionFields: new Map(),
-      celledFields: new Map(),
-      staticMethodStateClasses: new Set(),
-      structNames: new Set()
+      revisionFields: new Map<string, ReadonlySet<string>>(),
+      celledFields: new Map<string, ReadonlySet<string>>(),
+      staticMethodStateClasses: new Set<DeclarationId>(),
+      structNames: new Set<string>()
     }
   }
 
@@ -4234,7 +4457,7 @@ export const cppRecordDeclarations = (
     const declaration = declarationByStruct.get(structName)
     const owners =
       declaration === undefined
-        ? [...(shapesByStruct.get(structName) ?? [])].map((shapeId) => dynamicFieldConversionOwnerOf({ kind: 'record', shapeId })!)
+        ? [...setValues(shapesByStruct.get(structName))].map((shapeId) => dynamicFieldConversionOwnerOf({ kind: 'record', shapeId })!)
         : [dynamicFieldConversionOwnerOf({ kind: 'class-ref', declaration })!]
     const dynamicFieldLoad: DynamicFieldLoad = (key, target) => {
       if (conversionSite === undefined) return null
@@ -4278,7 +4501,7 @@ export const cppRecordDeclarations = (
       (renderableAccessors(layout).length > 0 && !classStructNames.has(structName)) ||
       (lazyArrowFields !== undefined && lazyArrowFields.size > 0) ||
       writesConvertIntoLaterStruct(layouts, layout, orderOf.get(structName) ?? 0, orderOf, dynamicFieldLoad)
-    const definitions = splitFieldDefinitions || needsOutOfLineFields ? [] : undefined
+    const definitions: string[] | undefined = splitFieldDefinitions || needsOutOfLineFields ? [] : undefined
     if (definitions) fieldDefinitionsByStruct.set(structName, definitions)
     return renderStructDefinition(
       structName,
@@ -4306,7 +4529,7 @@ export const cppRecordDeclarations = (
       !classStructNames.has(structName) &&
         !links.has(structName) &&
         !baseStructNames.has(structName) &&
-        [...(shapesByStruct.get(structName) ?? [])].every(
+        [...setValues(shapesByStruct.get(structName))].every(
           (shapeId) =>
             !recordShapeRestricted(
               shapeId,
@@ -4324,14 +4547,14 @@ export const cppRecordDeclarations = (
   if (refused.length > 0)
     return {
       declarations: [],
-      fieldDefinitionsByStruct: new Map(),
+      fieldDefinitionsByStruct: new Map<string, readonly string[]>(),
       runtimeClassBases: [],
       classIndexProtocols,
       refused,
-      revisionFields: new Map(),
-      celledFields: new Map(),
-      staticMethodStateClasses: new Set(),
-      structNames: new Set()
+      revisionFields: new Map<string, ReadonlySet<string>>(),
+      celledFields: new Map<string, ReadonlySet<string>>(),
+      staticMethodStateClasses: new Set<DeclarationId>(),
+      structNames: new Set<string>()
     }
 
   // `Value` can only project a genuinely dynamic class back to a nominal

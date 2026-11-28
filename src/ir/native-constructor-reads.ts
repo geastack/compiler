@@ -1,6 +1,6 @@
 import { nativePropertyKeyTextsOf } from './native-property-key-texts.js'
 import type { BindingPlacement } from '../projection/bindings.js'
-import type { DeclarationId, FunctionId } from '../identity/ids.js'
+import type { DeclarationId, FunctionId, IrValueId } from '../identity/ids.js'
 import { runtimeClassLayoutsOf, type ClassLayout } from '../projection/classes.js'
 import { extendsClass } from '../projection/dispatch.js'
 import { classStaticMemberOf } from '../projection/fields.js'
@@ -89,7 +89,9 @@ export const nativeConstructorGetInputsOf = (
           for (const field of current.staticFields) keys.add(field.key)
           for (const method of current.staticMethods) keys.add(method.key)
           for (const accessor of current.staticAccessors) keys.add(accessor.key)
-          for (const key of slots?.slots.get(current.staticOwner ?? current.declaration)?.keys() ?? []) keys.add(key)
+          // Guarded rather than `?? []`: an iterator-or-array union has no single native iteration protocol.
+          const ownSlots = slots?.slots.get(current.staticOwner ?? current.declaration)
+          if (ownSlots) for (const key of ownSlots.keys()) keys.add(key)
           if (current.name !== null) {
             keys.add('name')
             keys.add('length')
@@ -99,7 +101,8 @@ export const nativeConstructorGetInputsOf = (
       }
       for (const key of keys) {
         if (key === 'prototype') {
-          if (layout.instance?.kind === 'class-ref') add('field-read', layout.instance, result)
+          const instance = layout.instance
+          if (instance !== null && instance.kind === 'class-ref') add('field-read', instance, result)
           continue
         }
         const stored = slots === undefined ? null : staticFieldSlotOf(slots, classes, [layout.declaration], key)
@@ -128,26 +131,50 @@ export const nativeConstructorGetInputsOf = (
   return [...inputs.values()]
 }
 
+/**
+ * What `nativeConstructorMethodBodiesOf` reads of a whole program: its string
+ * and number constants, and the only operations that can replace a static
+ * method -- a write or delete on a constructor, or a call handed one. Built
+ * per question, both were a pass over every operation of the program for
+ * every static method read, and a solve asks once per read per visit.
+ */
+export interface NativeConstructorMutations {
+  readonly constants: ReadonlyMap<IrValueId, string>
+  readonly mutations: readonly IrOperation[]
+}
+
+const holdsConstructor = (representation: Representation): boolean =>
+  leavesOf(representation).some((held) => held.kind === 'constructor-family')
+
+export const nativeConstructorMutationsOf = (operations: readonly IrOperation[]): NativeConstructorMutations => {
+  const constants = new Map<IrValueId, string>()
+  const mutations: IrOperation[] = []
+  for (const candidate of operations) {
+    if (candidate.kind === 'constant' && (candidate.literal === 'string' || candidate.literal === 'number'))
+      constants.set(candidate.result.id, candidate.text)
+    else if (candidate.kind === 'set' || candidate.kind === 'define-own-property' || candidate.kind === 'delete') {
+      if (holdsConstructor(candidate.receiver.representation)) mutations.push(candidate)
+    } else if (candidate.kind === 'call' && candidate.arguments.some((argument) => holdsConstructor(argument.representation)))
+      mutations.push(candidate)
+  }
+  return { constants, mutations }
+}
+
 /** Only an actual selected static method body supplies callable provenance; construct ABI spelling alone does not. */
 export const nativeConstructorMethodBodiesOf = (
   operation: GetOperation,
   keyText: string | null,
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   operations: readonly IrOperation[],
-  placements: ReadonlyMap<DeclarationId, BindingPlacement> = new Map()
+  placements: ReadonlyMap<DeclarationId, BindingPlacement> = new Map<DeclarationId, BindingPlacement>(),
+  mutationsOf: () => NativeConstructorMutations = () => nativeConstructorMutationsOf(operations)
 ): readonly FunctionId[] | null => {
   const receivers = leavesOf(operation.receiver.representation)
   if (receivers.length === 0 || receivers.some((receiver) => receiver.kind !== 'constructor-family')) return null
   const keys = keyText === null ? (operation.provenKeyTexts ?? nativePropertyKeyTextsOf(operation.key, operations, placements)) : [keyText]
   if (keys === null || keys.length === 0) return null
   const methods = new Set<FunctionId>()
-  const constants = new Map(
-    operations.flatMap((candidate) =>
-      candidate.kind === 'constant' && (candidate.literal === 'string' || candidate.literal === 'number')
-        ? [[candidate.result.id, candidate.text] as const]
-        : []
-    )
-  )
+  const { constants, mutations } = mutationsOf()
   for (const receiver of receivers) {
     if (receiver.kind !== 'constructor-family') return null
     const candidates = nativeConstructorPropertyClassesOf(receiver, classes, keyText, operation.result.representation)
@@ -157,7 +184,7 @@ export const nativeConstructorMethodBodiesOf = (
         const site = classStaticMemberOf(classes, layout.declaration, keyText)
         if (site?.kind !== 'method' || site.method.callable === null) return null
         if (
-          operations.some((candidate) => {
+          mutations.some((candidate) => {
             if (candidate.kind === 'set' || candidate.kind === 'define-own-property' || candidate.kind === 'delete') {
               const changedKey = constants.get(candidate.key.value)
               return (

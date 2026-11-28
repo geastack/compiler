@@ -5,7 +5,7 @@ import { createCommonJsRequireCensus } from './commonjs-require.js'
 import type { ValueFlowIndex } from './flow/model.js'
 import { sourceValueSessionOf } from './flow/source-value-session.js'
 import { attachSourceCommonJsExportIdentities, type SourceCommonJsExportIdentities } from './flow/source-commonjs-exports.js'
-import { deferredIntrinsicProtocolLedgerOf } from './deferred-intrinsic-protocols.js'
+import { deferredIntrinsicProtocolLedgerOf, captureAnswer } from './deferred-intrinsic-protocols.js'
 import { isTypePositionReference } from './flow/targets.js'
 
 /**
@@ -356,7 +356,7 @@ export const censusCommonJsModuleRecords = (
       continue
     }
     const session = sourceValueSessionOf(checker, flow)
-    const proof = ledger.capture(() => {
+    const proof = captureAnswer(ledger, () => {
       const roots = session.closedValuesOf(literal)
       if (roots?.length !== 1 || roots[0] !== literal) return false
       for (const property of literal.properties) {

@@ -121,11 +121,18 @@ export const keySetTouches = (keys: MutationKeySet | undefined, query: Prototype
  * whole-object question.
  * @semanticCategory generic-primitive
  */
+// Production code queries it through `hasEntry`, not the inherited Set view:
+// the native build dispatches a Set method only off a Set carrier, and this
+// census is a Set subclass held through its interface.
 export interface GlobalHostMutationTaint extends ReadonlySet<DeclarationId | '*'> {
+  /** Whether this object identity, or `'*'` for the global surface, is tainted. */
+  hasEntry(entry: DeclarationId | '*'): boolean
   /** Keys written on some receiver that may be the global object or any intrinsic object. */
   readonly surfaceKeys: MutationKeySet
   /** Keys written on this specific object identity; `undefined` when nothing was. */
   readonly keysOf: (object: DeclarationId) => MutationKeySet | undefined
+  /** Every object identity some key was written on: the set's entries other than `'*'`. */
+  readonly taintedObjects: () => readonly DeclarationId[]
 }
 
 /**
@@ -155,7 +162,7 @@ export const intrinsicObjectKeysIntact = (
   object: DeclarationId,
   query: PrototypeKeyQuery | 'all'
 ): boolean => {
-  const star = taint.has('*')
+  const star = taint.hasEntry('*')
   const surface = keySetTouches(taint.surfaceKeys, query)
   const own = keySetTouches(taint.keysOf(object), query)
   if (keyBlockDebug && (star || surface || own)) {
@@ -201,6 +208,16 @@ export class HostMutationTaint extends Set<DeclarationId | '*'> implements Globa
   }
 
   readonly keysOf = (object: DeclarationId): MutationKeySet | undefined => this.#objects.get(object)
+
+  hasEntry(entry: DeclarationId | '*'): boolean {
+    return this.has(entry)
+  }
+
+  readonly taintedObjects = (): readonly DeclarationId[] => {
+    const objects: DeclarationId[] = []
+    for (const [object] of this.#objects) objects.push(object)
+    return objects
+  }
 
   /** A legacy add carries no key, so it is the whole object (or, for `'*'`, every surface key). */
   override add(entry: DeclarationId | '*'): this {
@@ -259,11 +276,10 @@ export class HostMutationTaint extends Set<DeclarationId | '*'> implements Globa
     if (surface.numeric) this.taintSurface(numericKeys)
     if (surface.programSymbols) this.taintSurface(programSymbolKeys)
     if (surface.every) this.taintSurface(everyKey)
-    for (const entry of other) {
-      if (entry === '*') {
-        this.taintSurface(everyKey)
-        continue
-      }
+    // The census's entries, read off its object table rather than iterated as
+    // a Set: a `'*'` entry is `surface.every`, already absorbed above, and the
+    // native build has no conversion from a Set subclass to a Set to iterate.
+    for (const entry of other.taintedObjects()) {
       const keys = other.keysOf(entry)
       if (!keys) {
         this.taintObject(entry, everyKey)

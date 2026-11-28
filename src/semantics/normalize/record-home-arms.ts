@@ -67,12 +67,20 @@ export const recordArmUnionStatementOf = (
 export const isHomelessRecordArm = (checker: ts.TypeChecker, declared: ts.Type, passed: ts.Type): boolean => {
   if (!isPlainRecordType(checker, passed)) return false
   const members = presentMembersOf(declared)
-  if (
-    members.some(
-      (member) => member === passed || (checker.isTypeAssignableTo(member, passed) && checker.isTypeAssignableTo(passed, member))
-    )
-  )
-    return false
+  const isMember = (type: ts.Type): boolean =>
+    members.some((member) => member === type || (checker.isTypeAssignableTo(member, type) && checker.isTypeAssignableTo(type, member)))
+  if (isMember(passed)) return false
+  // Type algebra, not a record: an argument typed `Value & (Other | Value)`
+  // expands to every pairwise intersection. One that contains a declared arm
+  // IS that arm, narrowed; one that reduces to `never` (conflicting `kind`
+  // literals) holds no value at all. Either fits several arms by
+  // construction, and adding them buried the stated arms under ~100
+  // phantom ones whose narrowing then dropped the real ones. The part must be
+  // the declared arm itself: a record built by intersection
+  // (`Omit<Options, 'raw'> & { timeoutMS: number }`) has parts merely
+  // assignable to an arm, and is a record of its own that can be homeless.
+  if (passed.isIntersection() && passed.types.some((part) => members.includes(part))) return false
+  if (checker.isTypeAssignableTo(passed, checker.getNeverType())) return false
   const homes = members.filter((member) => isPlainRecordType(checker, member) && checker.isTypeAssignableTo(passed, member))
   if (homes.length < 2) return false
   const keys = homes.map((home) => new Set(checker.getPropertiesOfType(home).map((property) => property.getName())))

@@ -181,9 +181,11 @@ const resolveBreakContinueTarget = (
   }
   let current: ts.Node | undefined = node.parent
   while (current && !isFunctionBoundary(current)) {
-    if (form === 'continue' && isIterationStatement(current)) return control(current)
-    if (form === 'break' && (isIterationStatement(current) || ts.isSwitchStatement(current))) return control(current)
-    current = current.parent
+    // A non-optional local, so each test below narrows a plain node.
+    const ancestor: ts.Node = current
+    if (form === 'continue' && isIterationStatement(ancestor)) return control(ancestor)
+    if (form === 'break' && (isIterationStatement(ancestor) || ts.isSwitchStatement(ancestor))) return control(ancestor)
+    current = ancestor.parent
   }
   return null
 }
@@ -430,6 +432,14 @@ const alwaysAbrupt = (statement: ts.Statement | undefined): boolean => {
   if (!statement) return false
   if (ts.isBlock(statement)) return alwaysAbrupt(statement.statements[statement.statements.length - 1])
   if (ts.isIfStatement(statement)) return alwaysAbrupt(statement.thenStatement) && alwaysAbrupt(statement.elseStatement)
+  // TryStatement evaluation: a finally that completes normally passes the
+  // try/catch completion through, and an abrupt one replaces it -- abrupt
+  // either way.
+  if (ts.isTryStatement(statement))
+    return (
+      (statement.finallyBlock !== undefined && alwaysAbrupt(statement.finallyBlock)) ||
+      (alwaysAbrupt(statement.tryBlock) && (statement.catchClause === undefined || alwaysAbrupt(statement.catchClause.block)))
+    )
   return (
     ts.isBreakStatement(statement) || ts.isReturnStatement(statement) || ts.isThrowStatement(statement) || ts.isContinueStatement(statement)
   )

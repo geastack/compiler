@@ -3,6 +3,7 @@ import type { CallableAbi, Representation } from '../../../representation/model.
 import type { StructuralTypeId } from '../../../identity/ids.js'
 import { isOpenDocument, representationKey } from '../../../representation/model.js'
 import { hostMemberTemplateOf, isArrayConstantOf } from '../../../representation/host-templates.js'
+import { isMapEntryPairCarrier } from '../../../representation/collections.js'
 import type { CallOperation, IrOperand } from '../../../ir/model.js'
 import {
   createCppEmitBlockedError,
@@ -1309,7 +1310,7 @@ const arrayFromText = (ctx: EmitContext, operation: CallOperation): string => {
       // beats handing clang an assignment between two array carriers.
       if (
         !callback &&
-        result &&
+        result != null &&
         !(result.element.kind === 'scalar' && (result.element.domain === 'number' || result.element.domain === 'float64'))
       ) {
         throw createCppEmitBlockedError(
@@ -1361,16 +1362,7 @@ const arrayFromText = (ctx: EmitContext, operation: CallOperation): string => {
   // renders and on the same pair-shape check; a `ReadonlyMap` copied this way
   // reads it.
   if (carrier.kind === 'keyed-collection' && carrier.family === 'map' && carrier.value !== null && !callback) {
-    const pair = result.element.kind === 'record' ? result.element : null
-    const [first, second] = pair?.fields ?? []
-    const matches =
-      pair !== null &&
-      pair.fields.length === 2 &&
-      first?.key === '0' &&
-      second?.key === '1' &&
-      representationKey(first.value) === representationKey(carrier.key) &&
-      representationKey(second.value) === representationKey(carrier.value)
-    if (!matches) {
+    if (!isMapEntryPairCarrier(result.element, carrier.key, carrier.value)) {
       throw createCppEmitBlockedError(
         'host-member-call:ArrayConstructor.from',
         `"Array.from" of a Map yields "[K, V]" pairs, which "${representationKey(result.element)}" cannot hold`

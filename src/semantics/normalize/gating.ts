@@ -9,8 +9,8 @@ import {
   type OperationId,
   type SemanticResultId
 } from '../../identity/ids.js'
-import type { ConditionalEdge, GatedOperations, GateLink } from '../model/edges.js'
-import { operandOf } from '../model/operands.js'
+import type { ConditionalEdge, EvaluationEdge, GatedOperations, GateLink } from '../model/edges.js'
+import { operandOf, type SemanticCaller } from '../model/operands.js'
 import type { SemanticOperation } from '../model/operations.js'
 import { forEachEvaluationChild } from './evaluation-order.js'
 import type { ArgumentsObjectCensus } from './arguments-objects.js'
@@ -75,33 +75,68 @@ export interface GatingInput {
  */
 type Gate = GateLink
 
+const sameCaller = (left: SemanticCaller, right: SemanticCaller): boolean =>
+  left.kind === 'function'
+    ? right.kind === 'function' && left.functionId === right.functionId
+    : right.kind === 'region' && left.regionId === right.regionId
+
 /**
- * Every operation one node published.
+ * `operations`' ids, grouped by the node half of their spelling and then by
+ * family, each family's ids at their ordinals.
+ *
+ * Gating asked the map for `op|<node>|<family>|<ordinal>` per family per
+ * node, a fresh long string hashed per probe -- on a self-compile most of the
+ * pass. Reading every id's spelling apart once answers the same probes: an id
+ * equals a probe exactly when its text after `op|` splits, at its last two
+ * bars, into that node, that family and that ordinal's decimal spelling, since
+ * neither a family nor an ordinal contains a bar.
+ */
+type OperationsByNode = ReadonlyMap<string, readonly (readonly OperationId[] | undefined)[]>
+
+const familyIndices = new Map<string, number>(operationFamilies.map((family, index) => [family, index]))
+
+const indexOperationsByNode = (operations: GatingInput['operations']): OperationsByNode => {
+  const byNode = new Map<string, OperationId[][]>()
+  for (const id of operations.keys()) {
+    const text: string = id
+    if (!text.startsWith('op|')) continue
+    const ordinalAt = text.lastIndexOf('|')
+    const familyAt = text.lastIndexOf('|', ordinalAt - 1)
+    if (familyAt < 3) continue
+    const family = familyIndices.get(text.slice(familyAt + 1, ordinalAt))
+    if (family === undefined) continue
+    const ordinalText = text.slice(ordinalAt + 1)
+    const ordinal = Number(ordinalText)
+    if (!Number.isInteger(ordinal) || ordinal < 0 || String(ordinal) !== ordinalText) continue
+    const node = text.slice(3, familyAt)
+    let families = byNode.get(node)
+    if (families === undefined) byNode.set(node, (families = []))
+    let ids = families[family]
+    if (ids === undefined) families[family] = ids = []
+    ids[ordinal] = id
+  }
+  return byNode
+}
+
+/**
+ * Every operation one node published, in family order and then ordinal order.
  *
  * Ordinals within a `(node, family)` pair are handed out consecutively from
- * zero, so probing until the first absence enumerates them exactly. This is why
- * the pass can gate a node without knowing which producer served it or how many
- * operations that producer minted -- a compound assignment's three, an update's
- * two, a property's get-then-set pair.
+ * zero, so the run from zero up to the first absence enumerates them exactly,
+ * as probing did. This is why the pass can gate a node without knowing which
+ * producer served it or how many operations that producer minted -- a compound
+ * assignment's three, an update's two, a property's get-then-set pair.
  */
-const operationsOfNode = (operations: GatingInput['operations'], node: NodeId): readonly OperationId[] => {
+const operationsOfNode = (byNode: OperationsByNode, node: NodeId): readonly OperationId[] => {
   const found: OperationId[] = []
-  // The node half of the identity, built once instead of once per probe.
-  //
-  // Every probe below asks for `op|<node>|<family>|<ordinal>` and the node is
-  // the long part -- a file identity, a syntax kind, an ordinal and a
-  // specialization suffix. Rebuilding it for all fourteen families, and again
-  // for every ordinal of every family that answers, copied that string fifteen
-  // or more times to ask fifteen questions about one node. The ids are
-  // identical to `operationId`'s own spelling (this is the same concatenation
-  // it performs, with its first argument factored out), so the probe order,
-  // the answers, and the truncation at the first absent ordinal are unchanged.
-  const prefix = `op|${node}|`
-  for (const family of operationFamilies) {
-    const familyPrefix = `${prefix}${family}|`
-    for (let ordinal = 0; ; ordinal += 1) {
-      const id = `${familyPrefix}${ordinal}` as OperationId
-      if (!operations.has(id)) break
+  const families = byNode.get(node)
+  if (families === undefined) return found
+  for (let family = 0; family < operationFamilies.length; family++) {
+    const ids = families[family]
+    if (ids === undefined) continue
+    for (let ordinal = 0; ordinal < ids.length; ordinal++) {
+      const id = ids[ordinal]
+      if (id === undefined) break
       found.push(id)
     }
   }
@@ -125,8 +160,10 @@ const bodyOfOwnCaller = (node: ts.Node): ts.Node | null => {
 /** The condition's own published result, or `null` when nothing citable produces it. */
 const guardOf = (condition: ts.Expression, facts: CitationFacts): SemanticResultId | null => {
   const cited = citeExpressionResult(condition, facts)
-  if (cited.kind !== 'source' || cited.source.kind !== 'result') return null
-  return cited.source.result
+  if (cited.kind !== 'source') return null
+  const source = cited.source
+  if (source.kind !== 'result') return null
+  return source.result
 }
 
 /**
@@ -146,10 +183,14 @@ export const gatingEdges = (input: GatingInput): GatedOperations => {
   const { files, operations, specializations } = input
   const gatedOperations: OperationId[] = []
   const gatedChains: (readonly Gate[])[] = []
+  const orderedEdges: EvaluationEdge[] = []
   // One walker per copy, built on first use. Rebuilding a dozen closures for
   // every node of every copy would rebuild them for one answer, the same way
   // `normalize.ts` caches a producer set per copy and for the same reason.
   const walkers = new Map<string, GateWalker>()
+  // Built on first use: `operations` is complete before gating starts and never changes during it.
+  let byNode: OperationsByNode | null = null
+  const operationsByNode = (): OperationsByNode => (byNode ??= indexOperationsByNode(operations))
 
   // Recorded in chain order, outermost first: the lowering reads the chain back
   // in the order the edges arrive, so a caller's own nesting is what states
@@ -182,9 +223,19 @@ export const gatingEdges = (input: GatingInput): GatedOperations => {
       namespacePaths: input.namespacePaths
     }
 
+    // The test a `default` clause being walked falls through from, if any;
+    // see the switch walk below.
+    let fellFrom: SemanticOperation | null = null
     const emit = (node: ts.Node, gates: readonly Gate[]): void => {
-      if (gates.length === 0) return
-      for (const to of operationsOfNode(operations, identities.nodeIdOf(node))) pushGateEdgesFor(to, gates)
+      if (gates.length === 0 && fellFrom === null) return
+      for (const to of operationsOfNode(operationsByNode(), identities.nodeIdOf(node))) {
+        pushGateEdgesFor(to, gates)
+        // Same owner only: a nested function's body runs when it is called,
+        // and its operations are ordered within that function, not here.
+        const target = fellFrom === null ? undefined : operations.get(to)
+        if (fellFrom !== null && target !== undefined && sameCaller(target.caller, fellFrom.caller))
+          orderedEdges.push({ kind: 'evaluation', from: fellFrom.id, to })
+      }
     }
 
     /**
@@ -207,15 +258,28 @@ export const gatingEdges = (input: GatingInput): GatedOperations => {
       // A type annotation contains no operations, and a function body starts a
       // caller of its own whose execution this chain says nothing about.
       if (ts.isTypeNode(node) && !ts.isExpressionWithTypeArguments(node)) return
-      const copies = specializations.specializationsOf(node as ts.Declaration)
+      // Forked where the census forks, on `genericSubjectOf`: for `const f =
+      // <T>() => ...` the copies are keyed on the arrow but the DECLARATION is
+      // what the census records per copy. Asking the declaration alone found
+      // no copies, walked it under the enclosing path, and gated ids no copy
+      // publishes -- so a generic arrow declared after an `if (...) continue`
+      // in a loop lost that gate, and its binding write was scheduled ahead of
+      // the arm that allocates the closure it stores.
+      const holder = path[path.length - 1]
+      if (holder !== undefined && holder.owner === node) {
+        visitHere(node, gates)
+        return
+      }
+      const subject = input.identities.genericSubjectOf(node as ts.Declaration)
+      const copies = specializations.specializationsOf(subject)
       if (copies.length > 0) {
         for (const copy of copies) {
-          if (!specializations.admittedUnder(node as ts.Declaration, copy, path)) continue
-          walkerFor([...path, { owner: node as ts.Declaration, ordinal: copy.ordinal }]).visitHere(node, gates)
+          if (!specializations.admittedUnder(subject, copy, path)) continue
+          walkerFor([...path, { owner: subject, ordinal: copy.ordinal }]).visitHere(node, gates)
         }
         return
       }
-      if (specializations.isGeneric(node as ts.Declaration)) return
+      if (specializations.isGeneric(subject)) return
       visitHere(node, gates)
     }
 
@@ -405,7 +469,16 @@ export const gatingEdges = (input: GatingInput): GatedOperations => {
         let running: SemanticResultId | null = null
         for (const clause of node.caseBlock.clauses) {
           if (!ts.isCaseClause(clause)) {
+            // Falling into `default` puts it on no arm of the guard handed
+            // forward, so nothing in the chain orders it after that guard's
+            // test -- and the tests carry the switch's own evaluation ordinal,
+            // which sorts after every statement inside it. Without an explicit
+            // edge the default's body was scheduled before the test it falls
+            // from, and the lowering re-entered an arm it had already closed.
+            const enclosing = fellFrom
+            fellFrom = running === null ? null : (operations.get(operationOfResult(running)) ?? null)
             for (const statement of clause.statements) visit(statement, chain)
+            fellFrom = enclosing
             running = null
             continue
           }
@@ -583,7 +656,7 @@ export const gatingEdges = (input: GatingInput): GatedOperations => {
 
   const root = walkerFor(rootSpecialization)
   for (const file of files) for (const statement of input.reachable.statementsOf(file)) root.visit(statement, [])
-  return { operations: gatedOperations, chains: gatedChains }
+  return { operations: gatedOperations, chains: gatedChains, ordered: orderedEdges }
 }
 
 interface HeadTestedLoop {

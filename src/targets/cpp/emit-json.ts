@@ -313,10 +313,14 @@ const classJsonUnsupportedReason = (
   return null
 }
 
-/** Runtime key ordering selects a field, while its value retains its native carrier. */
-const renderJsonMemberWriter = (
+/**
+ * Runtime key ordering selects a field, while its value retains its native carrier.
+ * Generic in the field so each caller's own field array is read as itself, never
+ * converted to a narrower element carrier.
+ */
+const renderJsonMemberWriter = <F extends { readonly key: string; readonly value: Representation }>(
   structName: string,
-  fields: readonly { readonly key: string; readonly value: Representation }[]
+  fields: readonly F[]
 ): string => {
   const lines = [
     `inline bool gea_json_write_member(std::string& out, const ${structName}& value, const gea::PropertyKey& key, bool& first) {`
@@ -1221,6 +1225,16 @@ const absentWhenUnserializableText = (ctx: EmitContext, operation: CallOperation
   const writeText = (value: string): string =>
     `std::string gea_json_out; gea_json_write(gea_json_out, ${value}); return ${resultType}(std::move(gea_json_out));`
   const representation = argument.representation
+  // An optional whose payload has a native writer is the payload's document
+  // or `undefined`; asked first, because the optional carrier itself has no
+  // mapping and the data-tree refusal below would otherwise read it as one.
+  if (
+    representation.kind === 'optional' &&
+    representation.absence === 'undefined' &&
+    jsonUnsupportedReason(jsonWorldOf(ctx), representation.payload, emptyJsonCollected(), new Set(), 'write') === null
+  ) {
+    return `[&]() -> ${resultType} { const auto& gea_json_value = ${operandText(ctx, argument)}; if (!gea_json_value.has_value()) return ${resultType}(); ${writeText('*gea_json_value')} }()`
+  }
   const unsupported =
     representation.kind === 'dynamic'
       ? null
@@ -1240,6 +1254,44 @@ const absentWhenUnserializableText = (ctx: EmitContext, operation: CallOperation
   }
   if (representation.kind === 'undefined') return `${resultType}()`
   return null
+}
+
+/** ECMA-262 25.5.2 JSON.stringify steps 6-8: the gap a `space` argument selects, over each carrier it may arrive in. */
+const jsonGapText = (representation: Representation, text: string): string => {
+  if (representation.kind === 'undefined' || representation.kind === 'null') return 'std::string()'
+  if (representation.kind === 'string' || (representation.kind === 'scalar' && representation.domain === 'number')) {
+    return `gea::json::indentGap(${text})`
+  }
+  if (representation.kind === 'optional') {
+    return `((${text}).has_value() ? ${jsonGapText(representation.payload, `(*(${text}))`)} : std::string())`
+  }
+  if (representation.kind === 'tagged-union') {
+    const arms = representation.arms.map((arm, index) => jsonGapText(arm.value, armAt(text, index)))
+    return arms.reduceRight((rest, arm, index) => `${armIs(text, index)} ? ${arm} : (${rest})`)
+  }
+  throw createCppEmitBlockedError(
+    'host-member-call:JSON.stringify',
+    `JSON.stringify space carries unsupported "${representationKey(representation)}"`
+  )
+}
+
+/**
+ * `JSON.stringify(value, replacer, space)` whose replacer is `null` or
+ * `undefined`: step 4 then installs neither a ReplacerFunction nor a
+ * PropertyList, so the document is the one-argument document laid out with
+ * the gap. Writing it compactly and re-laying it out is that layout exactly
+ * (`gea::json::indentCompact`), for every carrier the native writer takes.
+ */
+const nullishReplacerStringifyText = (ctx: EmitContext, operation: CallOperation, valueText: string): string | null => {
+  const replacer = operation.arguments[1]
+  if (replacer === undefined || (replacer.representation.kind !== 'null' && replacer.representation.kind !== 'undefined')) return null
+  const space = operation.arguments[2]
+  const compact = `[&]() { std::string gea_json_out; gea_json_write(gea_json_out, ${valueText}); return gea_json_out; }()`
+  if (space === undefined) return compact
+  return (
+    `([&]() { const auto& __gea_space = ${operandText(ctx, space)}; ` +
+    `return gea::json::indentCompact(${compact}, ${jsonGapText(space.representation, '__gea_space')}); })()`
+  )
 }
 
 export const jsonCallText = (ctx: EmitContext, member: 'stringify' | 'parse', operation: CallOperation): string => {
@@ -1277,6 +1329,8 @@ export const jsonCallText = (ctx: EmitContext, member: 'stringify' | 'parse', op
     }
     const valueText = operandText(ctx, argument)
     if (operation.arguments.length > 1) {
+      const nullishReplacer = nullishReplacerStringifyText(ctx, operation, valueText)
+      if (nullishReplacer !== null) return nullishReplacer
       if (argument.representation.kind !== 'string' && argument.representation.kind !== 'dynamic') {
         throw createCppEmitBlockedError(
           'host-member-call:JSON.stringify',
@@ -1315,24 +1369,7 @@ export const jsonCallText = (ctx: EmitContext, member: 'stringify' | 'parse', op
         return `[&]() { std::string gea_json_out; gea_json_write(gea_json_out, ${valueText}); return gea_json_out; }()`
       }
       const space = operation.arguments[2]
-      const gapText = (representation: Representation, text: string): string => {
-        if (representation.kind === 'undefined' || representation.kind === 'null') return 'std::string()'
-        if (representation.kind === 'string' || (representation.kind === 'scalar' && representation.domain === 'number')) {
-          return `gea::json::indentGap(${text})`
-        }
-        if (representation.kind === 'optional') {
-          return `((${text}).has_value() ? ${gapText(representation.payload, `(*(${text}))`)} : std::string())`
-        }
-        if (representation.kind === 'tagged-union') {
-          const arms = representation.arms.map((arm, index) => gapText(arm.value, armAt(text, index)))
-          return arms.reduceRight((rest, arm, index) => `${armIs(text, index)} ? ${arm} : (${rest})`)
-        }
-        throw createCppEmitBlockedError(
-          'host-member-call:JSON.stringify',
-          `JSON.stringify space carries unsupported "${representationKey(representation)}"`
-        )
-      }
-      const gap = space === undefined ? 'std::string()' : gapText(space.representation, '__gea_space')
+      const gap = space === undefined ? 'std::string()' : jsonGapText(space.representation, '__gea_space')
       const selected = callable[0] as (typeof callable)[number]
       const callableRepresentation = selected.representation as Extract<Representation, { readonly kind: 'function-value-dispatch' }>
       const spaceBinding = space === undefined ? '' : `const auto& __gea_space = ${operandText(ctx, space)};`
@@ -1465,7 +1502,12 @@ const jsonParseWithReviverText = (ctx: EmitContext, operation: CallOperation): s
     )
   }
   const selected = callable[0] as (typeof callable)[number]
-  const abi = (selected.representation as Extract<Representation, { readonly kind: 'function-value-dispatch' }>).abi
+  // Narrowed rather than asserted: an assertion leaves the read on the whole
+  // union, where a live-view arm demands a slot receipt this read cannot have.
+  const callableRepresentation = selected.representation
+  if (callableRepresentation.kind !== 'function-value-dispatch')
+    throw createCppEmitBlockedError('host-member-call:JSON.parse', 'JSON.parse reviver lost its callable arm')
+  const abi = callableRepresentation.abi
   const parameterKinds = abi.parameters.map((parameter) => parameter.value.kind)
   // The answer lands in the dynamic tree: lib declares it `any`, so a reviver
   // whose body the checker typed narrower (`(k, v) => \`${k}:${v}\``) widens

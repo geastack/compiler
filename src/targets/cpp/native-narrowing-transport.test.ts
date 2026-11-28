@@ -102,6 +102,23 @@ test('a tag-selected load out of a uniform-like sum states native transport when
   assert.ok(emitted.includes('get<2>().get<0>()'))
 })
 
+test('a declare-narrowed read never projects a nested class arm while the wide base arm can hold it', () => {
+  // `parent: Node` written through the base, read as a subclass's `declare
+  // readonly parent: Element | Spread`: `Element` lives only in the base arm,
+  // `Spread` also has a nested arm of its own.
+  const base = point
+  const element: Representation = { ...point, declaration: 'element' as never, shapeId: 'element-shape', ancestors: [base.declaration] }
+  const spread: Representation = { ...point, declaration: 'spread' as never, shapeId: 'spread-shape', ancestors: [base.declaration] }
+  const other: Representation = { ...point, declaration: 'other' as never, shapeId: 'other-shape', ancestors: [base.declaration] }
+  const held = sum(base, sum(other, spread), number)
+  const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+  const emitted = alignedValueText(siteOf(conversions), 'declare-narrowed-load', held, sum(element, spread), 'cell')
+  assert.ok(emitted)
+  assert.ok(emitted.includes('classIdentityExtends'), 'the base arm picks the class from the object')
+  const beforeFirstTest = emitted.split('?')[0] ?? ''
+  assert.ok(!beforeFirstTest.includes('cell.get<1>().get<1>()'), 'the nested arm is not read before a discriminant test')
+})
+
 test('the absence the renderer spells as unreachable reads nothing', () => {
   const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
   assert.equal(conversionRecipeOf({ kind: 'undefined' }, array(number))?.id, 'unreachable-value')

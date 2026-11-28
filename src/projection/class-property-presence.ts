@@ -12,7 +12,7 @@ export const classPrototypeMemberIsPresent = (
 ): boolean => {
   const seen = new Set<DeclarationId>()
   let current: DeclarationId | null = declaration
-  while (current && !seen.has(current)) {
+  while (current !== null && !seen.has(current)) {
     seen.add(current)
     const layout = classes.get(current)
     if (!layout) return false
@@ -62,7 +62,7 @@ export const symbolKeyedMemberIsDeclared = (
   if (declaration === null && fields !== null && fields.some(isSymbolKey)) return true
   const seen = new Set<DeclarationId>()
   let current: DeclarationId | null = declaration
-  while (current && !seen.has(current)) {
+  while (current !== null && !seen.has(current)) {
     seen.add(current)
     const layout: ClassLayout | undefined = classes.get(current)
     if (!layout) return true

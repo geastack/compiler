@@ -13,7 +13,15 @@ import { representationKey, type CallableAbi, type RecordField, type Representat
 import { nativeEnumerationPlanOf, type NativeEnumerationPlan } from '../../ir/native-enumeration.js'
 import { tuplePositionArmsOf } from '../../ir/certify/carrier-keys.js'
 import type { LazySplit } from '../../ir/lazy-splits.js'
-import { createCppEmitBlockedError, defineValue, operandText, paddedArguments, suspendsInPlace, type EmitContext } from './emit-context.js'
+import {
+  createCppEmitBlockedError,
+  defineValue,
+  defineValueAlias,
+  operandText,
+  paddedArguments,
+  suspendsInPlace,
+  type EmitContext
+} from './emit-context.js'
 import { receiverArgumentText } from './emit-callable.js'
 import { nativeCallReceiverText } from './emit-native-method.js'
 import { memberAccessOperator } from './emit-carrier-members.js'
@@ -1246,9 +1254,18 @@ export const emitIteratorNext = (ctx: EmitContext, lines: string[], operation: I
     emitAsyncFromSyncNext(ctx, lines, operation, iteratorRepresentation)
     return
   }
-  const name = defineValue(ctx, operation.result)
   const element = iteratorRepresentation.element
   const result = operation.result.representation
+  // `for (const step of g)` over a `Generator<void>`: the binding is typed
+  // `void`, which has no storage, while the cursor's own element stores the
+  // `undefined` every step holds. The step still advances the cursor; its
+  // value is the same no-storage `(void)0` a void call's result is.
+  if (result.kind === 'void' && (element.kind === 'undefined' || element.kind === 'void')) {
+    lines.push(`${operandText(ctx, operation.iterator)}.arrayNext();`)
+    defineValueAlias(ctx, operation.result, '(void)0')
+    return
+  }
+  const name = defineValue(ctx, operation.result)
   if (representationKey(result) === representationKey(element)) {
     // A string element is stored in place: `name = arrayNext()` copied it out
     // and then moved it in, and libstdc++ moves an inline string with a

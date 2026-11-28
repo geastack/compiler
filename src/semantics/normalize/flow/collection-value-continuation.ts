@@ -9,7 +9,7 @@ const inventories = new WeakMap<ValueFlowIndex, Map<ts.Node, ValueWrite[]>>()
 const collectionWritesAt = (flow: ValueFlowIndex, site: ts.Node): readonly ValueWrite[] => {
   let inventory = inventories.get(flow)
   if (!inventory) {
-    inventory = new Map()
+    inventory = new Map<ts.Node, ValueWrite[]>()
     for (const write of flow.allWrites) {
       if (write.edge !== 'collection-key' && write.edge !== 'collection-value') continue
       const writes = inventory.get(write.site) ?? []
@@ -37,7 +37,10 @@ const collectionValueFlowOf = (
   readonly values: readonly ts.Expression[]
   readonly constructions: ReadonlySet<ts.NewExpression>
 } | null => {
-  if (!write.naming || !write.target.declaration || !isCell(write.target.declaration)) return null
+  // Narrowed as a local: a type guard on the field path itself would read the
+  // stored node through its narrower cell type.
+  const root = write.target.declaration
+  if (!write.naming || !root || !isCell(root)) return null
   const cells = new Set<CollectionCell>()
   const active = new Set<CollectionCell>()
   const constructions = new Set<ts.NewExpression>()
@@ -88,7 +91,7 @@ const collectionValueFlowOf = (
     if (closed) cells.add(declaration)
     return closed
   }
-  if (!origins(write.target.declaration)) return null
+  if (!origins(root)) return null
   const protocol = nativeCollectionProtocolPlanOf(checker, flow, publication, family!, constructions)
   if (!protocol || !protocolClosed?.(protocol)) return null
   const results = new Set<ts.Expression>()

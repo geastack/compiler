@@ -58,8 +58,8 @@ const isSpellable = (representation: Representation): boolean => {
 }
 
 const cppOperandHelperCapabilitiesOf = (
-  typeofOperands: Iterable<Representation>,
-  objectTagOperands: Iterable<Representation>
+  typeofOperands: readonly Representation[],
+  objectTagOperands: readonly Representation[]
 ): ReadonlySet<string> => {
   const helpers = new Set<string>()
   for (const representation of typeofOperands)
@@ -93,7 +93,7 @@ export const withCppIrOperandHelpers = (manifest: TargetRuntimeManifest, bodies:
 export const createCppTargetManifest = (
   plan: SealedRepresentationPlan,
   capabilities: CppRuntimeCapabilities = currentCppRuntimeCapabilities,
-  typeofOperandRepresentations: Iterable<Representation> = [],
+  typeofOperandRepresentations: readonly Representation[] = [],
   // The host member table this compilation's native-boundary claims are
   // derived from -- defaulted to the core, plugin-independent table so every
   // existing caller (tests included) keeps computing the same answer
@@ -104,14 +104,14 @@ export const createCppTargetManifest = (
   // emitter renders from rather than to a frozen capabilities snapshot taken
   // before any host tables for THIS compilation existed.
   hostMembers: HostMemberTable = coreHostMembers,
-  objectTagOperands: Iterable<Representation> = [],
+  objectTagOperands: readonly Representation[] = [],
   // The installed hosts' own `[[HasInstance]]` predicates, keyed by the native
   // type the right-hand operand of `instanceof` carries -- see
   // `PluginCapabilities.hostInstanceTests`. A row here is a claim for EVERY
   // left carrier kind, which is what that capability's contract states the
   // spelling must accept; `emit-instanceof.ts`'s `hostInstanceTestText`
   // unwraps an optional or a union first and calls the predicate on each leaf.
-  hostInstanceTests: ReadonlyMap<string, string> = new Map()
+  hostInstanceTests: ReadonlyMap<string, string> = new Map<string, string>()
 ): TargetRuntimeManifest => {
   const spellable = new Set<string>()
   for (const representation of plan.selected.values()) {

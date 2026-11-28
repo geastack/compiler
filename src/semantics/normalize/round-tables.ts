@@ -58,3 +58,62 @@ export const createRoundTableSharing = <T extends { readonly [name: string]: Tab
     return result
   }
 }
+
+/** Two values of a table whose values are never lists: the same value or not. */
+const sameEntry = <V>(a: V, b: V): boolean => a === b
+
+/** Two lists with the same entries in the same order. */
+const sameList = <E>(a: readonly E[], b: readonly E[]): boolean =>
+  a === b || (a.length === b.length && a.every((entry, index) => entry === b[index]))
+
+/** `sameTable`, typed per table: the native build has no reader for a table of unknown entries. */
+const sameTypedTable = <K, V>(a: ReadonlyMap<K, V>, b: ReadonlyMap<K, V>, same: (left: V, right: V) => boolean): boolean => {
+  if (a.size !== b.size) return false
+  const theirs = b.entries()
+  for (const [key, value] of a) {
+    const next = theirs.next()
+    if (next.done || next.value[0] !== key || !same(next.value[1], value)) return false
+  }
+  return true
+}
+
+/**
+ * `createRoundTableSharing` for one table whose values are not lists: the
+ * earlier round's table replaces an equal one. One sharer per table, so each
+ * keeps its own key and value types.
+ */
+export const createTableSharing = <K, V>(): ((checker: ts.TypeChecker, table: Map<K, V>) => Map<K, V>) => {
+  const previous = new WeakMap<ts.TypeChecker, Map<K, V>>()
+  return (checker, table) => {
+    const before = previous.get(checker)
+    const result = before !== undefined && sameTypedTable(table, before, sameEntry) ? before : table
+    previous.set(checker, result)
+    return result
+  }
+}
+
+/**
+ * `createRoundTableSharing` for one table of lists: the earlier round's table
+ * replaces an equal one, and otherwise each list equal to the earlier round's
+ * is replaced by that list.
+ */
+export const createListTableSharing = <K, E>(): ((checker: ts.TypeChecker, table: Map<K, E[]>) => Map<K, E[]>) => {
+  const previous = new WeakMap<ts.TypeChecker, Map<K, E[]>>()
+  return (checker, table) => {
+    const before = previous.get(checker)
+    let result = table
+    if (before !== undefined) {
+      // A closure calling `sameList` at `E`, not `sameList` itself: a generic
+      // function passed as a value reaches a native build with erased entries.
+      if (sameTypedTable(table, before, (left: E[], right: E[]) => sameList<E>(left, right))) result = before
+      else {
+        for (const [key, value] of table) {
+          const list = before.get(key)
+          if (list !== undefined && list !== value && sameList(list, value)) table.set(key, list)
+        }
+      }
+    }
+    previous.set(checker, result)
+    return result
+  }
+}

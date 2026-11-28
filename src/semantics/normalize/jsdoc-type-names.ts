@@ -358,15 +358,19 @@ export const censusJsDocTypeNames = (
   // into the SAME `byName` index, so two typedefs of one name still collide and
   // are still refused rather than guessed between.
   const localsOf = (file: ts.SourceFile): ts.SymbolTable | undefined => (file as unknown as { locals?: ts.SymbolTable }).locals
+  // A loop over `values()`, not `locals?.forEach`: an optional-chained
+  // callback receiver has no native receiver protocol. Same order either way.
   for (const file of files) {
-    localsOf(file)?.forEach((symbol) => {
-      if (!symbol.declarations?.some((node) => ts.isJSDocTypedefTag(node) || ts.isJSDocCallbackTag(node))) return
+    const locals = localsOf(file)
+    if (!locals) continue
+    for (const symbol of locals.values()) {
+      if (!symbol.declarations?.some((node) => ts.isJSDocTypedefTag(node) || ts.isJSDocCallbackTag(node))) continue
       const declared = checker.getDeclaredTypeOfSymbol(symbol)
-      if (!declared || isUninformative(declared)) return
+      if (!declared || isUninformative(declared)) continue
       const existing = byName.get(symbol.name)
       if (existing) existing.add(symbol)
       else byName.set(symbol.name, new Set([symbol]))
-    })
+    }
   }
 
   const bound = new Map<ts.Declaration, ts.Type>()

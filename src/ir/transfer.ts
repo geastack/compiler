@@ -33,9 +33,10 @@ export interface SunkStore {
 }
 
 /** The dying reads, and the stores whose emission position moved to make them dying. */
-export class DyingArgumentSet extends Set<IrValueId> {
+export interface DyingArgumentFacts {
+  readonly dying: Set<IrValueId>
   /** Keyed by the stored value's read id. */
-  readonly sunkStores = new Map<IrValueId, SunkStore>()
+  readonly sunkStores: Map<IrValueId, SunkStore>
 }
 
 /**
@@ -69,7 +70,14 @@ export const buildDyingArgumentIndex = (
   bodies: readonly IrBody[],
   isConstructorBody: (body: IrBody) => boolean = () => false,
   isStoreSinkConstructor: (body: IrBody) => boolean = () => false
-): DyingArgumentSet => {
+): Set<IrValueId> => dyingArgumentFactsOf(bodies, isConstructorBody, isStoreSinkConstructor).dying
+
+/** `buildDyingArgumentIndex` with the stores it moved to make the reads dying. */
+export const dyingArgumentFactsOf = (
+  bodies: readonly IrBody[],
+  isConstructorBody: (body: IrBody) => boolean = () => false,
+  isStoreSinkConstructor: (body: IrBody) => boolean = () => false
+): DyingArgumentFacts => {
   const reads = new Map<IrValueId, { readonly declaration: DeclarationId; readonly body: IrBody; readonly block: IrBlockId }>()
   const readCounts = new Map<DeclarationId, number>()
   const writeBodies = new Map<DeclarationId, Set<IrBody>>()
@@ -132,7 +140,8 @@ export const buildDyingArgumentIndex = (
     }
   }
   const cyclic = new Map<IrBody, ReadonlySet<IrBlockId>>()
-  const dying = new DyingArgumentSet()
+  const dying = new Set<IrValueId>()
+  const sunkStores = new Map<IrValueId, SunkStore>()
   // A plugin-declared reactive field is a cell with subscribers: a write notifies them, and a
   // subscriber may read a field that is still unset. A write needs a subscriber, a subscriber
   // needs a reactive read somewhere in the program, so a program with no reactive read at all
@@ -167,10 +176,10 @@ export const buildDyingArgumentIndex = (
     if (blocks.has(read.block) || (useBlock !== undefined && blocks.has(useBlock))) continue
     dying.add(value)
   }
-  for (const value of constructorFormalLastReadsOf(bodies, isConstructorBody, storeSinkAllowed, readCounts, writeBodies, dying.sunkStores))
+  for (const value of constructorFormalLastReadsOf(bodies, isConstructorBody, storeSinkAllowed, readCounts, writeBodies, sunkStores))
     dying.add(value)
   for (const [alias, root] of renames) if (dying.has(root)) dying.add(alias)
-  return dying
+  return { dying, sunkStores }
 }
 
 /**
@@ -340,7 +349,7 @@ const constructorFormalLastReadsOf = (
       }
       return end
     }
-    const planStoreSink = (blockId: IrBlockId, storeIndex: number, later: readonly { readonly index: number }[]): SunkStore | null => {
+    const planStoreSink = (blockId: IrBlockId, storeIndex: number, later: readonly Use[]): SunkStore | null => {
       const block = body.blocks.get(blockId)
       const store = block?.operations[storeIndex]
       if (block === undefined || store === undefined || store.kind !== 'set' || receiverIds.size === 0) return null
@@ -607,9 +616,23 @@ export const transferOf = (
   ownedValues: ReadonlySet<IrValueId>,
   ownedDyingValues: ReadonlySet<IrValueId>,
   value: IrValueId,
-  renames: ReadonlyMap<IrValueId, IrValueId> = new Map()
-): ValueTransfer =>
-  dyingArguments.has(value) || (ownedValues.has(renames.get(value) ?? value) && ownedDyingValues.has(value)) ? 'move' : 'retain'
+  renames: ReadonlyMap<IrValueId, IrValueId> = new Map<IrValueId, IrValueId>()
+): ValueTransfer => transferWhere(dyingArguments, (owned) => ownedValues.has(owned), ownedDyingValues, value, renames)
+
+/**
+ * `transferOf` with the storage-ownership census asked one value at a time.
+ * The emitter's census is a mutable render-time buffer (`EmitContext.ownedValues`);
+ * a native build of the compiler has no conversion from that field's read
+ * into a `ReadonlySet` argument, while a membership test on it is a plain
+ * member call.
+ */
+export const transferWhere = (
+  dyingArguments: ReadonlySet<IrValueId>,
+  isOwned: (value: IrValueId) => boolean,
+  ownedDyingValues: ReadonlySet<IrValueId>,
+  value: IrValueId,
+  renames: ReadonlyMap<IrValueId, IrValueId> = new Map<IrValueId, IrValueId>()
+): ValueTransfer => (dyingArguments.has(value) || (isOwned(renames.get(value) ?? value) && ownedDyingValues.has(value)) ? 'move' : 'retain')
 
 /**
  * The formal-conversion half of the same pipeline (`ownedFormalInputsOf`'s

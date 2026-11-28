@@ -20,6 +20,8 @@ import { nativeDataPropertyText } from './emit-buffers.js'
 import { nativeDataPropertyOf } from '../../representation/native-data-properties.js'
 import { staticOwnFieldsOf } from '../../representation/record-fields.js'
 import type { StructuralTypeId } from '../../identity/ids.js'
+import type { ConversionNode } from '../../conversion/algebra.js'
+import { ASSERTED_UNION_MATERIALIZER } from '../../conversion/nodes.js'
 
 const tokenOf = (type: string): string => `gea::detail::payloadTypeTagFor<${type}>()`
 const routeTokenOf = (value: Representation): string =>
@@ -40,9 +42,25 @@ const liveKeyText = (key: string): string =>
     ? fieldPropertyKeyText(key)
     : `gea::record::LiteralFieldKey{${cppStringLiteral(key)}, ${new TextEncoder().encode(key).length}}`
 
+/**
+ * A view route whose source slot no arm of can be the declared field type: a
+ * descriptor installed through an unchecked cast (`set.has(key as never)`
+ * viewing any object as the element record) is shared by every read of that
+ * shape, so the read names the source even where no flow delivers it. The
+ * asserted dispatch then has no home at all, and the read is the same
+ * `TypeError` an unhomed arm already is, rather than a refused program.
+ */
+const unhomedAssertedLeaf = (ctx: EmitContext, node: ConversionNode, text: string): string | null =>
+  node.capability.kind === 'static' &&
+  node.capability.materializer.id === ASSERTED_UNION_MATERIALIZER &&
+  node.source.kind === 'tagged-union' &&
+  node.source.arms.every((arm) => ctx.conversions.nodeFor(arm.value, node.target).capability.kind === 'never')
+    ? `gea::host::unhomedUnionArm<${cppTypeOf(node.target)}>((${text}).index())`
+    : null
+
 const renderedLeaf = (ctx: EmitContext, id: string, text: string): string => {
   const node = ctx.conversions.nodeById(id)
-  const rendered = node === null ? null : recipeText(ctx, node, text)
+  const rendered = node === null ? null : (recipeText(ctx, node, text) ?? unhomedAssertedLeaf(ctx, node, text))
   if (rendered === null)
     throw createCppEmitBlockedError(`conversion:${id}`, 'a native field-view receipt has no exact certified conversion renderer')
   return rendered

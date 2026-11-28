@@ -33,7 +33,23 @@ export interface SemanticGraph {
   readonly edges: SemanticEdges
   readonly coverage: ReadonlyMap<OperationFamily, FamilyReport>
   /** Every published result, so a consumer never re-derives one from an operation. */
-  readonly results: ReadonlyMap<SemanticResultId, OperationId>
+  readonly results: SemanticResultIndex
+}
+
+/**
+ * The sealed graph's result index, as every consumer reads it: lookup, size
+ * and registration-order iteration. A plain `Map` is one; `PublishedResults`
+ * is the sealed graph's own. Not `ReadonlyMap` itself: a native build lays
+ * that out as its own keyed collection, which a class instance cannot become
+ * (the same reason `SemanticEdges` is not an array type). `keys` states the
+ * iterator both implementations return: declared as a bare `Iterable`, a
+ * native build had no conversion from the class's generator to it.
+ */
+export interface SemanticResultIndex extends Iterable<[SemanticResultId, OperationId]> {
+  readonly size: number
+  get(result: SemanticResultId): OperationId | undefined
+  has(result: SemanticResultId): boolean
+  keys(): MapIterator<SemanticResultId>
 }
 
 /**
@@ -47,7 +63,7 @@ export interface SemanticGraph {
  * explicitly. Iteration visits operations in table order and each one's
  * results in its own order: exactly the order the results were registered in.
  */
-export class PublishedResults implements ReadonlyMap<SemanticResultId, OperationId> {
+export class PublishedResults implements SemanticResultIndex {
   readonly size: number
 
   constructor(
@@ -76,19 +92,8 @@ export class PublishedResults implements ReadonlyMap<SemanticResultId, Operation
     for (const operation of this.operations.values()) for (const result of operation.results) yield result.id
   }
 
-  *values(): MapIterator<OperationId> {
-    for (const operation of this.operations.values()) for (let index = 0; index < operation.results.length; index++) yield operation.id
-  }
-
   [Symbol.iterator](): MapIterator<[SemanticResultId, OperationId]> {
     return this.entries()
-  }
-
-  forEach(
-    callback: (value: OperationId, key: SemanticResultId, map: ReadonlyMap<SemanticResultId, OperationId>) => void,
-    thisArg?: unknown
-  ): void {
-    for (const [key, value] of this.entries()) callback.call(thisArg, value, key, this)
   }
 }
 

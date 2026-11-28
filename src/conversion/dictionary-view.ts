@@ -1,7 +1,7 @@
 import { conversionRequiresSourceGuard, type ConversionCapability, type ConversionNode } from './algebra.js'
 import { recipeClosureOf, recipeIsMaterializableWithoutPriorSourceGuard } from './recipe-closure.js'
 import type { AcceptedConversion } from './structural-plan.js'
-import { representationKey, type Representation } from '../representation/model.js'
+import { absenceCarrier, representationKey, type Representation } from '../representation/model.js'
 import type { NativeSelectionRecipe } from './native-selection.js'
 import { dynamicWrapperDependenciesOf, dynamicWrapperPlanMatches } from './dynamic-wrapper.js'
 import { nativePayloadTransportMatches } from './native-payload-transport.js'
@@ -326,12 +326,20 @@ export const composedDictionaryViewPlan = (
         return { kind: 'conversion', conversion: ordinary }
       if (from.kind === 'optional') {
         const present = build(from.payload, into)
-        const absent = build({ kind: from.absence }, into)
+        const absent = build(absenceCarrier(from.absence), into)
         return present !== null && absent !== null ? { kind: 'optional', present, absent } : null
       }
       if (from.kind === 'tagged-union') {
-        const arms = from.arms.map((arm) => build(arm.value, into))
-        return arms.every((arm): arm is DictionaryViewStep => arm !== null) ? { kind: 'dispatch', arms } : null
+        // Collected into a typed array: a native build cannot narrow an array
+        // of nullable steps through an `every` predicate.
+        const arms: DictionaryViewStep[] = []
+        let failed = false
+        for (const arm of from.arms) {
+          const step = build(arm.value, into)
+          if (step === null) failed = true
+          else arms.push(step)
+        }
+        return failed ? null : { kind: 'dispatch', arms }
       }
       if (into.kind === 'optional') {
         const payload = build(from, into.payload)

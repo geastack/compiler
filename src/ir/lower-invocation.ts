@@ -278,34 +278,35 @@ const lowerDeferredFunctionApply = (
     tupleFields.length >= deferred.abi.restFrom
       ? deferred.abi.restFrom
       : null
-  const tailSlots: readonly ArgumentSlot[] =
-    argsArraySlot && tupleFields !== null
-      ? [
-          ...(runtimeTailFrom === null ? tupleFields : tupleFields.slice(0, runtimeTailFrom)).map((field, index): ArgumentSlot => {
-            const keyRepresentation = { kind: 'string' } as const
-            const key = {
-              value: ctx.builder.constant(block, lineage, field.key, 'string', keyRepresentation),
-              representation: keyRepresentation
-            }
-            const read = {
-              value: ctx.builder.get(block, lineage, argsArraySlot.value, key, field.value),
-              representation: field.value
-            }
-            const slot = callArgumentSlotOf(deferred.abi, null, index)
-            if (slot.kind === 'slot')
-              return {
-                kind: 'value',
-                actualValue: read,
-                value: convertOrDrift(ctx, block, lineage, operation.id, 'apply-argument', index, read, slot.representation)
-              }
-            if (slot.kind === 'raw') return { kind: 'value', value: read }
-            throw new IrLoweringBlockedError(`a fixed apply argument ${index} has no admitted native formal slot`)
-          }),
-          ...(runtimeTailFrom === null ? [] : [{ kind: 'spread' as const, value: argsArraySlot.value, from: runtimeTailFrom }])
-        ]
-      : argsArraySlot
-        ? [{ kind: 'spread', value: argsArraySlot.value }]
-        : []
+  // Filled rather than joined from three array literals: a native build carries
+  // them as different layouts of `ArgumentSlot[]`, and the join's store into the
+  // declared type selected one arm unchecked.
+  const tailSlots: ArgumentSlot[] = []
+  if (argsArraySlot && tupleFields !== null) {
+    tailSlots.push(
+      ...(runtimeTailFrom === null ? tupleFields : tupleFields.slice(0, runtimeTailFrom)).map((field, index): ArgumentSlot => {
+        const keyRepresentation = { kind: 'string' } as const
+        const key = {
+          value: ctx.builder.constant(block, lineage, field.key, 'string', keyRepresentation),
+          representation: keyRepresentation
+        }
+        const read = {
+          value: ctx.builder.get(block, lineage, argsArraySlot.value, key, field.value),
+          representation: field.value
+        }
+        const slot = callArgumentSlotOf(deferred.abi, null, index)
+        if (slot.kind === 'slot')
+          return {
+            kind: 'value',
+            actualValue: read,
+            value: convertOrDrift(ctx, block, lineage, operation.id, 'apply-argument', index, read, slot.representation)
+          }
+        if (slot.kind === 'raw') return { kind: 'value', value: read }
+        throw new IrLoweringBlockedError(`a fixed apply argument ${index} has no admitted native formal slot`)
+      })
+    )
+    if (runtimeTailFrom !== null) tailSlots.push({ kind: 'spread', value: argsArraySlot.value, from: runtimeTailFrom })
+  } else if (argsArraySlot) tailSlots.push({ kind: 'spread', value: argsArraySlot.value })
   const args = packRestArguments(ctx, block, lineage, operation.id, deferred.abi, tailSlots)
   const representation = optionalResultRepresentation(ctx, operation, 'value')
   const returned = ctx.builder.call(

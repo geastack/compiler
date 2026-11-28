@@ -60,14 +60,17 @@ export const certifiedIterableObjectViewText = (
     ...abi.parameters.map((parameter, ordinal) => `${cppAbiParameterType(parameter)} gea_view_arg_${ordinal}`)
   ]
   const signature = `void* gea_view_env${formals.length > 0 ? ', ' : ''}${formals.join(', ')}`
-  const resultType = cppResultTypeOf(abi.result)
+  // Narrowed through a local: a property path narrowed to one arm (`abi.result`
+  // as an optional) has no native widening back.
+  const viewResult = abi.result
+  const resultType = cppResultTypeOf(viewResult)
   const cursorText = `${cppTypeOf(plan.cursor)}(**gea::unpackEnvironment<${holderType}>(gea_view_env, gea_view_slot))`
-  const object = abi.result.kind === 'optional' ? abi.result.payload : abi.result
+  const object = viewResult.kind === 'optional' ? viewResult.payload : viewResult
   const cursor = certified.leaves.get(structuralConversionKey(plan.cursor, object))
   if (cursor === undefined) throw new Error('an iterable view has no certified cursor object recipe')
   const viewed = namedConversionText(ctx, 'emit-iterable-object-view.ts:cursor', cursor, cursorText)
   if (viewed === null) return null
-  const answer = abi.result.kind === 'optional' ? `${cppTypeOf(abi.result)}(${viewed})` : viewed
+  const answer = viewResult.kind === 'optional' ? `${cppTypeOf(viewResult)}(${viewed})` : viewed
   const ignored = abi.parameters.map((_, ordinal) => `(void)gea_view_arg_${ordinal}; `).join('')
   const receiverIgnored = abi.receiver === null ? '' : '(void)gea_view_this; '
   const callable =

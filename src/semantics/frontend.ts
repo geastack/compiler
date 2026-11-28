@@ -59,7 +59,10 @@ import {
   attachDeferredIntrinsicProtocolLedger,
   createDeferredIntrinsicProtocolLedger,
   failedIntrinsicProtocolRequirements,
-  intrinsicProtocolRequirementKind
+  intrinsicProtocolRequirementKind,
+  type DeferredIntrinsicProtocolLedger,
+  type IntrinsicProtocolRequirement,
+  captureAnswer
 } from './normalize/deferred-intrinsic-protocols.js'
 import { prototypeKeyQuerySignature } from './normalize/host-mutation-keys.js'
 import { explainIntrinsicProtocolFailure } from './normalize/intrinsic-prototype.js'
@@ -107,6 +110,7 @@ import {
   type ProgramReachability
 } from './normalize/reachability.js'
 import { createProgram, defaultCompilerOptions } from './program.js'
+import type { SourceTransformProtocol } from './source-transform-protocol.js'
 import { createJsxRuntimeModuleResolver } from './jsx-runtime-provider.js'
 import { createFrontendTiming, progress, progressed } from './frontend-timing.js'
 import type { DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
@@ -149,6 +153,7 @@ import {
   typedArrayInstanceInterfaceNames,
   wellKnownSymbolDeclarationsOf
 } from './host-protocols.js'
+import type { HostMethodBinding } from './host-methods.js'
 
 /**
  * The frontend boundary.
@@ -674,6 +679,23 @@ export interface CensusAccounting {
  * name a real one. Inventing a plausible-looking component id instead would let
  * a reader join these rows against the graph and get an answer that is wrong.
  */
+/**
+ * `ledger.capture(work)`, with `work`'s answer kept in a list of its own
+ * type: the ledger's `capture` is one generic function value whose `value`
+ * field merges every caller's answer type, so only the requirements are read
+ * back from it. `capture` runs `work` exactly once.
+ */
+const capturedBy = <T>(
+  ledger: DeferredIntrinsicProtocolLedger,
+  work: () => T
+): { readonly value: T; readonly requirements: readonly IntrinsicProtocolRequirement[] } => {
+  const answers: T[] = []
+  const requirements = captureAnswer(ledger, () => {
+    answers.push(work())
+  }).requirements
+  return { value: answers[0]!, requirements }
+}
+
 const checkerComponent = componentId('op|checker|reference|0' as Parameters<typeof componentId>[0])
 
 /**
@@ -1010,16 +1032,16 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     ...(input.sourceOverlay ? { sourceOverlay: input.sourceOverlay } : {}),
     ...(input.moduleResolution ? { moduleResolution: input.moduleResolution } : {}),
     ...(input.typesOnlyPackages ? { typesOnlyPackages: input.typesOnlyPackages } : {}),
-    commonJsGlobals: input.commonJsGlobals ?? new Map(),
-    commonJsBuiltinModules: input.commonJsBuiltinModules ?? new Map(),
-    commonJsBuiltinModuleSources: input.commonJsBuiltinModuleSources ?? new Map(),
-    hostMethodBindings: input.hostMethodBindings ?? new Map(),
+    commonJsGlobals: input.commonJsGlobals ?? new Map<string, CommonJsWrapperDeclaration>(),
+    commonJsBuiltinModules: input.commonJsBuiltinModules ?? new Map<string, string>(),
+    commonJsBuiltinModuleSources: input.commonJsBuiltinModuleSources ?? new Map<string, string>(),
+    hostMethodBindings: input.hostMethodBindings ?? new Map<string, ReadonlyMap<string, HostMethodBinding>>(),
     ...(input.statedModuleSet ? { statedModuleSet: true } : {}),
     ...(input.closedScriptScope ? { closedScriptScope: true } : {}),
     sourceTransforms: input.sourceTransforms ?? []
   })
   timing.mark('program-and-diagnostics')
-  const hostMethodBindings = input.hostMethodBindings ?? new Map()
+  const hostMethodBindings = input.hostMethodBindings ?? new Map<string, ReadonlyMap<string, HostMethodBinding>>()
   const hostProvidedNames = input.hostProvidedNames ?? noHostProvidedNames
   const packageDeclarationNameOf = createPackageDeclarationNames(ts.sys.fileExists, ts.sys.readFile)
   const table = createStructuralTypeTable()
@@ -1038,7 +1060,15 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     constructorTargetsOf: (expression) => {
       constructionFlow ??= indexValueFlow(compiled.checker, compiled.sourceFiles, wholeProgram)
       const selected = sourceConstructorSelectionsOf(compiled.checker, constructionFlow, expression)
-      return selected?.every(ts.isClassDeclaration) ? selected : null
+      if (!selected) return null
+      // Collected one by one: a narrowed `every` would hand the selection's
+      // own list on as a list of a different element type.
+      const classes: ts.ClassDeclaration[] = []
+      for (const declaration of selected) {
+        if (!ts.isClassDeclaration(declaration)) return null
+        classes.push(declaration)
+      }
+      return classes
     },
     // A CommonJS module is not an ESM entry: it runs only from its record's
     // `require`, so it must not join `moduleEvaluationOrder`.  Its body still
@@ -1224,7 +1254,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   const commonJsModuleRecords = censusCommonJsModuleRecords(
     compiled.checker,
     compiled.program.getSourceFiles(),
-    input.commonJsGlobals ?? new Map(),
+    input.commonJsGlobals ?? new Map<string, CommonJsWrapperDeclaration>(),
     compiled.runtimeModuleTargetOf,
     compiled.sourceFileOf,
     baseValueFlow
@@ -1597,7 +1627,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   const commonJsRequire = createCommonJsRequireCensus(
     compiled.checker,
     compiled.program.getSourceFiles(),
-    input.commonJsGlobals ?? new Map()
+    input.commonJsGlobals ?? new Map<string, CommonJsWrapperDeclaration>()
   )
   progress('structural @1578 hostMutationFactsSealed')
   let hostMutationFactsSealed = false
@@ -1623,7 +1653,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
    */
   progress('structural @1598 receiptUnderIntrinsicObligations')
   const receiptUnderIntrinsicObligations = <T>(work: () => T | null): T | null => {
-    const proof = intrinsicProtocols.capture(work)
+    const proof = capturedBy(intrinsicProtocols, work)
     if (!hostMutationFactsSealed)
       return proof.requirements.length === 0 || intrinsicProtocols.include(proof.requirements) ? proof.value : null
     return failedIntrinsicProtocolRequirements(intrinsicPropertyContext, proof.requirements).length === 0 ? proof.value : null
@@ -1892,7 +1922,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
         // Object.prototype -- exactly the "may have grown an arbitrary
         // property" case this whole mechanism exists to rule out. Refuse
         // rather than publish a set the language does not actually bound.
-        if (globalHostMutationTaint.has('*') || surface.every || surface.numeric) return null
+        if (globalHostMutationTaint.hasEntry('*') || surface.every || surface.numeric) return null
         const own = objectPrototypeDeclaration === null ? undefined : globalHostMutationTaint.keysOf(objectPrototypeDeclaration)
         if (own?.every || own?.numeric) return null
         for (const name of surface.names) keys.add(name)
@@ -1928,7 +1958,13 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   const context: Omit<ProducerContext, 'ordinals' | 'evaluationOrdinals'> = {
     nativeIterableAt: (source, consumer) => {
       if (!hostMutationFactsSealed) return null
-      return sourceNativeIterableOf(context, valueFlow, input.nativeIterableProviders ?? new Map(), source, consumer)
+      return sourceNativeIterableOf(
+        context,
+        valueFlow,
+        input.nativeIterableProviders ?? new Map<string, NativeIterableProvider>(),
+        source,
+        consumer
+      )
     },
     installedGlobalPropertyBindingAt: (node) =>
       ts.isPropertyAccessExpression(node) ? (installedGlobalProperties.get(node) ?? null) : null,
@@ -1941,12 +1977,12 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     computedKeyTextsOf,
     readonlyCallableSetAt: (access) => {
       if (!hostMutationFactsSealed) return null
-      const proof = intrinsicProtocols.capture(() => sourceCallableReadonlySetOf(access, valueFlow, intrinsicPropertyContext))
+      const proof = capturedBy(intrinsicProtocols, () => sourceCallableReadonlySetOf(access, valueFlow, intrinsicPropertyContext))
       return failedIntrinsicProtocolRequirements(intrinsicPropertyContext, proof.requirements).length === 0 ? proof.value : null
     },
     descriptorOwnProtocolAt: (definition) => {
       if (!hostMutationFactsSealed) return null
-      const proof = intrinsicProtocols.capture(() =>
+      const proof = capturedBy(intrinsicProtocols, () =>
         sourceDescriptorOwnProtocolOf(compiled.checker, valueFlow, definition, (descriptor) =>
           sourceAccessorDescriptorOwnNamesOf(compiled.checker, valueFlow, descriptor, definition)
         )
@@ -1955,7 +1991,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     },
     ownAssignmentAt: (call, path, describedKeysOf) => {
       if (!hostMutationFactsSealed) return null
-      const proof = intrinsicProtocols.capture(() => {
+      const proof = capturedBy(intrinsicProtocols, () => {
         const frames = specializedSourceFramesOf(call, path)
         return frames === null ? null : sourceValueSession.ownAssignmentOf(call, frames, describedKeysOf)
       })
@@ -1963,18 +1999,18 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     },
     ownSlotAt: (expression, key) => {
       if (!hostMutationFactsSealed) return null
-      const proof = intrinsicProtocols.capture(() => sourceValueSessionOf(compiled.checker, valueFlow).ownSlotOf(expression, key))
+      const proof = capturedBy(intrinsicProtocols, () => sourceValueSessionOf(compiled.checker, valueFlow).ownSlotOf(expression, key))
       return failedIntrinsicProtocolRequirements(intrinsicPropertyContext, proof.requirements).length === 0 ? proof.value : null
     },
     logicalLeftObjectTruthyAt: (left) => {
       if (!hostMutationFactsSealed) return false
-      const proof = intrinsicProtocols.capture(() => logicalLeftObjectTruthyAt(compiled.checker, valueFlow, left))
+      const proof = capturedBy(intrinsicProtocols, () => logicalLeftObjectTruthyAt(compiled.checker, valueFlow, left))
       return proof.value && failedIntrinsicProtocolRequirements(intrinsicPropertyContext, proof.requirements).length === 0
     },
     deadEventCallAt: deadEventCallsOf(compiled.checker, compiled.sourceFiles, identities, classHeritage),
     numericIndexAbsenceProvenAt: (receiver, key) => {
       if (!hostMutationFactsSealed) return false
-      const proof = intrinsicProtocols.capture(() =>
+      const proof = capturedBy(intrinsicProtocols, () =>
         numericIndexAbsenceProven(
           compiled.checker,
           valueFlow,
@@ -1988,7 +2024,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     },
     closedLiteralMemberAbsenceProvenAt: (receiver, name) => {
       if (!hostMutationFactsSealed) return false
-      const proof = intrinsicProtocols.capture(() =>
+      const proof = capturedBy(intrinsicProtocols, () =>
         closedLiteralMemberAbsenceProven(
           compiled.checker,
           valueFlow,
@@ -2057,17 +2093,17 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     census: census.candidates,
     types,
     table,
-    nativeTypes: input.nativeTypes ?? new Map(),
-    nativeTypesByDeclaration: input.nativeTypesByDeclaration ?? new Map(),
-    hostSingletonDeclarations: input.hostSingletonDeclarations ?? new Map(),
+    nativeTypes: input.nativeTypes ?? new Map<string, string>(),
+    nativeTypesByDeclaration: input.nativeTypesByDeclaration ?? new Map<string, HostNativeTypeDeclaration>(),
+    hostSingletonDeclarations: input.hostSingletonDeclarations ?? new Map<string, HostOwnedDeclaration>(),
     hostNamespaceRoots: input.hostNamespaceRoots ?? new Set(),
     hostNamespaceRootDeclarations: input.hostNamespaceRootDeclarations ?? [],
     hostNamespacePaths: input.hostNamespacePaths ?? new Set(),
-    hostNamespaceRootTypes: input.hostNamespaceRootTypes ?? new Map(),
-    commonJsGlobals: input.commonJsGlobals ?? new Map(),
+    hostNamespaceRootTypes: input.hostNamespaceRootTypes ?? new Map<string, string>(),
+    commonJsGlobals: input.commonJsGlobals ?? new Map<string, CommonJsWrapperDeclaration>(),
     commonJsDeclarationFiles: [
       ...new Set(
-        [...(input.commonJsGlobals ?? new Map()).values()].flatMap((entry) => {
+        [...(input.commonJsGlobals ?? new Map<string, CommonJsWrapperDeclaration>()).values()].flatMap((entry) => {
           const file = compiled.sourceFileOf(entry.declarationFileName)
           return file ? [file] : []
         })
@@ -2128,7 +2164,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   const receiverAnchor = compiled.sourceFiles[0]
   progress('structural @2057 if')
   if (receiverAnchor) {
-    for (const name of [...typedArrayInstanceInterfaceNames, ...(input.standardClasses ?? [])]) {
+    for (const name of [...typedArrayInstanceInterfaceNames, ...(input.standardClasses == null ? [] : [...input.standardClasses])]) {
       const symbol = compiled.checker.resolveName(name, receiverAnchor, ts.SymbolFlags.Interface, false)
       const typedArray = typedArrayInstanceInterfaceNames.includes(name)
       if (
@@ -2227,8 +2263,10 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   )
   hostMutationFactsSealed = true
   progress('structural @2151 for')
-  for (const [file, protocols] of compiled.sourceTransformProtocols ?? []) {
-    const proof = intrinsicProtocols.capture(() => {
+  const transformProtocols: ReadonlyMap<ts.SourceFile, readonly SourceTransformProtocol[]> =
+    compiled.sourceTransformProtocols ?? new Map<ts.SourceFile, readonly SourceTransformProtocol[]>()
+  for (const [file, protocols] of transformProtocols) {
+    const proof = captureAnswer(intrinsicProtocols, () => {
       for (const protocol of protocols) {
         if ('callablePrototypeMember' in protocol)
           intrinsicProtocols.include([
@@ -2245,7 +2283,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // These assumptions belong to text already selected for this source file.
     // They cannot disappear as a failed inference alternative, and a revoked
     // protocol must not fall through to the replacement's host template.
-    intrinsicProtocols.replace(protocols, proof.requirements)
+    // Scoped by the file, which holds exactly one protocol list here.
+    intrinsicProtocols.replace(file, proof.requirements)
   }
   progress('structural @2171 installedGlobals')
   const installedGlobals = installedGlobalPropertiesOf(
@@ -2254,10 +2293,10 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     compiled.sourceFiles,
     {
       isIntrinsicGlobalThis: unresolvableNames.isIntrinsicGlobalThis,
-      hostProvidedNames: new Set([...unresolvableNames.hostProvidedNames, ...(input.absentGlobals ?? [])])
+      hostProvidedNames: new Set([...unresolvableNames.hostProvidedNames, ...(input.absentGlobals == null ? [] : [...input.absentGlobals])])
     },
     input.closedScriptScope === true,
-    !globalHostMutationTaint.has('*'),
+    !globalHostMutationTaint.hasEntry('*'),
     census.candidates
   )
   progress('structural @2183 for')
@@ -2286,7 +2325,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
         requirement.sourceGlobalBinding !== undefined
           ? 'source-global-binding'
           : requirement.member !== undefined
-            ? intrinsicPropertyContext.globalHostMutationTaint.has('*')
+            ? intrinsicPropertyContext.globalHostMutationTaint.hasEntry('*')
               ? '*'
               : 'member'
             : explainIntrinsicProtocolFailure(intrinsicPropertyContext, requirement.intrinsic, requirement.location, query)

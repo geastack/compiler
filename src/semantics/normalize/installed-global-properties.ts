@@ -65,7 +65,10 @@ export const installedGlobalPropertiesOf = (
   mutationIsClosed: boolean,
   census: readonly CensusCandidate[]
 ): InstalledGlobalProperties => {
-  const empty = (): InstalledGlobalProperties => ({ declarations: new Set(), accesses: new Map() })
+  const empty = (): InstalledGlobalProperties => ({
+    declarations: new Set(),
+    accesses: new Map<ts.PropertyAccessExpression, DeclarationId>()
+  })
   if (!closedScriptScope || !mutationIsClosed) return empty()
   const evaluation = new Map(census.filter((candidate) => candidate.family === 'property').map((candidate) => [candidate.node, candidate]))
   const references = new Map(census.filter((candidate) => candidate.family === 'reference').map((candidate) => [candidate.node, candidate]))

@@ -303,7 +303,7 @@ function stdFunctionIdentityOf(
 ): { readonly verdicts: StdFunctionIdentity; readonly probe: string; readonly ast: string } {
   const candidates = new Map<ClangNode, readonly number[]>()
   stdFunctionCandidates(signature, [], candidates)
-  if (candidates.size === 0) return { verdicts: new Map(), probe: '', ast: '' }
+  if (candidates.size === 0) return { verdicts: new Map<ClangNode, boolean>(), probe: '', ast: '' }
   const marks = [...candidates.values()].map(
     (path, index) => `Identity${index} = GeaIsStdFunction<typename GeaAt<Function${path.map((step) => `, ${step}`).join('')}>::type>::value`
   )
@@ -385,7 +385,7 @@ enum Bounds { ${widths.join(',\n')} };
   const compiler = input.compiler ?? defaultClang()
   const args = [
     '-std=c++17',
-    ...(input.compilerArguments ?? []),
+    ...(input.compilerArguments == null ? [] : [...input.compilerArguments]),
     ...(input.includeDirectories ?? []).flatMap((directory) => ['-I', directory]),
     '-x',
     'c++',

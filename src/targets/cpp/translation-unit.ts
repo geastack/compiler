@@ -17,7 +17,13 @@ import { nativePromiseBaseInitializeStatements } from './native-promise-base.js'
 import { classFieldStorageOwnerOf, classMemberOf, classMethodOverrideOf } from '../../projection/fields.js'
 import { balanceCppUnits, chunkCppItems, cppChunkFileName, cppUnitByteBudget, type CppUnitItem } from './balanced-units.js'
 import { readonlyBorrowFormalsOf } from '../../ir/borrowed-call-arguments.js'
-import { borrowForwardedArgumentsOf, stableBorrowEntryOf, withoutDyingArguments, type StableBorrowEntry } from './borrowed-call-entry.js'
+import {
+  borrowForwardedArgumentsOf,
+  stableBorrowEntryOf,
+  withoutDyingArguments,
+  withoutSunkStores,
+  type StableBorrowEntry
+} from './borrowed-call-entry.js'
 import { programFactsOf } from '../../ir/program-facts.js'
 import { integrityRestrictionsOf } from '../../ir/integrity-restrictions.js'
 import { keyOrderObservationOf, nothingProvenUnobserved } from '../../ir/key-order-observation.js'
@@ -92,6 +98,7 @@ import {
 } from './class-layout.js'
 import {
   classStaticFieldStorageRows,
+  cppPhysicalClassesOf,
   cppRecordDeclarations,
   cppStructNameOf,
   declaredFieldRepresentationOf,
@@ -148,6 +155,7 @@ import { cppRecursiveContainerDeclarations, cppRecursiveContainerTraceEdges } fr
 import { plainFieldReadOf } from '../../ir/plain-field-read.js'
 import { codeFreeFieldReadOf } from '../../ir/field-read-reuse.js'
 import { writeEffectsOf } from '../../ir/write-effects.js'
+import type { CallableFlowCandidate } from '../../ir/callable-flow-candidates.js'
 
 /**
  * One C++ translation unit, assembled from what earlier stages sealed.
@@ -466,7 +474,7 @@ const globalStorage = (
   placements: ReadonlyMap<DeclarationId, BindingPlacement>,
   omit: ReadonlySet<DeclarationId>,
   realm = false,
-  integerCells: ReadonlySet<DeclarationId> = new Set()
+  integerCells: ReadonlySet<DeclarationId> = new Set<DeclarationId>()
 ): readonly StorageSpelling[] =>
   [...placements.entries()]
     .filter(
@@ -571,9 +579,9 @@ const externDeclarations = (placements: ReadonlyMap<DeclarationId, BindingPlacem
  */
 const formalsOf = (
   abi: CallableAbi,
-  narrowed: ReadonlySet<number> = new Set(),
+  narrowed: ReadonlySet<number> = new Set<number>(),
   borrowReceiver = false,
-  borrowed: ReadonlySet<number> = new Set()
+  borrowed: ReadonlySet<number> = new Set<number>()
 ): readonly string[] => [
   ...(abi.receiver === null
     ? []
@@ -607,7 +615,7 @@ const bodyFormalsOf = (
   admission: CaptureAdmission,
   narrowed: ReadonlySet<number>,
   borrowReceiver: boolean,
-  borrowed: ReadonlySet<number> = new Set(),
+  borrowed: ReadonlySet<number> = new Set<number>(),
   coroutine = false
 ): readonly string[] => [
   ...(admission.kind === 'ok'
@@ -1085,7 +1093,7 @@ const constructionsOf = (
   linkage: CppLinkage,
   bodyAbis: ReadonlyMap<string, CallableAbi | null>,
   /** The classes whose struct holds `gea_method_state` statically -- `cppRecordDeclarations`' own report, never re-derived here. */
-  staticMethodStateClasses: ReadonlySet<DeclarationId> = new Set(),
+  staticMethodStateClasses: ReadonlySet<DeclarationId> = new Set<DeclarationId>(),
   parallelRegions = false
 ): readonly ClassConstruction[] => {
   // Layout-only classes publish no requested construction. Every runtime
@@ -1225,9 +1233,9 @@ const constructDefinitionsOf = (constructions: readonly ClassConstruction[]): re
 const signatureOf = (
   body: IrBody,
   captures: CaptureIndex,
-  narrowed: ReadonlySet<number> = new Set(),
+  narrowed: ReadonlySet<number> = new Set<number>(),
   narrowedResult = false,
-  borrowed: ReadonlySet<number> = new Set(),
+  borrowed: ReadonlySet<number> = new Set<number>(),
   name = cppBodyName(body.sourceOwner),
   taskResult = false
 ): string => {
@@ -1418,8 +1426,10 @@ const constructThunkOf = (
     ...(abi.receiver !== null ? [cppReceiverName] : []),
     ...construct.parameters.map((_, ordinal) => cppFormalName(ordinal))
   ]
-  const buildable = nativeOrdinaryConstructInstanceMatches(abi, instance)
-  if (!buildable) {
+  if (
+    (instance.kind !== 'record' && instance.kind !== 'record-with-index' && instance.kind !== 'native-record-ref') ||
+    !nativeOrdinaryConstructInstanceMatches(abi, instance)
+  ) {
     const why =
       abi.receiver === null
         ? `its construction evaluates to ${representationKey(instance)}, which is not an allocatable record`
@@ -2100,6 +2110,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     callableFlowCandidates,
     repeatedConstructors,
     dyingArguments,
+    sunkStores,
     formalsBorrowedIn,
     bodyCallsUnsafeKnownCallee,
     callableIdentityDemand,
@@ -2273,10 +2284,14 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // must likewise retain their declared carrier. The reflection census has
   // already closed inherited physical protocols, so this includes a base's
   // storage reached through a derived-class Reflect call.
-  for (const [declaration, demand] of input.reflection?.classes ?? [])
-    if (reflectedFieldStorageNeedsPublishedCarrier(demand)) excludedStructs.add(cppClassName(declaration))
-  for (const [shape, demand] of input.reflection?.records ?? [])
-    if (reflectedFieldStorageNeedsPublishedCarrier(demand)) excludedStructs.add(cppRecordStructName(shape))
+  // Guarded rather than `?? []`: a loop over a map-or-array union has no
+  // native iterator protocol.
+  if (input.reflection) {
+    for (const [declaration, demand] of input.reflection.classes)
+      if (reflectedFieldStorageNeedsPublishedCarrier(demand)) excludedStructs.add(cppClassName(declaration))
+    for (const [shape, demand] of input.reflection.records)
+      if (reflectedFieldStorageNeedsPublishedCarrier(demand)) excludedStructs.add(cppRecordStructName(shape))
+  }
   const fieldStructNameOf = (representation: Representation, key: string): string | null => {
     if (representation.kind !== 'class-ref') return cppStructNameOf(representation)
     const owner = classFieldStorageOwnerOf(deriver, representation, key, input.classes)
@@ -2288,8 +2303,12 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     const names = [name]
     if (representation.kind !== 'class-ref') return names
     const seen = new Set<DeclarationId>([representation.declaration])
-    const classes = input.physicalClasses ?? input.classes
-    for (let base = classes.get(representation.declaration)?.base; base != null && !seen.has(base); base = classes.get(base)?.base) {
+    // Read per map rather than through `physicalClasses ?? classes`: a union of
+    // two map carriers has no native receiver.
+    const physical = input.physicalClasses
+    const baseOf = (declaration: DeclarationId): DeclarationId | null | undefined =>
+      physical !== undefined ? physical.get(declaration)?.base : input.classes.get(declaration)?.base
+    for (let base = baseOf(representation.declaration); base != null && !seen.has(base); base = baseOf(base)) {
       seen.add(base)
       names.push(cppClassName(base))
     }
@@ -2456,12 +2475,15 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     perFile,
     input.reflection,
     emissionRepresentations,
-    input.physicalClasses ?? input.classes,
+    // Absent physical classes are projected from `input.classes` by the callee
+    // itself; passing `physicalClasses ?? classes` would hand it a union of
+    // two map carriers, which no native conversion narrows.
+    input.physicalClasses !== undefined ? cppPhysicalClassesOf(input.physicalClasses) : undefined,
     (body) => captures.of(body).kind === 'ok',
     fixedFieldStateConstant,
     // A module may evaluate once in EACH worker realm. Keep the ordinary
     // per-instance reference to its constructor's realm-owned method state.
-    input.realmStorage ? new Set() : singleEvaluationClasses,
+    input.realmStorage ? new Set<DeclarationId>() : singleEvaluationClasses,
     (shapeId, hasSymbolField) => nativeIntegrityRestricted.restrictsRecordShape(shapeId, hasSymbolField),
     (declaration, key) => constructionOnlyFields.holdsOlder(declaration, key),
     new Set(nativeViewTargets.map(cppRecordStructName)),
@@ -2732,6 +2754,9 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // read-only leaf then passes it by reference at every level instead of
   // moving it once per level.
   let borrowDying: ReadonlySet<IrValueId> = dyingArguments
+  // `programFactsOf` publishes the stores moved behind the dying reads beside
+  // them; they travel beside the set from now on.
+  let borrowSunkStores = sunkStores
   for (;;) {
     const entries = new Map<string, StableBorrowEntry>()
     for (const body of input.bodies) {
@@ -2741,6 +2766,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     const forwarded = borrowForwardedArgumentsOf(input.bodies, entries, dyingArguments)
     if ([...forwarded].every((value) => !borrowDying.has(value))) break
     borrowDying = withoutDyingArguments(dyingArguments, forwarded)
+    borrowSunkStores = withoutSunkStores(sunkStores, forwarded)
   }
   for (const body of input.bodies) {
     if (isRegionId(body.sourceOwner)) continue
@@ -2925,7 +2951,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
         constructEntries,
         hostMethodAliases,
         callableMemberCandidates,
-        callableFlowCandidates.get(body.owner) ?? new Map(),
+        callableFlowCandidates.get(body.owner) ?? new Map<IrValueId, CallableFlowCandidate>(),
         borrowableMemberBodies,
         stableBorrowEntries,
         printerDrift,
@@ -2946,7 +2972,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
         writeEffects,
         promiseView === null && returnsOwnReceiver(body),
         allocationCells,
-        codeFreeFieldRead
+        codeFreeFieldRead,
+        borrowSunkStores
       )
       const commonJsScope = [
         ...coroutineEnvironmentPrologueOf(promiseView ?? body, captures),
@@ -3296,7 +3323,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   for (const spelling of globals) header.append(plain(spelling.declaration))
   for (const declaration of environments) header.append(plain(declaration))
   for (const signature of signatures) header.append(plain(signature))
-  for (const helper of selectionHelpers?.values() ?? []) header.append(plain(helper.declaration))
+  if (selectionHelpers !== undefined) for (const helper of selectionHelpers.values()) header.append(plain(helper.declaration))
   for (const definition of commonJs.definitions) header.append(plain(definition))
   for (const tag of declarationTags) header.append(plain(tag))
   for (const thunk of thunks.values()) header.append(plain(thunk.prototype))
@@ -3323,7 +3350,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     if (isolate) program.append(plain(namespaceOpen))
     // Static own-property view structs are declared once in the shared header.
     for (const spelling of globals) program.append(plain(spelling.definition))
-    for (const helper of selectionHelpers?.values() ?? []) program.append(plain(helper.definition))
+    if (selectionHelpers) for (const helper of selectionHelpers.values()) program.append(plain(helper.definition))
     for (const definition of virtuals.definitions) program.append(plain(definition))
     for (const definition of prototypeHooks.definitions) program.append(plain(definition))
     for (const table of tables) for (const artifact of table) program.append(artifact)
@@ -3355,11 +3382,15 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
 
   // Bodies and classes grouped by the file that declared them. The identity is
   // the grouping key; the file name is only what the unit is called.
-  const groups = new Map<string, { bodies: RenderedBody[]; constructions: ClassConstruction[]; fieldDefinitions: string[] }>()
-  const groupOf = (identity: string): { bodies: RenderedBody[]; constructions: ClassConstruction[]; fieldDefinitions: string[] } => {
+  type FileGroup = { bodies: RenderedBody[]; constructions: ClassConstruction[]; fieldDefinitions: string[] }
+  const groups = new Map<string, FileGroup>()
+  const groupOf = (identity: string): FileGroup => {
     const existing = groups.get(identity)
     if (existing) return existing
-    const created = { bodies: [], constructions: [], fieldDefinitions: [] }
+    // Annotated: an unannotated literal is laid out with `never[]` fields and
+    // read through a `FileGroup` view, which a native build answers with the
+    // one shared empty array, so every file's group pushed into one list.
+    const created: FileGroup = { bodies: [], constructions: [], fieldDefinitions: [] }
     groups.set(identity, created)
     return created
   }

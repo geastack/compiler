@@ -233,7 +233,10 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
     return producer !== undefined && graph.operations.get(producer)?.family === 'allocation'
   }
   /** The call signatures a type carries, resolved through a declared name or a union of callables. */
-  const signatureShapesOf = (id: StructuralTypeId, seen: Set<StructuralTypeId> = new Set()): readonly SignatureShape[] => {
+  const signatureShapesOf = (
+    id: StructuralTypeId,
+    seen: Set<StructuralTypeId> = new Set<StructuralTypeId>()
+  ): readonly SignatureShape[] => {
     if (seen.has(id)) return []
     seen.add(id)
     const shape = graph.structuralTypes.get(id)?.shape
@@ -301,7 +304,7 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
         disqualified.add(core)
         const shape = graph.structuralTypes.get(core)?.shape
         if (shape?.kind === 'object') for (const member of shape.members) pending.push(member.type)
-        pending.push(...typeArgumentsOf(graph, core))
+        for (const argument of typeArgumentsOf(graph, core)) pending.push(argument)
       }
     }
   }

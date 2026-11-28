@@ -12,8 +12,10 @@ import {
   representationKey,
   walkRepresentation,
   type CallableAbi,
+  type RecordField,
   type Representation
 } from '../representation/model.js'
+import { mapValues } from '../collection-lists.js'
 
 /** Why one carrier entered the emitted unit's physical closure. */
 export interface EmissionRepresentationReason {
@@ -93,6 +95,21 @@ const abiCarriersOf = (abi: CallableAbi): readonly Representation[] => [
   abi.result,
   ...(abi.receiver ? [abi.receiver] : [])
 ]
+
+/**
+ * `layout` with its own fields replaced by a class's native storage fields.
+ * Built field by field: a spread of the narrowed record union has no single
+ * native layout to copy from.
+ */
+const withStorageFields = (layout: Representation, fields: readonly RecordField[]): Representation => {
+  if (layout.kind === 'record')
+    return layout.standIn === true
+      ? { kind: 'record', shapeId: layout.shapeId, fields, accessors: layout.accessors, ownership: layout.ownership, standIn: true }
+      : { kind: 'record', shapeId: layout.shapeId, fields, accessors: layout.accessors, ownership: layout.ownership }
+  if (layout.kind === 'record-with-index')
+    return { kind: 'record-with-index', shapeId: layout.shapeId, fields, indexes: layout.indexes, ownership: layout.ownership }
+  return layout
+}
 
 const operationOwnerOf = (body: IrBody, operation: IrOperation): string => `${String(body.owner)}:${operation.kind}`
 
@@ -196,7 +213,7 @@ export const publishEmissionRepresentationsOf = (input: EmissionRepresentationIn
     if (body.facts?.capturedReceiver)
       enqueue(body.facts.capturedReceiver, { kind: 'capture-receiver', owner: String(body.owner), detail: 'captured receiver' }, true)
     for (const declaration of [
-      ...(body.facts?.capturedDeclarations ?? []),
+      ...(body.facts?.capturedDeclarations == null ? [] : [...body.facts?.capturedDeclarations]),
       ...(body.facts ? [...body.facts.boxed] : []),
       ...(body.facts ? [...body.facts.requiresEarlyBox] : [])
     ]) {
@@ -420,10 +437,7 @@ export const publishEmissionRepresentationsOf = (input: EmissionRepresentationIn
         const rawLayout = input.deriver.layoutOf(item.representation.shapeId as StructuralTypeId)
         const nativeStorage =
           item.representation.kind === 'class-ref' ? input.classes.get(item.representation.declaration)?.nativeStorage : undefined
-        const layout =
-          nativeStorage !== undefined && (rawLayout.kind === 'record' || rawLayout.kind === 'record-with-index')
-            ? { ...rawLayout, fields: nativeStorage.fields }
-            : rawLayout
+        const layout = nativeStorage !== undefined ? withStorageFields(rawLayout, nativeStorage.fields) : rawLayout
         const reason: EmissionRepresentationReason = {
           kind: 'native-layout',
           owner: item.reason.owner,
@@ -469,7 +483,7 @@ export const publishEmissionRepresentationsOf = (input: EmissionRepresentationIn
       continue
     }
     const unique = new Map<string, EmissionRepresentationReason>()
-    for (const reason of [...(nested?.reasons.values() ?? []), ...(direct?.reasons.values() ?? [])])
+    for (const reason of [...mapValues(nested?.reasons), ...mapValues(direct?.reasons)])
       if (!unique.has(reasonKeyOf(reason))) unique.set(reasonKeyOf(reason), reason)
     closure.set(key, { representation: nested?.representation ?? direct!.representation, reasons: Object.freeze([...unique.values()]) })
   }

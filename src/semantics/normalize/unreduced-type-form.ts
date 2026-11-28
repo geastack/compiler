@@ -39,7 +39,7 @@ import ts from '#typescript'
  * census declines. Doing it a second time here would be a second authority on
  * one reduction.
  */
-export const isUnreducedTypeForm = (type: ts.Type, seen: Set<ts.Type> = new Set()): boolean => {
+export const isUnreducedTypeForm = (type: ts.Type, seen: Set<ts.Type> = new Set<ts.Type>()): boolean => {
   if (seen.has(type)) return false
   seen.add(type)
   const deferred = ts.TypeFlags.Conditional | ts.TypeFlags.IndexedAccess | ts.TypeFlags.Index | ts.TypeFlags.Substitution

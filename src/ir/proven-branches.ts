@@ -139,7 +139,7 @@ export const provenResultTruthiness = (
   // rule, which a phi stops -- that fact composes through `&&`/`||` here, as
   // in the harness's `a === 0 && b === 0`.
   const tagsMemo = new Map<StructuralTypeId, ReadonlySet<string> | null>()
-  const tagsOf = (type: StructuralTypeId, seen: Set<StructuralTypeId> = new Set()): ReadonlySet<string> | null => {
+  const tagsOf = (type: StructuralTypeId, seen: Set<StructuralTypeId> = new Set<StructuralTypeId>()): ReadonlySet<string> | null => {
     const remembered = tagsMemo.get(type)
     if (remembered !== undefined) return remembered
     if (seen.has(type)) return null
@@ -152,7 +152,7 @@ export const provenResultTruthiness = (
     if (shape?.kind === 'primitive')
       tags =
         shape.primitive === 'never'
-          ? new Set()
+          ? new Set<string>()
           : ['void', 'unknown', 'any'].includes(shape.primitive)
             ? null
             : new Set([shape.primitive === 'int32' || shape.primitive === 'int64' ? 'number' : shape.primitive])
@@ -284,7 +284,10 @@ export const pruneProvenBranches = (
     const protectedFlow = Boolean(
       body.tryRegions.length || body.iteratorCloseRegions?.length || body.generator || body.generatorPrologueBoundary
     )
-    const facts = new Map<string, boolean>(closed?.truthiness)
+    // This body's own facts over the whole program's closed ones. Copying the
+    // closed map into every body's table made the pass bodies x program values.
+    const facts = new Map<string, boolean>()
+    const factOf = (value: IrValueId): boolean | undefined => facts.get(value) ?? closed?.truthiness.get(value)
     const operations = [...body.blocks.values()].flatMap((block) => block.operations)
     const definitions = new Map(
       operations.flatMap((operation) => {
@@ -342,7 +345,7 @@ export const pruneProvenBranches = (
     }
     for (const operation of operations) {
       if (operation.kind !== 'test' || operation.predicate !== 'to-boolean') continue
-      const truth = facts.get(operation.value.value)
+      const truth = factOf(operation.value.value)
       if (truth !== undefined) facts.set(operation.result.id, truth)
     }
     const blocks = new Map(body.blocks)
@@ -434,7 +437,7 @@ export const pruneProvenBranches = (
       const block = { ...original, operations }
       blocks.set(blockId, block)
       if (protectedFlow || block.terminator.kind !== 'branch') continue
-      const truth = facts.get(block.terminator.condition.value)
+      const truth = factOf(block.terminator.condition.value)
       if (truth === undefined) continue
       blocks.set(blockId, {
         ...block,

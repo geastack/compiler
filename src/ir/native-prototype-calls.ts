@@ -45,8 +45,18 @@ export const nativePrototypeCallClaimsOf = (
     }
     if (carrier.kind === 'class-ref') {
       if (classMemberOf(classes, carrier.declaration, member) !== null) return null
-      if (carrier.nativeBase?.kind === 'promise' || carrier.nativeBase?.kind === 'keyed-collection')
-        return claims(carrier.nativeBase)?.map((claim) => ({ ...claim, nativeReceiver: carrier })) ?? null
+      if (carrier.nativeBase?.kind === 'promise' || carrier.nativeBase?.kind === 'keyed-collection') {
+        const base = claims(carrier.nativeBase)
+        // Field by field: a spread of the claim builds an anonymous record, not a NativePrototypeCallClaim.
+        return (
+          base?.map((claim): NativePrototypeCallClaim => ({
+            kind: claim.kind,
+            carrier: claim.carrier,
+            member: claim.member,
+            nativeReceiver: carrier
+          })) ?? null
+        )
+      }
       if (deriver && nativePrototypeShapeMethodOf(carrier, member, classes, deriver)) return [{ kind: 'object-shape', carrier, member }]
       return null
     }

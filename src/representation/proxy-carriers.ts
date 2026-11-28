@@ -58,7 +58,8 @@ export const proxyCarriersOf = (
     const value = carrier ? resultOf(operation, 'value') : undefined
     if (carrier && value) sites.set(value.id, carrier)
   }
-  if (sites.size === 0) return { results: new Map(), staticFields: new Map() }
+  if (sites.size === 0)
+    return { results: new Map<SemanticResultId, Representation>(), staticFields: new Map<DeclarationId, Representation>() }
 
   const callables = callableOriginsOf(graph)
   // What each node may hold: the proxy carriers, keyed by representation, and
@@ -341,8 +342,16 @@ const withProxyArms = (declared: Representation, proxies: readonly Representatio
 const abiOfCallable = (carrier: Representation): CallableAbi | null =>
   carrier.kind === 'function' || carrier.kind === 'function-value-dispatch' ? carrier.abi : null
 
-const withResult = (carrier: Representation, abi: CallableAbi): Representation =>
-  carrier.kind === 'function' || carrier.kind === 'function-value-dispatch' ? { ...carrier, abi } : carrier
+// Built field by field per arm: a spread of a two-arm union has no single
+// native layout to copy from.
+const withResult = (carrier: Representation, abi: CallableAbi): Representation => {
+  if (carrier.kind === 'function') return { kind: 'function', functionId: carrier.functionId, abi }
+  if (carrier.kind === 'function-value-dispatch')
+    return carrier.recursive === undefined
+      ? { kind: 'function-value-dispatch', abi }
+      : { kind: 'function-value-dispatch', abi, recursive: carrier.recursive }
+  return carrier
+}
 
 /**
  * A `proxy-object` arm the target has no place for.

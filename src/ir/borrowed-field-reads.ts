@@ -164,13 +164,20 @@ export const borrowedFieldReadsOf = (
       const block = body.blocks.get(blockId)
       const entry = entries.get(blockId)
       if (block === undefined) continue
-      const current = new Map(entry ?? [])
+      const current = entry === undefined ? new Map<string, Fact>() : new Map<string, Fact>(entry)
       for (const operation of block.operations) {
         if (operation.kind === 'phi') {
           // On its edge: the predecessor's exit must still hold the incoming read.
           for (const incoming of operation.incoming) {
             if (!members.has(incoming.value.value)) continue
-            if (holds(exits.get(incoming.block) ?? new Map(), incoming.value.value) === undefined) return incoming.value.value
+            if (
+              holds(
+                exits.get(incoming.block) ??
+                  new Map<string, { readonly receiver: string; readonly key: string; readonly value: IrValueId }>(),
+                incoming.value.value
+              ) === undefined
+            )
+              return incoming.value.value
           }
           continue
         }

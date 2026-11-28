@@ -90,7 +90,7 @@ export const cleanWindowReadsOf = (body: IrBody, reads: readonly WindowRead[], u
   const finallyBlocks = [...finallyBlocksOf(body, graph)]
   const successorsOf = (block: IrBlockId): readonly IrBlockId[] => [...(graph.successors.get(block) ?? []), ...(implicit.get(block) ?? [])]
   for (const read of reads) {
-    const sites = [...(uses.get(read.value) ?? []), ...(read.extraUses ?? [])]
+    const sites = [...(uses.get(read.value) ?? []), ...(read.extraUses == null ? [] : [...read.extraUses])]
     if (sites.length === 0) continue
     if (finallyBlocks.some((block) => body.blocks.get(block)?.operations.some(read.clobbers) === true)) continue
     const firstClobberFrom = (block: IrBlockId, from: number): number => {

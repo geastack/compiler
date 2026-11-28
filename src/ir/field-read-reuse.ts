@@ -6,7 +6,23 @@ import type { RepresentationDeriver } from '../representation/derive.js'
 import { representationKey, type Representation } from '../representation/model.js'
 import { stringConstantsOf } from './dead-values.js'
 import { controlFlowGraphOf } from './dominance.js'
-import type { GetOperation, IrBlock, IrBlockId, IrBody, IrNonTerminatorOperation, IrPhiIncoming, PhiOperation } from './model.js'
+import type {
+  CallOperation,
+  ConvertOperation,
+  GetOperation,
+  IrArrayElement,
+  IrBlock,
+  IrBlockId,
+  IrBody,
+  IrNonTerminatorOperation,
+  IrOperand,
+  IrPhiIncoming,
+  IrRecordFieldInit,
+  IrSwitchCase,
+  IrTerminatorOperation,
+  PhiOperation,
+  SetOperation
+} from './model.js'
 import { arrayAllocationDrainsDynamicIterator, operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import { verifyIrBody } from './verify.js'
 import { inertArgument, nativeData, primitive } from './write-effects.js'
@@ -44,7 +60,7 @@ export const reuseFieldReads = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   deriver: RepresentationDeriver
 ): ReadonlyMap<PhysicalBodyId, IrBody> => {
-  const codeFree = codeFreeFieldReadOf(bodies.values(), classes, deriver)
+  const codeFree = codeFreeFieldReadOf([...bodies.values()], classes, deriver)
   let output: Map<PhysicalBodyId, IrBody> | null = null
   for (const [id, body] of bodies) {
     const reused = reusedBody(body, codeFree)
@@ -63,7 +79,7 @@ export type CodeFreeFieldRead = (receiver: Representation, key: string) => boole
  * lean on the same proof (`borrowed-field-reads.ts`), may treat as a load.
  */
 export const codeFreeFieldReadOf = (
-  bodies: Iterable<IrBody>,
+  bodies: readonly IrBody[],
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   deriver: RepresentationDeriver
 ): CodeFreeFieldRead => {
@@ -94,7 +110,7 @@ export const codeFreeFieldReadOf = (
  * still be answered by a getter of the shape it came from.
  */
 const accessorKeysOf = (
-  bodies: Iterable<IrBody>,
+  bodies: readonly IrBody[],
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   deriver: RepresentationDeriver
 ): ReadonlySet<string> => {
@@ -401,11 +417,11 @@ const reusedBody = (body: IrBody, codeFree: CodeFreeFieldRead): IrBody => {
   for (const [id, block] of body.blocks) {
     const kept = block.operations
       .filter((operation) => !(operation.kind === 'get' && replaced.has(operation.result.id)))
-      .map((operation) => renamed(operation, (value) => replaced.get(value) ?? value))
+      .map((operation) => renamedNonTerminator(operation, (value) => replaced.get(value) ?? value))
     const leading = kept.findIndex((operation) => operation.kind !== 'phi')
     const split = leading < 0 ? kept.length : leading
     const operations = [...kept.slice(0, split), ...(built.get(id) ?? []), ...kept.slice(split)]
-    blocks.set(id, { ...block, operations, terminator: renamed(block.terminator, (value) => replaced.get(value) ?? value) })
+    blocks.set(id, { ...block, operations, terminator: renamedTerminator(block.terminator, (value) => replaced.get(value) ?? value) })
   }
   for (const value of replaced.keys()) values.delete(value)
   const rewritten: IrBody = { ...body, blocks, values }
@@ -418,24 +434,521 @@ const reusedBody = (body: IrBody, codeFree: CodeFreeFieldRead): IrBody => {
 /**
  * The operation with every operand naming a replaced read renamed to the read
  * it reuses. An operand is the `{ value, representation }` pair wherever an
- * operation or one of its published facts holds it.
+ * operation or one of its published facts holds it; a bare `IrValueId` a fact
+ * cites (an allocation, a capture) is an identity, not a read, and keeps its
+ * name.
+ *
+ * Spelled per operation kind rather than as one walk over arbitrary objects so
+ * a native build can type every step, and so a new operation kind or a new
+ * operand-holding fact fails to compile here instead of silently keeping a
+ * stale operand. Untouched parts keep their identity: a caller compares the
+ * result against the original to learn whether anything moved.
  */
-const renamed = <T>(node: T, resolve: (value: IrValueId) => IrValueId): T => {
-  if (Array.isArray(node)) {
-    let copy: unknown[] | null = null
-    node.forEach((item, index) => {
-      const next = renamed(item, resolve)
-      if (next !== item) (copy ??= [...node])[index] = next
-    })
-    return (copy ?? node) as T
+type ValueResolver = (value: IrValueId) => IrValueId
+
+const renamedOperand = (operand: IrOperand, resolve: ValueResolver): IrOperand => {
+  const value = resolve(operand.value)
+  return value === operand.value ? operand : { ...operand, value }
+}
+
+const renamedOptionalOperand = (operand: IrOperand | null, resolve: ValueResolver): IrOperand | null =>
+  operand === null ? null : renamedOperand(operand, resolve)
+
+const renamedEach = <E>(items: readonly E[], rename: (item: E) => E): readonly E[] => {
+  let copy: E[] | null = null
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index]!
+    const next = rename(item)
+    if (next !== item) (copy ??= items.slice())[index] = next
   }
-  if (node === null || typeof node !== 'object' || Object.getPrototypeOf(node) !== Object.prototype) return node
-  const record = node as Record<string, unknown>
-  let copy: Record<string, unknown> | null = null
-  for (const [field, value] of Object.entries(record)) {
-    let next = renamed(value, resolve)
-    if (field === 'value' && typeof value === 'string' && 'representation' in record) next = resolve(value as IrValueId)
-    if (next !== value) (copy ??= { ...record })[field] = next
+  return copy ?? items
+}
+
+const renamedOperands = (operands: readonly IrOperand[], resolve: ValueResolver): readonly IrOperand[] =>
+  renamedEach(operands, (operand) => renamedOperand(operand, resolve))
+
+type ObjectDataSlot = NonNullable<GetOperation['nativeObjectDataSlot']>
+const renamedObjectDataSlot = (slot: ObjectDataSlot, resolve: ValueResolver): ObjectDataSlot => {
+  let next = slot
+  const owner = renamedOperand(slot.owner, resolve)
+  if (owner !== slot.owner) next = { ...next, owner }
+  if (slot.write !== null) {
+    const value = renamedOperand(slot.write.value, resolve)
+    if (value !== slot.write.value) next = { ...next, write: { ...slot.write, value } }
   }
-  return (copy ?? node) as T
+  return next
+}
+
+type CallableDataSlot = NonNullable<GetOperation['nativeCallableDataSlot']>
+const renamedCallableDataSlot = (slot: CallableDataSlot, resolve: ValueResolver): CallableDataSlot => {
+  const value = renamedOperand(slot.value, resolve)
+  return value === slot.value ? slot : { ...slot, value }
+}
+
+type PrivateCallableSlot = NonNullable<GetOperation['privateNativeCallableSlot']>
+const renamedPrivateCallableSlot = (slot: PrivateCallableSlot, resolve: ValueResolver): PrivateCallableSlot => {
+  const value = renamedOperand(slot.value, resolve)
+  return value === slot.value ? slot : { ...slot, value }
+}
+
+type CallablePrototype = NonNullable<GetOperation['nativeCallablePrototype']>
+const renamedCallablePrototype = (prototype: CallablePrototype, resolve: ValueResolver): CallablePrototype => {
+  const receiver = renamedOperand(prototype.receiver, resolve)
+  return receiver === prototype.receiver ? prototype : { ...prototype, receiver }
+}
+
+type DocumentEntry = NonNullable<GetOperation['nativeDocumentEntry']>
+const renamedDocumentEntry = (entry: DocumentEntry, resolve: ValueResolver): DocumentEntry => {
+  const receiver = renamedOperand(entry.receiver, resolve)
+  return receiver === entry.receiver ? entry : { ...entry, receiver }
+}
+
+type CallableDataWrite = NonNullable<SetOperation['nativeCallableDataWrite']>
+const renamedCallableDataWrite = (write: CallableDataWrite, resolve: ValueResolver): CallableDataWrite => {
+  const receiver = renamedOperand(write.receiver, resolve)
+  const key = renamedOperand(write.key, resolve)
+  const value = renamedOperand(write.value, resolve)
+  const storedValue = renamedOperand(write.storedValue, resolve)
+  return receiver === write.receiver && key === write.key && value === write.value && storedValue === write.storedValue
+    ? write
+    : { ...write, receiver, key, value, storedValue }
+}
+
+type CallableReadonlySet = NonNullable<SetOperation['nativeCallableReadonlySet']>
+const renamedCallableReadonlySet = (set: CallableReadonlySet, resolve: ValueResolver): CallableReadonlySet => {
+  const receiver = renamedOperand(set.receiver, resolve)
+  const key = renamedOperand(set.key, resolve)
+  const value = renamedOperand(set.value, resolve)
+  return receiver === set.receiver && key === set.key && value === set.value ? set : { ...set, receiver, key, value }
+}
+
+type ArrayDescriptorSnapshot = NonNullable<CallOperation['nativeArrayDescriptorSnapshot']>
+const renamedArrayDescriptorSnapshot = (snapshot: ArrayDescriptorSnapshot, resolve: ValueResolver): ArrayDescriptorSnapshot => {
+  const receiver = renamedOperand(snapshot.receiver, resolve)
+  const key = renamedOperand(snapshot.key, resolve)
+  return receiver === snapshot.receiver && key === snapshot.key ? snapshot : { ...snapshot, receiver, key }
+}
+
+type ArrayDescriptorReinstallation = NonNullable<CallOperation['nativeArrayDescriptorReinstallation']>
+const renamedArrayDescriptorReinstallation = (
+  reinstallation: ArrayDescriptorReinstallation,
+  resolve: ValueResolver
+): ArrayDescriptorReinstallation => {
+  const receiver = renamedOperand(reinstallation.receiver, resolve)
+  const key = renamedOperand(reinstallation.key, resolve)
+  const descriptor = renamedOperand(reinstallation.descriptor, resolve)
+  return receiver === reinstallation.receiver && key === reinstallation.key && descriptor === reinstallation.descriptor
+    ? reinstallation
+    : { ...reinstallation, receiver, key, descriptor }
+}
+
+type CallableIntegrity = NonNullable<CallOperation['nativeCallableIntegrity']>
+const renamedCallableIntegrity = (integrity: CallableIntegrity, resolve: ValueResolver): CallableIntegrity => {
+  let next = integrity
+  const receiver = renamedOperand(integrity.receiver, resolve)
+  if (receiver !== integrity.receiver) next = { ...next, receiver }
+  if (integrity.prototype !== undefined) {
+    const prototype = renamedCallablePrototype(integrity.prototype, resolve)
+    if (prototype !== integrity.prototype) next = { ...next, prototype }
+  }
+  return next
+}
+
+type OwnAssignment = NonNullable<CallOperation['nativeOwnAssignment']>
+type OwnAssignmentSource = OwnAssignment['sources'][number]
+const renamedOwnAssignment = (assignment: OwnAssignment, resolve: ValueResolver): OwnAssignment => {
+  const owner = renamedOperand(assignment.owner, resolve)
+  const sources = renamedEach(assignment.sources, (source: OwnAssignmentSource): OwnAssignmentSource => {
+    const receiver = renamedOperand(source.receiver, resolve)
+    return receiver === source.receiver ? source : { ...source, receiver }
+  })
+  return owner === assignment.owner && sources === assignment.sources ? assignment : { ...assignment, owner, sources }
+}
+
+type AccessorReinstallation = NonNullable<CallOperation['nativeAccessorReinstallation']>
+const renamedAccessorReinstallation = (reinstallation: AccessorReinstallation, resolve: ValueResolver): AccessorReinstallation => {
+  const snapshotReceiver = renamedOperand(reinstallation.snapshotReceiver, resolve)
+  const snapshotKey = renamedOperand(reinstallation.snapshotKey, resolve)
+  return snapshotReceiver === reinstallation.snapshotReceiver && snapshotKey === reinstallation.snapshotKey
+    ? reinstallation
+    : { ...reinstallation, snapshotReceiver, snapshotKey }
+}
+
+type ObjectSample = NonNullable<ConvertOperation['nativeObjectSample']>
+const renamedObjectSample = (sample: ObjectSample, resolve: ValueResolver): ObjectSample => {
+  const observed = renamedOperand(sample.observed, resolve)
+  const owner = renamedOperand(sample.owner, resolve)
+  return observed === sample.observed && owner === sample.owner ? sample : { ...sample, observed, owner }
+}
+
+const renamedArrayElement = (element: IrArrayElement, resolve: ValueResolver): IrArrayElement => {
+  switch (element.kind) {
+    case 'hole':
+      return element
+    case 'gather': {
+      const iterator = renamedOperand(element.iterator, resolve)
+      return iterator === element.iterator ? element : { ...element, iterator }
+    }
+    case 'element': {
+      const value = renamedOperand(element.value, resolve)
+      return value === element.value ? element : { ...element, value }
+    }
+    case 'spread': {
+      const value = renamedOperand(element.value, resolve)
+      return value === element.value ? element : { ...element, value }
+    }
+  }
+}
+
+const renamedGet = (operation: GetOperation, resolve: ValueResolver): GetOperation => {
+  let next = operation
+  const receiver = renamedOperand(operation.receiver, resolve)
+  const key = renamedOperand(operation.key, resolve)
+  if (receiver !== operation.receiver || key !== operation.key) next = { ...next, receiver, key }
+  if (operation.nativeObjectDataSlot !== undefined) {
+    const nativeObjectDataSlot = renamedObjectDataSlot(operation.nativeObjectDataSlot, resolve)
+    if (nativeObjectDataSlot !== operation.nativeObjectDataSlot) next = { ...next, nativeObjectDataSlot }
+  }
+  if (operation.nativeCallableDataSlot !== undefined) {
+    const nativeCallableDataSlot = renamedCallableDataSlot(operation.nativeCallableDataSlot, resolve)
+    if (nativeCallableDataSlot !== operation.nativeCallableDataSlot) next = { ...next, nativeCallableDataSlot }
+  }
+  if (operation.privateNativeCallableSlot !== undefined) {
+    const privateNativeCallableSlot = renamedPrivateCallableSlot(operation.privateNativeCallableSlot, resolve)
+    if (privateNativeCallableSlot !== operation.privateNativeCallableSlot) next = { ...next, privateNativeCallableSlot }
+  }
+  if (operation.nativeCallablePrototype !== undefined) {
+    const nativeCallablePrototype = renamedCallablePrototype(operation.nativeCallablePrototype, resolve)
+    if (nativeCallablePrototype !== operation.nativeCallablePrototype) next = { ...next, nativeCallablePrototype }
+  }
+  if (operation.nativeDocumentEntry !== undefined) {
+    const nativeDocumentEntry = renamedDocumentEntry(operation.nativeDocumentEntry, resolve)
+    if (nativeDocumentEntry !== operation.nativeDocumentEntry) next = { ...next, nativeDocumentEntry }
+  }
+  return next
+}
+
+const renamedSet = (operation: SetOperation, resolve: ValueResolver): SetOperation => {
+  let next = operation
+  const receiver = renamedOperand(operation.receiver, resolve)
+  const key = renamedOperand(operation.key, resolve)
+  const value = renamedOperand(operation.value, resolve)
+  if (receiver !== operation.receiver || key !== operation.key || value !== operation.value) next = { ...next, receiver, key, value }
+  if (operation.nativeCallableReadonlySet !== undefined) {
+    const nativeCallableReadonlySet = renamedCallableReadonlySet(operation.nativeCallableReadonlySet, resolve)
+    if (nativeCallableReadonlySet !== operation.nativeCallableReadonlySet) next = { ...next, nativeCallableReadonlySet }
+  }
+  if (operation.nativeCallableDataWrite !== undefined) {
+    const nativeCallableDataWrite = renamedCallableDataWrite(operation.nativeCallableDataWrite, resolve)
+    if (nativeCallableDataWrite !== operation.nativeCallableDataWrite) next = { ...next, nativeCallableDataWrite }
+  }
+  if (operation.nativeObjectDataSlot !== undefined) {
+    const nativeObjectDataSlot = renamedObjectDataSlot(operation.nativeObjectDataSlot, resolve)
+    if (nativeObjectDataSlot !== operation.nativeObjectDataSlot) next = { ...next, nativeObjectDataSlot }
+  }
+  if (operation.nativeCallableDataSlot !== undefined) {
+    const nativeCallableDataSlot = renamedCallableDataSlot(operation.nativeCallableDataSlot, resolve)
+    if (nativeCallableDataSlot !== operation.nativeCallableDataSlot) next = { ...next, nativeCallableDataSlot }
+  }
+  if (operation.privateNativeCallableSlot !== undefined) {
+    const privateNativeCallableSlot = renamedPrivateCallableSlot(operation.privateNativeCallableSlot, resolve)
+    if (privateNativeCallableSlot !== operation.privateNativeCallableSlot) next = { ...next, privateNativeCallableSlot }
+  }
+  if (operation.nativeDocumentEntry !== undefined) {
+    const nativeDocumentEntry = renamedDocumentEntry(operation.nativeDocumentEntry, resolve)
+    if (nativeDocumentEntry !== operation.nativeDocumentEntry) next = { ...next, nativeDocumentEntry }
+  }
+  return next
+}
+
+const renamedCall = (operation: CallOperation, resolve: ValueResolver): CallOperation => {
+  let next = operation
+  const callee = renamedOperand(operation.callee, resolve)
+  const receiver = renamedOptionalOperand(operation.receiver, resolve)
+  const args = renamedOperands(operation.arguments, resolve)
+  if (callee !== operation.callee || receiver !== operation.receiver || args !== operation.arguments)
+    next = { ...next, callee, receiver, arguments: args }
+  if (operation.thisArgument !== undefined) {
+    const thisArgument = renamedOperand(operation.thisArgument, resolve)
+    if (thisArgument !== operation.thisArgument) next = { ...next, thisArgument }
+  }
+  if (operation.nativeArrayDescriptorSnapshot !== undefined) {
+    const nativeArrayDescriptorSnapshot = renamedArrayDescriptorSnapshot(operation.nativeArrayDescriptorSnapshot, resolve)
+    if (nativeArrayDescriptorSnapshot !== operation.nativeArrayDescriptorSnapshot) next = { ...next, nativeArrayDescriptorSnapshot }
+  }
+  if (operation.nativeArrayDescriptorReinstallation !== undefined) {
+    const nativeArrayDescriptorReinstallation = renamedArrayDescriptorReinstallation(operation.nativeArrayDescriptorReinstallation, resolve)
+    if (nativeArrayDescriptorReinstallation !== operation.nativeArrayDescriptorReinstallation)
+      next = { ...next, nativeArrayDescriptorReinstallation }
+  }
+  if (operation.nativeCallablePrototypeDescriptor !== undefined) {
+    const nativeCallablePrototypeDescriptor = renamedCallablePrototype(operation.nativeCallablePrototypeDescriptor, resolve)
+    if (nativeCallablePrototypeDescriptor !== operation.nativeCallablePrototypeDescriptor)
+      next = { ...next, nativeCallablePrototypeDescriptor }
+  }
+  if (operation.nativeCallableIntegrity !== undefined) {
+    const nativeCallableIntegrity = renamedCallableIntegrity(operation.nativeCallableIntegrity, resolve)
+    if (nativeCallableIntegrity !== operation.nativeCallableIntegrity) next = { ...next, nativeCallableIntegrity }
+  }
+  if (operation.nativeCallableDataWrite !== undefined) {
+    const nativeCallableDataWrite = renamedCallableDataWrite(operation.nativeCallableDataWrite, resolve)
+    if (nativeCallableDataWrite !== operation.nativeCallableDataWrite) next = { ...next, nativeCallableDataWrite }
+  }
+  if (operation.nativeOwnAssignment !== undefined) {
+    const nativeOwnAssignment = renamedOwnAssignment(operation.nativeOwnAssignment, resolve)
+    if (nativeOwnAssignment !== operation.nativeOwnAssignment) next = { ...next, nativeOwnAssignment }
+  }
+  if (operation.nativeCallableDataSlot !== undefined) {
+    const nativeCallableDataSlot = renamedCallableDataSlot(operation.nativeCallableDataSlot, resolve)
+    if (nativeCallableDataSlot !== operation.nativeCallableDataSlot) next = { ...next, nativeCallableDataSlot }
+  }
+  if (operation.nativeAccessorReinstallation !== undefined) {
+    const nativeAccessorReinstallation = renamedAccessorReinstallation(operation.nativeAccessorReinstallation, resolve)
+    if (nativeAccessorReinstallation !== operation.nativeAccessorReinstallation) next = { ...next, nativeAccessorReinstallation }
+  }
+  return next
+}
+
+const renamedConvert = (operation: ConvertOperation, resolve: ValueResolver): ConvertOperation => {
+  let next = operation
+  const source = renamedOperand(operation.source, resolve)
+  if (source !== operation.source) next = { ...next, source }
+  if (operation.nativeCallablePrototypeObservation !== undefined) {
+    const nativeCallablePrototypeObservation = renamedCallablePrototype(operation.nativeCallablePrototypeObservation, resolve)
+    if (nativeCallablePrototypeObservation !== operation.nativeCallablePrototypeObservation)
+      next = { ...next, nativeCallablePrototypeObservation }
+  }
+  if (operation.nativeObjectSample !== undefined) {
+    const nativeObjectSample = renamedObjectSample(operation.nativeObjectSample, resolve)
+    if (nativeObjectSample !== operation.nativeObjectSample) next = { ...next, nativeObjectSample }
+  }
+  return next
+}
+
+const renamedTerminator = (operation: IrTerminatorOperation, resolve: ValueResolver): IrTerminatorOperation => {
+  switch (operation.kind) {
+    case 'jump':
+      return operation
+    case 'branch': {
+      const condition = renamedOperand(operation.condition, resolve)
+      return condition === operation.condition ? operation : { ...operation, condition }
+    }
+    case 'return': {
+      const value = renamedOptionalOperand(operation.value, resolve)
+      return value === operation.value ? operation : { ...operation, value }
+    }
+    case 'throw': {
+      const value = renamedOperand(operation.value, resolve)
+      return value === operation.value ? operation : { ...operation, value }
+    }
+    case 'switch': {
+      const discriminant = renamedOperand(operation.discriminant, resolve)
+      const cases = renamedEach(operation.cases, (entry: IrSwitchCase): IrSwitchCase => {
+        const test = renamedOperand(entry.test, resolve)
+        return test === entry.test ? entry : { ...entry, test }
+      })
+      return discriminant === operation.discriminant && cases === operation.cases ? operation : { ...operation, discriminant, cases }
+    }
+  }
+}
+
+const renamedNonTerminator = (operation: IrNonTerminatorOperation, resolve: ValueResolver): IrNonTerminatorOperation => {
+  switch (operation.kind) {
+    case 'get':
+      return renamedGet(operation, resolve)
+    case 'set':
+      return renamedSet(operation, resolve)
+    case 'call':
+      return renamedCall(operation, resolve)
+    case 'convert':
+      return renamedConvert(operation, resolve)
+    case 'commonjs-require':
+    case 'commonjs-binding':
+    case 'constant':
+    case 'binding-read':
+    case 'binding-renew':
+    case 'parameter':
+    case 'receiver':
+    case 'global-this':
+    case 'catch-binding':
+    case 'unresolvable-reference':
+    case 'allocate-ordinary-object':
+    case 'allocate-template-object':
+    case 'allocate-regexp':
+      return operation
+    case 'delete': {
+      const receiver = renamedOperand(operation.receiver, resolve)
+      const key = renamedOperand(operation.key, resolve)
+      return receiver === operation.receiver && key === operation.key ? operation : { ...operation, receiver, key }
+    }
+    case 'has-property': {
+      const receiver = renamedOperand(operation.receiver, resolve)
+      const key = renamedOperand(operation.key, resolve)
+      return receiver === operation.receiver && key === operation.key ? operation : { ...operation, receiver, key }
+    }
+    case 'own-property-keys': {
+      const receiver = renamedOperand(operation.receiver, resolve)
+      return receiver === operation.receiver ? operation : { ...operation, receiver }
+    }
+    case 'module-namespace': {
+      const fresh = renamedOperand(operation.fresh, resolve)
+      return fresh === operation.fresh ? operation : { ...operation, fresh }
+    }
+    case 'define-own-property': {
+      const receiver = renamedOperand(operation.receiver, resolve)
+      const key = renamedOperand(operation.key, resolve)
+      const value = renamedOperand(operation.value, resolve)
+      return receiver === operation.receiver && key === operation.key && value === operation.value
+        ? operation
+        : { ...operation, receiver, key, value }
+    }
+    case 'spread-copy': {
+      const receiver = renamedOperand(operation.receiver, resolve)
+      const source = renamedOperand(operation.source, resolve)
+      return receiver === operation.receiver && source === operation.source ? operation : { ...operation, receiver, source }
+    }
+    case 'commonjs-binding-set': {
+      const value = renamedOperand(operation.value, resolve)
+      return value === operation.value ? operation : { ...operation, value }
+    }
+    case 'binding-write': {
+      const value = renamedOperand(operation.value, resolve)
+      return value === operation.value ? operation : { ...operation, value }
+    }
+    case 'proxy-arm-test': {
+      const value = renamedOperand(operation.value, resolve)
+      return value === operation.value ? operation : { ...operation, value }
+    }
+    case 'test': {
+      const value = renamedOperand(operation.value, resolve)
+      return value === operation.value ? operation : { ...operation, value }
+    }
+    case 'super-initialize': {
+      const args = renamedOperands(operation.arguments, resolve)
+      return args === operation.arguments ? operation : { ...operation, arguments: args }
+    }
+    case 'reparent-constructor': {
+      const classValue = renamedOperand(operation.classValue, resolve)
+      const heritage = renamedOperand(operation.heritage, resolve)
+      return classValue === operation.classValue && heritage === operation.heritage ? operation : { ...operation, classValue, heritage }
+    }
+    case 'construct': {
+      const callee = renamedOperand(operation.callee, resolve)
+      const newTarget = renamedOperand(operation.newTarget, resolve)
+      const args = renamedOperands(operation.arguments, resolve)
+      return callee === operation.callee && newTarget === operation.newTarget && args === operation.arguments
+        ? operation
+        : { ...operation, callee, newTarget, arguments: args }
+    }
+    case 'await': {
+      const operand = renamedOperand(operation.operand, resolve)
+      return operand === operation.operand ? operation : { ...operation, operand }
+    }
+    case 'yield': {
+      const operand = renamedOptionalOperand(operation.operand, resolve)
+      return operand === operation.operand ? operation : { ...operation, operand }
+    }
+    case 'compute': {
+      const operands = renamedOperands(operation.operands, resolve)
+      return operands === operation.operands ? operation : { ...operation, operands }
+    }
+    case 'phi': {
+      const incoming = renamedEach(operation.incoming, (edge: IrPhiIncoming): IrPhiIncoming => {
+        const value = renamedOperand(edge.value, resolve)
+        return value === edge.value ? edge : { ...edge, value }
+      })
+      return incoming === operation.incoming ? operation : { ...operation, incoming }
+    }
+    case 'allocate-array-object': {
+      const elements = renamedEach(operation.elements, (element: IrArrayElement) => renamedArrayElement(element, resolve))
+      return elements === operation.elements ? operation : { ...operation, elements }
+    }
+    case 'allocate-callable': {
+      const captures = renamedOperands(operation.captures, resolve)
+      return captures === operation.captures ? operation : { ...operation, captures }
+    }
+    case 'bind-callable': {
+      const source = renamedOperand(operation.source, resolve)
+      const thisArgument = renamedOptionalOperand(operation.thisArgument, resolve)
+      const receiver = renamedOptionalOperand(operation.receiver, resolve)
+      const bound = renamedOperands(operation.bound, resolve)
+      return source === operation.source &&
+        thisArgument === operation.thisArgument &&
+        receiver === operation.receiver &&
+        bound === operation.bound
+        ? operation
+        : { ...operation, source, thisArgument, receiver, bound }
+    }
+    case 'allocate-constructor': {
+      let next = operation
+      const captures = renamedOperands(operation.captures, resolve)
+      if (captures !== operation.captures) next = { ...next, captures }
+      if (operation.heritage !== undefined) {
+        const heritage = renamedOperand(operation.heritage, resolve)
+        if (heritage !== operation.heritage) next = { ...next, heritage }
+      }
+      return next
+    }
+    case 'allocate-proxy': {
+      const target = renamedOperand(operation.target, resolve)
+      const handler = renamedOperand(operation.handler, resolve)
+      return target === operation.target && handler === operation.handler ? operation : { ...operation, target, handler }
+    }
+    case 'proxy-part': {
+      const proxy = renamedOperand(operation.proxy, resolve)
+      return proxy === operation.proxy ? operation : { ...operation, proxy }
+    }
+    case 'proxy-trap-check': {
+      const answer = renamedOperand(operation.answer, resolve)
+      return answer === operation.answer ? operation : { ...operation, answer }
+    }
+    case 'allocate-record': {
+      const fields = renamedEach(operation.fields, (field: IrRecordFieldInit): IrRecordFieldInit => {
+        const value = renamedOperand(field.value, resolve)
+        return value === field.value ? field : { ...field, value }
+      })
+      return fields === operation.fields ? operation : { ...operation, fields }
+    }
+    case 'merge-live-arm-rebuild': {
+      const source = renamedOperand(operation.source, resolve)
+      return source === operation.source ? operation : { ...operation, source }
+    }
+    case 'dead-logical-merge-value': {
+      const source = renamedOperand(operation.source, resolve)
+      return source === operation.source ? operation : { ...operation, source }
+    }
+    case 'get-iterator': {
+      const receiver = renamedOperand(operation.receiver, resolve)
+      const method = renamedOptionalOperand(operation.method, resolve)
+      return receiver === operation.receiver && method === operation.method ? operation : { ...operation, receiver, method }
+    }
+    case 'iterator-next': {
+      const iterator = renamedOperand(operation.iterator, resolve)
+      const value = renamedOptionalOperand(operation.value, resolve)
+      return iterator === operation.iterator && value === operation.value ? operation : { ...operation, iterator, value }
+    }
+    case 'iterator-done': {
+      const iterator = renamedOperand(operation.iterator, resolve)
+      return iterator === operation.iterator ? operation : { ...operation, iterator }
+    }
+    case 'iterator-close': {
+      const iterator = renamedOperand(operation.iterator, resolve)
+      return iterator === operation.iterator ? operation : { ...operation, iterator }
+    }
+    case 'element': {
+      const tag = renamedOptionalOperand(operation.tag, resolve)
+      return tag === operation.tag ? operation : { ...operation, tag }
+    }
+    case 'element-prop': {
+      const node = renamedOperand(operation.node, resolve)
+      const key = renamedOperand(operation.key, resolve)
+      const value = renamedOperand(operation.value, resolve)
+      return node === operation.node && key === operation.key && value === operation.value ? operation : { ...operation, node, key, value }
+    }
+    case 'element-child': {
+      const node = renamedOperand(operation.node, resolve)
+      const child = renamedOperand(operation.child, resolve)
+      return node === operation.node && child === operation.child ? operation : { ...operation, node, child }
+    }
+  }
 }

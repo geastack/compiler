@@ -1,6 +1,6 @@
 import { operationOfResult, type SemanticResultId } from '../identity/ids.js'
 import { carriesUndefined, isArrayPatternCapable, representationKey, type Representation } from '../representation/model.js'
-import { edgesOfKind } from '../semantics/model/edges.js'
+import { evaluationEdgesOf } from '../semantics/model/edges.js'
 import { operandOf, type SemanticOperand } from '../semantics/model/operands.js'
 import { IrLoweringBlockedError } from './lower-graph.js'
 import type { FlowController } from './lower-flow.js'
@@ -18,7 +18,7 @@ import {
   type LoweringContext
 } from './lower-operands.js'
 import type { DestructuringOperation } from '../semantics/model/operations.js'
-import type { IrBlockId, IrOperand } from './model.js'
+import type { IrBlockId, IrOperand, IrRecordFieldInit } from './model.js'
 
 /**
  * Destructuring, lowered as the operations it actually is.
@@ -65,7 +65,7 @@ import type { IrBlockId, IrOperand } from './model.js'
  */
 
 const chainSuccessorOf = (graph: LoweringContext['graph'], id: DestructuringOperation['id']): DestructuringOperation['id'] | null => {
-  for (const edge of edgesOfKind(graph.edges, 'evaluation')) {
+  for (const edge of evaluationEdgesOf(graph.edges)) {
     if (edge.from === id) return edge.to
   }
   return null
@@ -336,6 +336,13 @@ const lowerArrayPatternSource = (ctx: LoweringContext, block: IrBlockId, operati
         'a general iterable needs the fully dynamic iterator protocol, which is not installed'
     )
   }
+  // An array carrying extension fields (`NodeArray`'s `pos`/`end`) where the
+  // pattern selected the plain array: the same elements, converted into the
+  // selected carrier by the census's own recipe when one is installed.
+  if (representationKey(declared) !== representationKey(source.representation)) {
+    const converted = convertTo(ctx, block, lineage, source, declared, 'array-pattern-source')
+    if (converted !== null) source = converted
+  }
   if (representationKey(declared) !== representationKey(source.representation)) {
     throw new IrLoweringBlockedError(
       `an array binding pattern's source resolved to "${representationKey(source.representation)}", but its own iterator-record result ` +
@@ -591,7 +598,15 @@ const lowerArrayPatternRest = (ctx: LoweringContext, block: IrBlockId, operation
  */
 const lowerObjectPatternRest = (ctx: LoweringContext, block: IrBlockId, operation: DestructuringOperation): void => {
   const lineage = requireLineage(operation)
-  const source = resolveRequiredOperand(ctx, block, lineage, namedOperand(operation, 'base'))
+  const base = resolveRequiredOperand(ctx, block, lineage, namedOperand(operation, 'base'))
+  // `const { a, ...rest } = list[0]!`: the checker admits a pattern over an
+  // optional only where presence was asserted or proven, and destructuring
+  // `undefined` throws anyway, so the rest copies from the present payload
+  // (the census's checked `present-optional` load).
+  const source =
+    base.representation.kind === 'optional' && recordLayoutOf(ctx, base.representation) === null
+      ? (convertTo(ctx, block, lineage, base, base.representation.payload, 'object-rest-source') ?? base)
+      : base
   const representation = requireResultRepresentation(ctx, operation, 'value', 'an object-pattern rest element')
 
   // CopyDataProperties over an open dictionary is a runtime key walk. Reuse
@@ -629,11 +644,32 @@ const lowerObjectPatternRest = (ctx: LoweringContext, block: IrBlockId, operatio
       `an object-pattern rest element's own carrier "${representationKey(representation)}" states no record layout to build`
     )
   }
-  const fields = targetLayout.map((field) => {
+  const fields = targetLayout.map((field): IrRecordFieldInit => {
     const sourceField = sourceLayout.find((candidate) => candidate.key === field.key)
+    // A source carrier that is not the field's own but converts into it: a
+    // union's merged record states a field only one arm has as optional, while
+    // the rest's `Omit<Arm, K>` requires it -- the checker's narrowing proved
+    // that arm. Read in the source's carrier, then converted, the same way a
+    // narrowed binding read is.
+    const conversion =
+      sourceField && representationKey(sourceField.value) !== representationKey(field.value)
+        ? ctx.program.conversions.nodeFor(sourceField.value, field.value)
+        : null
+    if (sourceField && conversion && conversion.capability.kind !== 'never') {
+      const key: IrOperand = {
+        value: ctx.builder.constant(block, lineage, field.key, 'string', { kind: 'string' }),
+        representation: { kind: 'string' }
+      }
+      const read: IrOperand = { value: ctx.builder.get(block, lineage, source, key, sourceField.value), representation: sourceField.value }
+      return {
+        key: field.key,
+        value: { value: ctx.builder.convert(block, lineage, conversion.id, read, field.value), representation: field.value }
+      }
+    }
     if (!sourceField || representationKey(sourceField.value) !== representationKey(field.value)) {
       throw new IrLoweringBlockedError(
-        `an object-pattern rest element's own field "${field.key}" has no matching field in its source's record layout, or the two ` +
+        `an object-pattern rest element's own field "${field.key}" (${representationKey(field.value)}) has no matching field in its source's record layout` +
+          `${sourceField ? `, which carries "${representationKey(sourceField.value)}"` : ''}, or the two ` +
           'carry different carriers -- a mismatch would need a per-field conversion this fast path does not perform'
       )
     }

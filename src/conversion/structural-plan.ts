@@ -306,6 +306,12 @@ export const certifiedRecordViewPlan = (
                   : add(read.held.value, field.value)
               case 'view':
                 return walk(read.plan)
+              case 'subclass-field':
+                return read.arms.every((arm) =>
+                  abiOfCallee(arm.held.value) !== null && abiOfCallee(field.value) !== null
+                    ? addMethod(arm.held.value, field.value)
+                    : add(arm.held.value, field.value)
+                )
               case 'sidecar':
                 return (
                   add(dynamicSidecar, field.value) && (nativeFieldViewPlanOf(plan, layouts) === null || add(field.value, dynamicSidecar))
@@ -544,16 +550,18 @@ export const callableViewPlan = (
     to.receiver?.kind === 'class-ref' &&
     to.result.kind === 'class-ref' &&
     (to.result.declaration === to.receiver.declaration || to.result.ancestors.includes(to.receiver.declaration))
+  // Locals: a native build narrows `.kind` on them, but reads a narrowed
+  // `from.result`/`to.result` path back as an optional arm the leaf cannot take.
+  const fromResult = from.result
+  const toResult = to.result
   const result =
-    to.result.kind === 'void'
-      ? null
-      : leaf(from.result.kind === 'void' ? { kind: 'undefined' } : from.result, to.result, polymorphicSelfResult)
-  if (to.result.kind !== 'void' && result === null) return null
+    toResult.kind === 'void' ? null : leaf(fromResult.kind === 'void' ? { kind: 'undefined' } : fromResult, toResult, polymorphicSelfResult)
+  if (toResult.kind !== 'void' && result === null) return null
   const nodes = [
     receiver,
     ...parameters,
     ...omittedArguments,
-    ...(restPacking?.elements ?? []),
+    ...(restPacking?.elements == null ? [] : [...restPacking?.elements]),
     ...(restUnpacking?.elements.flatMap((element) => [element.present, element.absent]) ?? []),
     result
   ].filter((node): node is ConversionNode => node !== null)
@@ -562,7 +570,7 @@ export const callableViewPlan = (
   // `(x) => number` stands where `(x) => void` is declared: the frames agree
   // leaf for leaf, yet the two native callables return different physical
   // types, so the adaptation that discards the result is itself the plan.
-  const discardsResult = to.result.kind === 'void' && representationKey(from.result) !== representationKey(to.result)
+  const discardsResult = toResult.kind === 'void' && representationKey(from.result) !== representationKey(toResult)
   // The mirror: a `=> void` body read where its slot declares `=> undefined`
   // (a bound method read through an optional chain). The completion VALUE is
   // the same -- the result leaf is `undefined -> undefined`, an identity -- but

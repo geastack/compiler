@@ -176,11 +176,12 @@ export const closedRecordCallablesOf = (
   const unknownEntries = new Set<FunctionId>()
   // Base constructors also receive super-initialize and implicit-derived
   // entries, which are not represented by the ordinary caller map below.
-  for (const layout of fieldContext?.classes.values() ?? []) {
-    const base = constructedBaseOf(layout)
-    const constructor = base === null ? null : fieldContext?.classes.get(base)?.constructor
-    if (constructor) unknownEntries.add(constructor)
-  }
+  if (fieldContext !== undefined)
+    for (const layout of fieldContext.classes.values()) {
+      const base = constructedBaseOf(layout)
+      const constructor = base === null ? null : fieldContext.classes.get(base)?.constructor
+      if (constructor) unknownEntries.add(constructor)
+    }
   for (const operation of operations) {
     if (operation.kind !== 'call' && operation.kind !== 'construct') continue
     const callable = functionOf(operation.callee.value)
@@ -244,7 +245,7 @@ export const closedRecordCallablesOf = (
     bodies,
     operations,
     producers,
-    fieldContext?.classes ?? new Map(),
+    fieldContext?.classes ?? new Map<DeclarationId, ClassLayout>(),
     fieldContext?.exposure,
     (value) => record(value) !== null,
     placements,

@@ -52,7 +52,10 @@ export const nativeFieldViewPlanOf = (
     plan.expando ||
     (plan.spilled?.length ?? 0) > 0 ||
     (plan.expandoSpilled?.length ?? 0) > 0 ||
-    plan.fields.some(({ field, read }) => field.key.startsWith('sym(') || read.kind === 'absent' || read.kind === 'sidecar')
+    plan.fields.some(
+      ({ field, read }) =>
+        field.key.startsWith('sym(') || read.kind === 'absent' || read.kind === 'subclass-field' || read.kind === 'sidecar'
+    )
   )
     return null
   // A policy that cannot say whether a class accessor has a setter cannot say
@@ -81,6 +84,8 @@ export const nativeFieldViewPlanOf = (
         return { key: field.key, read: field.value, write: null }
       case 'sidecar':
         throw new Error('a dynamic index read cannot publish native extension storage')
+      case 'subclass-field':
+        throw new Error('a subclass-held field cannot publish native extension storage')
       case 'native-descriptor':
         return { key: field.key, read: field.value, write: null, descriptorForward: true }
       case 'absent':
@@ -171,7 +176,10 @@ export const nativeFieldViewLiveLeavesOf = (nodes: Iterable<ConversionNode>): re
   const visit = (node: ConversionNode): void => {
     if (found.has(node) || !nativeFieldViewIdentityTransportOf(node) || !('materializer' in node.capability)) return
     found.add(node)
-    for (const leaf of node.capability.materializer.recordView?.leaves.values() ?? []) visit(leaf)
+    // Guarded rather than `?? []`: a native build has no iterator over the
+    // union of a map iterator and an empty array.
+    const leaves = node.capability.materializer.recordView?.leaves
+    if (leaves) for (const leaf of leaves.values()) visit(leaf)
   }
   for (const node of nodes) visit(node)
   return [...found]
@@ -182,9 +190,13 @@ export const nativeFieldViewPlansOf = (nodes: Iterable<ConversionNode>): readonl
   const plans = new Set<NativeFieldViewPlan>()
   for (const node of nodes) {
     if (!nativeFieldViewIdentityTransportOf(node) || !('materializer' in node.capability)) continue
-    for (const fields of node.capability.materializer.documentRecordView?.nativeFields ?? []) plans.add(fields)
+    // Guarded rather than `?? []`: a native build has no iterator over the
+    // union of a map iterator and an empty array.
+    const documentFields = node.capability.materializer.documentRecordView?.nativeFields
+    if (documentFields) for (const fields of documentFields) plans.add(fields)
     if (node.capability.materializer.nativeDescriptorSnapshot) plans.add(node.capability.materializer.nativeDescriptorSnapshot.nativeFields)
-    for (const plan of node.capability.materializer.recordView?.fieldViews?.values() ?? []) plans.add(plan)
+    const fieldViews = node.capability.materializer.recordView?.fieldViews
+    if (fieldViews) for (const plan of fieldViews.values()) plans.add(plan)
   }
   return [...plans]
 }

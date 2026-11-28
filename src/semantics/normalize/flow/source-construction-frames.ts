@@ -62,7 +62,7 @@ export const sourceConstructionFramesOf = (checker: ts.TypeChecker, flow: ValueF
 
   const firstExplicitConstructorOf = (
     selected: SourceClass,
-    active: Set<SourceClass> = new Set()
+    active: Set<SourceClass> = new Set<SourceClass>()
   ): readonly ts.SignatureDeclaration[] | null => {
     if (active.has(selected)) return null
     if (!isClassSpelledSourceClass(selected)) return [selected]

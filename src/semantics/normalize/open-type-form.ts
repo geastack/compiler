@@ -8,7 +8,7 @@ import ts from '#typescript'
  * own type arguments are open. Ordinary `T extends Renderer` has T's distinct
  * symbol, so its constraint must not be mistaken for a concrete argument.
  */
-export const isOpenTypeForm = (type: ts.Type, seen: Set<ts.Type> = new Set()): boolean => {
+export const isOpenTypeForm = (type: ts.Type, seen: Set<ts.Type> = new Set<ts.Type>()): boolean => {
   if (seen.has(type)) return false
   seen.add(type)
   if ((type.flags & ts.TypeFlags.TypeParameter) !== 0) {

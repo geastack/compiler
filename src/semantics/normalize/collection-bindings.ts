@@ -1,4 +1,5 @@
 import ts from '#typescript'
+import { checkerUnionOf } from '../checker-union.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
 import { disjointUnionTypeOf, isStandardInterfaceType, joinOfWrites, literalMemberNameOf, widestOf } from './derived-expression-type.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
@@ -6,6 +7,7 @@ import type { ValueFlowIndex, ValueWrite } from './flow/model.js'
 import { closedArrayIsProvenEmpty } from './flow/callable-reach.js'
 import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
+import { declaredNameOf } from './declared-name.js'
 
 /**
  * The type arguments a bare `new Map()`/`new Set()`/`new WeakMap()`/`new
@@ -514,7 +516,7 @@ export const censusCollectionBindings = (
   const describeOwner = (node: ts.Node): string => {
     const sourceFile = node.getSourceFile()
     const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1
-    const name = (node as { name?: ts.PropertyName }).name
+    const name = declaredNameOf(node)
     const label = name && (ts.isIdentifier(name) || ts.isPrivateIdentifier(name)) ? name.text : node.getText(sourceFile)
     return `${label} (${sourceFile.fileName}:${line})`
   }
@@ -588,8 +590,7 @@ export const censusCollectionBindings = (
     // store then "narrowed" the live Map arm away without a check.
     const arms = parameters.unionArmsAt(expr)
     if (arms && arms.length > 1) {
-      const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
-      return typeof constructing.getUnionType === 'function' ? constructing.getUnionType(arms) : null
+      return checkerUnionOf(checker, arms)
     }
     const own = checker.getTypeAtLocation(expr)
     return isUnusableEvidence(own) ? parameters.typeAt(expr) : own
@@ -634,9 +635,15 @@ export const censusCollectionBindings = (
     }
     if (ts.isVariableDeclaration(owner) && ts.isIdentifier(owner.name)) {
       const symbol = checker.getSymbolAtLocation(owner.name)
-      let scope: ts.Node | undefined = owner.parent
-      while (scope && !ts.isFunctionLike(scope)) scope = scope.parent
-      if (symbol && scope && ts.isFunctionLike(scope) && scope.type && 'body' in scope && scope.body) {
+      // Held as the function it is, assigned only once the test has answered:
+      // a module-level owner has no enclosing function at all.
+      let scope: ts.SignatureDeclaration | undefined
+      for (let node: ts.Node | undefined = owner.parent; node; node = node.parent)
+        if (ts.isFunctionLike(node)) {
+          scope = node
+          break
+        }
+      if (symbol && scope && scope.type && 'body' in scope && scope.body) {
         const returned = checker.getTypeFromTypeNode(scope.type)
         let returnsOwner = false
         const visit = (node: ts.Node): void => {

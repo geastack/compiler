@@ -27,7 +27,10 @@ export const nativePrototypeObjectText = (
 ): string => {
   if (receiver.members.length > 1) return familyPrototypeObjectText(ctx, receiver, result, receiverText, originalMethod)
   const layout = classPrototypeReadOf(ctx.classes, receiver, 'prototype', result)
-  if (layout === null || layout.instance?.kind !== 'class-ref') {
+  // Narrowed through a local: a property path narrowed to one arm
+  // (`layout.instance` as a class-ref) has no native widening back.
+  const instance = layout === null ? null : layout.instance
+  if (layout === null || instance === null || instance.kind !== 'class-ref') {
     const reasons = receiver.members.length === 1 ? ctx.classes.get(receiver.members[0]!)?.prototypeUnsupportedUses : undefined
     if (reasons?.length) throw createCppEmitBlockedError('property-access:class-prototype:method-only', reasons.join('; '))
     throw createCppEmitBlockedError(
@@ -81,7 +84,7 @@ export const nativePrototypeObjectText = (
     initialize.push(`gea_prototype->${cppRecordFieldAttributesName(method.key)}.enumerable = false;`)
   }
   const prototype = `gea::nativeClassPrototype<${cppClassName(declaration)}>(gea::nativeClassMethodStateFromEnvironment(${receiverText}.environment), [&](const auto& gea_prototype) { ${initialize.join(' ')} })`
-  const converted = alignedValueText(ctx, 'native-prototype:result', layout.instance, result, prototype)
+  const converted = alignedValueText(ctx, 'native-prototype:result', instance, result, prototype)
   if (converted === null)
     throw createCppEmitBlockedError(
       'property-access:class-prototype:result',

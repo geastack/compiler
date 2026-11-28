@@ -208,8 +208,13 @@ const typeOfParameter = (checker: ts.TypeChecker, parameter: ts.Symbol): ts.Type
 
 /** A declaration's own `typeParameters`, or none when it declares none. */
 const typeParametersOf = (declaration: ts.Declaration): readonly ts.TypeParameterDeclaration[] => {
-  const withParameters = declaration as ts.Declaration & { readonly typeParameters?: ts.NodeArray<ts.TypeParameterDeclaration> }
-  return withParameters.typeParameters ?? []
+  // Narrowed rather than read through a structural cast: a natively compiled
+  // compiler builds a cast's view from the static (base node) class, which
+  // declares no `typeParameters`, so every declaration read as declaring none.
+  if (ts.isFunctionLike(declaration) || ts.isClassLike(declaration)) return declaration.typeParameters ?? []
+  if (ts.isInterfaceDeclaration(declaration) || ts.isTypeAliasDeclaration(declaration)) return declaration.typeParameters ?? []
+  if (ts.isJSDocTemplateTag(declaration)) return declaration.typeParameters
+  return []
 }
 
 /**

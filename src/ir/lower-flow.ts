@@ -795,8 +795,15 @@ export const createFlowController = (deps: FlowControllerDeps): FlowController =
       throw new IrLoweringBlockedError("a merge over a guard was requested while one of that guard's arms was still open")
     }
     const info = ensureGuardBlocks(guard)
-    if (info.truthySource === null) sendArmToJoin(guard, info, info.armTrue, 'truthy')
-    if (info.falsySource === null) sendArmToJoin(guard, info, info.armFalse, 'falsy')
+    // An arm with no source either ran nothing -- its entry block is still
+    // empty and heads straight to the join -- or ended in a terminator on
+    // every path (a `case` whose inner `switch` returns from each arm), so it
+    // never reaches the join at all. Its entry block is then already sealed by
+    // whatever it ended with; the edge this merge needs from that side comes
+    // from a fresh block nothing branches to, which pruning removes.
+    const sourceOf = (arm: IrBlockId): IrBlockId => (builder.isTerminated(arm) ? builder.openBlock() : arm)
+    if (info.truthySource === null) sendArmToJoin(guard, info, sourceOf(info.armTrue), 'truthy')
+    if (info.falsySource === null) sendArmToJoin(guard, info, sourceOf(info.armFalse), 'falsy')
     const join = info.joinBlock
     const truthy = info.truthySource
     const falsy = info.falsySource

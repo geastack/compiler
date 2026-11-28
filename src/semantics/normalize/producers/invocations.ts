@@ -544,7 +544,7 @@ const bindingHoldsExactly = (
   context: ProducerContext,
   binding: ts.Declaration,
   declaration: ts.Declaration,
-  seen: Set<ts.Declaration> = new Set()
+  seen: Set<ts.Declaration> = new Set<ts.Declaration>()
 ): boolean => {
   if (!ts.isVariableDeclaration(binding)) return true
   if (seen.has(binding)) return false

@@ -12,18 +12,46 @@ type FactQuery = {
 }[keyof ParameterBindingCensus]
 
 // Derive the keys from the public census interface. A new fact query must be
-// included here or TypeScript rejects the build; it cannot escape convergence.
-const queries: Record<FactQuery, (view: ParameterBindingCensus, node: ts.Node) => CensusFact> = {
-  argumentsAt: (view, node) => view.argumentsAt?.(node as ts.ParameterDeclaration) ?? null,
-  callTargetsAt: (view, node) => view.callTargetsAt?.(node as ts.CallExpression | ts.NewExpression) ?? null,
-  callDeclarationAt: (view, node) => view.callDeclarationAt?.(node as ts.CallExpression | ts.NewExpression) ?? null,
-  typeAt: (view, node) => view.typeAt(node),
-  implicitArgumentsTupleAt: (view, node) => view.implicitArgumentsTupleAt?.(node) ?? null,
-  restElementTypeAt: (view, node) => view.restElementTypeAt?.(node as ts.ParameterDeclaration) ?? null,
-  statedTypeAt: (view, node) => view.statedTypeAt(node),
-  unionArmsAt: (view, node) => view.unionArmsAt(node),
-  preferredTypeAt: (view, node) => view.preferredTypeAt?.(node) ?? null,
-  patternReadTypeAt: (view, node) => view.patternReadTypeAt?.(node as ts.BindingElement) ?? null
+// answered by the round wrapper or TypeScript rejects the build; it cannot
+// escape convergence.
+type CensusQueries = { readonly [K in FactQuery]-?: NonNullable<ParameterBindingCensus[K]> }
+
+// A census list copied into the fact's own list type. A typed array has no
+// conversion into an array of a wider element type natively, and every
+// reader of a list fact compares or labels its elements, never its identity.
+const listFact = <T extends ts.Type | ts.Node>(list: readonly T[] | null | undefined): CensusFact => {
+  if (list == null) return null
+  const fact: (ts.Type | ts.Node)[] = []
+  for (const item of list) fact.push(item)
+  return fact
+}
+
+// A switch rather than a table of functions indexed by name: a function read
+// out of a keyed record has no checked dispatch natively. Exhaustive, so a
+// query missing here fails the build as one missing from the wrapper does.
+const askQuery = (name: FactQuery, view: ParameterBindingCensus, node: ts.Node): CensusFact => {
+  switch (name) {
+    case 'argumentsAt':
+      return listFact(view.argumentsAt?.(node as ts.ParameterDeclaration))
+    case 'callTargetsAt':
+      return listFact(view.callTargetsAt?.(node as ts.CallExpression | ts.NewExpression))
+    case 'callDeclarationAt':
+      return view.callDeclarationAt?.(node as ts.CallExpression | ts.NewExpression) ?? null
+    case 'typeAt':
+      return view.typeAt(node)
+    case 'implicitArgumentsTupleAt':
+      return view.implicitArgumentsTupleAt?.(node) ?? null
+    case 'restElementTypeAt':
+      return view.restElementTypeAt?.(node as ts.ParameterDeclaration) ?? null
+    case 'statedTypeAt':
+      return view.statedTypeAt(node)
+    case 'unionArmsAt':
+      return listFact(view.unionArmsAt(node))
+    case 'preferredTypeAt':
+      return view.preferredTypeAt?.(node) ?? null
+    case 'patternReadTypeAt':
+      return view.patternReadTypeAt?.(node as ts.BindingElement) ?? null
+  }
 }
 
 /**
@@ -122,15 +150,36 @@ export const settleBindingCensus = <Facts>(
     // that same wrapper -- `statedTypeAt` recursed between the two until the
     // stack died, a minute into a large compile.
     const upstream = previousCensus
-    const observed = { ...upstream }
-    // `Object.keys` preserves the closed query table's keys. The wrapper
-    // preserves each method's result kind and normalizes an absent optional
+    // One typed member per query rather than defineProperty over the query
+    // table: a function value in a reflective descriptor has no checked
+    // conversion natively. Typing it as `CensusQueries` keeps the table closed --
+    // a query left out here fails the build instead of escaping convergence.
+    // Each member records what it answered and normalizes an absent optional
     // method to the same null answer used when checking the next view.
-    for (const name of Object.keys(queries) as FactQuery[]) {
-      Object.defineProperty(observed, name, {
-        value: (node: ts.Node) => read(name, node, queries[name](upstream, node)),
-        enumerable: true
-      })
+    const observed: ParameterBindingCensus & CensusQueries = {
+      ...upstream,
+      argumentsAt: (parameter) => {
+        const answer = upstream.argumentsAt?.(parameter) ?? null
+        read('argumentsAt', parameter, listFact(answer))
+        return answer
+      },
+      callTargetsAt: (call) => {
+        const answer = upstream.callTargetsAt?.(call) ?? null
+        read('callTargetsAt', call, listFact(answer))
+        return answer
+      },
+      callDeclarationAt: (call) => read('callDeclarationAt', call, upstream.callDeclarationAt?.(call) ?? null),
+      typeAt: (node) => read('typeAt', node, upstream.typeAt(node)),
+      implicitArgumentsTupleAt: (owner) => read('implicitArgumentsTupleAt', owner, upstream.implicitArgumentsTupleAt?.(owner) ?? null),
+      restElementTypeAt: (parameter) => read('restElementTypeAt', parameter, upstream.restElementTypeAt?.(parameter) ?? null),
+      statedTypeAt: (node) => read('statedTypeAt', node, upstream.statedTypeAt(node)),
+      unionArmsAt: (node) => {
+        const answer = upstream.unionArmsAt(node)
+        read('unionArmsAt', node, listFact(answer))
+        return answer
+      },
+      preferredTypeAt: (node) => read('preferredTypeAt', node, upstream.preferredTypeAt?.(node) ?? null),
+      patternReadTypeAt: (element) => read('patternReadTypeAt', element, upstream.patternReadTypeAt?.(element) ?? null)
     }
     const previousBoundCount = upstream.boundCount
     // `compose` is called with nothing in this function's own scope naming the
@@ -141,12 +190,14 @@ export const settleBindingCensus = <Facts>(
     unsettled = changed ? [`boundCount ${previousBoundCount} -> ${next.parameters.boundCount}`] : []
     // Reads may lazily consult earlier views. Snapshot before querying `next`
     // so forwarding to `observed` cannot extend the map during iteration.
-    progress(`census round ${rounds} convergence check over ${[...(reads ?? [])].reduce((sum, [, nodes]) => sum + nodes.size, 0)} queries`)
-    const pending = [...(reads ?? [])].map(([name, nodes]) => [name, [...nodes]] as const)
+    progress(
+      `census round ${rounds} convergence check over ${[...(reads == null ? [] : [...reads])].reduce((sum, [, nodes]) => sum + nodes.size, 0)} queries`
+    )
+    const pending = [...(reads == null ? [] : [...reads])].map(([name, nodes]) => [name, [...nodes]] as const)
     reads = null
     for (const [name, nodes] of pending) {
       for (const [node, previous] of nodes) {
-        const answer = queries[name](next.parameters, node)
+        const answer = askQuery(name, next.parameters, node)
         const equal =
           previous === answer ||
           (Array.isArray(previous) &&

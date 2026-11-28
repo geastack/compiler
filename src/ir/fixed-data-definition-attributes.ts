@@ -13,7 +13,7 @@ import { authenticatedTemplateCallEntry } from './call-entry.js'
 import { descriptorOwnProtocolMatches } from './descriptor-own-protocol.js'
 import { fixedDataDefinitionRecipeOf, type FixedDataDefinitionRecipe } from './fixed-data-definition.js'
 import { intrinsicCallArgumentMatches } from './intrinsic-call-facts.js'
-import { allOperationsOf, type CallOperation, type IrBody, type IrOperation } from './model.js'
+import { allOperationsOf, type CallOperation, type IrBlock, type IrBlockId, type IrBody, type IrOperation } from './model.js'
 import { nativeClassConstructionOf } from './native-class-construction.js'
 import type { NativeDataDefinitionInput } from './native-data-definition.js'
 import { nativeFieldViewCarrierNeedsReceipt, nativeFieldViewTargetsOf } from './native-field-view-facts.js'
@@ -30,7 +30,7 @@ export const fixedDataDefinitionAttributesOf = (
 ): ReadonlyMap<CallOperation, FixedDataDefinitionRecipe> => {
   const recipes = new Map<CallOperation, FixedDataDefinitionRecipe>()
   const topology = [...input.bodies.values()]
-  const live = nativeFieldViewTargetsOf(input.bodies.values(), input.conversions)
+  const live = nativeFieldViewTargetsOf([...input.bodies.values()], input.conversions)
   const sourceBodies = new Map<FunctionId, IrBody | null>()
   for (const body of input.bodies.values()) {
     const source = body.sourceOwner as FunctionId
@@ -182,7 +182,7 @@ export const fixedDataDefinitionAttributesOf = (
           } else continue
           const prefix: IrBody = {
             ...body,
-            blocks: new Map([
+            blocks: new Map<IrBlockId, IrBlock>([
               [
                 block.id,
                 {

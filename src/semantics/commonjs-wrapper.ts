@@ -182,10 +182,16 @@ export const createCommonJsWrapperIdentity = (
   // one over the same checker, files and globals, and each memoized a
   // classification for every identifier it evaluated (~13 MB across the three
   // on a 48K-line app). Its answers are a function of exactly these inputs.
-  let byGlobals = wrapperIdentities.get(checker)
-  if (!byGlobals) wrapperIdentities.set(checker, (byGlobals = new WeakMap()))
-  let built = byGlobals.get(globals)
-  if (!built) byGlobals.set(globals, (built = []))
+  let byGlobals: WrapperIdentitiesByGlobals | undefined = wrapperIdentities.get(checker)
+  if (!byGlobals) {
+    byGlobals = new WeakMap<ReadonlyMap<string, CommonJsWrapperDeclaration>, WrapperIdentityEntry[]>()
+    wrapperIdentities.set(checker, byGlobals)
+  }
+  let built: WrapperIdentityEntry[] | undefined = byGlobals.get(globals)
+  if (!built) {
+    built = new Array<WrapperIdentityEntry>()
+    byGlobals.set(globals, built)
+  }
   const known = built.find(
     (entry) =>
       entry.hostProvided === hostProvided &&
@@ -203,13 +209,15 @@ export interface CommonJsWrapperIdentity {
   readonly globalOfDeclaration: (declaration: ts.Declaration) => CommonJsGlobal | null
 }
 
-const wrapperIdentities = new WeakMap<
-  ts.TypeChecker,
-  WeakMap<
-    ReadonlyMap<string, CommonJsWrapperDeclaration>,
-    { readonly files: readonly ts.SourceFile[]; readonly hostProvided: ReadonlySet<string>; readonly identity: CommonJsWrapperIdentity }[]
-  >
->()
+interface WrapperIdentityEntry {
+  readonly files: readonly ts.SourceFile[]
+  readonly hostProvided: ReadonlySet<string>
+  readonly identity: CommonJsWrapperIdentity
+}
+
+type WrapperIdentitiesByGlobals = WeakMap<ReadonlyMap<string, CommonJsWrapperDeclaration>, WrapperIdentityEntry[]>
+
+const wrapperIdentities = new WeakMap<ts.TypeChecker, WrapperIdentitiesByGlobals>()
 
 const buildCommonJsWrapperIdentity = (
   checker: ts.TypeChecker,

@@ -369,6 +369,21 @@ export const arrayAccessText = (ctx: EmitContext, receiver: IrOperand, key: IrOp
       reconciledElementText(ctx, receiver.representation.element, result, `${receiverText}->readElementAt(${indexText})`)
     )
   }
+  // An OPTIONAL Number key is the Number read when present; absent, its
+  // ToPropertyKey is "undefined"/"null", never a canonical index, so it takes
+  // the out-of-range answer the dynamic key's Undefined/Null tags already get.
+  if (
+    key.representation.kind === 'optional' &&
+    key.representation.payload.kind === 'scalar' &&
+    key.representation.payload.domain !== 'boolean' &&
+    key.representation.payload.domain !== 'bigint'
+  ) {
+    const indexText = `gea::detail::arrayIndexFromOptionalKey(${operandText(ctx, key)})`
+    return (
+      absentCapableElementText(ctx, receiverText, 'elementAt', indexText, receiver.representation.element, result) ??
+      reconciledElementText(ctx, receiver.representation.element, result, `${receiverText}->readElementAt(${indexText})`)
+    )
+  }
   if (key.representation.kind !== 'scalar') {
     throw createCppEmitBlockedError(
       'property-access:array-object:get:true',

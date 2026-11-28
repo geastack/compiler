@@ -85,7 +85,7 @@ const runtimeConditions = (value: unknown): unknown => {
 export const createModuleResolver = (
   host: ts.ModuleResolutionHost,
   options: ts.CompilerOptions,
-  declarationModules: ReadonlySet<string> = new Set(),
+  declarationModules: ReadonlySet<string> = new Set<string>(),
   packageSources: readonly PackageSource[] = []
 ): {
   readonly resolve: (specifier: string, containingFile: string, mode?: ts.ResolutionMode, statedTarget?: string) => ModuleResolution

@@ -131,7 +131,7 @@ export const authenticatedIntrinsicAccessorGetterOf = (
   node: ts.Node
 ): IntrinsicAccessorGetterChain | null => {
   const chain = intrinsicAccessorGetterChainOf(context.checker, node)
-  if (chain === null || context.globalHostMutationTaint.has('*')) return null
+  if (chain === null || context.globalHostMutationTaint.hasEntry('*')) return null
   const { checker } = context
   for (const [index, owner] of chain.links.objectOwners.entries()) {
     const member = chain.links.objectMembers[index]

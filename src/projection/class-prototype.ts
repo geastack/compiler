@@ -12,11 +12,15 @@ export const classPrototypeReadOf = (
   if (key !== 'prototype' || receiver.kind !== 'constructor-family' || receiver.members.length !== 1 || value.kind !== 'class-ref')
     return null
   const layout = classes.get(receiver.members[0]!)
+  if (!layout) return null
+  // A local, not `layout.instance?.kind`: a native build does not carry that
+  // narrowing to the key read below and would see an optional carrier there.
+  const instance = layout.instance
   if (
-    !layout ||
-    layout.instance?.kind !== 'class-ref' ||
+    !instance ||
+    instance.kind !== 'class-ref' ||
     layout.prototypeUnsupportedUses?.length ||
-    representationKey(layout.instance) !== representationKey(value)
+    representationKey(instance) !== representationKey(value)
   )
     return null
   const seen = new Set<DeclarationId>()

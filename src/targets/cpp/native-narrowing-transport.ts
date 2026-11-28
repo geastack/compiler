@@ -2,7 +2,7 @@ import type { MaterializerContract } from '../../conversion/algebra.js'
 import { narrowsToDescendantClassUnion } from '../../conversion/build.js'
 import { nativeSumPlan, nativeSumPreservesPayload } from '../../conversion/native-sum.js'
 import type { ConversionRuntimeRegistry } from '../../conversion/registry.js'
-import { representationKey, type Representation } from '../../representation/model.js'
+import { absenceCarrier, representationKey, type Representation } from '../../representation/model.js'
 import { conversionRecipeOf } from './emit-narrowing.js'
 
 /**
@@ -52,7 +52,7 @@ const isSum = (value: Representation): value is Extract<Representation, { kind: 
 
 const alternativesOf = (value: Representation): readonly Representation[] =>
   value.kind === 'optional'
-    ? [value.payload, { kind: value.absence }]
+    ? [value.payload, absenceCarrier(value.absence)]
     : value.kind === 'tagged-union'
       ? value.arms.map((arm) => arm.value)
       : []

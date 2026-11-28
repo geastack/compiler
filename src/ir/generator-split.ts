@@ -1,7 +1,7 @@
 import type { DeclarationId, FunctionId, IrValueId, PhysicalBodyId } from '../identity/ids.js'
 import { irValueId, physicalBodyId } from '../identity/ids.js'
 import type { BindingPlacement } from '../projection/bindings.js'
-import { passingOf, type Representation } from '../representation/model.js'
+import { passingOf, type CallableAbi, type Representation } from '../representation/model.js'
 import { defaultOwnershipPolicy } from '../representation/policies.js'
 import {
   allOperationsOf,
@@ -17,6 +17,10 @@ import {
 } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import { verifyIrBody } from './verify.js'
+
+// Not a type guard on purpose: narrowing `abi.result` by its `kind` would hand
+// the later `Representation` consumers a void-less sub-union of the carrier.
+const returnsVoid = (abi: CallableAbi): boolean => abi.result.kind === 'void'
 
 /**
  * Carves every generator body `ir/lower.ts` marked with a
@@ -129,7 +133,7 @@ const splitOneGeneratorBody = (
   // Iterator), and `construct` never applies to one (`new` on a generator
   // function throws) -- both are defensive refusals for a shape this body
   // cannot actually have, not a case this module means to support.
-  if (!abi || abi.result.kind === 'void' || body.construct) return null
+  if (!abi || returnsVoid(abi) || body.construct) return null
   const cutBlock = body.blocks.get(boundary.block)
   if (!cutBlock) return null
 
@@ -241,7 +245,8 @@ const splitOneGeneratorBody = (
   // matching function for call". The call's argument and the declaration it
   // targets must agree on the SAME ownership, exactly as `cppAbiParameterType`
   // assumes everywhere else.
-  const innerAbi = {
+  // Typed as `CallableAbi`: see `constructAbi` in `representation/derive.ts`.
+  const innerAbi: CallableAbi = {
     parameters: bridged.map((id) => {
       const value = bridgedRepresentations.get(id) as Representation
       const parameterOwnership = defaultOwnershipPolicy.forParameter(value)

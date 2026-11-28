@@ -243,9 +243,14 @@ export class NodeOrdinals {
 
   constructor(nodes: readonly ts.Node[]) {
     this.#nodes = nodes
+    // Sorted as a number[] and then packed: the comparator is a total order,
+    // so the packed result is the one `Int32Array.prototype.sort` would give,
+    // and the native backend sorts arrays but has no typed-array `sort`.
+    const order: number[] = []
+    for (let ordinal = 0; ordinal < nodes.length; ordinal++) order.push(ordinal)
+    order.sort((left, right) => nodes[left]!.pos - nodes[right]!.pos || left - right)
     const byPosition = new Int32Array(nodes.length)
-    for (let ordinal = 0; ordinal < nodes.length; ordinal++) byPosition[ordinal] = ordinal
-    byPosition.sort((left, right) => nodes[left]!.pos - nodes[right]!.pos || left - right)
+    for (let index = 0; index < order.length; index++) byPosition[index] = order[index]!
     this.#byPosition = byPosition
   }
 
@@ -275,7 +280,7 @@ export class NodeOrdinals {
   }
 
   /** Each node with its ordinal, in ordinal order. */
-  *entries(): IterableIterator<readonly [ts.Node, number]> {
+  *entries(): Generator<readonly [ts.Node, number]> {
     const nodes = this.#nodes
     for (let ordinal = 0; ordinal < nodes.length; ordinal++) yield [nodes[ordinal]!, ordinal]
   }
@@ -713,6 +718,29 @@ export const createIdentityTable = (
       const site = specializations.specializationAt(node, substituteInPath)
       return site && site.declaration === node ? [...prefix, { owner: node, ordinal: site.ordinal }] : prefix
     }
+    /**
+     * `useSitePath` under this copy, with the enclosing copies a LEXICAL
+     * generic's binding lives in.
+     *
+     * `useSitePath` answers the copy step alone, which is the whole path for a
+     * generic declared at module level. One declared inside another generic
+     * function -- `const read = <T>(...) => ...` in the body of `settle<F>` --
+     * is introduced by `census.ts` once per enclosing copy, under
+     * `[settle@k, read@n]`, so reading it as `[read@n]` named a binding the
+     * program never introduces. A local binding is only nameable inside its
+     * enclosing function, so the enclosing copy is necessarily the one doing
+     * the naming: its steps are this path's prefix for the declaration. A
+     * method is left alone -- it is reached through a receiver, whose class
+     * copy is not the naming copy's.
+     */
+    const lexicalSitePath = (declaration: ts.Declaration, at: ts.Node | undefined): SpecializationPath | null => {
+      const site = useSitePath(declaration, at, substituteInPath)
+      if (site === null) return null
+      const subject = subjectOf(declaration)
+      if (!(ts.isFunctionDeclaration(subject) || ts.isArrowFunction(subject) || ts.isFunctionExpression(subject))) return site
+      const enclosing = prefixFor(declaration, path).filter((step) => step.owner !== subject)
+      return enclosing.length === 0 ? site : [...enclosing, ...site]
+    }
     const view: IdentityTable = {
       forSpecialization,
       copyKeyOf,
@@ -728,12 +756,12 @@ export const createIdentityTable = (
       symbolDeclarationId: (symbol, at) => {
         const declaration = declarationOfSymbol(symbol)
         if (!declaration) return null
-        return declarationIdOf(declaration, useSitePath(declaration, at, substituteInPath) ?? prefixFor(declaration, path))
+        return declarationIdOf(declaration, lexicalSitePath(declaration, at) ?? prefixFor(declaration, path))
       },
       symbolValueDeclarationId: (symbol, at) => {
         const declaration = valueDeclarationOfSymbol(symbol)
         if (!declaration) return null
-        return declarationIdOf(declaration, useSitePath(declaration, at, substituteInPath) ?? prefixFor(declaration, path))
+        return declarationIdOf(declaration, lexicalSitePath(declaration, at) ?? prefixFor(declaration, path))
       }
     }
     views.set(key, view)

@@ -2,6 +2,7 @@ import { implicitArgumentsSlotOf } from './implicit-arguments.js'
 import type { ImplicitArgumentsTuple } from './implicit-arguments-tuple.js'
 import { neverOverrideResultOf } from './never-override-result.js'
 import ts from '#typescript'
+import { signatureHasRestParameter } from '../ts-internals.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
 import { bagReturnTypeOf, bagShapeTypeAt, emptyObjectBagCensus, type ObjectBagCensus } from './object-bag-bindings.js'
@@ -26,6 +27,22 @@ import { annotationStatesNothing, isUnusableEvidence } from './derived-expressio
 import { inferredArrayElementAt, inferredCollectionTypeArgumentsAt } from './structural-array-element.js'
 import type { IdentityTable } from './identities.js'
 import { withAbsences, type SloppyAbsenceCensus } from './sloppy-absence.js'
+
+/**
+ * The member signatures of a union's composite call signature (TypeScript's
+ * internal `compositeKind`/`compositeSignatures`), or none. Read by presence,
+ * through `unknown`, rather than through a cast to a record that declares
+ * them or an `in` test on the signature itself: a native build has no
+ * conversion from a checker's signature class to either record, and the
+ * typescript-go facade's signatures carry no composite at all.
+ */
+const unionCompositeSignaturesOf = (signature: ts.Signature): readonly ts.Signature[] => {
+  const value: unknown = signature
+  if (typeof value !== 'object' || value === null) return []
+  if (!('compositeKind' in value) || value.compositeKind !== ts.TypeFlags.Union) return []
+  if (!('compositeSignatures' in value) || !Array.isArray(value.compositeSignatures)) return []
+  return value.compositeSignatures as readonly ts.Signature[]
+}
 
 /**
  * What a declaration's PARTS are, once the walk knows how to translate a type.
@@ -443,20 +460,16 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // TypeScript copies a contextual callback's explicit `this` parameter
     // onto an arrow signature. It constrains assignability, but an arrow
     // still reads its lexical capture and accepts no call-site receiver.
-    const thisParameter = declaration && ts.isArrowFunction(declaration) ? undefined : signature.thisParameter
+    const thisParameter = declaration !== undefined && ts.isArrowFunction(declaration) ? undefined : signature.thisParameter
     const written = thisParameter ? typeOfSymbolAt(thisParameter, thisParameter.valueDeclaration) : null
     const receiver = written ?? (declaration ? implicitReceiverOf(declaration) : null)
     // The checker gives a union call signature its first declaration, but that
     // declaration does not own every possible method receiver. Preserve the
     // component receivers before publishing one physical callable convention.
     // An explicit `this` remains the checker's own resolved constraint.
-    const composite = signature as ts.Signature & {
-      readonly compositeKind?: ts.TypeFlags
-      readonly compositeSignatures?: readonly ts.Signature[]
-    }
     const implicitReceivers =
-      written === null && composite.compositeKind === ts.TypeFlags.Union
-        ? (composite.compositeSignatures ?? []).flatMap((part) => {
+      written === null
+        ? unionCompositeSignaturesOf(signature).flatMap((part) => {
             const own = part.getDeclaration()
             const implicit = own ? implicitReceiverOf(own) : null
             return implicit ? [typeOf(implicit)] : []
@@ -552,10 +565,12 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
       if (!inferredObjectLiteralType(checkerResult) || !checker.isTypeAssignableTo(checkerResult, slot)) return null
       return slot
     })()
-    const neverOverrideResult = resultOverride === undefined && declaration ? neverOverrideResultOf(checker, declaration) : null
+    const neverOverrideResult =
+      resultOverride === undefined && declaration !== undefined ? neverOverrideResultOf(checker, declaration) : null
     const censusResult = declaration ? parameters.typeAt(declaration) : null
-    const censusUnionArms = resultOverride === undefined && declaration ? parameters.unionArmsAt(declaration) : null
-    const bagResult = resultOverride === undefined && declaration && table ? bagReturnTypeOf(table, typeOf, bags, declaration) : null
+    const censusUnionArms = resultOverride === undefined && declaration !== undefined ? parameters.unionArmsAt(declaration) : null
+    const bagResult =
+      resultOverride === undefined && declaration !== undefined && table != null ? bagReturnTypeOf(table, typeOf, bags, declaration) : null
     const collectionResult = (() => {
       if (resultOverride !== undefined || !declaration || !table) return null
       const expressions: ts.Expression[] = []
@@ -627,9 +642,7 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // Not part of the public `typescript` `.d.ts` (unlike the checker-cast
     // escape hatches elsewhere in this module for the same reason), so it is
     // reached the same way: a narrow, optional-typed cast rather than `any`.
-    const hasRestParameter = (ts as unknown as { signatureHasRestParameter?: (signature: ts.Signature) => boolean })
-      .signatureHasRestParameter
-    const semanticRestIndex = hasRestParameter?.(signature) ? signatureParameters.length - 1 : -1
+    const semanticRestIndex = signatureHasRestParameter?.(signature) ? signatureParameters.length - 1 : -1
     // Expand only a checker-authenticated bind protocol tuple. A source
     // function's tuple rest retains the container its body actually binds.
     const parametersOf = (parameter: ts.Symbol, index: number): readonly SignatureParameter[] => {
@@ -867,7 +880,8 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // an unresolved expression/binding cycle downstream.
     const inferredBag = table && declaration ? bagShapeTypeAt(table, typeOf, bags, declaration) : null
     const optional = (symbol.getFlags() & ts.SymbolFlags.Optional) !== 0
-    const arraySlot = inferredArray && optional ? input.internUnion([inferredArray, typeOf(checker.getUndefinedType())]) : inferredArray
+    const arraySlot =
+      inferredArray !== null && optional ? input.internUnion([inferredArray, typeOf(checker.getUndefinedType())]) : inferredArray
     // ⛔ An optional member's ABSENCE is a state of its own and has to be in
     // the member's TYPE, because that type is the only thing
     // `representation/` derives the field's carrier from -- `recordFieldsOf`

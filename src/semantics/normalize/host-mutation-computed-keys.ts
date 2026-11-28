@@ -1,7 +1,7 @@
 import type ts from '#typescript'
 import type { ValueFlowIndex } from './flow/model.js'
 import { arrayIterationKeys, computedKeySetOf, type ComputedKeySetAuthority } from './flow/computed-key-set.js'
-import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
+import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement, captureAnswer } from './deferred-intrinsic-protocols.js'
 import { sourceExecutingParameterValuesOf } from './flow/source-executing-parameter-values.js'
 
 /**
@@ -67,7 +67,7 @@ export const createCensusComputedKeysOf = (
           return true
         }
       })
-    const run = ledger ? ledger.capture(work) : { value: work(), requirements: [] }
+    const run = ledger ? captureAnswer(ledger, work) : { value: work(), requirements: [] }
     if (run.value === null) return null
     return { keys: run.value, inheritsObjectPrototypeKeys: inherits, requirements: [...assumed, ...run.requirements] }
   }

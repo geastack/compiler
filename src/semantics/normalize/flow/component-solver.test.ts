@@ -163,7 +163,7 @@ test('fact propagation discovers every receiver target and is independent of que
         return {
           transfer: (read) => {
             const facts = new Set<string>()
-            for (const receiver of read('origins')) for (const target of read(`${receiver}.method`)) facts.add(target)
+            for (const receiver of read('origins').list()) for (const target of read(`${receiver}.method`).list()) facts.add(target)
             return facts
           },
           seal: (read) => {
@@ -198,7 +198,7 @@ test('an unseeded recursive origin branch cannot borrow a sibling allocation', (
   const { solve } = dependencyFactSolver<string, string, string>((key) => {
     if (key === 'mixed')
       return {
-        transfer: (read) => new Set([...read('cycle'), ...read('allocation')]),
+        transfer: (read) => new Set([...read('cycle').list(), ...read('allocation').list()]),
         seal: (read) => {
           read('cycle')
           read('allocation')
@@ -207,7 +207,7 @@ test('an unseeded recursive origin branch cannot borrow a sibling allocation', (
       }
     if (key === 'cycle')
       return {
-        transfer: (read) => read('cycle'),
+        transfer: (read) => new Set(read('cycle').list()),
         seal: (read) => {
           read('cycle')
           return { locallyComplete: true }
@@ -231,7 +231,7 @@ test('facts propagate beside an opaque sibling, while closure refuses the partia
   const { solve } = dependencyFactSolver<string, string, string>((key) => {
     if (key === 'root')
       return {
-        transfer: (read) => new Set([...read('known'), ...read('opaque')]),
+        transfer: (read) => new Set([...read('known').list(), ...read('opaque').list()]),
         seal: (read) => {
           read('known')
           read('opaque')
@@ -406,7 +406,7 @@ test('observed fact growth revisits its dependent transfer', () => {
       return {
         transfer: (_read, observe) => {
           queryTransfers++
-          return observe('candidate')
+          return new Set(observe('candidate').list())
         },
         seal: (_read, observe) => {
           observe('candidate')
@@ -415,7 +415,7 @@ test('observed fact growth revisits its dependent transfer', () => {
       }
     if (key === 'candidate')
       return {
-        transfer: (read) => read('leaf'),
+        transfer: (read) => new Set(read('leaf').list()),
         seal: (read) => {
           read('leaf')
           return { locallyComplete: true }
@@ -437,7 +437,7 @@ test('observations preserve query-order-independent discovery and closure', () =
     dependencyFactSolver<string, string, string>((key) => {
       if (key === 'query')
         return {
-          transfer: (read, observe) => new Set([...observe('candidate'), ...read('closure')]),
+          transfer: (read, observe) => new Set([...observe('candidate').list(), ...read('closure').list()]),
           seal: (read, observe) => {
             observe('candidate')
             read('closure')
@@ -448,7 +448,7 @@ test('observations preserve query-order-independent discovery and closure', () =
       if (key === 'closure') return { transfer: () => new Set(['certified-target']), seal: () => ({ locallyComplete: true }) }
       if (key === 'other-root')
         return {
-          transfer: (read) => read('query'),
+          transfer: (read) => new Set(read('query').list()),
           seal: (read) => {
             read('query')
             return { locallyComplete: true }
@@ -507,7 +507,7 @@ test('grounded facts are query-order independent and opaque siblings still refus
     dependencyFactSolver<string, string, string>((key) => {
       if (key === 'entry')
         return {
-          transfer: (read) => new Set([...read('origin'), ...read('opaque')]),
+          transfer: (read) => new Set([...read('origin').list(), ...read('opaque').list()]),
           seal: (read) => {
             read('origin')
             read('opaque')
@@ -516,7 +516,7 @@ test('grounded facts are query-order independent and opaque siblings still refus
         }
       if (key === 'origin')
         return {
-          transfer: (read) => new Set([...read('call-fact'), ...read('allocation')]),
+          transfer: (read) => new Set([...read('call-fact').list(), ...read('allocation').list()]),
           seal: (read) => {
             read('call-fact')
             read('allocation')
@@ -529,7 +529,7 @@ test('grounded facts are query-order independent and opaque siblings still refus
         }
       if (key === 'call-fact')
         return {
-          transfer: (read) => read('origin'),
+          transfer: (read) => new Set(read('origin').list()),
           seal: (read) => {
             read('origin')
             return { locallyComplete: true }
@@ -651,7 +651,7 @@ test('holdersOf answers over seeded candidates only, including facts published b
 
 test('a later seal change evicts every cached answer that reaches it, and only those', () => {
   const { solve, seed } = dependencyFactSolver<string, string, string>((key) => {
-    if (key === 'outer') return { transfer: (read) => new Set(read('inner')), seal: () => ({ locallyComplete: true }) }
+    if (key === 'outer') return { transfer: (read) => new Set(read('inner').list()), seal: () => ({ locallyComplete: true }) }
     if (key === 'inner')
       return {
         transfer: () => new Set(['inner-fact']),

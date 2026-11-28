@@ -552,13 +552,14 @@ const inheritedCopyOf = (context: ProducerContext, path: SpecializationPath, own
   for (let depth = 0; current && depth < 16; depth += 1) {
     const step: SpecializationPath[number] | undefined = current[current.length - 1]
     if (!step) return null
-    if (step.owner === owner) return current
-    if (!ts.isClassLike(step.owner)) return null
+    const stepOwner = step.owner
+    if (stepOwner === owner) return current
+    if (!ts.isClassLike(stepOwner)) return null
     current = heritageCopyOf(
       context.identities.declarationOfSymbol,
       context.specializations,
       context.identities.prefixFor,
-      step.owner,
+      stepOwner,
       current
     )
   }
@@ -2056,13 +2057,22 @@ export const expectedParameterCountOf = (node: ts.SignatureDeclarationBase): num
  * the async one's abrupt completion as a REJECTION -- the other throws at the
  * call.
  */
+/**
+ * Whether a node carries a generator `*`: the node kinds whose syntax can.
+ * Tested by kind rather than `'asteriskToken' in node`, whose narrowed record
+ * type the native build has no view of.
+ */
+export const hasAsteriskToken = (node: ts.Node): boolean =>
+  ((ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isMethodDeclaration(node)) && node.asteriskToken !== undefined) ||
+  (ts.isYieldExpression(node) && node.asteriskToken !== undefined)
+
 export const isAsyncCallableNode = (node: ts.Node): boolean =>
-  !('asteriskToken' in node && (node as ts.FunctionLikeDeclaration).asteriskToken !== undefined) &&
+  !hasAsteriskToken(node) &&
   ts.canHaveModifiers(node) &&
   ts.getModifiers(node)?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) === true
 
 export const ownPrototypePropertyOf = (node: ts.Node): boolean | null => {
-  if ('asteriskToken' in node && (node as ts.FunctionLikeDeclaration).asteriskToken !== undefined) return null
+  if (hasAsteriskToken(node)) return null
   if (!ts.isFunctionDeclaration(node) && !ts.isFunctionExpression(node)) return false
   return node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) !== true
 }

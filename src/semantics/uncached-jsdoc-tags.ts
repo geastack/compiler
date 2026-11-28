@@ -15,7 +15,7 @@ import ts from '#typescript'
  * parser's, not ours.
  */
 export const uncachedJsDocTags = (node: ts.Node): readonly ts.JSDocTag[] => {
-  const carrier = node as ts.Node & { jsDoc?: unknown }
+  const carrier = node as ts.Node & { jsDoc?: ts.JSDoc[] | undefined }
   const before = carrier.jsDoc
   const tags = ts.getJSDocTags(node)
   if (before === undefined) carrier.jsDoc = undefined

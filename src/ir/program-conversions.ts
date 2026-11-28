@@ -21,6 +21,10 @@ import { constantPropertyKeyTextOf } from './native-property-key-texts.js'
 import type { ReflectionExposure } from './reflection-demand.js'
 import { isPrivateNameKey } from '../semantics/model/structural-types.js'
 
+// Not a type guard on purpose: narrowing `abi.result` by its `kind` would hand
+// the later `Representation` consumers a void-less sub-union of the carrier.
+const returnsVoid = (abi: CallableAbi): boolean => abi.result.kind === 'void'
+
 export type ProgramConversionRole =
   | 'async-entry'
   | 'construct-argument'
@@ -51,7 +55,7 @@ export interface ProgramConversionRecipe extends ProgramConversionInput {
 }
 
 export interface ProgramConversionInputs {
-  readonly bodies: Iterable<IrBody>
+  readonly bodies: readonly IrBody[]
   readonly classes: ReadonlyMap<DeclarationId, ClassLayout>
   readonly deriver: RepresentationDeriver
   readonly conversions: ConversionCensus
@@ -258,12 +262,22 @@ export const programConversionInputsOf = (input: ProgramConversionInputs): reado
         const abi = method.callable === null ? null : abiOf(method.callable)
         if (abi !== null) boxedFrames.push(abi)
       }
-  for (const abi of boxedFrames)
+  // One frame boxed at many sites is one frame: a repeat adds nothing its
+  // first visit did not, and a record a visit already declined declines again.
+  const visitedFrames = new Set<CallableAbi>()
+  const declinedRecords = new Set<Representation>()
+  for (const abi of boxedFrames) {
+    if (visitedFrames.has(abi)) continue
+    visitedFrames.add(abi)
     for (const parameter of abi.parameters)
       for (const record of argumentRecordsOf(parameter.value)) {
+        if (declinedRecords.has(record)) continue
         const owner = dynamicFieldConversionOwnerOf(record)
         if (owner === null || inputs.has(programConversionKey({ role: 'dynamic-call-argument', owner, slot: '' }))) continue
-        if (!dynamicRecordLoadNeedsPlan(record, layouts) || !dynamicLoadInstalled(record, input.conversions)) continue
+        if (!dynamicRecordLoadNeedsPlan(record, layouts) || !dynamicLoadInstalled(record, input.conversions)) {
+          declinedRecords.add(record)
+          continue
+        }
         add('dynamic-call-argument', owner, '', prototypeSetterValue, record)
         // A live view boxes as its original object (`record::boxNativeView`),
         // so a view of this record handed through the box arrives as the
@@ -280,6 +294,7 @@ export const programConversionInputsOf = (input: ProgramConversionInputs): reado
           )
             add('dynamic-call-argument', owner, `origin:${representationKey(origin.source)}`, origin.source, record)
       }
+  }
   for (const body of bodies) {
     const view = asyncPromiseViewOf(body)
     if (view?.abi && body.abi) add('async-entry', String(body.sourceOwner), '', view.abi.result, body.abi.result)
@@ -300,7 +315,7 @@ export const programConversionInputsOf = (input: ProgramConversionInputs): reado
         ) {
           if (getter.receiver !== null)
             add('prototype-getter-receiver', String(layout.declaration), accessor.key, layout.instance, getter.receiver)
-          if (getter.result.kind !== 'void')
+          if (!returnsVoid(getter))
             add('prototype-getter-result', String(layout.declaration), accessor.key, getter.result, prototypeSetterValue)
         }
         const actual = accessor.setter === null ? null : abiOf(accessor.setter)

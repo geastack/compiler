@@ -25,7 +25,9 @@ const disk: SourceFileSystem = {
     mkdirSync(dirname(file), { recursive: true })
     writeFileSync(file, text)
   },
-  realpath: realpathSync,
+  // Called, not passed: a native build carries node's `realpathSync` as a host
+  // handle (it also carries `.native`), which is not a function value.
+  realpath: (file) => realpathSync(file),
   directories: (directory) =>
     readdirSync(directory, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())

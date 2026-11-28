@@ -5,6 +5,10 @@ import type { ConstructOperation, IrBody } from './model.js'
 import type { ConversionCensus } from '../conversion/nodes.js'
 import { nativeArgumentsMatch, type CallFrameMatch } from './call-entry.js'
 
+// Not a type guard on purpose: narrowing `abi.result` by its `kind` would hand
+// the later `Representation` consumers a void-less sub-union of the carrier.
+const returnsVoid = (abi: CallableAbi): boolean => abi.result.kind === 'void'
+
 /** The allocation owns the receiver; explicit arguments and result use its construct ABI. */
 export const constructMatchesAbi = (
   operation: ConstructOperation,
@@ -22,7 +26,7 @@ export const classConstructorBodyMatches = (layout: ClassLayout, body: IrBody): 
   const construct = layout.construct
   return (
     abi !== null &&
-    abi.result.kind === 'void' &&
+    returnsVoid(abi) &&
     layout.instance !== null &&
     abi.receiver !== null &&
     representationKey(abi.receiver) === representationKey(layout.instance) &&
@@ -62,7 +66,7 @@ export const ordinaryConstructBodyMatches = (
     !constructMatchesAbi(operation, construct, conversions)
   )
     return false
-  if (abi.result.kind !== 'void') {
+  if (!returnsVoid(abi)) {
     if (abi.receiver === null || representationKey(abi.result) !== representationKey(abi.receiver)) return false
     const receivers = new Set(
       [...body.blocks.values()].flatMap((block) =>
@@ -76,11 +80,11 @@ export const ordinaryConstructBodyMatches = (
 }
 
 /** Allocation and body entry must share one native receiver representation.
- * Both provenance and the construct thunk consume this same admission. */
-export const nativeOrdinaryConstructInstanceMatches = (
-  abi: CallableAbi,
-  instance: Representation
-): instance is Extract<Representation, { kind: 'record' | 'record-with-index' | 'native-record-ref' }> => {
+ * Both provenance and the construct thunk consume this same admission.
+ * Not a type predicate: a record instance can still fail the ownership or
+ * receiver conjuncts, and a predicate would narrow that record out of the
+ * false branch, which a native build enforces as a failed selection. */
+export const nativeOrdinaryConstructInstanceMatches = (abi: CallableAbi, instance: Representation): boolean => {
   return (
     (instance.kind === 'record' || instance.kind === 'record-with-index' || instance.kind === 'native-record-ref') &&
     (instance.ownership === 'owned' || instance.ownership === 'shared-refcount') &&

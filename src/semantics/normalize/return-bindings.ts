@@ -3,7 +3,7 @@ import { definitelyReturns } from './return-paths.js'
 import { carriesUnsubstitutedGeneric, emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
 import { emptyObjectBagCensus, type ObjectBagCensus } from './object-bag-bindings.js'
-import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
+import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement, captureAnswer } from './deferred-intrinsic-protocols.js'
 import type { ValueFlowIndex } from './flow/model.js'
 import { classFamilyMemberReadTypeOf } from './flow/class-family-member-read.js'
 import { thisConstructorFamilyOf } from './flow/member-call-forwarding.js'
@@ -470,7 +470,10 @@ export const mentionsTypeParameter = (type: ts.Type, depth = 0): boolean => {
   if (depth > 6) return false
   if (type.isUnionOrIntersection()) return type.types.some((member) => mentionsTypeParameter(member, depth + 1))
   const reference = type as ts.TypeReference
-  const args = [...(reference.typeArguments ?? []), ...(type.aliasTypeArguments ?? [])]
+  const args = [
+    ...(reference.typeArguments == null ? [] : [...reference.typeArguments]),
+    ...(type.aliasTypeArguments == null ? [] : [...type.aliasTypeArguments])
+  ]
   return args.some((argument) => mentionsTypeParameter(argument, depth + 1))
 }
 
@@ -1183,7 +1186,9 @@ export const censusReturnBindings = (
    * return boxed the app and published its whole router to dynamic code.
    */
   const anyAssertionReturnOf = (assertion: ts.AsExpression | ts.TypeAssertion, owner: ReturnCandidateDeclaration): ts.Type | null => {
-    if (assertion.type.kind !== ts.SyntaxKind.AnyKeyword) return null
+    // Tested for presence first: a natively built facade node has reached here
+    // with no `type`, and such an assertion is no `any` erasure to answer.
+    if (!assertion.type || assertion.type.kind !== ts.SyntaxKind.AnyKeyword) return null
     if (!ts.isArrowFunction(owner) && !ts.isFunctionExpression(owner)) return null
     const contextual = checker.getContextualType(owner)
     const signatures = contextual ? checker.getNonNullableType(contextual).getCallSignatures() : []
@@ -1398,7 +1403,7 @@ export const censusReturnBindings = (
       const stated = statedBounds.get(declaration)
       return stated ? heldToStatement(declaration, stated, computed) : computed
     }
-    const captured = ledger?.capture(infer)
+    const captured = ledger ? captureAnswer(ledger, infer) : undefined
     const result = captured?.value ?? (ledger ? null : infer())
     resolving.delete(declaration)
     // A disjoint synthesized union is an accepted return answer too; its

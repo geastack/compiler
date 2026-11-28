@@ -10,7 +10,7 @@ import { callableFlowCandidatesOf, type CallableFlowCandidate } from './callable
 import { cyclicBlocksOf, dominatorTreeOf } from './dominance.js'
 import { allOperationsOf, type IrBlockId, type IrBody, type IrNonTerminatorOperation } from './model.js'
 import { operandsOfIrOperation } from './queries.js'
-import { buildDyingArgumentIndex } from './transfer.js'
+import { dyingArgumentFactsOf, type SunkStore } from './transfer.js'
 
 /**
  * Whole-program indices a translation unit needs before any of its bodies are
@@ -42,6 +42,8 @@ export interface ProgramFacts {
   readonly repeatedConstructors: ReadonlyMap<DeclarationId, DeclarationId>
   /** Argument reads whose value has no use after the call it feeds, so the printer may spell them `std::move(...)`. */
   readonly dyingArguments: ReadonlySet<IrValueId>
+  /** The stores moved behind the reads of `dyingArguments` (`ir/transfer.ts`'s `SunkStore`). */
+  readonly sunkStores: ReadonlyMap<IrValueId, SunkStore>
   /** Which parameter positions this body may declare `const T&` instead of `T`. */
   readonly formalsBorrowedIn: (owner: FunctionId | RegionId) => ReadonlySet<number>
   /**
@@ -402,7 +404,7 @@ const refCarrierByValue = (value: import('../representation/model.js').Represent
 
 const borrowedFormalsOf = (
   body: IrBody,
-  dyingArguments: ReadonlySet<IrValueId>,
+  isDyingArgument: (value: IrValueId) => boolean,
   isBoxed: (declaration: DeclarationId) => boolean,
   isCoroutineBody: (body: IrBody) => boolean,
   placements: ReadonlyMap<DeclarationId, BindingPlacement>,
@@ -450,7 +452,7 @@ const borrowedFormalsOf = (
       const sameCarrier =
         placement?.representation != null && representationKey(placement.representation) === representationKey(parameter.value)
       if (values.length !== 1 || isBoxed(declaration) || !sameCarrier) moved = true
-      for (const read of readsOf.get(declaration) ?? []) if (dyingArguments.has(read) && !borrowedForwarding.has(read)) moved = true
+      for (const read of readsOf.get(declaration) ?? []) if (isDyingArgument(read) && !borrowedForwarding.has(read)) moved = true
     }
     if (!moved) borrowed.add(ordinal)
   }
@@ -490,11 +492,13 @@ export const programFactsOf = (
       )
     )
   )
-  const dyingArguments = buildDyingArgumentIndex(
+  const { dying: dyingArguments, sunkStores } = dyingArgumentFactsOf(
     bodies,
     policy.isConstructorBody,
     (body) => !rewritesPrototypes && policy.isStoreSinkConstructor?.(body) === true
   )
+  // The borrow fixed point only asks membership.
+  const isDyingArgument = (value: IrValueId): boolean => dyingArguments.has(value)
   const borrowEffects = borrowEffectsOf(
     bodies,
     directCallables,
@@ -536,7 +540,7 @@ export const programFactsOf = (
       const owner = String(body.sourceOwner)
       const next = borrowedFormalsOf(
         body,
-        dyingArguments,
+        isDyingArgument,
         policy.isBoxed,
         policy.isCoroutineBody,
         placements,
@@ -586,6 +590,7 @@ export const programFactsOf = (
     callableFlowCandidates,
     repeatedConstructors,
     dyingArguments,
+    sunkStores,
     formalsBorrowedIn,
     bodyCallsUnsafeKnownCallee,
     callableIdentityDemand,

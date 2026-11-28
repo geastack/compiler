@@ -55,11 +55,16 @@ export const interfaceImplementorsOf = (
   files: readonly ts.SourceFile[]
 ): ReadonlyMap<DeclarationId, readonly DeclarationId[]> => {
   const claims = new Map<DeclarationId, DeclarationId[]>()
+  const contracts = new Map<DeclarationId, ts.InterfaceDeclaration>()
+  const classes = new Map<DeclarationId, ts.ClassLikeDeclaration>()
 
   const interfaceOf = (
     node: ts.ExpressionWithTypeArguments
   ): { readonly id: DeclarationId; readonly declaration: ts.InterfaceDeclaration } | null => {
-    const symbol = checker.getSymbolAtLocation(ts.isIdentifier(node.expression) ? node.expression : node)
+    // A qualified contract (`implements ts.Node`) is named by its last
+    // identifier; asked of the whole clause, the checker answers nothing.
+    const at = ts.isPropertyAccessExpression(node.expression) ? node.expression.name : node.expression
+    const symbol = checker.getSymbolAtLocation(ts.isIdentifier(at) ? at : node)
     const target = symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(symbol) : symbol
     const declarations = target?.declarations
     const sole = declarations && declarations.length === 1 ? declarations[0] : undefined
@@ -67,11 +72,32 @@ export const interfaceImplementorsOf = (
     return { id: identities.declarationIdOf(sole), declaration: sole }
   }
 
-  const declaresAMethod = (declaration: ts.InterfaceDeclaration): boolean =>
-    declaration.members.some((member) => ts.isMethodSignature(member))
+  // An inherited method counts as much as an own one: `interface Identifier
+  // extends Node` with `Node`'s `getText()` is a behaviour too, so only the
+  // classes inhabit it. Counting own members alone left such a derived
+  // contract a record, and narrowing a class instance into it
+  // (`isIdentifier(node)`) built a view out of the BASE class's fields, which
+  // has no slot for the subclass's own -- a certified read that threw at run
+  // time.
+  const declaresAMethod = (declaration: ts.InterfaceDeclaration, seen = new Set<ts.InterfaceDeclaration>()): boolean => {
+    if (seen.has(declaration)) return false
+    seen.add(declaration)
+    if (declaration.members.some((member) => ts.isMethodSignature(member))) return true
+    for (const heritage of declaration.heritageClauses ?? [])
+      for (const base of heritage.types) {
+        const at = ts.isPropertyAccessExpression(base.expression) ? base.expression.name : base.expression
+        const symbol = checker.getSymbolAtLocation(at)
+        const target = symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(symbol) : symbol
+        for (const other of target?.declarations ?? []) if (ts.isInterfaceDeclaration(other) && declaresAMethod(other, seen)) return true
+      }
+    return false
+  }
 
+  const subContracts: ts.InterfaceDeclaration[] = []
   for (const file of files) {
     const visit = (node: ts.Node): void => {
+      if (ts.isInterfaceDeclaration(node) && node.typeParameters === undefined && node.heritageClauses !== undefined)
+        subContracts.push(node)
       if (ts.isClassLike(node)) {
         for (const clause of node.heritageClauses ?? []) {
           if (clause.token !== ts.SyntaxKind.ImplementsKeyword) continue
@@ -79,6 +105,7 @@ export const interfaceImplementorsOf = (
             const resolved = interfaceOf(typeNode)
             if (!resolved) continue
             const claimed = identities.declarationIdOf(node)
+            classes.set(claimed, node)
             const seen = new Set<DeclarationId>()
             // Implementing a derived contract also implements its bases. A
             // direct-clause-only census loses that class when the value flows
@@ -88,6 +115,7 @@ export const interfaceImplementorsOf = (
               if (seen.has(contract.id)) return
               seen.add(contract.id)
               if (declaresAMethod(contract.declaration)) {
+                contracts.set(contract.id, contract.declaration)
                 const existing = claims.get(contract.id)
                 if (existing === undefined) claims.set(contract.id, [claimed])
                 else if (!existing.includes(claimed)) existing.push(claimed)
@@ -110,17 +138,146 @@ export const interfaceImplementorsOf = (
 
   // Classes the program STORES into a slot typed by the interface: see
   // `interfaceFlowImplementorsOf` below.
-  for (const [declaration, classes] of interfaceFlowImplementorsOf(checker, files)) {
+  for (const [declaration, flowed] of interfaceFlowImplementorsOf(checker, files)) {
     const id = identities.declarationIdOf(declaration)
+    contracts.set(id, declaration)
     const existing = claims.get(id) ?? []
-    for (const claimed of classes) {
+    for (const claimed of flowed) {
       const claimedId = identities.declarationIdOf(claimed)
+      classes.set(claimedId, claimed)
       if (!existing.includes(claimedId)) existing.push(claimedId)
     }
     claims.set(id, existing)
   }
 
+  for (const [id, claimed] of claims) {
+    const contract = contracts.get(id)
+    const nodes = claimed.map((claim) => classes.get(claim))
+    if (contract === undefined || claimed.length < 2 || nodes.some((node) => node === undefined)) continue
+    const ancestor = sharedAncestorOf(checker, contract, nodes as ts.ClassLikeDeclaration[])
+    if (ancestor === null) continue
+    const ancestorId = identities.declarationIdOf(ancestor)
+    if (!claimed.includes(ancestorId)) claims.set(id, [ancestorId, ...claimed])
+  }
+
+  // A sub-contract no class names -- `interface TypeReference extends
+  // ObjectType` where a class implements `ObjectType` and narrowing reaches
+  // `TypeReference` by a cast or a type guard. Its values are values of its
+  // bases, so they are among the bases' claimed classes; carried as its own
+  // record instead, every narrowing built a view of the class, the same
+  // base-class-view defect `declaresAMethod`'s comment describes. It inherits
+  // exactly the base classes that declare every member it states: a class
+  // without one of its members could not answer a read it admits, so that
+  // class is left out, and with none left the sub-contract stays a record.
+  // Repeated until stable, since a sub-contract can itself be the base of
+  // another; declaration order keeps the claims a function of the program.
+  for (let changed = true; changed;) {
+    changed = false
+    for (const declaration of subContracts) {
+      const id = identities.declarationIdOf(declaration)
+      if (claims.has(id) || !declaresAMethod(declaration)) continue
+      const inherited: DeclarationId[] = []
+      for (const heritage of declaration.heritageClauses ?? [])
+        for (const base of heritage.types) {
+          const parent = interfaceOf(base)
+          for (const candidate of (parent === null ? undefined : claims.get(parent.id)) ?? [])
+            if (!inherited.includes(candidate)) inherited.push(candidate)
+        }
+      const covering = inherited.filter((candidate) => {
+        const node = classes.get(candidate)
+        return node !== undefined && node.typeParameters === undefined && classCoversContract(checker, declaration, node)
+      })
+      if (covering.length === 0) continue
+      contracts.set(id, declaration)
+      claims.set(id, covering)
+      changed = true
+    }
+  }
+
   return claims
+}
+
+/** The class's instance type has every member the contract states, brands aside (`sharedAncestorOf` says why brands need no slot). */
+const classCoversContract = (checker: ts.TypeChecker, contract: ts.InterfaceDeclaration, node: ts.ClassLikeDeclaration): boolean => {
+  const classSymbol = node.name === undefined ? undefined : checker.getSymbolAtLocation(node.name)
+  const contractSymbol = checker.getSymbolAtLocation(contract.name)
+  if (classSymbol === undefined || contractSymbol === undefined) return false
+  const instance = checker.getDeclaredTypeOfSymbol(classSymbol)
+  return checker
+    .getPropertiesOfType(checker.getDeclaredTypeOfSymbol(contractSymbol))
+    .every(
+      (property) => isContractBrand(checker, contract, property) || checker.getPropertyOfType(instance, property.getName()) !== undefined
+    )
+}
+
+/**
+ * A brand member holds no value, so a carrying class needs no slot for it:
+ * an optional `never` or `undefined` one (`isVacuousBrand` in
+ * representation/derive.ts), or a required `never` one, which each
+ * implementor states type-only (`declare readonly _expressionBrand: never`).
+ * derive.ts keeps the required form out of its brand test because there it
+ * asks whether a structural type is inhabited; here the question is only
+ * whether a class can carry every value the contract describes, and a member
+ * no value can populate adds nothing to carry.
+ */
+const isContractBrand = (checker: ts.TypeChecker, contract: ts.InterfaceDeclaration, property: ts.Symbol): boolean => {
+  const flags = checker.getTypeOfSymbolAtLocation(property, contract).flags
+  return (flags & ts.TypeFlags.Never) !== 0 || ((property.flags & ts.SymbolFlags.Optional) !== 0 && (flags & ts.TypeFlags.Undefined) !== 0)
+}
+
+/**
+ * The class every implementor descends from, when that class itself declares
+ * every member the contract states.
+ *
+ * Then the class IS the contract's carrier: a slot typed by the interface
+ * holds one of its descendants, every read the interface admits is a read of
+ * a member the class declares, and a member only a descendant has stays
+ * behind the narrowing TypeScript already requires -- the checked downcast of
+ * a class family. Prepending it lets the union rule that folds a descendant
+ * into its ancestor's arm (`withoutNominallySubsumed`) make the slot ONE
+ * `Ref<Base>` instead of a sum with an arm per implementor: a syntax tree's
+ * `Expression` has a hundred implementing node classes, and a sum dispatched
+ * every `node.kind` read over all of them.
+ *
+ * Only when the class covers every member: a contract adding a member the
+ * base lacks (`NamedDeclaration`'s `name`) is read per implementor, which only
+ * the sum can do. Generic contracts and implementors keep the sum, since an
+ * instantiation would have to be matched per argument.
+ */
+const sharedAncestorOf = (
+  checker: ts.TypeChecker,
+  contract: ts.InterfaceDeclaration,
+  implementors: readonly ts.ClassLikeDeclaration[]
+): ts.ClassLikeDeclaration | null => {
+  if (contract.typeParameters !== undefined || implementors.some((node) => node.typeParameters !== undefined)) return null
+  const instanceOf = (node: ts.ClassLikeDeclaration): ts.InterfaceType | null => {
+    const symbol = node.name === undefined ? undefined : checker.getSymbolAtLocation(node.name)
+    return symbol === undefined ? null : (checker.getDeclaredTypeOfSymbol(symbol) as ts.InterfaceType)
+  }
+  const chainOf = (node: ts.ClassLikeDeclaration): ts.ClassLikeDeclaration[] => {
+    const chain: ts.ClassLikeDeclaration[] = []
+    let current: ts.ClassLikeDeclaration | undefined = node
+    while (current !== undefined && !chain.includes(current)) {
+      chain.push(current)
+      const instance = instanceOf(current)
+      const base: ts.BaseType | undefined = instance === null ? undefined : checker.getBaseTypes(instance)[0]
+      current = base?.getSymbol()?.declarations?.find(ts.isClassLike)
+    }
+    return chain
+  }
+  const chains = implementors.map(chainOf)
+  const shared = chains[0]!.find((candidate) => chains.every((chain) => chain.includes(candidate)))
+  if (shared === undefined || shared.typeParameters !== undefined) return null
+  const sharedInstance = instanceOf(shared)
+  const contractSymbol = checker.getSymbolAtLocation(contract.name)
+  if (sharedInstance === null || contractSymbol === undefined) return null
+  const stated = checker.getPropertiesOfType(checker.getDeclaredTypeOfSymbol(contractSymbol))
+  return stated.every(
+    (property) =>
+      isContractBrand(checker, contract, property) || checker.getPropertyOfType(sharedInstance, property.getName()) !== undefined
+  )
+    ? shared
+    : null
 }
 
 /**

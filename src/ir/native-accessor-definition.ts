@@ -16,6 +16,8 @@ import { intrinsicCallArgumentMatches } from './intrinsic-call-facts.js'
 import {
   allOperationsOf,
   type CallOperation,
+  type IrBlock,
+  type IrBlockId,
   type IrBody,
   type IrNonTerminatorOperation,
   type IrOperand,
@@ -24,6 +26,7 @@ import {
 import { resultOfIrOperation, operandsOfIrOperation } from './queries.js'
 import { nativeCallableSourceAliasesOf } from './native-callable-argument.js'
 import { descriptorOwnProtocolMatches } from './descriptor-own-protocol.js'
+import { mapValues } from '../collection-lists.js'
 
 /** A descriptor half retains an actual source Function and separately names
  * its future zero/one-argument accessor call frame.
@@ -102,6 +105,11 @@ export interface NativeAccessorDefinitionInput {
 /** The body frame supplies its actual read/write carrier. The installation
  * neither binds this nor converts a native result to the ambient any result.
  */
+// A shared constant rather than an inline literal: an object literal arm
+// merged with a `Representation` is a second record carrier.
+const voidResult: Representation = { kind: 'void' }
+const undefinedResult: Representation = { kind: 'undefined' }
+
 export const nativeAccessorHalfOf = (
   half: 'get' | 'set',
   value: IrOperand,
@@ -120,7 +128,11 @@ export const nativeAccessorHalfOf = (
       write = first.element
     } else write = first
   }
-  const read: Representation | null = half === 'get' ? (source.result.kind === 'void' ? { kind: 'undefined' } : source.result) : null
+  let read: Representation | null = null
+  if (half === 'get') read = source.result.kind === 'void' ? undefinedResult : source.result
+  // Narrowed before the merge with `voidResult`: the result read itself
+  // carries an absent state that merge has no slot for.
+  const getResult: Representation | null = half === 'get' ? source.result : null
   const call: Representation = {
     kind: 'function-value-dispatch',
     abi: {
@@ -130,7 +142,7 @@ export const nativeAccessorHalfOf = (
           ? []
           : [{ value: write, ownership: 'ownership' in write ? write.ownership : 'owned', passing: passingOf(write) }],
       restFrom: null,
-      result: half === 'get' ? source.result : { kind: 'void' }
+      result: getResult !== null ? getResult : voidResult
     }
   }
   const node = input.conversions.nativeMethodFor(value.representation, call) ?? input.conversions.nodeFor(value.representation, call)
@@ -138,9 +150,15 @@ export const nativeAccessorHalfOf = (
   // Only an object a dynamic carrier holds can meet a dynamic [[Get]] or
   // [[Set]] of this key, and only a typed half needs a frame for one.
   let observe: ConversionNodeId | null = null
-  const typed = half === 'get' ? read : write
-  if (dynamicReceiver && typed !== null && typed.kind !== 'dynamic') {
-    const frame = half === 'get' ? input.conversions.nodeFor(typed, dynamicCarrier) : input.conversions.nodeFor(dynamicCarrier, typed)
+  // Each half asks its own carrier: `half === 'get' ? read : write` merged
+  // two carriers that need not agree.
+  if (dynamicReceiver && half === 'get' && read !== null && read.kind !== 'dynamic') {
+    const frame = input.conversions.nodeFor(read, dynamicCarrier)
+    if (!recipeIsMaterializableWithoutPriorSourceGuard(frame, input.conversions.nodeById)) return null
+    observe = frame.id
+  }
+  if (dynamicReceiver && half === 'set' && write !== null && write.kind !== 'dynamic') {
+    const frame = input.conversions.nodeFor(dynamicCarrier, write)
     if (!recipeIsMaterializableWithoutPriorSourceGuard(frame, input.conversions.nodeById)) return null
     observe = frame.id
   }
@@ -608,7 +626,7 @@ export const nativeAccessorObservationOf = (
   if (!definition || !nativeAccessorDefinitionMatches(definition, installed.nativeAccessorDefinition!)) return null
   const installedSemantic = semanticOf(input.graph, installed)
   if (
-    [...(census.schemas.get(owner.id)?.values() ?? [])].some((schema) =>
+    [...mapValues(census.schemas.get(owner.id))].some((schema) =>
       schema.blockers.some((blocker) => blocker.operation.id !== semantic.id && blocker.operation.id !== installedSemantic?.id)
     )
   )
@@ -825,8 +843,8 @@ export const publishNativeAccessorDefinitions = (input: NativeAccessorDefinition
       id,
       {
         ...body,
-        blocks: new Map(
-          [...body.blocks].map(([blockId, block]) => [
+        blocks: new Map<IrBlockId, IrBlock>(
+          [...body.blocks].map(([blockId, block]): readonly [IrBlockId, IrBlock] => [
             blockId,
             {
               ...block,
@@ -867,8 +885,8 @@ export const publishNativeAccessorDefinitions = (input: NativeAccessorDefinition
       id,
       {
         ...body,
-        blocks: new Map(
-          [...body.blocks].map(([blockId, block]) => [
+        blocks: new Map<IrBlockId, IrBlock>(
+          [...body.blocks].map(([blockId, block]): readonly [IrBlockId, IrBlock] => [
             blockId,
             {
               ...block,
@@ -897,13 +915,13 @@ export const publishNativeAccessorDefinitions = (input: NativeAccessorDefinition
         const result = resultOfIrOperation(operation)
         if (result) observationDefinitions.set(result.id, operation)
       }
-  return new Map(
+  return new Map<PhysicalBodyId, IrBody>(
     [...observationsPublished].map(([id, body]) => [
       id,
       {
         ...body,
-        blocks: new Map(
-          [...body.blocks].map(([blockId, block]) => [
+        blocks: new Map<IrBlockId, IrBlock>(
+          [...body.blocks].map(([blockId, block]): readonly [IrBlockId, IrBlock] => [
             blockId,
             {
               ...block,

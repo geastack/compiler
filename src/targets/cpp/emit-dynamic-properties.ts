@@ -779,6 +779,22 @@ export const unboxedReadText = (produced: Representation, text: string, site: st
         )
       }
     }
+    if (isPlainCallableCarrier(produced.payload)) {
+      const value = '__gea_optional_value'
+      return (
+        `([&]() -> ${cppTypeOf(produced)} { const gea::Value ${value} = ${text}; ` +
+        `if (${value}.tag() == gea::Value::Tag::Undefined || ${value}.tag() == gea::Value::Tag::Null) return ${cppTypeOf(produced)}(); ` +
+        `return ${cppTypeOf(produced)}(${callableLoadText(produced.payload, value, site)}); })()`
+      )
+    }
+    if (produced.payload.kind === 'class-ref' && produced.payload.ownership === 'shared-refcount') {
+      const value = '__gea_optional_value'
+      return (
+        `([&]() -> ${cppTypeOf(produced)} { const gea::Value ${value} = ${text}; ` +
+        `if (${value}.tag() == gea::Value::Tag::Undefined || ${value}.tag() == gea::Value::Tag::Null) return ${cppTypeOf(produced)}(); ` +
+        `return ${cppTypeOf(produced)}(${classRefLoadText(produced.payload, value, site)}); })()`
+      )
+    }
     const payloadTag = dynamicTagFor(produced.payload)
     if (payloadTag === null) {
       throw createCppEmitBlockedError(
@@ -787,6 +803,15 @@ export const unboxedReadText = (produced: Representation, text: string, site: st
       )
     }
     return `gea::detail::unboxOptional<${cppTypeOf(produced.payload)}>(${text}, gea::Value::Tag::${payloadTag}, ${cppStringLiteral(site)})`
+  }
+  if (isPlainCallableCarrier(produced)) return callableLoadText(produced, text, site)
+  if (produced.kind === 'class-ref' && produced.ownership === 'shared-refcount') {
+    const value = '__gea_class_value'
+    return (
+      `([&]() -> ${cppTypeOf(produced)} { const gea::Value ${value} = ${text}; ` +
+      `if (${value}.tag() == gea::Value::Tag::Null) return ${cppTypeOf(produced)}(); ` +
+      `return ${classRefLoadText(produced, value, site)}; })()`
+    )
   }
   const tag = dynamicTagFor(produced)
   if (tag === null) {
@@ -797,6 +822,39 @@ export const unboxedReadText = (produced: Representation, text: string, site: st
   }
   return `gea::detail::unboxAs<${cppTypeOf(produced)}>(${text}, gea::Value::Tag::${tag}, ${cppStringLiteral(site)})`
 }
+
+// A class-typed property holds an allocation of that class OR A SUBCLASS: a
+// `Ref<Derived>` boxes under its own payload type, so `unboxAs<Ref<Base>>`'s
+// exact payload comparison refused every subclass instance (`node.name` read
+// through a structural cast, holding an Identifier). `unboxClassRef` checks
+// the class identity chain and keeps the original object, as a cast does.
+// A function-typed property holds whatever function was stored there: a method
+// of another native signature (a generator `[Symbol.iterator]` read as `() =>
+// Iterator`) or a boxed dynamic function. `unboxAs` demanded the box carry this
+// exact `CallableObject` type and refused the rest; `DynamicCarrier::in` keeps
+// that exact match as its fast path and adapts anything else through the box.
+// The exact match is tested on the payload type alone first, as `unboxAs` does:
+// `DynamicCarrier::in` also compares the frame flags, so a function boxed with
+// its `arguments` frame (`function f() { g(...arguments) }`) missed its own
+// type and went through the generic adapter, which writes the argument tuple
+// dynamically.
+const isPlainCallableCarrier = (carrier: Representation): boolean =>
+  carrier.kind === 'function' ||
+  carrier.kind === 'function-family' ||
+  carrier.kind === 'function-value-family' ||
+  (carrier.kind === 'function-value-dispatch' && !carrier.recursive)
+
+const callableLoadText = (produced: Representation, value: string, site: string): string => {
+  const type = cppTypeOf(produced)
+  return (
+    `([&]() -> ${type} { if (${value}.tag() == gea::Value::Tag::Function && ${value}.payloadType() == gea::detail::payloadTypeTagFor<${type}>()) return ${value}.as<${type}>(); ` +
+    `if constexpr (gea::detail::DynamicCarrier<${type}>::supported) return gea::detail::DynamicCarrier<${type}>::in(${value}, 0); ` +
+    `else return gea::detail::unboxAs<${type}>(${value}, gea::Value::Tag::Function, ${cppStringLiteral(site)}); })()`
+  )
+}
+
+const classRefLoadText = (produced: Extract<Representation, { kind: 'class-ref' }>, value: string, site: string): string =>
+  `gea::detail::unboxClassRef<${cppClassName(produced.declaration)}>(${value}, ${cppStringLiteral(site)})`
 
 /**
  * The ownership of a generated record/record-with-index/native-record-ref/
@@ -961,8 +1019,13 @@ const finiteRecordUnionGetText = (ctx: EmitContext, operation: GetOperation, rec
   // Compatibility route for IR reads lowered before the sealed recipe was
   // introduced (including destructuring and protocol-generated reads). Keep
   // its prior tagged-union condition and conversion behavior intact.
+  // A static key is not computed: certification (`propertyReadConversionInputsOf`)
+  // cites these per-field arms only when it has no key text, so a constant key
+  // the receiver's layout does not declare (`(base as Derived).field`) is the
+  // dynamic sidecar read below, never a switch over the base's own fields.
   const produced = operation.result.representation
   if (produced.kind !== 'tagged-union' || operation.key.representation.kind !== 'string') return null
+  if (ctx.staticKeyTexts.has(operation.key.value)) return null
   const representation = operation.receiver.representation
   const fields = compatibilityFieldReadSourcesOf(operation, ctx.deriver)
   if (fields.length === 0) return null

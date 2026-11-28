@@ -16,7 +16,8 @@ import { definitelyReturns } from './return-paths.js'
 import { createBagAbsenceResolver, type BagAbsence } from './bag-absence.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { isObjectLiteralPrototypeSetter } from './assignment-patterns.js'
-import { createRoundTableSharing } from './round-tables.js'
+import { createListTableSharing, createTableSharing } from './round-tables.js'
+import { mapKeys } from '../../collection-lists.js'
 
 /**
  * The members an OPEN PROPERTY BAG carries, inferred from the properties the
@@ -282,8 +283,8 @@ export interface ObjectBagCensus {
 /** An identity fixpoint that claimed nothing, for callers that state no program. */
 const emptyObjectBagIdentity: ObjectBagIdentity = {
   roots: new Set(),
-  bagOf: new Map(),
-  returnsBag: new Map(),
+  bagOf: new Map<ts.Node, ts.Node>(),
+  returnsBag: new Map<ts.Node, ts.Node>(),
   conflicted: new Set(),
   ungrounded: new Set()
 }
@@ -331,11 +332,9 @@ const emptyEvidence = (): BagEvidence => ({
 })
 
 /** Every round's bag census stays alive beside the next; see `createRoundTableSharing`. */
-const shareBagTables = createRoundTableSharing<{
-  readonly writesTo: Map<ts.Node, ts.Expression[]>
-  readonly allocationOwners: Map<ts.Expression, ts.Node | null>
-  readonly returnsOf: Map<ts.Node, (ts.Expression | null)[]>
-}>()
+const shareBagWrites = createListTableSharing<ts.Node, ts.Expression>()
+const shareBagOwners = createTableSharing<ts.Expression, ts.Node | null>()
+const shareBagReturns = createListTableSharing<ts.Node, ts.Expression | null>()
 
 export const censusObjectBagBindings = (
   checker: ts.TypeChecker,
@@ -923,7 +922,8 @@ export const censusObjectBagBindings = (
         ;(node.arguments ?? []).forEach((argument, position) => {
           if (ts.isSpreadElement(argument)) return
           const parameter = callee.parameters[position]
-          if (!parameter || parameter.dotDotDotToken || parameter.type || !ts.isIdentifier(parameter.name)) return
+          if (!parameter || parameter.dotDotDotToken !== undefined || parameter.type !== undefined || !ts.isIdentifier(parameter.name))
+            return
           noteWrite(parameter, argument)
         })
       }
@@ -956,7 +956,9 @@ export const censusObjectBagBindings = (
         if ((ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Async) !== 0 || ('asteriskToken' in owner && owner.asteriskToken))
           continue
         const roots = expressions.map((expression) => (expression ? bagRootOf(expression) : null))
-        const [first] = roots
+        // An index read rather than a pattern: a native array pattern binds its
+        // element as optional, which the list's own element carrier is not.
+        const first = roots[0]
         // Every `return` must be the same bag: a function returning a bag on one
         // path and something else on another has no single storage to name.
         if (!first || roots.some((root) => root !== first)) continue
@@ -1317,7 +1319,7 @@ export const censusObjectBagBindings = (
     const evidence = evidenceOf.get(root)
     if (!evidence || evidence.opaqueUse) return false
     const literals = literalsByOwner.get(root) ?? []
-    const initialKeys = new Set(literals.flatMap((literal) => [...(initialMembers.get(literal)?.keys() ?? [])]))
+    const initialKeys = new Set(literals.flatMap((literal) => [...mapKeys(initialMembers.get(literal))]))
     if (literals.some((literal) => initialMembers.has(literal)) && ![...evidence.namedWrites.keys()].some((key) => !initialKeys.has(key)))
       return false
     return evidence.namedWrites.size > 0 || evidence.indexWrites.length > 0
@@ -1423,7 +1425,7 @@ export const censusObjectBagBindings = (
     const evidence = evidenceOf.get(root)
     const literals = literalsByOwner.get(root) ?? []
     const populated = literals.some((literal) => initialMembers.has(literal))
-    const initialKeys = new Set(literals.flatMap((literal) => [...(initialMembers.get(literal)?.keys() ?? [])]))
+    const initialKeys = new Set(literals.flatMap((literal) => [...mapKeys(initialMembers.get(literal))]))
     if (populated && (!evidence || ![...evidence.namedWrites.keys()].some((key) => !initialKeys.has(key)))) continue
     if (!evidence) {
       refuseRoot(root, 'no-uses', 'bag:no-uses')
@@ -1440,12 +1442,15 @@ export const censusObjectBagBindings = (
     // insertion order from the literal and include every initial value in
     // the join, so augmentation cannot erase a field or narrow its writes.
     const writes = new Map<string, ts.Expression[]>()
-    for (const literal of literals)
-      for (const [key, value] of initialMembers.get(literal) ?? []) {
+    for (const literal of literals) {
+      const members = initialMembers.get(literal)
+      if (!members) continue
+      for (const [key, value] of members) {
         const values = writes.get(key) ?? []
         values.push(value)
         writes.set(key, values)
       }
+    }
     for (const [key, values] of evidence.namedWrites) writes.set(key, [...(writes.get(key) ?? []), ...values])
     const required = new Set(
       [...initialKeys].filter(
@@ -1538,7 +1543,9 @@ export const censusObjectBagBindings = (
   }
 
   // Complete from here on: nothing below writes them.
-  ;({ writesTo, allocationOwners, returnsOf } = shareBagTables(checker, { writesTo, allocationOwners, returnsOf }))
+  writesTo = shareBagWrites(checker, writesTo)
+  allocationOwners = shareBagOwners(checker, allocationOwners)
+  returnsOf = shareBagReturns(checker, returnsOf)
   const absencesAt = createBagAbsenceResolver(checker, ownerDeclOfExpr, calleeDeclarationOf, writesTo, returnsOf)
   const valueShape = (root: ts.Node | null | undefined, node: ts.Node): ObjectBagShape | null => {
     let bag = root ? bound.get(root) : undefined

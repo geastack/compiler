@@ -10,7 +10,7 @@ import {
 import type { ValueFlowIndex } from './flow/model.js'
 import { isModuleExportedDeclaration, isTypePositionReference, runtimeParametersOf } from './flow/targets.js'
 import { localBindingWritesAreComplete } from './flow/value-provenance.js'
-import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
+import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement, captureAnswer } from './deferred-intrinsic-protocols.js'
 import { intrinsicOwnKeyQueryOf } from './intrinsic-property-call.js'
 import { isGlobalArrayConstructor, isStandardGlobalValue } from './derived-expression-type.js'
 import { outermostErasureOf, unwrapErasedExpression } from './producers/erasure.js'
@@ -91,7 +91,7 @@ export const censusFreshDictionaryStorage = (
   const blocked = new Set<ts.Node>()
   const requirements = new Map<ts.Node, IntrinsicProtocolRequirement[]>()
   const proofFor = <T>(node: ts.Node, work: () => T): T => {
-    const proof = ledger?.capture(work) ?? { value: work(), requirements: [] }
+    const proof = (ledger ? captureAnswer(ledger, work) : undefined) ?? { value: work(), requirements: [] }
     if (proof.value !== null && proof.value !== undefined && proof.value !== false && proof.requirements.length > 0) {
       const needed = requirements.get(node) ?? []
       needed.push(...proof.requirements)
@@ -126,7 +126,9 @@ export const censusFreshDictionaryStorage = (
     argumentsObjectUsesAt(checker, declaration)
   for (const site of flow.calls) {
     if (!ts.isNewExpression(site.call) && site.call.expression.kind !== ts.SyntaxKind.SuperKeyword) continue
-    const proof = ledger?.capture(() => closedConstructorForwardingTargetsOf(checker, flow, site.call, argumentsUsesAt))
+    const proof = ledger
+      ? captureAnswer(ledger, () => closedConstructorForwardingTargetsOf(checker, flow, site.call, argumentsUsesAt))
+      : undefined
     const targets = proof ? proof.value : closedConstructorForwardingTargetsOf(checker, flow, site.call, argumentsUsesAt)
     if (targets !== null)
       for (const target of targets)

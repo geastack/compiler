@@ -97,7 +97,8 @@ const absentTypeofOperand = (expr: ts.Expression, absent: AbsentGlobalCensus): t
   if (expr.operatorToken.kind !== ts.SyntaxKind.ExclamationEqualsEqualsToken) return null
   const left = expr.left
   const right = expr.right
-  const [typeofExpr, literal] = ts.isTypeOfExpression(left) ? [left, right] : ts.isTypeOfExpression(right) ? [right, left] : [null, null]
+  const typeofExpr = ts.isTypeOfExpression(left) ? left : ts.isTypeOfExpression(right) ? right : null
+  const literal = typeofExpr === null ? null : typeofExpr === left ? right : left
   if (!typeofExpr || !literal) return null
   if (!isUndefinedStringLiteral(literal)) return null
   return absent.typeAt(typeofExpr.expression) !== null ? typeofExpr.expression : null

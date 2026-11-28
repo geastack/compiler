@@ -90,7 +90,9 @@ export const nativeDescriptorSnapshotPlanOf = (
       fields: fields.flatMap<NativeFieldViewPlan['fields'][number]>((entry) =>
         entry.retainedAccessor
           ? [{ key: entry.field.key, read: entry.field.value, write: null, descriptorForward: true as const }]
-          : entry.reads.map((read) => ({
+          : // Annotated so both arms are one array type: a literal-record arm
+            // beside a Route[] arm has no native conversion at the merge.
+            entry.reads.map((read): NativeFieldViewPlan['fields'][number] => ({
               key: entry.field.key,
               read: read.source,
               write: null,

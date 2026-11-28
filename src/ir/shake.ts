@@ -125,9 +125,13 @@ const carriesDynamic = (representation: Representation): boolean => {
       return true
     case 'borrowed-ref':
       return carriesDynamic(representation.referent)
+    // One arm per case: a property read across several narrowed arms has no single native layout to load it from.
     case 'array-object':
+      return carriesDynamic(representation.element)
     case 'dense-buffer':
+      return carriesDynamic(representation.element)
     case 'native-sequence':
+      return carriesDynamic(representation.element)
     case 'iterator':
       return carriesDynamic(representation.element)
     case 'async-generator':
@@ -344,11 +348,38 @@ const classObjectCopyOf = (
  * remove one, which is what lets the caller re-run this as the program's own
  * fixpoint widens without ever having to undo a conclusion.
  */
+/** A `MemberReach` key, `${scope}#${member}`. */
+type MemberKeyOf = (scope: string, member: string) => string
+
+/**
+ * Interns `MemberReach` keys for one shake. Every slice of every body spells
+ * the same few scopes and members again, and each re-slice after a cell goes
+ * live spells them once more; a fresh concatenation per operation, hashed
+ * into the set anew, was most of what a slice cost.
+ */
+const memberKeyInterner = (): MemberKeyOf => {
+  const byScope = new Map<string, Map<string, string>>()
+  return (scope, member) => {
+    let members = byScope.get(scope)
+    if (members === undefined) {
+      members = new Map()
+      byScope.set(scope, members)
+    }
+    let key = members.get(member)
+    if (key === undefined) {
+      key = `${scope}#${member}`
+      members.set(member, key)
+    }
+    return key
+  }
+}
+
 const sliceBody = (
   body: IrBody,
   placements: ReadonlyMap<DeclarationId, BindingPlacement>,
   liveCells: ReadonlySet<DeclarationId>,
-  structuralViewScopes: ReadonlyMap<string, readonly string[]>
+  structuralViewScopes: ReadonlyMap<string, readonly string[]>,
+  memberKey: MemberKeyOf
 ): BodySlice => {
   const definitions = new Map<IrValueId, IrOperation>()
   const blocks: IrBlock[] = []
@@ -516,8 +547,8 @@ const sliceBody = (
         text === undefined && (operation.kind === 'get' || operation.kind === 'set') && operation.provenKeyTexts?.length
           ? operation.provenKeyTexts
           : undefined
-      if (proven !== undefined) for (const scope of scopes) for (const key of proven) spelledKeys.add(`${scope}#${key}`)
-      else if (text !== undefined) for (const scope of scopes) spelledKeys.add(`${scope}#${text}`)
+      if (proven !== undefined) for (const scope of scopes) for (const key of proven) spelledKeys.add(memberKey(scope, key))
+      else if (text !== undefined) for (const scope of scopes) spelledKeys.add(memberKey(scope, text))
       // A dynamic key is a hazard only where it READS. `fieldInitializerRuns`
       // asks one question -- can anything observe the value this initializer
       // would leave in the field -- and a store answers no: whatever key it
@@ -551,7 +582,7 @@ const sliceBody = (
       } else {
         const text = constants.get(key.value)
         const scopes = receiverClassScopes(receiver.representation, structuralViewScopes)
-        if (text !== undefined) for (const scope of scopes) spelledKeys.add(`${scope}#${text}`)
+        if (text !== undefined) for (const scope of scopes) spelledKeys.add(memberKey(scope, text))
         else if (operation.intrinsicReflection !== 'set') {
           for (const scope of scopes) fieldHazardScopes.add(scope)
           if (operation.intrinsicReflection === 'get' && operation.result)
@@ -587,8 +618,8 @@ const sliceBody = (
       const operands = operation.kind === 'convert' ? [operation.source] : operation.operands
       for (const operand of operands) {
         for (const scope of receiverClassScopes(operand.representation, structuralViewScopes)) {
-          spelledKeys.add(`${scope}#toString`)
-          spelledKeys.add(`${scope}#valueOf`)
+          spelledKeys.add(memberKey(scope, 'toString'))
+          spelledKeys.add(memberKey(scope, 'valueOf'))
         }
       }
     }
@@ -612,8 +643,8 @@ const sliceBody = (
       ) {
         for (const argument of operation.arguments) {
           for (const scope of receiverClassScopes(argument.representation, structuralViewScopes)) {
-            spelledKeys.add(`${scope}#toString`)
-            spelledKeys.add(`${scope}#valueOf`)
+            spelledKeys.add(memberKey(scope, 'toString'))
+            spelledKeys.add(memberKey(scope, 'valueOf'))
           }
         }
       }
@@ -621,7 +652,7 @@ const sliceBody = (
     if (operation.kind === 'call' && jsonStringifyCallees.has(operation.callee.value)) {
       const argument = operation.arguments[0]
       if (argument)
-        for (const scope of receiverClassScopes(argument.representation, structuralViewScopes)) spelledKeys.add(`${scope}#toJSON`)
+        for (const scope of receiverClassScopes(argument.representation, structuralViewScopes)) spelledKeys.add(memberKey(scope, 'toJSON'))
       if (argument) jsonSerialized.push(argument.representation)
     }
     for (const operand of operandsOfIrOperation(operation)) carriers.push(operand.representation)
@@ -1132,7 +1163,7 @@ const bodiesOfClass = (
     constructed && field.initializer && fieldInitializerRuns(field, scopes, reach, hazards, effectFree) ? [field.initializer] : []
   ),
   ...layout.staticFields.flatMap((field) =>
-    field.initializer && fieldInitializerRuns(field, scopes, reach, hazards, effectFree) ? [field.initializer] : []
+    field.initializer !== null && fieldInitializerRuns(field, scopes, reach, hazards, effectFree) ? [field.initializer] : []
   ),
   ...layout.methods.flatMap((method) =>
     method.callable &&
@@ -1411,13 +1442,14 @@ export const shakeProgram = (input: IrShakeInput): IrShakeResult => {
   // this many live cells has the same answer and every set it feeds already
   // holds it.
   const slicedAtCells = new Map<FunctionId | RegionId, number>()
+  const memberKey = memberKeyInterner()
   for (let owner = queue.pop(); owner !== undefined; owner = queue.pop()) {
     if (slicedAtCells.get(owner) === liveCells.size) continue
     slicedAtCells.set(owner, liveCells.size)
     const freshCells: DeclarationId[] = []
     let freshKeys = false
     for (const body of bodiesByOwner.get(owner) ?? []) {
-      const slice = sliceBody(body, input.placements, liveCells, structuralViewScopes)
+      const slice = sliceBody(body, input.placements, liveCells, structuralViewScopes, memberKey)
       slices.set(body.owner, slice)
       for (const cell of slice.readCells) {
         if (liveCells.has(cell)) continue

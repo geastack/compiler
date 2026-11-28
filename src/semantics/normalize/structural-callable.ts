@@ -57,7 +57,7 @@ export const isFabricatedSignatureShape = (checker: ts.TypeChecker, signature: t
 export const structuralCallSignatures = (
   table: StructuralTypeTable,
   id: StructuralTypeId,
-  seen: ReadonlySet<StructuralTypeId> = new Set()
+  seen: ReadonlySet<StructuralTypeId> = new Set<StructuralTypeId>()
 ): readonly SignatureShape[] | null => {
   if (seen.has(id)) return null
   const next = new Set(seen).add(id)

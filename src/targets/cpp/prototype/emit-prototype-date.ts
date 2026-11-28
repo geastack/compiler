@@ -390,7 +390,7 @@ export const deferredDateMethodClaim = (
 
 export const dateMemberText = (ctx: EmitContext, receiver: IrOperand, key: IrOperand, result: string | null): string | null => {
   const carrier = receiver.representation
-  if (!isDateCarrier(carrier)) return null
+  if (!isDateCarrier(carrier) || carrier.kind !== 'native-record-ref') return null
   // A claim, not a fold: this decides whether the access is a STATIC member at
   // all (falls through to the dynamic sidecar below when it is not), so it
   // must not see a key text `constantTexts` only holds because the render

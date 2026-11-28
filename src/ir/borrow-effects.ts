@@ -66,10 +66,16 @@ const pureNumericMath: ReadonlySet<string> = new Set([
   'trunc'
 ])
 
+const noCallees: ReadonlySet<IrValueId> = new Set<IrValueId>()
+
+/** `assumedCallees` widens `safeCallees` without a merged copy of it: the
+ * effect proof assumes a body's self-calls safe while proving it, and copying
+ * the program-wide safe set once per such body cost more than the proof. */
 export const borrowSafeOperationsOf = (
   body: IrBody,
-  safeCallees: ReadonlySet<IrValueId> = new Set(),
-  plainFieldRead: PlainFieldRead = () => false
+  safeCallees: ReadonlySet<IrValueId> = new Set<IrValueId>(),
+  plainFieldRead: PlainFieldRead = () => false,
+  assumedCallees: ReadonlySet<IrValueId> = noCallees
 ): ReadonlySet<IrNonTerminatorOperation> => {
   const keys = stringConstantsOf(body)
   const nativeCharacterReads = new Set<IrValueId>()
@@ -158,6 +164,7 @@ export const borrowSafeOperationsOf = (
         case 'call':
           if (
             safeCallees.has(operation.callee.value) ||
+            assumedCallees.has(operation.callee.value) ||
             (mathReads.has(operation.callee.value) && operation.arguments.every((argument) => number(argument.representation))) ||
             (nativeCharacterReads.has(operation.callee.value) &&
               operation.arguments.length === 1 &&
@@ -208,38 +215,94 @@ export const borrowEffectsOf = (
           if (target !== undefined) targets.set(operation.result.id, target)
         }
       }
+  // The values naming each owner, so a body finds its own self-calls without
+  // scanning every target in the program once per body per round.
+  const targetsByOwner = new Map<string, IrValueId[]>()
+  for (const [value, target] of targets) {
+    const owner = String(target)
+    const values = targetsByOwner.get(owner)
+    if (values) values.push(value)
+    else targetsByOwner.set(owner, [value])
+  }
+  // A worklist rather than whole-program rounds. A body's safe set reads the
+  // proven owners only through its own calls' callees, so it can change only
+  // when an owner one of its calls names is proven; re-evaluating every
+  // unproven body each round made the proof cost rounds x bodies, and the
+  // rounds are as many as the longest chain of proofs. Proving only grows the
+  // callee set and every test is monotone in it, so any evaluation order
+  // reaches the same least fixed point, and each unproven body's last
+  // evaluation follows the last proof among its callees: the published sets
+  // are the ones the round-based iteration settled on.
   const proven = new Set<string>()
   const operations = new Map<string, ReadonlySet<IrNonTerminatorOperation>>()
-  let changed = true
-  while (changed) {
-    changed = false
-    const safeCallees = new Set([...targets].filter(([, target]) => proven.has(String(target))).map(([value]) => value))
-    for (const body of bodies) {
-      const owner = String(body.sourceOwner)
-      if (proven.has(owner) || splitOwners.has(owner)) continue
-      // A body's calls to ITSELF are assumed safe while proving it: if every
-      // other operation is safe, the recursion only re-runs safe operations
-      // (induction on depth). A monotone fixed point starting from nothing
-      // could never prove a recursive body otherwise -- `sum(node)` calling
-      // `sum(node.left)` stayed unproved forever. The assumption is kept only
-      // when the proof succeeds; an unproved body publishes the safe set
-      // computed without it, so nothing downstream inherits the optimism.
-      const selfCalls = new Set<IrValueId>()
-      for (const [value, target] of targets) if (String(target) === owner && !safeCallees.has(value)) selfCalls.add(value)
-      const optimistic = selfCalls.size === 0 ? safeCallees : new Set([...safeCallees, ...selfCalls])
-      const safe = borrowSafeOperationsOf(body, optimistic, plainFieldRead)
-      const qualifies =
-        synchronous(body) &&
-        [...body.blocks.values()].every((block) =>
-          block.operations.every(
-            (operation) => safe.has(operation) && (operation.kind !== 'binding-write' || privateWrite(body, operation.declaration))
-          )
+  const safeCallees = new Set<IrValueId>()
+  const candidates: IrBody[] = []
+  const candidateOwners: string[] = []
+  for (const body of bodies) {
+    const owner = String(body.sourceOwner)
+    if (splitOwners.has(owner)) continue
+    candidates.push(body)
+    candidateOwners.push(owner)
+  }
+  // The candidates whose calls name each owner, so its proof revisits exactly them.
+  const dependents = new Map<string, number[]>()
+  for (let index = 0; index < candidates.length; index += 1) {
+    const body = candidates[index]!
+    const own = candidateOwners[index]!
+    for (const block of body.blocks.values())
+      for (const operation of block.operations) {
+        if (operation.kind !== 'call') continue
+        const target = targets.get(operation.callee.value)
+        if (target === undefined) continue
+        const owner = String(target)
+        if (owner === own) continue
+        const list = dependents.get(owner)
+        if (list === undefined) dependents.set(owner, [index])
+        else if (list[list.length - 1] !== index) list.push(index)
+      }
+  }
+  const dirty: boolean[] = candidates.map(() => false)
+  const queue: number[] = []
+  const evaluate = (index: number): void => {
+    const body = candidates[index]!
+    const owner = candidateOwners[index]!
+    // A body's calls to ITSELF are assumed safe while proving it: if every
+    // other operation is safe, the recursion only re-runs safe operations
+    // (induction on depth). A monotone fixed point starting from nothing
+    // could never prove a recursive body otherwise -- `sum(node)` calling
+    // `sum(node.left)` stayed unproved forever. The assumption is kept only
+    // when the proof succeeds; an unproved body publishes the safe set
+    // computed without it, so nothing downstream inherits the optimism.
+    const selfCalls = new Set<IrValueId>()
+    for (const value of targetsByOwner.get(owner) ?? []) if (!safeCallees.has(value)) selfCalls.add(value)
+    const safe = borrowSafeOperationsOf(body, safeCallees, plainFieldRead, selfCalls)
+    const qualifies =
+      synchronous(body) &&
+      [...body.blocks.values()].every((block) =>
+        block.operations.every(
+          (operation) => safe.has(operation) && (operation.kind !== 'binding-write' || privateWrite(body, operation.declaration))
         )
-      operations.set(owner, qualifies || selfCalls.size === 0 ? safe : borrowSafeOperationsOf(body, safeCallees, plainFieldRead))
-      if (!qualifies) continue
-      proven.add(owner)
-      changed = true
+      )
+    operations.set(owner, qualifies || selfCalls.size === 0 ? safe : borrowSafeOperationsOf(body, safeCallees, plainFieldRead))
+    if (!qualifies) return
+    proven.add(owner)
+    for (const value of targetsByOwner.get(owner) ?? []) safeCallees.add(value)
+    for (const dependent of dependents.get(owner) ?? []) {
+      if (dirty[dependent] === true || proven.has(candidateOwners[dependent]!)) continue
+      dirty[dependent] = true
+      queue.push(dependent)
     }
+  }
+  for (let index = 0; index < candidates.length; index += 1) {
+    if (proven.has(candidateOwners[index]!)) continue
+    dirty[index] = false
+    evaluate(index)
+  }
+  for (let next = 0; next < queue.length; next += 1) {
+    const index = queue[next]!
+    if (dirty[index] !== true || proven.has(candidateOwners[index]!)) continue
+    dirty[index] = false
+    evaluate(index)
   }
   return { operations, targets }
 }

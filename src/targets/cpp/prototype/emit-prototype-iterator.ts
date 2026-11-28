@@ -104,11 +104,6 @@ interface StepReads {
 }
 
 /** The two channels a step's record is built from: what a yield carries, and what completion carries. */
-interface StepChannels {
-  readonly element: Representation
-  readonly completion: Representation
-}
-
 /**
  * Builds `IteratorYieldResult<T> | IteratorReturnResult<TReturn>` from
  * whichever `stepText` expression already advanced (or injected an abrupt
@@ -168,7 +163,7 @@ const iteratorResultUnionOf = (
  */
 const iteratorResultArmsText = (
   ctx: EmitContext,
-  carrier: StepChannels & Representation,
+  carrier: Extract<Representation, { readonly kind: 'iterator' | 'async-generator' }>,
   union: Extract<Representation, { kind: 'tagged-union' }>,
   reads: StepReads
 ): string => {

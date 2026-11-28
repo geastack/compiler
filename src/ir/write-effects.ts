@@ -78,9 +78,9 @@ export const inertArgument = (value: Representation): boolean => {
     value.kind === 'shared-array-buffer' ||
     value.kind === 'data-view' ||
     (value.kind === 'native-handle' && value.native !== null) ||
-    ((value.kind === 'array-object' || value.kind === 'dense-buffer' || value.kind === 'native-sequence') &&
-      'element' in value &&
-      primitive(value.element))
+    (value.kind === 'array-object' && primitive(value.element)) ||
+    (value.kind === 'dense-buffer' && primitive(value.element)) ||
+    (value.kind === 'native-sequence' && primitive(value.element))
   )
 }
 
@@ -193,13 +193,15 @@ export const writeEffectsOf = (bodies: readonly IrBody[], plainFieldRead: PlainF
       const keys = new Set(current.keys)
       let everything = false
       for (const body of ownerBodies) {
-        for (const local of locals.get(body)?.values() ?? []) {
-          if (local.kind === 'all') everything = true
-          else if (local.kind === 'key') keys.add(local.key)
-          else if (local.kind === 'calls')
-            for (const functionId of local.functionIds) if (!absorb(keys, String(functionId))) everything = true
-          if (everything) break
-        }
+        const bodyLocals = locals.get(body)
+        if (bodyLocals !== undefined)
+          for (const local of bodyLocals.values()) {
+            if (local.kind === 'all') everything = true
+            else if (local.kind === 'key') keys.add(local.key)
+            else if (local.kind === 'calls')
+              for (const functionId of local.functionIds) if (!absorb(keys, String(functionId))) everything = true
+            if (everything) break
+          }
         if (everything) break
       }
       if (everything) {

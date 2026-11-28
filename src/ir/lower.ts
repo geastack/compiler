@@ -1383,7 +1383,7 @@ const lowerOwner = (
     if (!iterator || iterator.source.kind !== 'result') continue
     const source = operationOfResult(iterator.source.result)
     const first = ownerEdges.find((edge) => edge.kind === 'evaluation' && edge.from === source)?.to
-    if (first && first !== close.id) {
+    if (first !== undefined && first !== close.id) {
       finiteCloseStarts.set(close.id, first)
       finiteCloseByStart.set(first, close.id)
     }
@@ -1555,7 +1555,9 @@ const lowerOwner = (
  */
 const mergedReactiveClassFields = (plugins: readonly PluginInstance[]): ReadonlyMap<DeclarationId, ReadonlySet<string>> => {
   const cell = plugins.reduce<string | null>((claimed, plugin) => plugin.capabilities.nativeReactiveCell ?? claimed, null)
-  return cell === null ? new Map() : new Map(plugins.flatMap((plugin) => [...plugin.capabilities.reactiveClassFields]))
+  return cell === null
+    ? new Map<DeclarationId, ReadonlySet<string>>()
+    : new Map(plugins.flatMap((plugin) => [...plugin.capabilities.reactiveClassFields]))
 }
 
 /**

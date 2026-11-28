@@ -106,6 +106,15 @@ export interface StructuralTypeTable {
   readonly isOpen: (id: StructuralTypeId) => boolean
   /** Whether the shape at this id reaches an anchor a frame abandoned. See the implementation. */
   readonly citesAbandoned: (id: StructuralTypeId) => boolean
+  /** The id the next reservation or new shape will get, as an ordinal: what `releaseCitingAbandonedSince` scopes a sweep by. */
+  readonly watermark: () => number
+  /**
+   * Releases every completed id minted at or after `mark` whose shape reaches,
+   * through ids minted at or after `mark`, an anchor some frame abandoned.
+   * See the implementation for why the journal of remembered checker types
+   * is not enough.
+   */
+  readonly releaseCitingAbandonedSince: (mark: number) => void
   readonly seal: () => ReadonlyMap<StructuralTypeId, StructuralType>
 }
 
@@ -291,6 +300,20 @@ export const createStructuralTypeTable = (): StructuralTypeTable => {
    * a shape MEANS, so it must not go stale when a shape kind gains a field --
    * which is exactly what a hand-maintained enumeration would do.
    */
+  const forEachCitedId = (shape: StructuralShape, visit: (id: StructuralTypeId) => void): void => {
+    const scan = (value: unknown): void => {
+      if (typeof value === 'string') {
+        if (/^type\|\d+$/.test(value)) visit(value as StructuralTypeId)
+        return
+      }
+      if (Array.isArray(value)) {
+        for (const element of value) scan(element)
+        return
+      }
+      if (value !== null && typeof value === 'object') for (const element of Object.values(value)) scan(element)
+    }
+    scan(shape)
+  }
   const citesAbandoned = (id: StructuralTypeId): boolean => {
     const seen = new Set<StructuralTypeId>()
     const pending: StructuralTypeId[] = [id]
@@ -301,20 +324,72 @@ export const createStructuralTypeTable = (): StructuralTypeTable => {
       if (abandoned.has(next)) return true
       const shape = byId.get(next)
       if (!shape) continue
-      const scan = (value: unknown): void => {
-        if (typeof value === 'string') {
-          if (/^type\|\d+$/.test(value)) pending.push(value as StructuralTypeId)
-          return
-        }
-        if (Array.isArray(value)) {
-          for (const element of value) scan(element)
-          return
-        }
-        if (value !== null && typeof value === 'object') for (const element of Object.values(value)) scan(element)
-      }
-      scan(shape)
+      forEachCitedId(shape, (cited) => pending.push(cited))
     }
     return false
+  }
+
+  const watermark = (): number => nextId
+
+  /**
+   * The rest of an unwound walk's withdrawal: every id the failed attempt
+   * minted that now stands on an abandoned sibling, not only the ones a
+   * remembered checker type maps to.
+   *
+   * The walk's journal names checker types, so an anchor no checker type is
+   * remembered under -- an interface family's shared layout
+   * (`interface-family:<key>`), which every member of the family completes
+   * with as its body -- was never released. Its members were, because their
+   * shapes reach the abandoned stub THROUGH that layout; the retry then
+   * re-reserved each member, found the very same layout under its unreleased
+   * key, and completed it with a shape identical to the released one. Two
+   * ids for one declared type: measured on the compiler's own sources,
+   * `ts.Node` and 25 more family members each held two, which split every
+   * record holding a node (`{ site: ts.Node }` inside a generic `push<K, V>`
+   * copy against the same record outside it) and every generic class filled
+   * with one (`SmallSet<AliasTerm>` grouped as two layouts).
+   *
+   * Scoped to ids at or after `mark`, the ordinal the failed attempt started
+   * at: an older shape cannot name an anchor reserved after it was built, so
+   * nothing older can stand on an anchor this attempt abandoned, and the
+   * sweep stays proportional to the attempt rather than to the table. Exact
+   * on cycles: badness spreads backwards from the abandoned ids along the
+   * citations, never forwards through a memo a cycle could leave stale.
+   */
+  const releaseCitingAbandonedSince = (mark: number): void => {
+    requireOpen()
+    if (abandoned.size === 0) return
+    const ordinalOf = (id: StructuralTypeId): number => Number(id.slice('type|'.length))
+    const citedBy = new Map<StructuralTypeId, StructuralTypeId[]>()
+    const bad: StructuralTypeId[] = []
+    const recent: StructuralTypeId[] = []
+    for (let ordinal = mark; ordinal < nextId; ordinal++) {
+      const id = `type|${ordinal}` as StructuralTypeId
+      if (abandoned.has(id)) {
+        bad.push(id)
+        continue
+      }
+      const shape = openAnchors.has(id) ? undefined : byId.get(id)
+      if (!shape) continue
+      recent.push(id)
+      forEachCitedId(shape, (cited) => {
+        if (ordinalOf(cited) < mark) return
+        const citers = citedBy.get(cited)
+        if (citers) citers.push(id)
+        else citedBy.set(cited, [id])
+      })
+    }
+    if (bad.length === 0) return
+    const tainted = new Set<StructuralTypeId>(bad)
+    while (bad.length > 0) {
+      const next = bad.pop()!
+      for (const citer of citedBy.get(next) ?? []) {
+        if (tainted.has(citer)) continue
+        tainted.add(citer)
+        bad.push(citer)
+      }
+    }
+    for (const id of recent) if (tainted.has(id)) releaseKey(id)
   }
 
   const releaseKey = (id: StructuralTypeId): void => {
@@ -372,5 +447,18 @@ export const createStructuralTypeTable = (): StructuralTypeTable => {
 
   const isOpen = (id: StructuralTypeId): boolean => openAnchors.has(id)
 
-  return { intern, anchor, complete, abandon, citesAbandoned, releaseKey, bindAnchorKey, get, isOpen, seal }
+  return {
+    intern,
+    anchor,
+    complete,
+    abandon,
+    citesAbandoned,
+    watermark,
+    releaseCitingAbandonedSince,
+    releaseKey,
+    bindAnchorKey,
+    get,
+    isOpen,
+    seal
+  }
 }

@@ -8,7 +8,7 @@ import type { IrBody } from './model.js'
 
 /** The virtual members generated from the final native bodies and allocation layouts. */
 export const settledVirtualCallFramesOf = (
-  bodies: Iterable<IrBody>,
+  bodies: readonly IrBody[],
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   conversions: ConversionCensus
 ): ReadonlyMap<string, CallableAbi> => {

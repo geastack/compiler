@@ -39,12 +39,80 @@ interface ImportGraph {
   readonly mentions: Map<ts.SourceFile, Map<ts.Symbol, ts.Identifier[]>>
 }
 
-const graphs = new WeakMap<StatedModuleSet, ImportGraph>()
-const lastSegment = (path: string): string => path.replace(/^.*[\\/]/, '').replace(/\.[^.]*$/, '')
-const DYNAMIC_MODULE_REFERENCE = /\bimport\s*\(|\brequire\s*\(/
+// Keyed by what the module set holds, not by the set object: a natively built
+// compiler hands the stated set out as a fresh record view on every
+// `statedModuleSetOf`, so an identity key missed every time and each export
+// query rebuilt the graph -- every module's statements, a dynamic-import scan of
+// every tree, and the per-file mention index. The anchor is the first module,
+// held weakly, so the graph still dies with the program's trees.
+interface CachedGraph {
+  readonly files: readonly ts.SourceFile[]
+  readonly entries: readonly ts.SourceFile[]
+  readonly graph: ImportGraph
+}
+const graphs = new WeakMap<ts.SourceFile, CachedGraph[]>()
+const sameModules = (left: readonly ts.SourceFile[], right: readonly ts.SourceFile[]): boolean => {
+  if (left === right) return true
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index++) if (left[index] !== right[index]) return false
+  return true
+}
+const cachedGraphOf = (modules: StatedModuleSet): ImportGraph | null => {
+  const anchor = modules.files[0]
+  if (anchor === undefined) return null
+  for (const cached of graphs.get(anchor) ?? [])
+    if (sameModules(cached.files, modules.files) && sameModules(cached.entries, modules.entries)) return cached.graph
+  return null
+}
+const rememberGraph = (modules: StatedModuleSet, graph: ImportGraph): void => {
+  const anchor = modules.files[0]
+  if (anchor === undefined) return
+  const cached: CachedGraph = { files: modules.files, entries: modules.entries, graph }
+  const list = graphs.get(anchor)
+  if (list) list.push(cached)
+  else graphs.set(anchor, [cached])
+}
+// Plain string scans rather than regular expressions: these run over every
+// module path and every module's whole text, where a backtracking matcher tries
+// each start position.
+const lastSeparator = (path: string): number => Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+const lastSegment = (path: string): string => {
+  const name = path.slice(lastSeparator(path) + 1)
+  const dot = name.lastIndexOf('.')
+  return dot < 0 ? name : name.slice(0, dot)
+}
+const parentPath = (path: string): string => {
+  const separator = lastSeparator(path)
+  return separator < 0 ? path : path.slice(0, separator)
+}
+const isWordCode = (code: number): boolean =>
+  (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 95
+const isSpaceCode = (code: number): boolean =>
+  code === 32 ||
+  (code >= 9 && code <= 13) ||
+  code === 0xa0 ||
+  code === 0x1680 ||
+  (code >= 0x2000 && code <= 0x200a) ||
+  code === 0x2028 ||
+  code === 0x2029 ||
+  code === 0x202f ||
+  code === 0x205f ||
+  code === 0x3000 ||
+  code === 0xfeff
+/** `/\bkeyword\s*\(/.test(text)`. */
+const mentionsCall = (text: string, keyword: string): boolean => {
+  for (let at = text.indexOf(keyword); at >= 0; at = text.indexOf(keyword, at + 1)) {
+    if (at > 0 && isWordCode(text.charCodeAt(at - 1))) continue
+    let next = at + keyword.length
+    while (next < text.length && isSpaceCode(text.charCodeAt(next))) next++
+    if (text.charCodeAt(next) === 40) return true
+  }
+  return false
+}
+const hasDynamicModuleReference = (text: string): boolean => mentionsCall(text, 'import') || mentionsCall(text, 'require')
 
 const importGraphOf = (checker: ts.TypeChecker, modules: StatedModuleSet): ImportGraph => {
-  const known = graphs.get(modules)
+  const known = cachedGraphOf(modules)
   if (known) return known
   const edges = new Map<ts.Symbol, ModuleEdge[]>()
   const dynamic = new Set<ts.Symbol>()
@@ -85,7 +153,7 @@ const importGraphOf = (checker: ts.TypeChecker, modules: StatedModuleSet): Impor
         dynamicAt(statement.moduleReference.expression)
       }
     }
-    if (DYNAMIC_MODULE_REFERENCE.test(file.text)) ts.forEachChild(file, scan)
+    if (hasDynamicModuleReference(file.text)) ts.forEachChild(file, scan)
   }
   const graph: ImportGraph = {
     opaque,
@@ -96,7 +164,7 @@ const importGraphOf = (checker: ts.TypeChecker, modules: StatedModuleSet): Impor
     entries: new Set(modules.entries),
     mentions: new Map()
   }
-  graphs.set(modules, graph)
+  rememberGraph(modules, graph)
   return graph
 }
 
@@ -225,7 +293,7 @@ export const inProgramImportReferencesOf = (
       refuse(`unresolved-specifier:${segment}`, source)
       return false
     }
-    if (segment === 'index' && graph.unresolved.has(lastSegment(source.fileName.replace(/[\\/][^\\/]*$/, '')))) {
+    if (segment === 'index' && graph.unresolved.has(lastSegment(parentPath(source.fileName)))) {
       refuse('unresolved-index-directory', source)
       return false
     }

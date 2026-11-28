@@ -1,4 +1,5 @@
 import ts from '#typescript'
+import { checkerUnionOf } from '../checker-union.js'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import { impliedPatternParameterOf, isUnusableEvidence, widestOf, withoutUndefinedMember } from './derived-expression-type.js'
 import type { ParameterBindingCensus } from './parameter-bindings.js'
@@ -36,12 +37,12 @@ const valueParametersOf = (declaration: ts.SignatureDeclaration): readonly ts.Pa
 
 const overloadSiblingsOf = (implementation: ts.SignatureDeclaration): readonly ts.SignatureDeclaration[] => {
   const container = implementation.parent
-  const siblings: readonly ts.Node[] =
-    ts.isSourceFile(container) || ts.isModuleBlock(container) || ts.isBlock(container)
-      ? container.statements
-      : ts.isClassLike(container)
-        ? container.members
-        : []
+  // Copied element by element: statements and members are different arrays,
+  // and a native build cannot read either one as a plain node array.
+  const siblings: ts.Node[] = []
+  if (ts.isSourceFile(container) || ts.isModuleBlock(container) || ts.isBlock(container))
+    for (const statement of container.statements) siblings.push(statement)
+  else if (ts.isClassLike(container)) for (const member of container.members) siblings.push(member)
   const sameName = (candidate: ts.Node): boolean => {
     if (ts.isConstructorDeclaration(implementation)) return ts.isConstructorDeclaration(candidate)
     if (candidate.kind !== implementation.kind) return false
@@ -572,8 +573,7 @@ export const impliedPatternElementOfArms = (
 
 /** The internal union constructor; the public checker exposes none (the same reach `field-bindings.ts` takes). */
 const unionTypeOf = (checker: ts.TypeChecker, types: readonly ts.Type[]): ts.Type | null => {
-  const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
-  return typeof constructing.getUnionType === 'function' ? constructing.getUnionType(types) : null
+  return checkerUnionOf(checker, types)
 }
 
 export const impliedPatternArrayElementAt = (

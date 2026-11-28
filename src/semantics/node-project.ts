@@ -62,9 +62,11 @@ export const discoverNodeProject = (directory: string, host: ts.System = ts.sys)
   const launched = entryFile(launch)
   if (launched) return { root, manifest, projectFile, entries: [{ name, file: launched }] }
   if (launch) throw new Error(`The start script names ${launch}, but neither it nor its declared source exists.`)
-  const bins = typeof manifest.bin === 'string' ? { [name]: manifest.bin } : object(manifest.bin)
-  if (Object.keys(bins).length > 0) {
-    const entries = Object.entries(bins).map(([name, value]) => {
+  // Entries rather than a one-key dictionary literal for the string form:
+  // both spellings then read as one list of [name, value] pairs.
+  const bins: [string, unknown][] = typeof manifest.bin === 'string' ? [[name, manifest.bin]] : Object.entries(object(manifest.bin))
+  if (bins.length > 0) {
+    const entries = bins.map(([name, value]) => {
       const file = entryFile(value)
       if (!file) throw new Error(`Cannot find the source for package bin ${name}: ${String(value)}`)
       return { name, file }

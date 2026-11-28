@@ -214,5 +214,8 @@ export const noNormalCallCompletionOf = (
         return false
     }
   }
-  return visit(body.entry, null, new Map(), new Map(), new Set()) && throws > 0 ? [...citations].sort() : null
+  return visit(body.entry, null, new Map<IrValueId, KnownPrimitive>(), new Map<DeclarationId, KnownPrimitive>(), new Set<IrBlockId>()) &&
+    throws > 0
+    ? [...citations].sort()
+    : null
 }

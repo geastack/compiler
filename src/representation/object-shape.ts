@@ -165,3 +165,24 @@ export const isDataOnlyObjectShape = (
   if (shape.members.length === 0 || shape.index.length > 0) return false
   return shape.members.every((member) => member.accessor === null && shapeOf(member.type)?.kind !== 'signature')
 }
+
+/**
+ * Whether an object shape is a plain string dictionary: no named members and
+ * exactly one string index signature over a non-callable value.
+ *
+ * The other transparent host shape beside `isDataOnlyObjectShape`'s records.
+ * A dictionary is a layout this compiler owns (`dictionary` carrier) just as a
+ * record is, and a host that hands one back -- node's `process.env` is
+ * `{ [key: string]: string | undefined }` -- states no operation of its own
+ * on it, so binding it as an opaque handle demanded a protocol no host could
+ * register (`native-boundary:ProcessEnv@1`).
+ */
+export const isStringDictionaryObjectShape = (
+  shape: StructuralShape | null,
+  shapeOf: (id: StructuralTypeId) => StructuralShape | null
+): boolean => {
+  if (shape?.kind !== 'object' || shape.membersDropped) return false
+  if (shape.members.length !== 0 || shape.index.length !== 1) return false
+  const index = shape.index[0]!
+  return index.key === 'string' && index.finite !== true && shapeOf(index.value)?.kind !== 'signature'
+}

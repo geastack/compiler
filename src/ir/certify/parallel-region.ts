@@ -198,6 +198,13 @@ class PointsTo implements PointsToSolver {
     for (const object of objects) watcher(object)
   }
 
+  /** The hub's own set; only a subscribed node asks, and only a solver with a hub subscribes. */
+  private hubSet(): Set<AbstractObject> {
+    // A narrowed index, not `this.hub!`: a non-null-asserted index reads as a dynamic element natively.
+    // A missing hub still indexes no set (-1, like `null`), so a misuse fails exactly as before.
+    return this.sets[this.hub === null ? -1 : this.hub]!
+  }
+
   private enqueue(id: number): void {
     if (this.queued[id]) return
     this.queued[id] = true
@@ -208,7 +215,7 @@ class PointsTo implements PointsToSolver {
     const set = this.sets[id]!
     if (set.has(object)) return
     // Already in a subscribed node through the hub, and its watchers saw it there.
-    if (this.subscribed[id] && this.sets[this.hub!]!.has(object)) return
+    if (this.subscribed[id] && this.hubSet().has(object)) return
     set.add(object)
     const delta = this.pending[id]
     if (delta) delta.push(object)
@@ -228,7 +235,7 @@ class PointsTo implements PointsToSolver {
       this.subscribed[id] = true
       this.subscribers.add(id)
       if (this.watchers[id]!.length > 0) this.watchedSubscribers.add(id)
-      const hubObjects = [...this.sets[this.hub!]!]
+      const hubObjects = [...this.hubSet()]
       const watching = this.watchers[id]!
       for (let index = 0; index < watching.length; index++) this.deliverHub(watching[index]!, hubObjects)
       for (const target of this.edges[id]!) work.push(target)
@@ -240,7 +247,7 @@ class PointsTo implements PointsToSolver {
     if (id === undefined) return PointsTo.EMPTY
     const rep = this.find(id)
     if (!this.subscribed[rep]) return this.sets[rep]!
-    const union = new Set(this.sets[this.hub!]!)
+    const union = new Set(this.hubSet())
     for (const object of this.sets[rep]!) union.add(object)
     return union
   }
@@ -270,7 +277,7 @@ class PointsTo implements PointsToSolver {
     this.watchers[id]!.push(watcher)
     if (this.subscribed[id]) this.watchedSubscribers.add(id)
     const own = [...this.sets[id]!]
-    const hubObjects = this.subscribed[id] ? [...this.sets[this.hub!]!] : []
+    const hubObjects = this.subscribed[id] ? [...this.hubSet()] : []
     for (const object of own) watcher(object)
     this.deliverHub(watcher, hubObjects)
   }
@@ -973,7 +980,7 @@ const programOf = (input: ParallelRegionInput): Program => {
         } else if (operation.kind === 'call' && operation.lineage !== null) {
           const semantic = input.graph.operations.get(operationOfResult(operation.lineage))
           const target = operation.arguments[0]
-          if (semantic?.family === 'invocation' && semantic.intrinsicMutation && target) {
+          if (semantic?.family === 'invocation' && semantic.intrinsicMutation !== undefined && target) {
             const classes = classRefsOf(target.representation)
             if (classes.size > 0) writes.push({ classes, key: null, callable: true })
           }
@@ -1994,7 +2001,7 @@ const certifyRegion = (
   global: PointsToSolver,
   entry: IrBody
 ): readonly ParallelRegionRefusal[] => {
-  const pessimistic = runRegion(input, program, global, entry, new Map())
+  const pessimistic = runRegion(input, program, global, entry, new Map<FunctionId, ReadonlySet<DeclarationId>>())
   let assumption = new Map<FunctionId, ReadonlySet<DeclarationId>>()
   let run = pessimistic
   for (let round = 0; round < 8; round++) {
@@ -2033,7 +2040,10 @@ const localCapturesOf = (
       admittedPerEntry.push(admitted)
     }
     const [first, ...rest] = admittedPerEntry
-    next.set(functionId, new Set([...(first ?? [])].filter((declaration) => rest.every((admitted) => admitted.has(declaration)))))
+    next.set(
+      functionId,
+      new Set([...(first == null ? [] : [...first])].filter((declaration) => rest.every((admitted) => admitted.has(declaration))))
+    )
   }
   return next
 }

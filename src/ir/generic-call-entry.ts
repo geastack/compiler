@@ -68,7 +68,7 @@ const frameConversionMatches = (
  */
 export const nativeGenericCallEntriesOf = (
   operation: CallOperation,
-  origins: Iterable<FunctionId> & { readonly size: number },
+  origins: readonly FunctionId[],
   bodyOf: (id: FunctionId) => IrBody | null | undefined,
   conversions?: Pick<ConversionCensus, 'nodeById'>
 ): readonly { readonly functionId: FunctionId; readonly arguments: readonly IrOperand[] }[] | null => {
@@ -79,7 +79,7 @@ export const nativeGenericCallEntriesOf = (
     !selector.members.length ||
     new Set(selector.members).size !== selector.members.length ||
     family?.length !== selector.members.length ||
-    !origins.size ||
+    !origins.length ||
     operation.argumentsAreSpread ||
     operation.receiver !== null ||
     family.some((member) => !selector.members.includes(member.member))
@@ -119,7 +119,7 @@ export const nativeGenericCallEntriesOf = (
       const target = operation.result.representation
       if (!frameConversionMatches(operation, 'call-result', source, target, conversions)) return null
     }
-    if ([...origins].some((origin) => withoutFunctionSpecialization(origin) === functionId(member)))
+    if (origins.some((origin) => withoutFunctionSpecialization(origin) === functionId(member)))
       entries.push({ functionId: selected.functionId, arguments: received })
   }
   return entries.length ? entries : null

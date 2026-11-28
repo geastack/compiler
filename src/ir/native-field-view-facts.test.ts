@@ -224,7 +224,7 @@ test('a selected checked view keeps every original primitive route and replays i
   const roots = [...originals.map((source) => conversions.nodeFor(source, intermediate)), conversions.nodeFor(intermediate, target)]
   const closure = recipeClosureOf(roots, conversions.nodeById)
   assert.ok(roots.every((node) => node.capability.kind !== 'never'))
-  const fields = nativeFieldViewDomainsOf(closure.values(), null, () => null)(target)
+  const fields = nativeFieldViewDomainsOf(closure.values(), null, () => null).fieldsOf(target)
   assert.ok(fields)
   const physical = fields.get('shown')!
   assert.ok(physical.some((entry) => entry.read.kind === 'scalar' && entry.checkedRead !== undefined))

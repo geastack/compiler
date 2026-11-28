@@ -17,6 +17,7 @@ import { knownCallerPredicateParameters } from './known-caller-predicate-paramet
 import { uncheckedWriteMemberDeclarations } from './unchecked-write-member-declarations.js'
 import type { SourceTransform, SourceTransformProtocol, SourceTransformModule } from './source-transform-protocol.js'
 import { resolveSourceTransformExport, sourceTransformExportStatus } from './source-transform-exports.js'
+import type { HostMethodBinding } from './host-methods.js'
 
 /**
  * The TypeScript program host.
@@ -177,7 +178,9 @@ export interface CompiledProgram {
   readonly sourceTransformProtocols?: ReadonlyMap<ts.SourceFile, readonly SourceTransformProtocol[]>
 }
 
-export const defaultCompilerOptions: ts.CompilerOptions = Object.freeze({
+// Typed at the literal, not through `Object.freeze`'s inferred argument, so
+// the options are built as `CompilerOptions` rather than converted to it.
+const defaultOptions: ts.CompilerOptions = {
   target: ts.ScriptTarget.ES2022,
   module: ts.ModuleKind.ESNext,
   moduleResolution: ts.ModuleResolutionKind.Bundler,
@@ -196,7 +199,8 @@ export const defaultCompilerOptions: ts.CompilerOptions = Object.freeze({
   // this compiler as an element or as a `jsx(type, props)` call is the
   // library's decision, expressed where every other TypeScript tool reads it.
   jsx: ts.JsxEmit.Preserve
-})
+}
+export const defaultCompilerOptions: ts.CompilerOptions = Object.freeze(defaultOptions)
 
 /**
  * The nearest project file at or above a directory, or `null`.
@@ -705,7 +709,7 @@ const transformingHost = (
   resolutionDiagnostics: { readonly literal: ts.StringLiteralLike; readonly diagnostic: ts.Diagnostic }[],
   preparedSourceText: ReadonlyMap<string, string>,
   timing: FrontendTiming,
-  requiredJsonFiles: ReadonlySet<string> = new Set(),
+  requiredJsonFiles: ReadonlySet<string> = new Set<string>(),
   transformed: TransformOutputs = new Map()
 ): ts.CompilerHost => {
   const transforms = input.sourceTransforms ?? []
@@ -734,7 +738,10 @@ const transformingHost = (
     host.readFile = (fileName) => overlay.get(resolve(fileName)) ?? readFile(fileName)
   }
   const stated = input.moduleResolution
-  const shadowedSpecifiers = new Set([...(stated ? statedSourceSpecifiers(stated) : []), ...pathMappedSourceSpecifiers(options, host)])
+  const shadowedSpecifiers = new Set([
+    ...(stated ? statedSourceSpecifiers(stated) : new Set<string>()),
+    ...pathMappedSourceSpecifiers(options, host)
+  ])
   const resolver = createModuleResolver(host, options, input.declarationModules, input.packageSources)
   // A host that resolves module literals itself gets no resolution cache from
   // `ts.createProgram`, and so no package.json cache either: every source file
@@ -986,7 +993,7 @@ const configuredProgram = (
     const roots = new Set(rootNames)
     const commonJsTargetPaths = new Set<string>()
     let program = timing.measure('create-program', () => ts.createProgram({ rootNames: [...roots], options, host }))
-    const globals = input.commonJsGlobals ?? new Map()
+    const globals = input.commonJsGlobals ?? new Map<string, CommonJsWrapperDeclaration>()
     for (;;) {
       // A program this iteration is about to replace is never read again, so
       // the full census (0.7-1 s, and a checker warm-up only the kept program
@@ -1000,9 +1007,9 @@ const configuredProgram = (
         ...(leanTargets !== null && rebuildFollows(leanTargets) ? leanTargets : staticCommonJsTargetsOf(program, globals, targetOf)),
         ...staticBuiltinModuleTargetsOf(
           program,
-          input.hostMethodBindings ?? new Map(),
-          input.commonJsBuiltinModules ?? new Map(),
-          input.commonJsBuiltinModuleSources ?? new Map()
+          input.hostMethodBindings ?? new Map<string, ReadonlyMap<string, HostMethodBinding>>(),
+          input.commonJsBuiltinModules ?? new Map<string, string>(),
+          input.commonJsBuiltinModuleSources ?? new Map<string, string>()
         )
       ]
       for (const target of targets) commonJsTargetPaths.add(target)
@@ -1030,7 +1037,7 @@ const configuredProgram = (
     }
   }
   if (!projectFileName) {
-    const options = { ...input.options, ...(input.dynamicFallback ? { noImplicitAny: false, checkJs: false } : {}) }
+    const options: ts.CompilerOptions = { ...input.options, ...(input.dynamicFallback ? { noImplicitAny: false, checkJs: false } : {}) }
     const host = transformingHost(input, options, resolutionDiagnostics, preparedSourceText, timing, requiredJsonFiles, transformed)
     const rootNames = [
       ...new Set([
@@ -1069,7 +1076,7 @@ const configuredProgram = (
       ...(input.commonJsGlobals ? [...input.commonJsGlobals.values()].map((entry) => entry.declarationFileName) : [])
     ])
   ]
-  const options = {
+  const options: ts.CompilerOptions = {
     ...parsed.options,
     ...javaScriptAdmission(input.options),
     ...fixedOptions,
@@ -1102,9 +1109,9 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
   const timing = createFrontendTiming('program')
   const resolutionDiagnostics: { readonly literal: ts.StringLiteralLike; readonly diagnostic: ts.Diagnostic }[] = []
   const transformOutputs: TransformOutputs = new Map()
-  let configured = configuredProgram(input, resolutionDiagnostics, new Map(), timing, transformOutputs)
+  let configured = configuredProgram(input, resolutionDiagnostics, new Map<string, string>(), timing, transformOutputs)
   const preparation = timing.measure('diagnostic-source-preparation', () =>
-    diagnosticSourcePreparation(ts, configured.program, input.packageSources ?? [])
+    diagnosticSourcePreparation(configured.program, input.packageSources ?? [])
   )
   // A bare `var require` in a CommonJS module redeclares the wrapper's own
   // parameter; blanked here so the checker types the name from the host's
@@ -1154,7 +1161,13 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
   )
   if (predicateParameters.size > 0) {
     resolutionDiagnostics.length = 0
-    configured = configuredProgram(input, resolutionDiagnostics, new Map([...prepared, ...predicateParameters]), timing, transformOutputs)
+    configured = configuredProgram(
+      input,
+      resolutionDiagnostics,
+      new Map<string, string>([...prepared, ...predicateParameters]),
+      timing,
+      transformOutputs
+    )
   }
   const program = configured.program
   const checker = withStableTypeQueries(program.getTypeChecker(), program)

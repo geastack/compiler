@@ -45,7 +45,7 @@ export interface StringMethodShape {
   readonly spelling?: string
 }
 
-export const stringMethodShapes: ReadonlyMap<string, StringMethodShape> = new Map([
+export const stringMethodShapes: ReadonlyMap<string, StringMethodShape> = new Map<string, StringMethodShape>([
   ['substring', { clause: '22.1.3.24', arities: [1, 2], carriers: ['number', 'number'] }],
   ['substr', { clause: 'B.2.3.1', arities: [1, 2], carriers: ['number', 'number'] }],
   ['slice', { clause: '22.1.3.22', arities: [1, 2], carriers: ['number', 'number'] }],
@@ -68,7 +68,7 @@ export const stringMethodShapes: ReadonlyMap<string, StringMethodShape> = new Ma
   // The three members `lib.es5.d.ts` declares over `string | RegExp`. These
   // rows are the STRING form only; the pattern form is rendered by
   // `emit-prototype-regexp.ts` and asked first (see `shapedStringMethodText`).
-  ['split', { clause: '22.1.3.21', arities: [1], carriers: ['string'] }],
+  ['split', { clause: '22.1.3.21', arities: [1, 2], carriers: ['string', 'number'] }],
   ['replace', { clause: '22.1.3.18', arities: [2], carriers: ['string', 'string'] }],
   ['replaceAll', { clause: '22.1.3.20', arities: [2], carriers: ['string', 'string'] }]
 ])
@@ -114,7 +114,9 @@ export const declaredStringPrototypeMemberNames: ReadonlySet<string> = new Set([
 
 export const cppDateType = 'gea::runtime::Date'
 
-export const isDateCarrier = (representation: Representation): representation is Extract<Representation, { kind: 'native-record-ref' }> =>
+// Not a type guard: a false answer says "not a Date", not "not a native record",
+// and the native build holds a caller's else branch to what the guard claims.
+export const isDateCarrier = (representation: Representation): boolean =>
   representation.kind === 'native-record-ref' && representation.native === cppDateType
 
 export const dateGetters: readonly string[] = [

@@ -4,7 +4,7 @@ import {
   recipePreservesNativePayload
 } from '../conversion/recipe-closure.js'
 import { nativePayloadTransportMatches } from '../conversion/native-payload-transport.js'
-import type { IrValueId, SemanticResultId } from '../identity/ids.js'
+import type { IrValueId, PhysicalBodyId, SemanticResultId } from '../identity/ids.js'
 import { isNativeCallableCarrier } from '../representation/callable-object.js'
 import { carriesUndefined, representationKey } from '../representation/model.js'
 import { operandOf } from '../semantics/model/operands.js'
@@ -65,7 +65,7 @@ const installedKeyCensuses = new WeakMap<object, { readonly keys: ReadonlySet<st
  * @semanticCategory generic-primitive
  */
 export const nativeCallableInstalledKeysOf = (
-  bodies: ReadonlyMap<unknown, IrBody>,
+  bodies: ReadonlyMap<PhysicalBodyId, IrBody>,
   graph: Pick<SemanticGraph, 'operations' | 'results'>
 ): { readonly keys: ReadonlySet<string>; readonly unknown: boolean } => {
   const cached = installedKeyCensuses.get(bodies)
@@ -115,7 +115,7 @@ export const nativeCallableInstalledKeysOf = (
 export const nativeCallableUninstalledKeyOf = (
   operation: IrOperation,
   key: string | null,
-  bodies: ReadonlyMap<unknown, IrBody>,
+  bodies: ReadonlyMap<PhysicalBodyId, IrBody>,
   graph: Pick<SemanticGraph, 'operations' | 'results'>
 ): string | null => {
   if (operation.kind !== 'get' || operation.nativeCallableDataSlot !== undefined || key === null) return null

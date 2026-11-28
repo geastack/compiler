@@ -101,6 +101,13 @@ export type ArgumentListBuild =
  * `representation/derive.ts` builds `CallableAbi.restFrom` from the same
  * declared rest parameter `SelectedSignature.parameters[i].rest` records.
  */
+/** `count` copies of one type (none for a non-positive count), built element by element rather than through the Array constructor. */
+const repeatedType = (type: StructuralTypeId, count: number): StructuralTypeId[] => {
+  const types: StructuralTypeId[] = []
+  for (let index = 0; index < count; index++) types.push(type)
+  return types
+}
+
 const restFormalIndexOf = (selected: SelectedSignature | null): number | null => {
   if (!selected) return null
   const index = selected.parameters.findIndex((parameter) => parameter.rest)
@@ -393,7 +400,7 @@ export const buildArgumentOperands = (
           shape.kind === 'tuple'
             ? maxArityTupleElementTypesOf(context, value.type)
             : shape.kind === 'array'
-              ? Array<StructuralTypeId>(Math.max(0, selected.parameters.length - position)).fill(shape.element)
+              ? repeatedType(shape.element, selected.parameters.length - position)
               : null
         if (positions === null) {
           return {
@@ -422,12 +429,9 @@ export const buildArgumentOperands = (
         const receiver = spreadReceiverOf(context, argument.expression)
         if (!receiver) return { kind: 'refused', reason: 'no normalized operation identifies the array a fixed-signature spread reads' }
         const element = widenedWithUndefined(context, fixedElement)
-        const expanded = mintPositionalSpreadReads(
-          context,
-          candidate,
-          receiver,
-          Array<StructuralTypeId>(Math.max(0, selected.parameters.length - position)).fill(element)
-        )
+        const elements: StructuralTypeId[] = []
+        for (let index = position; index < selected.parameters.length; index += 1) elements.push(element)
+        const expanded = mintPositionalSpreadReads(context, candidate, receiver, elements)
         operations.push(...expanded.operations)
         edges.push(...expanded.edges)
         for (const slot of expanded.positions) {

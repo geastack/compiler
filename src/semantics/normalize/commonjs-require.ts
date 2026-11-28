@@ -11,7 +11,10 @@ export interface CommonJsRequireCensus {
 }
 
 type DefinitionState = number
-type FunctionNode = ts.FunctionLikeDeclaration & { readonly body: ts.ConciseBody }
+// A function-like declaration `isFunctionNode` admitted, so one with a body.
+// The plain node union rather than an intersection stating `body`: the native
+// build has no view of an intersection over node classes.
+type FunctionNode = ts.FunctionLikeDeclaration
 type WrapperEffects = number
 type FunctionPrototypeMethod = 'call' | 'apply' | 'bind'
 
@@ -214,8 +217,7 @@ const constantTruthiness = (expression: ts.Expression): boolean | null => {
 
 const isFunctionNode = (node: ts.Node): node is FunctionNode => {
   if (!ts.isFunctionLike(node)) return false
-  const bodyBearing = node as ts.FunctionLikeDeclaration & { readonly body?: ts.ConciseBody }
-  return bodyBearing.body !== undefined
+  return (node as ts.FunctionLikeDeclaration).body !== undefined
 }
 
 const staticPropertyName = (node: ts.PropertyName | ts.Expression): string | null => {
@@ -411,7 +413,7 @@ function functionValuesOf(
   const node = unwrapExpression(expression)
   // A function literal never recurses, so it can never be re-entered while
   // active: answering it before the guard is the same answer without a set.
-  if (ts.isFunctionExpression(node) || ts.isArrowFunction(node)) return { functions: new Set([node]), unknown: false }
+  if (ts.isFunctionExpression(node) || ts.isArrowFunction(node)) return { functions: new Set<FunctionNode>([node]), unknown: false }
   const activeNodes = guardOf(traversal.functionNodes, deep ? 1 : 0)
   if (activeNodes.has(node)) return { functions: new Set(), unknown: true }
   activeNodes.add(node)
@@ -450,7 +452,7 @@ function functionValuesOf(
         if (key !== null) {
           for (const property of receiver.properties) {
             if (ts.isSpreadAssignment(property) || staticPropertyName(property.name) !== key) continue
-            if (isFunctionNode(property)) return { functions: new Set([property]), unknown: false }
+            if (isFunctionNode(property)) return { functions: new Set<FunctionNode>([property]), unknown: false }
             if (ts.isPropertyAssignment(property)) return functionValuesOf(property.initializer, context, deep, traversal)
             if (ts.isShorthandPropertyAssignment(property)) return shorthandFunctionValuesOf(property, context, deep, traversal)
           }
@@ -603,8 +605,8 @@ function functionPrototypeReceiversOf(
 function unknownTaintedMethodOrigin(
   expression: ts.Expression,
   context: AnalysisContext,
-  activeSymbols: Set<ts.Symbol> = new Set(),
-  activeNodes: Set<ts.Node> = new Set()
+  activeSymbols: Set<ts.Symbol> = new Set<ts.Symbol>(),
+  activeNodes: Set<ts.Node> = new Set<ts.Node>()
 ): boolean {
   const node = unwrapExpression(expression)
   if (activeNodes.has(node)) return true
@@ -726,8 +728,8 @@ const containerRootSymbol = (expression: ts.Expression, context: AnalysisContext
 const isStandardFunctionPrototypeObject = (
   expression: ts.Expression,
   context: AnalysisContext,
-  seenSymbols: Set<ts.Symbol> = new Set(),
-  seenNodes: Set<ts.Node> = new Set()
+  seenSymbols: Set<ts.Symbol> = new Set<ts.Symbol>(),
+  seenNodes: Set<ts.Node> = new Set<ts.Node>()
 ): boolean => {
   const node = unwrapExpression(expression)
   if (seenNodes.has(node)) return false
@@ -935,8 +937,8 @@ function functionPrototypeMethodsIn(
   expression: ts.Expression,
   context: AnalysisContext,
   deep: boolean,
-  seenSymbols: Set<ts.Symbol> = new Set(),
-  seenNodes: Set<ts.Node> = new Set()
+  seenSymbols: Set<ts.Symbol> = new Set<ts.Symbol>(),
+  seenNodes: Set<ts.Node> = new Set<ts.Node>()
 ): ReadonlySet<FunctionPrototypeMethod> {
   const node = unwrapExpression(expression)
   if (seenNodes.has(node)) return new Set()
@@ -1526,12 +1528,15 @@ const analyzeStatement = (node: ts.Statement, state: DefinitionState, context: A
 }
 
 const analyzeFunction = (node: FunctionNode, state: DefinitionState, context: AnalysisContext): Completion => {
-  if (ts.isBlock(node.body)) return analyzeStatements(node.body.statements, state, context)
-  const result = evaluateExpression(node.body, state, context)
-  const resolution = functionValuesOf(node.body, context, true)
+  const body = node.body
+  // Unreachable: `isFunctionNode` admits only function-likes with a body.
+  if (body === undefined) return completion(state)
+  if (ts.isBlock(body)) return analyzeStatements(body.statements, state, context)
+  const result = evaluateExpression(body, state, context)
+  const resolution = functionValuesOf(body, context, true)
   for (const fn of resolution.functions) context.returnedFunctions?.add(fn)
   if (resolution.unknown && context.returnedFunctionsUnknown) context.returnedFunctionsUnknown.value = true
-  deferFunctionValues(node.body, result, context)
+  deferFunctionValues(body, result, context)
   return { ...completion(unreachable), returned: result }
 }
 
@@ -1580,7 +1585,7 @@ const requireStatusOf = (
   requireWriters: ReadonlySet<ts.SourceFile>,
   reads: ReadonlyMap<ts.Identifier, DefinitionState>
 ): CommonJsRequireCensus['statusOf'] => {
-  const statusOf = (expression: ts.Expression, seen: Set<ts.Symbol> = new Set()): CommonJsRequireStatus => {
+  const statusOf = (expression: ts.Expression, seen: Set<ts.Symbol> = new Set<ts.Symbol>()): CommonJsRequireStatus => {
     const node = unwrapExpression(expression)
     if (!ts.isIdentifier(node)) return 'ordinary'
     const identityAtNode = identity.classify(node)
@@ -1932,7 +1937,14 @@ export const createCommonJsRequireTargetCensus = (
   if (globals.size === 0) return { statusOf: () => 'ordinary' }
   const implementationFiles = files.filter((file) => !file.isDeclarationFile)
   if (implementationFiles.some((file) => canAliasWrapperCells(file) || mayWriteRequireCell(file))) return null
-  return { statusOf: requireStatusOf(checker, createCommonJsWrapperIdentity(checker, files, globals), new Set(), new Map()) }
+  return {
+    statusOf: requireStatusOf(
+      checker,
+      createCommonJsWrapperIdentity(checker, files, globals),
+      new Set<ts.SourceFile>(),
+      new Map<ts.Identifier, DefinitionState>()
+    )
+  }
 }
 
 /** What a checker-authenticated static `require( 'x' )` does when it runs. */

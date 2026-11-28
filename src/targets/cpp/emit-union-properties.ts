@@ -1,5 +1,5 @@
-import type { Representation } from '../../representation/model.js'
-import { dictionaryKeyDomainOf, representationKey } from '../../representation/model.js'
+import type { Ownership, Representation } from '../../representation/model.js'
+import { absenceCarrier, dictionaryKeyDomainOf, representationKey } from '../../representation/model.js'
 import { typedArrayUnionOnly } from '../../representation/host-templates.js'
 import type { IrValueId } from '../../identity/ids.js'
 import type { DefineOwnPropertyOperation, GetOperation, IrBody, IrOperand, IrOperation, SetOperation } from '../../ir/model.js'
@@ -99,9 +99,22 @@ export const deferredTypedArrayUnionMethodClaim = (
  * members and accessor dispatch remain explicit refusals.
  */
 
-/** Receiver kinds with a declared native field layout. */
-const addressableArmKind = (kind: Representation['kind']): boolean =>
-  kind === 'record' || kind === 'record-with-index' || kind === 'native-record-ref' || kind === 'class-ref'
+/**
+ * The ownership of a receiver kind with a declared native field layout, or
+ * null for every other kind. Narrowing by `kind` (rather than casting) is what
+ * proves the `.ownership` read.
+ */
+const addressableArmOwnership = (arm: Representation): Ownership | null => {
+  switch (arm.kind) {
+    case 'record':
+    case 'record-with-index':
+    case 'native-record-ref':
+    case 'class-ref':
+      return arm.ownership
+    default:
+      return null
+  }
+}
 
 /** Native object carriers whose ordinary expando properties live in the runtime sidecar. */
 const sidecarArm = nativeExpandoSidecarOf
@@ -145,7 +158,8 @@ const armFieldSite = (
   key: string,
   write = false
 ): { readonly text: string; readonly representation: Representation; readonly presence: string | null } | null => {
-  if (!addressableArmKind(arm.kind)) return null
+  const ownership = addressableArmOwnership(arm)
+  if (ownership === null) return null
   if (arm.kind === 'class-ref') {
     const member = classMemberOf(ctx.classes, arm.declaration, key)
     // A method some write shadows with an own property (an HTTP framework's routers'
@@ -159,10 +173,6 @@ const armFieldSite = (
   }
   const declared = declaredFieldRepresentationOf(ctx.deriver, arm, key, ctx.classes)
   if (declared === null) return null
-  // Every addressable kind above carries `.ownership` (records.ts's own
-  // `declaredFieldRepresentationOf` reads the identical three kinds), so this
-  // narrowing is safe.
-  const ownership = (arm as Extract<Representation, { kind: 'record' | 'record-with-index' | 'native-record-ref' | 'class-ref' }>).ownership
   const accessor = memberAccessOperator(ownership)
   const field = declaredRecordFieldOf(ctx.deriver, arm, key, ctx.classes)
   const nativeBase = nativeBaseFieldOf(ctx.deriver, arm, key, ctx.classes)
@@ -425,7 +435,7 @@ export const unionPropertyLeaves = (representation: Representation, text: string
     const absentTest = test === 'true' ? `!${text}.has_value()` : `${test} && !${text}.has_value()`
     return [
       ...unionPropertyLeaves(representation.payload, `(*${text})`, presentTest),
-      { representation: { kind: representation.absence }, text, test: absentTest }
+      { representation: absenceCarrier(representation.absence), text, test: absentTest }
     ]
   }
   return [{ representation, text, test }]
@@ -1293,10 +1303,7 @@ const unionLeafSetText = (
     const created =
       site.presence !== null && tracksKeyOrder(ctx, leaf.representation) ? `${declaredFieldCreationText(leaf.text, key)} ` : ''
     const writes = `${created}${site.text} = ${converted};${site.presence === null ? '' : ` ${site.presence} = true;`}`
-    const ownership = addressableArmKind(leaf.representation.kind)
-      ? (leaf.representation as Extract<Representation, { kind: 'record' | 'record-with-index' | 'native-record-ref' | 'class-ref' }>)
-          .ownership
-      : 'owned'
+    const ownership = addressableArmOwnership(leaf.representation) ?? 'owned'
     return ownership === 'shared-refcount' && ctx.nativeIntegrityRestricted.restricts(leaf.representation)
       ? `if (gea::nativeOwnFieldsWritable(${leaf.text})) { ${writes} }`
       : writes

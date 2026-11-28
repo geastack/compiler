@@ -1026,9 +1026,9 @@ export const wellKnownSymbolDeclarationsOf = (
   files: readonly ts.SourceFile[]
 ): ReadonlyMap<DeclarationId, string> => {
   const anchor = files[0]
-  if (!anchor) return new Map()
+  if (!anchor) return new Map<DeclarationId, string>()
   const symbol = checker.resolveName('SymbolConstructor', anchor, ts.SymbolFlags.Interface, false)
-  if (!symbol) return new Map()
+  if (!symbol) return new Map<DeclarationId, string>()
   const declared = checker.getDeclaredTypeOfSymbol(symbol)
   const result = new Map<DeclarationId, string>()
   for (const member of declared.getProperties()) {
@@ -1123,19 +1123,22 @@ export const arrayIteratorDeclarationOf = (
  * assumed: a `Map<K, U>` stored where `ReadonlyMap<K, V>` is declared, with
  * `U` narrower than `V`, is the same object read through a view that widens
  * each value it hands out (`gea::Map::readOnlyView`), never a copy -- a copy
- * would lose every later write to the source. `ReadonlySet` stays absent: it
- * has no view yet, so a program naming one still refuses by name.
+ * would lose every later write to the source. `ReadonlySet` is the `set`
+ * family's read half the same way. It has no widening view yet, so a
+ * `Set<U>` stored where `ReadonlySet<V>` is declared shares the object only
+ * when `U` and `V` are one C++ type, and otherwise refuses by name.
  */
 const keyedCollectionFamilies: ReadonlyMap<string, KeyedCollectionFamily> = new Map([
   ['Map', 'map'],
   ['ReadonlyMap', 'map'],
   ['Set', 'set'],
+  ['ReadonlySet', 'set'],
   ['WeakMap', 'weak-map'],
   ['WeakSet', 'weak-set']
 ])
 
 /** The keyed-collection interfaces that are read-only views over their family's storage -- see `keyedCollectionFamilies`. */
-const readOnlyKeyedCollectionNames: ReadonlySet<string> = new Set(['ReadonlyMap'])
+const readOnlyKeyedCollectionNames: ReadonlySet<string> = new Set(['ReadonlyMap', 'ReadonlySet'])
 
 /**
  * The declaration identity of each standard keyed-collection interface this
@@ -1354,7 +1357,7 @@ const bindHostObjectClosure = (
   input: HostProtocolInput,
   census: HostCensus,
   seeds: readonly ts.Type[],
-  seedPaths: ReadonlyMap<ts.Type, string> = new Map()
+  seedPaths: ReadonlyMap<ts.Type, string> = new Map<ts.Type, string>()
 ): void => {
   const pending = [...seeds]
   const visited = new Set<ts.Type>()

@@ -552,7 +552,12 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   // call-site renderer verifies the concrete typed-array element carrier and
   // names the one native operation; methods omitted here fail at the property.
   ...['load', 'store', 'add', 'sub', 'and', 'or', 'xor', 'exchange', 'compareExchange', 'isLockFree', 'wait', 'notify'].map(
-    (member) => [`Atomics.${member}`, { kind: 'method', emit: '/* atomics call-site renderer */', arity: 'call-site' }] as const
+    // Typed entries rather than `as const`: a literal tuple is a record the
+    // table's `[string, HostMember]` element is not.
+    (member): [string, HostMember] => [
+      `Atomics.${member}`,
+      { kind: 'method', emit: '/* atomics call-site renderer */', arity: 'call-site' }
+    ]
   ),
   // `console`. Only `log`/`error` are claimed -- the two members any real
   // corpus program actually calls (`citations.md` section 2a) -- not

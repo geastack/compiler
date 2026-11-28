@@ -7,7 +7,8 @@ import {
   deferredIntrinsicProtocolLedgerOf,
   intrinsicProtocolRequirementKind,
   type DeferredIntrinsicProtocolLedger,
-  type IntrinsicProtocolRequirement
+  type IntrinsicProtocolRequirement,
+  captureAnswer
 } from '../deferred-intrinsic-protocols.js'
 import { intrinsicPrototypeKeyIsAbsent } from '../intrinsic-prototype.js'
 import { sourceGlobalCallableBindingIsClosed } from './source-global-binding.js'
@@ -25,7 +26,7 @@ export const sourceCallableObjectOf = (
   checker: ts.TypeChecker,
   flow: ValueFlowIndex,
   expression: ts.Expression,
-  seen: ReadonlySet<ts.Node> = new Set()
+  seen: ReadonlySet<ts.Node> = new Set<ts.Node>()
 ): SourceCallableObject | null => {
   const value = unwrapErasedExpression(expression)
   if (seen.has(value)) return null
@@ -146,7 +147,7 @@ const callableOwnerWriteIndexOf = (checker: ts.TypeChecker, flow: ValueFlowIndex
   const scriptScope = closedScriptScopeOf(flow)
   const commonJs = sourceCommonJsExportIdentitiesOf(flow)
   let variants = callableOwnerWriteIndexes.get(flow)
-  if (!variants) callableOwnerWriteIndexes.set(flow, (variants = new Map()))
+  if (!variants) callableOwnerWriteIndexes.set(flow, (variants = new Map<boolean, CallableOwnerWriteIndex>()))
   const known = variants.get(capturing)
   if (known && known.checker === checker && known.ledger === ledger && known.scriptScope === scriptScope && known.commonJs === commonJs)
     return known
@@ -160,11 +161,11 @@ const callableOwnerWriteIndexOf = (checker: ts.TypeChecker, flow: ValueFlowIndex
     if (!access) continue
     let owner: SourceCallableObject | null
     if (capturing && ledger) {
-      const resolved = ledger.capture(() => sourceCallableObjectOf(checker, flow, access.expression))
+      const resolved = captureAnswer(ledger, () => sourceCallableObjectOf(checker, flow, access.expression))
       owner = resolved.value
       for (const requirement of resolved.requirements) {
         let kinds = filed.get(requirement.location)
-        if (!kinds) filed.set(requirement.location, (kinds = new Set()))
+        if (!kinds) filed.set(requirement.location, (kinds = new Set<string>()))
         const kind = `${requirement.intrinsic}\0${intrinsicProtocolRequirementKind(requirement) ?? ''}`
         if (kinds.has(kind)) continue
         kinds.add(kind)
@@ -260,9 +261,9 @@ export const sourceCallableOwnDataMayBeWrittenOf = (
   key: string
 ): boolean => {
   let owners = callableMutationCandidates.get(flow)
-  if (!owners) callableMutationCandidates.set(flow, (owners = new Map()))
+  if (!owners) callableMutationCandidates.set(flow, (owners = new Map<SourceCallableObject, Map<string, boolean>>()))
   let keys = owners.get(root)
-  if (!keys) owners.set(root, (keys = new Map()))
+  if (!keys) owners.set(root, (keys = new Map<string, boolean>()))
   const known = keys.get(key)
   if (known !== undefined) return known
   const found = callableOwnDataMayBeWritten(checker, flow, root, key)
@@ -315,9 +316,10 @@ export const sourceCallableOwnDataWriteOf = (
   read?: ts.Node
 ): SourceCallableDataWrite | null => {
   let inventory = callableDataInventories.get(flow)
-  if (!inventory) callableDataInventories.set(flow, (inventory = new Map()))
+  if (!inventory)
+    callableDataInventories.set(flow, (inventory = new Map<SourceCallableObject, Map<string, readonly SourceCallableDataWrite[] | null>>()))
   let keys = inventory.get(root)
-  if (!keys) inventory.set(root, (keys = new Map()))
+  if (!keys) inventory.set(root, (keys = new Map<string, readonly SourceCallableDataWrite[] | null>()))
   let writes = keys.get(key)
   if (writes === undefined) {
     const found: SourceCallableDataWrite[] = []

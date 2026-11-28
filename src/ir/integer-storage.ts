@@ -502,6 +502,16 @@ interface BodyScan {
 
 const isNumberScalar = (representation: Representation): boolean => representation.kind === 'scalar' && representation.domain === 'number'
 
+/** One body's narrowing and the slot answers it was derived under, in `slotsReadBy` order. */
+interface RememberedNarrowing {
+  readonly answer: IntegerNarrowing
+  readonly integral: readonly boolean[]
+  readonly magnitudes: readonly (IntegerMagnitude | undefined)[]
+}
+
+const sameStoredMagnitude = (left: IntegerMagnitude | undefined, right: IntegerMagnitude | undefined): boolean =>
+  right === undefined ? left === undefined : sameMagnitude(left, right)
+
 const sameMagnitude = (left: IntegerMagnitude | undefined, right: IntegerMagnitude): boolean => {
   if (left === undefined || left.kind !== right.kind) return false
   if (left.kind === 'bounded' && right.kind === 'bounded') return left.limit === right.limit
@@ -553,7 +563,11 @@ const selfSumOf = (scan: BodyScan, slot: string, value: IrValueId): boolean => {
   return scan.reads.get(sum.left) === slot && scan.reads.get(sum.right) === slot
 }
 
-const emptyFacts: IntegerStorageFacts = { reads: new Map(), integral: new Set(), magnitudes: new Map() }
+const emptyFacts: IntegerStorageFacts = {
+  reads: new Map<IrValueId, string>(),
+  integral: new Set<string>(),
+  magnitudes: new Map<string, IntegerMagnitude>()
+}
 
 export const emptyIntegerStorageCensus: IntegerStorageCensus = {
   integerCells: new Set(),
@@ -787,7 +801,8 @@ const scanBody = (body: IrBody, question: IntegerStorageQuestion, disqualified: 
 
   const account = (operation: IrNonTerminatorOperation): void => {
     const result = resultOfIrOperation(operation)
-    const roles = [...operandsOfIrOperation(operation), ...(result ? [{ value: result.id, representation: result.representation }] : [])]
+    const roles: IrOperand[] = [...operandsOfIrOperation(operation)]
+    if (result) roles.push({ value: result.id, representation: result.representation })
     // What each box in this body PUTS AT RISK, rather than the fact that the
     // body boxes at all -- see `boxedStructs` and `boxOpaque`.
     for (const operand of roles) {
@@ -819,41 +834,42 @@ const scanBody = (body: IrBody, question: IntegerStorageQuestion, disqualified: 
     if (operation.kind === 'call') {
       const declaration = cellReads.get(unwrapCallable(operation.callee.value))
       const contracts = declaration === undefined ? undefined : question.nativeCallbackParameters?.get(declaration)
-      for (const [ordinal, parameters] of contracts ?? []) {
-        const argument = operation.arguments[ordinal]
-        if (argument === undefined) continue
-        const owners = calleeOwners(argument)
-        if (owners === null) continue
-        contractedArguments.add(ordinal)
-        for (const owner of owners) {
-          nativeCallbackOwners.add(owner)
-          // A callback may bind more parameters than the native signature supplies.
-          // Those incoming writes are not authenticated by this contract.
-          const target = question.bodies.find((candidate) => String(candidate.sourceOwner) === owner)
-          if (target !== undefined)
-            for (const block of target.blocks.values())
-              for (const parameter of block.operations) {
-                if (parameter.kind === 'parameter' && parameter.ordinal >= parameters.length)
-                  disqualified.add(integerParameterSlot(target.sourceOwner, parameter.ordinal))
+      if (contracts)
+        for (const [ordinal, parameters] of contracts) {
+          const argument = operation.arguments[ordinal]
+          if (argument === undefined) continue
+          const owners = calleeOwners(argument)
+          if (owners === null) continue
+          contractedArguments.add(ordinal)
+          for (const owner of owners) {
+            nativeCallbackOwners.add(owner)
+            // A callback may bind more parameters than the native signature supplies.
+            // Those incoming writes are not authenticated by this contract.
+            const target = question.bodies.find((candidate) => String(candidate.sourceOwner) === owner)
+            if (target !== undefined)
+              for (const block of target.blocks.values())
+                for (const parameter of block.operations) {
+                  if (parameter.kind === 'parameter' && parameter.ordinal >= parameters.length)
+                    disqualified.add(integerParameterSlot(target.sourceOwner, parameter.ordinal))
+                }
+            parameters.forEach((magnitude, parameter) => {
+              const slot = integerParameterSlot(owner as FunctionId, parameter)
+              if (
+                magnitude === null ||
+                magnitude.kind !== 'bounded' ||
+                !Number.isFinite(magnitude.limit) ||
+                magnitude.limit < 0 ||
+                magnitude.limit > 2 ** 53
+              ) {
+                disqualified.add(slot)
+                return
               }
-          parameters.forEach((magnitude, parameter) => {
-            const slot = integerParameterSlot(owner as FunctionId, parameter)
-            if (
-              magnitude === null ||
-              magnitude.kind !== 'bounded' ||
-              !Number.isFinite(magnitude.limit) ||
-              magnitude.limit < 0 ||
-              magnitude.limit > 2 ** 53
-            ) {
-              disqualified.add(slot)
-              return
-            }
-            const writes = nativeWrites.get(slot) ?? []
-            writes.push(magnitude)
-            nativeWrites.set(slot, writes)
-          })
+              const writes = nativeWrites.get(slot) ?? []
+              writes.push(magnitude)
+              nativeWrites.set(slot, writes)
+            })
+          }
         }
-      }
     }
     const escapingOperands =
       operation.kind === 'call'
@@ -1158,11 +1174,51 @@ export const integerStorageCensusOf = (question: IntegerStorageQuestion): Intege
       return { ...base, reads, integral: new Set([...settledSlots, ...checked]), magnitudes: checkedMagnitudes }
     }
   })
-  const unsettled = censusFrom(new Set(), new Set(), new Map(), new Map())
+  const unsettled = censusFrom(
+    new Set<string>(),
+    new Set<string>(),
+    new Map<string, IntegerMagnitude>(),
+    new Map<string, IntegerStorageFacts>()
+  )
+
+  // A body's narrowing reads the census only through the slots its own reads
+  // name (`storage.reads` -> `integral`/`magnitudes`), so a round re-derives
+  // just the bodies one of whose slots moved. Every round used to re-run every
+  // body, and the magnitude pass alone may take one round per slot.
+  const slotsReadBy = new Map<BodyScan, readonly string[]>()
+  const remembered = new Map<IrBody, RememberedNarrowing>()
+  const narrowingOf = (
+    body: IrBody,
+    scan: BodyScan,
+    integral: ReadonlySet<string>,
+    magnitudes: ReadonlyMap<string, IntegerMagnitude>
+  ): IntegerNarrowing => {
+    let slots = slotsReadBy.get(scan)
+    if (slots === undefined) {
+      slots = [...new Set(scan.reads.values())]
+      slotsReadBy.set(scan, slots)
+    }
+    const previous = remembered.get(body)
+    if (previous !== undefined) {
+      let same = true
+      for (let index = 0; index < slots.length && same; index += 1) {
+        const slot = slots[index]!
+        same = integral.has(slot) === previous.integral[index] && sameStoredMagnitude(magnitudes.get(slot), previous.magnitudes[index])
+      }
+      if (same) return previous.answer
+    }
+    const answer = narrowableIntegersOf(body, withCells({ reads: scan.reads, integral, magnitudes }))
+    remembered.set(body, {
+      answer,
+      integral: slots.map((slot) => integral.has(slot)),
+      magnitudes: slots.map((slot) => magnitudes.get(slot))
+    })
+    return answer
+  }
 
   // A slot nothing writes is one nothing can prove, so the candidates are
   // exactly the written ones -- a read-only member keeps its double.
-  const settle = (guardedSlots: ReadonlySet<string>): IntegerStorageCensus | ReadonlySet<string> => {
+  const settle = (guardedSlots: ReadonlySet<string>): IntegerStorageCensus => {
     let integral = new Set([...bySlot.keys()].filter((slot) => admits(slot) || guardedSlots.has(slot)))
     if (integral.size === 0) return unsettled
 
@@ -1173,7 +1229,7 @@ export const integerStorageCensusOf = (question: IntegerStorageQuestion): Intege
         const owner = String(body.sourceOwner)
         const scan = scans.get(owner)
         if (scan === undefined || (scan.reads.size === 0 && scan.writes.size === 0 && scan.returns === null)) continue
-        answers.set(owner, narrowableIntegersOf(body, withCells({ reads: scan.reads, integral, magnitudes })))
+        answers.set(owner, narrowingOf(body, scan, integral, magnitudes))
       }
       return answers
     }
@@ -1198,7 +1254,7 @@ export const integerStorageCensusOf = (question: IntegerStorageQuestion): Intege
     // exactly the case where a `long long` and a double stop agreeing.
     let settled = false
     while (!settled && integral.size > 0) {
-      magnitudes = new Map()
+      magnitudes = new Map<string, IntegerMagnitude>()
       let changed = new Set<string>()
       // Acyclic propagation can require one round per slot. A fixed budget
       // rejected an entire application once unrelated data flow exceeded it.
@@ -1288,10 +1344,8 @@ export const integerStorageCensusOf = (question: IntegerStorageQuestion): Intege
     // Every other slot settled on these reads being integral, so dropping one
     // here would leave a narrowed member written from a double. Settle again
     // without them instead; the set only shrinks, so this ends.
-    if (unbounded.size > 0) return new Set([...guardedSlots].filter((slot) => !unbounded.has(slot)))
+    if (unbounded.size > 0) return settle(new Set<string>([...guardedSlots].filter((slot) => !unbounded.has(slot))))
     return censusFrom(slots, settledSlots, magnitudes, facts)
   }
-  let settledCensus = settle(guardedCandidates)
-  while (settledCensus instanceof Set) settledCensus = settle(settledCensus)
-  return settledCensus as IntegerStorageCensus
+  return settle(guardedCandidates)
 }

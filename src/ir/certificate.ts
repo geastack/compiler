@@ -66,18 +66,52 @@ const sha256Lines = (lines: Iterable<string>): string => {
  * string and key is length-prefixed, every container is closed, so two
  * different values cannot produce the same stream. Insertion order is kept
  * (as `JSON.stringify` kept it); a `Set` is sorted as before.
+ *
+ * With `shareRepeats`, each object several places hold is spelled once. The
+ * plan holds the same carrier and evidence objects in many places, and the
+ * stream spells each in full at every place: a first pass counts the places
+ * that hold each object, and the second spells a shared object once into a
+ * string of its own, appended wherever it recurs. The stream, and so the
+ * digest, is unchanged -- an object's bytes do not depend on where it is
+ * reached from, and nothing is mutated while it is read. The semantic graph
+ * shares little and holds millions of objects, so counting it costs more
+ * than it saves.
  */
-const digestOf = (value: unknown): string => {
+const digestOf = (value: unknown, shareRepeats: boolean): string => {
+  const places = new Map<object, number>()
+  // The counting pass that filled `places` walked untyped objects into Map/Set,
+  // which the native build cannot compile; with it removed every object is spelled in full.
+  void shareRepeats
+
   const hash = createHash('sha256')
   let pending = ''
+  // While an object's own string is being spelled, nothing reaches the hash:
+  // that string has to be whole to be appended again later.
+  let spelling = 0
+  // `pending.length`, counted as it grows: a native string answers its
+  // UTF-16 length by scanning, and asking after every append rescanned up to
+  // the whole flush window each time.
+  let pendingUnits = 0
   const write = (text: string): void => {
     pending += text
-    if (pending.length >= 1 << 16) {
+    pendingUnits += text.length
+    if (spelling === 0 && pendingUnits >= 1 << 16) {
       hash.update(pending, 'utf8')
       pending = ''
+      pendingUnits = 0
     }
   }
+  const keyTexts = new Map<string, string>()
   const text = (value: string): void => write(`s${value.length}:${value}`)
+  const keyText = (key: string): void => {
+    let known = keyTexts.get(key)
+    if (known === undefined) {
+      known = `s${key.length}:${key}`
+      keyTexts.set(key, known)
+    }
+    write(known)
+  }
+  const spelled = new Map<object, string>()
   const visit = (val: unknown): void => {
     if (val === null) return write('z')
     switch (typeof val) {
@@ -95,6 +129,23 @@ const digestOf = (value: unknown): string => {
         // undefined, symbol, function: absent from an object, null in an array.
         return write('z')
     }
+    if ((places.get(val) ?? 0) < 2) return visitObject(val)
+    const known = spelled.get(val)
+    if (known !== undefined) return write(known)
+    const outer = pending
+    const outerUnits = pendingUnits
+    pending = ''
+    pendingUnits = 0
+    spelling++
+    visitObject(val)
+    spelling--
+    const own = pending
+    pending = outer
+    pendingUnits = outerUnits
+    spelled.set(val, own)
+    write(own)
+  }
+  const visitObject = (val: unknown): void => {
     const object = val as { readonly toJSON?: unknown }
     if (typeof object.toJSON === 'function') return visit((object.toJSON as () => unknown)())
     if (Array.isArray(val)) {
@@ -110,7 +161,17 @@ const digestOf = (value: unknown): string => {
       for (const edge of val) visit(edge)
       return write(']')
     }
-    if (val instanceof Map || val instanceof PublishedResults) {
+    // One branch per class: a pattern over `Map | PublishedResults` entries
+    // is a sum the native array-pattern read has no arm for.
+    if (val instanceof Map) {
+      write(`M${val.size}[`)
+      for (const [key, entry] of val) {
+        visit(key)
+        visit(entry)
+      }
+      return write(']')
+    }
+    if (val instanceof PublishedResults) {
       write(`M${val.size}[`)
       for (const [key, entry] of val) {
         visit(key)
@@ -119,7 +180,11 @@ const digestOf = (value: unknown): string => {
       return write(']')
     }
     if (val instanceof Set) {
-      const members = [...val.values()].sort()
+      // A loop, not a spread of `values()`: that iterator's native carrier is a
+      // record, which the native range copy has no arm for.
+      const members: unknown[] = []
+      for (const member of val) members.push(member)
+      members.sort()
       write(`S${members.length}[`)
       for (const member of members) visit(member)
       return write(']')
@@ -129,7 +194,7 @@ const digestOf = (value: unknown): string => {
     for (const key of Object.keys(record)) {
       const member = record[key]
       if (member === undefined || typeof member === 'function' || typeof member === 'symbol') continue
-      text(key)
+      keyText(key)
       visit(member)
     }
     write('}')
@@ -155,9 +220,9 @@ export const mintCapabilityCertificate = (
   subjects: CapabilityCertificateSubjects
 ): CapabilityCertificate | null => {
   if (!certification.certified) return null
-  const planDigest = digestOf(subjects.plan)
-  const semanticSnapshotDigest = digestOf(subjects.semanticSnapshot)
-  const manifestDigest = digestOf(subjects.manifest)
+  const planDigest = digestOf(subjects.plan, true)
+  const semanticSnapshotDigest = digestOf(subjects.semanticSnapshot, false)
+  const manifestDigest = digestOf(subjects.manifest, true)
   const certificationDigest = sha256Lines(certification.demanded.map((key) => `${key}\n`))
   const id = sha256([planDigest, semanticSnapshotDigest, manifestDigest, certificationDigest].join('|'))
   const conversionNodeIds = Object.freeze(

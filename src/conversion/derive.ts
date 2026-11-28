@@ -41,7 +41,7 @@ export interface ConversionDerivationContext {
 
 export const createConversionDerivationContext = (registry: ConversionRuntimeRegistry): ConversionDerivationContext => ({
   registry,
-  inProgress: new Map()
+  inProgress: new Map<Representation, ConversionNodeId>()
 })
 
 /** Wraps an installed pair as `Atom`, or `never` when nothing is installed or the pair disagrees on domain. */
@@ -236,8 +236,8 @@ const deriveAt = (target: Representation, context: ConversionDerivationContext, 
       // installs no such classifier -- v1 spelled that route as
       // `gea_cpp_typed_js_map::from_dynamic_checked`, which is exactly the
       // boxed round trip this compiler declines to build. The one exception
-      // is the all-dynamic Map, which needs no per-entry check at all -- see
-      // `dynamicMapViewMaterializer`.
+      // is the all-dynamic Map or Set, which needs no per-entry check at all --
+      // see `dynamicMapViewMaterializer`.
       // The round trip, exactly as `dictionary` takes it: a typed Map or Set
       // THIS program boxed comes back as itself, recognized by the payload
       // type `Value::box` recorded -- a tag check, an address check and a

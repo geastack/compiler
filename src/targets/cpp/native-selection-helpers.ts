@@ -37,7 +37,7 @@ export const nativeSelectionHelpers = (
   bodies: readonly IrBody[],
   census: ConversionCensus
 ): ReadonlyMap<ConversionNodeId, NativeSelectionHelper> => {
-  function* nodes(): Iterable<ConversionNode> {
+  function* nodes(): Generator<ConversionNode> {
     for (const body of bodies) {
       for (const block of body.blocks.values()) {
         for (const operation of allOperationsOf(block)) {

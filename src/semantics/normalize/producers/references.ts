@@ -728,7 +728,7 @@ const buildReference = (
   if (
     declaration !== null &&
     (context.hostSingletonBindings.has(declaration) || context.hostNamespaceBindings.has(declaration)) &&
-    (context.globalHostMutationTaint.has('*') || context.globalHostMutationTaint.has(declaration))
+    (context.globalHostMutationTaint.hasEntry('*') || context.globalHostMutationTaint.hasEntry(declaration))
   ) {
     return {
       kind: 'blocked',
@@ -751,7 +751,7 @@ const buildReference = (
     declaration !== null &&
     symbol?.valueDeclaration !== undefined &&
     isScriptGlobalObjectPropertyDeclaration(symbol.valueDeclaration) &&
-    (context.globalHostMutationTaint.has('*') || context.globalHostMutationTaint.has(declaration))
+    (context.globalHostMutationTaint.hasEntry('*') || context.globalHostMutationTaint.hasEntry(declaration))
   ) {
     return {
       kind: 'blocked',

@@ -3,7 +3,7 @@ import type { ConversionCensus } from '../conversion/nodes.js'
 import { nativeSumPlan } from '../conversion/native-sum.js'
 import { nativeTotalSelectionStepOf } from '../conversion/native-selection.js'
 import { nativePayloadTransportMatches } from '../conversion/native-payload-transport.js'
-import { representationKey, type Representation } from '../representation/model.js'
+import { absenceCarrier, representationKey, type Representation } from '../representation/model.js'
 import type { MergeLiveArmRebuildOperation } from './model.js'
 
 export interface NativeMergeTransport {
@@ -33,7 +33,7 @@ export const nativeMergeTransportOf = (
     nativeSumPlan(from, target) !== null || nativeTotalSelectionStepOf(from, target) !== null
   const sources = liveArms.map((index) => payload.arms[index]?.value)
   if (sources.some((arm) => !arm || !carried(arm))) return undefined
-  const absence = source.kind === 'optional' && sourceAbsenceLive ? ({ kind: source.absence } as const) : null
+  const absence = source.kind === 'optional' && sourceAbsenceLive ? absenceCarrier(source.absence) : null
   if (absence && !carried(absence)) return undefined
   return {
     source: representationKey(source),
@@ -81,7 +81,9 @@ export const nativeMergeTransportMatches = (
   )
     return false
   const needsAbsence = source.kind === 'optional' && operation.sourceAbsenceLive
-  return needsAbsence ? recipe.absence !== undefined && matches(recipe.absence, { kind: source.absence }) : recipe.absence === undefined
+  return needsAbsence
+    ? recipe.absence !== undefined && matches(recipe.absence, absenceCarrier(source.absence))
+    : recipe.absence === undefined
 }
 
 /** Avoiding reflection is weaker than retaining object identity: consume the actual selected payload proofs as well. */
@@ -100,6 +102,7 @@ export const nativeMergePayloadTransportMatches = (
       nativePayloadTransportMatches(payload.arms[arm.index]!.value, target, conversions.nodeById(arm.conversion))
     ) &&
     (recipe.absence === undefined ||
-      (source.kind === 'optional' && nativePayloadTransportMatches({ kind: source.absence }, target, conversions.nodeById(recipe.absence))))
+      (source.kind === 'optional' &&
+        nativePayloadTransportMatches(absenceCarrier(source.absence), target, conversions.nodeById(recipe.absence))))
   )
 }

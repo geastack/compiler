@@ -102,7 +102,7 @@ export const declaredBaseTypesOf = (checker: ts.TypeChecker, type: ts.Type): rea
     if (current.isClassOrInterface()) return current
     if ((current.flags & ts.TypeFlags.Object) === 0) return null
     if (((current as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) === 0) return null
-    const target = (current as ts.TypeReference).target
+    const target = (current as ts.TypeReference).target!
     return target !== current && target.isClassOrInterface() ? target : null
   }
 

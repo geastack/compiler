@@ -257,7 +257,13 @@ const layoutAnswerFor = (ctx: EmitContext, carrier: Representation, receiverText
     staticKey === null &&
     key.representation.kind === 'symbol' &&
     generatedSharedObjectCarrier(carrier) &&
-    !symbolKeyedMemberIsDeclared(ctx.classes, fields, carrier.kind === 'class-ref' ? carrier.declaration : null)
+    // Only the keys are passed: an array of record fields standing in for the
+    // callee's `{ key }[]` is a carrier change no native conversion makes.
+    !symbolKeyedMemberIsDeclared(
+      ctx.classes,
+      fields === null ? null : fields.map((field) => ({ key: field.key })),
+      carrier.kind === 'class-ref' ? carrier.declaration : null
+    )
   ) {
     const receiver = receiverText()
     const keyText = propertyKeyText(ctx, key, 'an "in" test with a symbol key on a native receiver')

@@ -104,7 +104,10 @@ export const absentClassArmRead = (
   key: string,
   result: Representation,
   classes: ReadonlyMap<DeclarationId, ClassLayout>
-): surface is Extract<Representation, { kind: 'class-ref' }> =>
+): boolean =>
+  // Not a `surface is class-ref` predicate: it also answers false FOR class
+  // arms, and a predicate's false branch would narrow every caller's surface
+  // to "not a class" -- a narrowing the native build enforces by selection.
   surface.kind === 'class-ref' &&
   (unionOf(receiver)?.arms.some((arm) => arm.value === surface) ?? false) &&
   holdsAbsent(result) &&
@@ -125,7 +128,11 @@ const absentClassArmsRequired = (
   if (holdsAbsentPrimitive(result)) return []
   const arms: DeclarationId[] = []
   for (const arm of unionOf(receiver)?.arms ?? [])
-    if (absentClassArmRead(receiver, arm.value, key, result, classes) && !arms.includes(arm.value.declaration))
+    if (
+      arm.value.kind === 'class-ref' &&
+      absentClassArmRead(receiver, arm.value, key, result, classes) &&
+      !arms.includes(arm.value.declaration)
+    )
       arms.push(arm.value.declaration)
   return arms
 }
@@ -164,7 +171,7 @@ const absentClassArmsOf = (
   const arms: DeclarationId[] = []
   for (const arm of union.arms) {
     const surface = arm.value
-    if (!absentClassArmRead(receiver, surface, key, operation.result.representation, classes)) continue
+    if (surface.kind !== 'class-ref' || !absentClassArmRead(receiver, surface, key, operation.result.representation, classes)) continue
     if (withoutDynamicProtocol(exposure, surface.declaration) && !arms.includes(surface.declaration)) arms.push(surface.declaration)
   }
   return arms

@@ -1,7 +1,7 @@
 import type { FunctionId, IrValueId } from '../../identity/ids.js'
 import { borrowWorthy, dynamicFormalIsReadOnly, readonlyBorrowFormalsOf, type PrivateBorrowCell } from '../../ir/borrowed-call-arguments.js'
 import { allOperationsOf, type IrBody, type IrOperand } from '../../ir/model.js'
-import { DyingArgumentSet } from '../../ir/transfer.js'
+import type { SunkStore } from '../../ir/transfer.js'
 import { representationKey, type CallableAbi } from '../../representation/model.js'
 import { cppBodyName } from './types.js'
 
@@ -212,11 +212,19 @@ export const borrowForwardedArgumentsOf = (
   return forwarded
 }
 
-/** `dying` without `released`, keeping the sunk stores of the reads that remain. */
+/** `dying` without `released`. */
 export const withoutDyingArguments = (dying: ReadonlySet<IrValueId>, released: ReadonlySet<IrValueId>): ReadonlySet<IrValueId> => {
-  const kept = new DyingArgumentSet()
+  const kept = new Set<IrValueId>()
   for (const value of dying) if (!released.has(value)) kept.add(value)
-  if (dying instanceof DyingArgumentSet)
-    for (const [value, store] of dying.sunkStores) if (!released.has(value)) kept.sunkStores.set(value, store)
+  return kept
+}
+
+/** The sunk stores of the reads `withoutDyingArguments` keeps. */
+export const withoutSunkStores = (
+  stores: ReadonlyMap<IrValueId, SunkStore>,
+  released: ReadonlySet<IrValueId>
+): ReadonlyMap<IrValueId, SunkStore> => {
+  const kept = new Map<IrValueId, SunkStore>()
+  for (const [value, store] of stores) if (!released.has(value)) kept.set(value, store)
   return kept
 }

@@ -9,7 +9,7 @@ import type { Representation } from '../representation/model.js'
 import { nativeLogicalReceiverProtocolOf, nativeLogicalReceiverProtocolSupported } from '../representation/native-logical-receiver.js'
 import { hostReceiverProtocolOf } from '../representation/host-templates.js'
 import { hostMemberOf, type HostSpellings } from '../targets/cpp/host/host-members.js'
-import { nativeCallableFlowOf } from './callable-class-flow.js'
+import { ignoredLogicalReceiverValuesOf } from './callable-class-flow.js'
 import type { BindCallableOperation, GetOperation, IrBlock, IrBlockId, IrBody, IrNonTerminatorOperation, IrOperation } from './model.js'
 import { genericNativeLogicalReceiverOf } from './call-entry.js'
 
@@ -62,12 +62,12 @@ const rewrite = (
   operation: (operation: IrOperation) => IrOperation
 ): ReadonlyMap<PhysicalBodyId, IrBody> =>
   new Map(
-    [...bodies].map(([id, body]) => [
+    [...bodies].map(([id, body]): [PhysicalBodyId, IrBody] => [
       id,
       {
         ...body,
         blocks: new Map(
-          [...body.blocks].map(([blockId, block]) => [
+          [...body.blocks].map(([blockId, block]): [IrBlockId, IrBlock] => [
             blockId,
             { ...block, operations: block.operations.map((value) => operation(value) as typeof value) }
           ])
@@ -128,14 +128,7 @@ export const publishLogicalReceivers = (
       return { ...operation, logicalReceiver: 'native' }
     return operation
   })
-  const ignored = nativeCallableFlowOf(
-    [...marked.values()],
-    placements,
-    classes,
-    conversions,
-    undefined,
-    deriver
-  ).ignoredLogicalReceiverValues
+  const ignored = ignoredLogicalReceiverValuesOf([...marked.values()], placements, classes, conversions, deriver ?? null)
   const physicalBodies = new Map<string, IrBody[]>()
   for (const body of marked.values()) {
     const source = String(body.sourceOwner)

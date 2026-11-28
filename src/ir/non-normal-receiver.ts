@@ -36,7 +36,7 @@ export interface NonNormalReceiverProof {
 
 export interface NonNormalReceiverInput {
   readonly body: IrBody
-  readonly bodies: Iterable<IrBody>
+  readonly bodies: readonly IrBody[]
   readonly conversions: Pick<ConversionCensus, 'nodeById'>
   readonly callables: ReadonlyMap<IrValueId, CallCalleeIdentity>
   readonly definitionOf: (value: IrValueId) => IrOperation | null

@@ -137,7 +137,7 @@ export const knownCallerPredicateParameters = (program: ts.Program, checker: ts.
       byName.set(name, [...(byName.get(name) ?? []), candidate])
     }
   }
-  if (candidates.size === 0) return new Map()
+  if (candidates.size === 0) return new Map<string, string>()
 
   for (const file of program.getSourceFiles()) {
     if (file.isDeclarationFile) continue

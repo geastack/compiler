@@ -204,7 +204,7 @@ export const callArgumentSlotOf = (abi: CallableAbi | null, callee: Representati
   if (abi.restFrom !== null && position >= abi.restFrom) {
     const rest = abi.parameters[abi.restFrom]?.value
     if (!rest) return unclassified('a variadic convention declares no parameter at its own rest position')
-    if (isClosedContiguousTupleRecord(rest)) {
+    if (rest.kind === 'record' && isClosedContiguousTupleRecord(rest)) {
       const field = rest.fields[abi.argumentsFrame === 'actual' ? position : position - abi.restFrom]
       return field ? slot(field.value, 'element') : unclassified(`argument ${position} is past the arity of a tuple-shaped rest slot`)
     }
@@ -766,19 +766,22 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
           case 'return': {
             const abi = abiOfCaller(operation)
             if (!abi) return operation.caller.kind === 'region' ? raw('discarded') : unclassified('a return in a body with no convention')
+            // Read once into a local: a native build narrows `result.kind` on a
+            // local but keeps `abi.result` optional through the guard above.
+            const result = abi.result
             // An async body's `return v` SETTLES its promise with `v`, so the
             // slot is the payload -- except when `v` is itself a promise: the
             // language adopts it, and the body hands the promise back whole
             // (a promise of another payload converts promise to promise). The
             // printer's return emitter reconciles on the same two cases.
-            if (abi.result.kind === 'promise' && carriesAPromise(carrierOf(operation, operand))) return slot(abi.result, 'result')
+            if (result.kind === 'promise' && carriesAPromise(carrierOf(operation, operand))) return slot(result, 'result')
             // A union of the payload and a promise of it -- see
             // `settlesOverPayloadOrPromise`'s own comment -- is read raw,
             // exactly as `await`'s own operand is just below, rather than
             // stored into the payload's slot: neither arm is provably live,
             // so `emit-return.ts`'s `coroutineReturnOf` hands the whole union
             // to `co_return`, which settles it correctly either way.
-            if (abi.result.kind === 'promise' && settlesOverPayloadOrPromise(carrierOf(operation, operand), returnPayloadOf(abi.result)))
+            if (result.kind === 'promise' && settlesOverPayloadOrPromise(carrierOf(operation, operand), returnPayloadOf(result)))
               return raw('coroutine-settlement')
             // A generator BODY's `return v` fills its cursor's completion
             // channel; an ordinary body whose result happens to be an
@@ -788,7 +791,7 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
             // value" recipe the census admits -- and the printer then had no
             // value to return.
             const generatorBody = operation.caller.kind === 'function' && generatorBodies.has(operation.caller.functionId)
-            const payload = generatorBody || abi.result.kind === 'promise' ? returnPayloadOf(abi.result) : abi.result
+            const payload = generatorBody || result.kind === 'promise' ? returnPayloadOf(result) : result
             return payload.kind === 'void' ? raw('discarded') : slot(payload, 'result')
           }
           case 'throw':

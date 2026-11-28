@@ -6,12 +6,13 @@ import {
   carriableIndexesOf,
   dictionaryIndexOf,
   isDataOnlyObjectShape,
+  isStringDictionaryObjectShape,
   physicalIndexesOf,
   recordAccessorsOf,
   recordFieldKeyOf
 } from './object-shape.js'
-import type { AbiParameter, CallableAbi, RecordField, RecordIndexSidecar, Representation, TaggedUnionArm } from './model.js'
-import { abiKey, passingOf, representationKey } from './model.js'
+import type { AbiParameter, CallableAbi, Ownership, RecordField, RecordIndexSidecar, Representation, TaggedUnionArm } from './model.js'
+import { abiKey, passingOf, representationKey, standardBufferCarrier } from './model.js'
 import {
   createIntersectionFlattener,
   intersectPropertyRepresentations,
@@ -155,6 +156,15 @@ export interface RepresentationDeriver {
    * way to ask for it before this was added.
    */
   readonly deriveStored: (type: StructuralTypeId) => Representation
+  /**
+   * The stored carrier of a slot that holds `type` OR the `undefined` it reads
+   * before anything writes it -- an unwritten record member, a static field
+   * with no initializer. Derived as the union `type | undefined`, so a
+   * `T | null` slot keeps its two absences apart (a tagged union of `null`,
+   * `undefined` and `T`) instead of stacking a second flag on one that
+   * already answers `null`.
+   */
+  readonly deriveStoredWithUndefined: (type: StructuralTypeId) => Representation
   /**
    * Whether a structural type's own shape is the primitive `never` --
    * distinct from asking whether its *carrier* is `{kind:'void'}`, which
@@ -302,13 +312,13 @@ export const createRepresentationDeriver = (
   implementors: InterfaceImplementorPolicy = defaultInterfaceImplementorPolicy,
   errors: ErrorDeclarationPolicy = defaultErrorDeclarationPolicy,
   dynamicFallback = false,
-  dynamicFallbackTypes: ReadonlySet<StructuralTypeId> = new Set(),
-  sourceCallableShapes: ReadonlyMap<FunctionId, StructuralTypeId> = new Map(),
-  dynamicWrittenTypes: ReadonlySet<StructuralTypeId> = new Set(),
+  dynamicFallbackTypes: ReadonlySet<StructuralTypeId> = new Set<StructuralTypeId>(),
+  sourceCallableShapes: ReadonlyMap<FunctionId, StructuralTypeId> = new Map<FunctionId, StructuralTypeId>(),
+  dynamicWrittenTypes: ReadonlySet<StructuralTypeId> = new Set<StructuralTypeId>(),
   classCopies: ClassCopyPolicy = defaultClassCopyPolicy,
   // The required members some object of a record type is created without
   // (`unwritten-record-members.ts`), by the record's object shape.
-  unwrittenMembers: ReadonlyMap<StructuralTypeId, ReadonlySet<string>> = new Map()
+  unwrittenMembers: ReadonlyMap<StructuralTypeId, ReadonlySet<string>> = new Map<StructuralTypeId, ReadonlySet<string>>()
 ): RepresentationDeriver => {
   const memo = new Map<StructuralTypeId, Representation>()
   // Every C++ spelling this deriver stamped on a Date's carrier, so `isDateCarrier` can read the fact back off a carrier.
@@ -453,7 +463,29 @@ export const createRepresentationDeriver = (
     }
     return null
   }
+  // The table's `undefined` primitive, found once: normalization interns it
+  // for every optional member, and the sealed table cannot intern it here.
+  let undefinedTypeId: StructuralTypeId | null | undefined
+  const undefinedType = (): StructuralTypeId | null => {
+    if (undefinedTypeId !== undefined) return undefinedTypeId
+    undefinedTypeId = null
+    for (const [id, type] of types)
+      if (type.shape.kind === 'primitive' && type.shape.primitive === 'undefined') {
+        undefinedTypeId = id
+        break
+      }
+    return undefinedTypeId
+  }
+  const deriveStoredWithUndefined = (id: StructuralTypeId): Representation => {
+    const absent = undefinedType()
+    if (absent === null) return withStaticFieldAbsence(deriveStored(id))
+    const shape = shapeOf(id)
+    const members = shape?.kind === 'union' ? shape.members : [id]
+    if (members.includes(absent)) return deriveStored(id)
+    return storedCarrier(deriveUnionShape({ kind: 'union', members: [...members, absent] }))
+  }
   const isDataOnlyBody = (id: StructuralTypeId): boolean => isDataOnlyObjectShape(shapeOf(id), shapeOf)
+  const isStringDictionaryBody = (id: StructuralTypeId): boolean => isStringDictionaryObjectShape(shapeOf(id), shapeOf)
 
   type RecursiveContainerSource =
     | {
@@ -501,9 +533,12 @@ export const createRepresentationDeriver = (
     if (outer.kind === 'declared' && collections.forDeclaration(outer.declaration)) {
       return { kind: 'keyed-collection', shape: outer, bodyId: id, ownershipShape: outer, ownershipId: id }
     }
-    const body = outer.kind === 'declared' && outer.body !== null ? shapeOf(outer.body) : null
+    // Read off the narrowed arm, not through an assertion: an assertion
+    // leaves the read on the whole shape union.
+    const declaredBody = outer.kind === 'declared' ? outer.body : null
+    const body = declaredBody !== null ? shapeOf(declaredBody) : null
     const source = body ?? outer
-    const sourceId = body === null ? id : (outer as Extract<StructuralShape, { kind: 'declared' }>).body!
+    const sourceId = body === null || declaredBody === null ? id : declaredBody
     if (source.kind === 'array') {
       return { kind: 'array', shape: source, bodyId: sourceId, ownershipShape: source, ownershipId: sourceId }
     }
@@ -548,7 +583,9 @@ export const createRepresentationDeriver = (
     const source = recursiveContainerSourceOf(id)
     if (!source) return null
     markProvisionalDependents()
-    const reference = {
+    // Stated as the carrier arm so the literal is allocated as that arm, not
+    // as a look-alike record a native build would have to recast.
+    const reference: Extract<Representation, { kind: 'native-record-ref' }> = {
       kind: 'native-record-ref' as const,
       shapeId: id,
       ownership: source.kind === 'callable' ? ('owned' as const) : ownership.forShape(source.ownershipShape, source.ownershipId),
@@ -561,6 +598,30 @@ export const createRepresentationDeriver = (
     recursiveReferences.set(id, reference)
     recursiveBodyIds.set(id, source.bodyId)
     return reference
+  }
+
+  /** Why a container's ownership cannot close a back edge whose reference has `referenceOwnership`, or `null`. */
+  const recursiveOwnershipRefusal = (
+    id: StructuralTypeId,
+    ownershipOf: Ownership,
+    referenceOwnership: Ownership
+  ): Representation | null => {
+    if (ownershipOf !== referenceOwnership) {
+      guardFired += 1
+      return unresolved(`recursive type ${id} changes ownership between its definition and back edge`)
+    }
+    if (ownershipOf !== 'shared-refcount') {
+      guardFired += 1
+      return unresolved(`recursive type ${id} needs shared-refcount ownership for its native reference indirection`)
+    }
+    return null
+  }
+
+  /** Records `definition` as the body of `id`'s fixpoint when that body is another structural type. */
+  const definedRecursiveContainer = (id: StructuralTypeId, definition: Representation): Representation => {
+    const body = recursiveBodyIds.get(id)
+    if (body !== undefined && body !== id) memo.set(body, definition)
+    return definition
   }
 
   /** Marks the outer native container as the definition for a back-edge. */
@@ -581,26 +642,42 @@ export const createRepresentationDeriver = (
           guardFired += 1
           return unresolved(`recursive type ${id} carries a callable back edge that is not held by value`)
         }
-        const callable = { ...representation, recursive: { type: id, container: 'callable' as const, role: 'definition' as const } }
-        const callableBody = recursiveBodyIds.get(id)
-        if (callableBody !== undefined && callableBody !== id) memo.set(callableBody, callable)
-        return callable
+        const callable: Extract<Representation, { kind: 'function-value-dispatch' }> = {
+          ...representation,
+          recursive: { type: id, container: 'callable' as const, role: 'definition' as const }
+        }
+        return definedRecursiveContainer(id, callable)
       }
-      case 'array-object':
-      case 'dictionary':
-      case 'keyed-collection':
-        if (representation.ownership !== reference.ownership) {
-          guardFired += 1
-          return unresolved(`recursive type ${id} changes ownership between its definition and back edge`)
+      // One case per container, each spreading its own arm: a spread of the
+      // three-arm union would build a union-typed literal, which a native
+      // build has no allocation for.
+      case 'array-object': {
+        const refused = recursiveOwnershipRefusal(id, representation.ownership, reference.ownership)
+        if (refused) return refused
+        const definition: Extract<Representation, { kind: 'array-object' }> = {
+          ...representation,
+          recursive: { type: id, container: 'array-object', role: 'definition' as const }
         }
-        if (representation.ownership !== 'shared-refcount') {
-          guardFired += 1
-          return unresolved(`recursive type ${id} needs shared-refcount ownership for its native reference indirection`)
+        return definedRecursiveContainer(id, definition)
+      }
+      case 'dictionary': {
+        const refused = recursiveOwnershipRefusal(id, representation.ownership, reference.ownership)
+        if (refused) return refused
+        const definition: Extract<Representation, { kind: 'dictionary' }> = {
+          ...representation,
+          recursive: { type: id, container: 'dictionary', role: 'definition' as const }
         }
-        const definition = { ...representation, recursive: { type: id, container: representation.kind, role: 'definition' as const } }
-        const body = recursiveBodyIds.get(id)
-        if (body !== undefined && body !== id) memo.set(body, definition)
-        return definition
+        return definedRecursiveContainer(id, definition)
+      }
+      case 'keyed-collection': {
+        const refused = recursiveOwnershipRefusal(id, representation.ownership, reference.ownership)
+        if (refused) return refused
+        const definition: Extract<Representation, { kind: 'keyed-collection' }> = {
+          ...representation,
+          recursive: { type: id, container: 'keyed-collection', role: 'definition' as const }
+        }
+        return definedRecursiveContainer(id, definition)
+      }
       default:
         guardFired += 1
         return unresolved(`recursive type ${id} closed through non-container carrier ${representation.kind}`)
@@ -1033,7 +1110,7 @@ export const createRepresentationDeriver = (
       .map((member) => {
         const key = recordFieldKeyOf(member.key)
         return !member.optional && unwritten?.has(key)
-          ? { key, value: withStaticFieldAbsence(deriveStored(member.type)), required: false }
+          ? { key, value: deriveStoredWithUndefined(member.type), required: false }
           : { key, value: deriveStored(member.type), required: !member.optional }
       })
   }
@@ -1092,7 +1169,10 @@ export const createRepresentationDeriver = (
         return `an interface extending Array declares accessor "${key}"; only data fields are carried on an array's extension`
       fields.push({ key, value: deriveStored(member.type), required: !member.optional })
     }
-    return fields
+    // Keyed by field set, not declaration order: `ts.NodeArray` (inheriting
+    // pos/end) and a list interface declaring pos/end/hasTrailingComma itself
+    // are one layout, and an array built as one is read as the other.
+    return fields.sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0))
   }
 
   /**
@@ -1511,7 +1591,8 @@ export const createRepresentationDeriver = (
   const isUninhabitedIntersection = (substantive: readonly StructuralTypeId[]): boolean =>
     isUninhabitedNominalIntersection(substantive) ||
     isUninhabitedPrimitiveIntersection(substantive) ||
-    isUninhabitedClassTypedArrayIntersection(substantive)
+    isUninhabitedClassTypedArrayIntersection(substantive) ||
+    familyClassOf(substantive) === 'uninhabited'
 
   const intersectionMemberKind = (member: StructuralTypeId): string => intersectionMemberKindOf(shapeOf, member)
   const isPrimitiveValueMember = (member: StructuralTypeId): boolean => isPrimitiveValueShape(shapeOf, member)
@@ -1603,6 +1684,53 @@ export const createRepresentationDeriver = (
     return derived.kind === 'native-record-ref' ? derived : null
   }
 
+  /**
+   * The class an intersection of one interface family's names carries, when
+   * some of those names carry classes through their implementors.
+   *
+   * A family's names share one layout, but a name a class implements carries
+   * that class (`implementors` in the declared case), so `CallExpression &
+   * Expression` -- what narrowing a `QueryShape & QueryState` record's
+   * `node` field leaves -- is a class name beside the family's own record. The
+   * value is that class's instance, and the family record is only another view
+   * of it, so the most-derived class carries the intersection. Laid out as the
+   * family record instead, the narrowed union gained a record arm next to its
+   * class arms; a class value was stored into it and read back as a class
+   * arm it never was. Two names carrying unrelated classes
+   * (`CallExpression & ParameterDeclaration`, which the checker leaves
+   * unreduced but no value inhabits) answer `'uninhabited'`; `null` when the
+   * members are not one family or carry no class.
+   */
+  const familyClassOf = (members: readonly StructuralTypeId[]): Representation | 'uninhabited' | null => {
+    if (members.length < 2) return null
+    let body: StructuralTypeId | null = null
+    for (const member of members) {
+      const memberShape = shapeOf(member)
+      if (memberShape?.kind !== 'declared' || memberShape.body === null) return null
+      if (body === null) body = memberShape.body
+      else if (body !== memberShape.body) return null
+    }
+    const carriers = members.map((member) => derive(member))
+    const classes = carriers.filter((carrier): carrier is Extract<Representation, { kind: 'class-ref' }> => carrier.kind === 'class-ref')
+    if (classes.length === 0) return null
+    const descends = (
+      one: Extract<Representation, { kind: 'class-ref' }>,
+      other: Extract<Representation, { kind: 'class-ref' }>
+    ): boolean => one.declaration === other.declaration || one.ancestors.includes(other.declaration)
+    const most = classes.find((one) => classes.every((other) => descends(one, other)))
+    if (most === undefined) return 'uninhabited'
+    for (const carrier of carriers) {
+      if (carrier.kind === 'class-ref') continue
+      if (carrier.kind === 'native-record-ref' && carrier.shapeId === body) continue
+      if (carrier.kind === 'tagged-union' && carrier.arms.every((arm) => arm.value.kind === 'class-ref')) {
+        if (carrier.arms.some((arm) => arm.value.kind === 'class-ref' && descends(most, arm.value))) continue
+        return 'uninhabited'
+      }
+      return null
+    }
+    return most
+  }
+
   const deriveIntersection = (id: StructuralTypeId, shape: Extract<StructuralShape, { kind: 'intersection' }>): Representation => {
     // A HOST'S OWN NAME outranks the structure it erases to.
     //
@@ -1629,7 +1757,7 @@ export const createRepresentationDeriver = (
         version: stated.version,
         native: stated.native,
         bases: binding.basesOf(stated.native),
-        viewsFrom: binding.viewsInto?.(stated.native) ?? new Map(),
+        viewsFrom: binding.viewsInto?.(stated.native) ?? new Map<string, string>(),
         call: null,
         construct: null
       }
@@ -1664,6 +1792,9 @@ export const createRepresentationDeriver = (
     // object shape, and deriving THAT below mints a by-value record no family
     // ref converts to: 117 rows on one program, every one a narrowed read.
     // The intersection of names for one layout is that layout's own carrier.
+    const familyClass = familyClassOf(substantive)
+    if (familyClass === 'uninhabited') return { kind: 'void' }
+    if (familyClass !== null) return familyClass
     const familyRef = sharedBodyRefOf(substantive)
     if (familyRef !== null) return familyRef
     // A callable intersection has one native CallableObject carrier: callable
@@ -2452,7 +2583,7 @@ export const createRepresentationDeriver = (
         version: bound.version,
         native: bound.native,
         bases: binding.basesOf(bound.native),
-        viewsFrom: binding.viewsInto?.(bound.native) ?? new Map(),
+        viewsFrom: binding.viewsInto?.(bound.native) ?? new Map<string, string>(),
         call: null,
         construct
       }
@@ -2480,7 +2611,8 @@ export const createRepresentationDeriver = (
     if (typeof shared === 'string') return unresolved(shared)
     // A construction makes exactly this class, never "any copy" of it.
     const constructed = signature.construct[0]?.result
-    const abi = constructed === undefined ? shared : { ...shared, result: exactClassInstanceOf(constructed) }
+    // Typed as `CallableAbi`: see `constructAbi` in `deriveSignature`.
+    const abi: CallableAbi = constructed === undefined ? shared : { ...shared, result: exactClassInstanceOf(constructed) }
     // A derived class the program stores into this constructor's slot is a
     // member too: naming only the base would let construction and static
     // reads resolve to the base while the cell holds the derived class.
@@ -2535,7 +2667,12 @@ export const createRepresentationDeriver = (
       // authorities: a construction site would otherwise have to push a
       // receiver argument nothing evaluates, and `emit-callable.ts`'s
       // construct thunk is the code that actually allocates it.
-      const constructAbi = shared.receiver === null ? shared : { ...shared, receiver: null }
+      // Typed as `CallableAbi` so a native build allocates the spread as the
+      // one `CallableAbi` layout: left to its own literal type it got a twin
+      // layout reached through a live view, and a spread of a record holding
+      // that view (`{ ...sealed }` in `ir/lower.ts`) boxed the view as its
+      // original, which the exact `CallableAbi` read then refused.
+      const constructAbi: CallableAbi = shared.receiver === null ? shared : { ...shared, receiver: null }
       if (shape.call.length === 0) return { kind: 'constructor-value-dispatch', abi: constructAbi }
       const callAbi = sharedAbiOf(shape.call, 'overload', true)
       return typeof callAbi === 'string'
@@ -2644,7 +2781,7 @@ export const createRepresentationDeriver = (
         // is what made every ArrayBuffer in a program an opaque handle with no
         // bytes behind it. See `StandardBufferPolicy`.
         const buffer = buffers.forDeclaration(shape.declaration)
-        if (buffer) return { kind: buffer, ownership: ownership.forShape(shape, id) }
+        if (buffer) return standardBufferCarrier(buffer, ownership.forShape(shape, id))
         // `Promise<T>` is checked immediately after, for the identical
         // reason and ahead of `binding`/the ambient-body walk below: run
         // through `declaredBodyOf`'s data-only member stripping, the ambient
@@ -2935,7 +3072,10 @@ export const createRepresentationDeriver = (
         // operations belong to the host whether or not this compiler was told
         // the type's spelling, and inventing a layout for it would be the
         // guess this rule exists to prevent.
-        const boundWithoutCarrier = bound !== null && !bound.native && shape.body !== null && isDataOnlyBody(shape.body)
+        // The same holds for a plain string dictionary the host hands back
+        // with no carrier of its own (`isStringDictionaryObjectShape`).
+        const boundWithoutCarrier =
+          bound !== null && !bound.native && shape.body !== null && (isDataOnlyBody(shape.body) || isStringDictionaryBody(shape.body))
         if (bound && !boundWithoutCarrier) {
           const invocable = shape.body ? shapeOf(shape.body) : null
           const call = invocable?.kind === 'signature' ? hostInvocationAbiOf(invocable.call, 'overload') : null
@@ -2947,7 +3087,7 @@ export const createRepresentationDeriver = (
             native: bound.native,
             referenceIdentity: binding.referenceIdentityOf?.(bound.native) === true,
             bases: binding.basesOf(bound.native),
-            viewsFrom: binding.viewsInto?.(bound.native) ?? new Map(),
+            viewsFrom: binding.viewsInto?.(bound.native) ?? new Map<string, string>(),
             call,
             construct
           }
@@ -3077,7 +3217,7 @@ export const createRepresentationDeriver = (
             version: bound.version,
             native: bound.native,
             bases: binding.basesOf(bound.native),
-            viewsFrom: binding.viewsInto?.(bound.native) ?? new Map(),
+            viewsFrom: binding.viewsInto?.(bound.native) ?? new Map<string, string>(),
             call: null,
             construct: null
           }
@@ -3186,6 +3326,7 @@ export const createRepresentationDeriver = (
     layoutOf,
     abiOf,
     deriveStored,
+    deriveStoredWithUndefined,
     isNeverType,
     isTupleShape,
     nativeCallableConventions,

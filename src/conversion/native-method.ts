@@ -15,6 +15,11 @@ export interface NativeMethodValueRecipe {
   readonly conversion: ConversionNodeId
 }
 
+export interface NativeResultNarrowing {
+  readonly source: Extract<Representation, { kind: 'class-ref' }>
+  readonly target: Extract<Representation, { kind: 'class-ref' }>
+}
+
 export interface NativeUnboundMethodContract {
   /** The finite non-receiver frame is admitted independently of native receiver erasure. */
   readonly frameAdaptation?: ConversionNode
@@ -22,10 +27,7 @@ export interface NativeUnboundMethodContract {
   readonly publicAdaptation?: ConversionNode
   readonly receiverRequirement?: 'present-native-brand'
   /** An inherited native self-result is checked against the public result allocation on every call. */
-  readonly resultNarrowing?: {
-    readonly source: Extract<Representation, { kind: 'class-ref' }>
-    readonly target: Extract<Representation, { kind: 'class-ref' }>
-  }
+  readonly resultNarrowing?: NativeResultNarrowing
   readonly source: CallableAbi
   readonly target: CallableAbi
   readonly receiver: Representation
@@ -64,6 +66,25 @@ const suppliedReceiverFits = (supplied: Representation, body: Representation): b
     body.kind === 'class-ref' &&
     (supplied.ancestors.includes(body.declaration) || body.ancestors.includes(supplied.declaration)))
 
+// Takes both frames already present: narrowing `from.receiver` through
+// `from?.receiver?.kind` leaves a native build holding an optional frame. The
+// two results are narrowed as locals for the same reason.
+const resultNarrowingOf = (from: CallableAbi, to: CallableAbi): NativeResultNarrowing | null => {
+  const receiver = from.receiver
+  const source = from.result
+  const target = to.result
+  return receiver !== null &&
+    receiver.kind === 'class-ref' &&
+    source.kind === 'class-ref' &&
+    target.kind === 'class-ref' &&
+    representationKey(source) === representationKey(receiver) &&
+    source.ownership === 'shared-refcount' &&
+    target.ownership === source.ownership &&
+    target.ancestors.includes(source.declaration)
+    ? { source, target }
+    : null
+}
+
 /** A native source entry can authenticate the receiver supplied by the public method frame. */
 export const nativeUnboundMethodContractOf = (source: Representation, target: Representation): NativeUnboundMethodContract | null => {
   const from = nativeAbiOf(source)
@@ -72,16 +93,7 @@ export const nativeUnboundMethodContractOf = (source: Representation, target: Re
   // boundary. Only its contextual public nil frame is erased here; ordinary
   // pair classifiers and native nominal receiver admission stay unchanged.
   const dynamicReceiver = from?.receiver?.kind === 'dynamic' && to?.receiver === null
-  const resultNarrowing =
-    from?.receiver?.kind === 'class-ref' &&
-    from.result.kind === 'class-ref' &&
-    to?.result.kind === 'class-ref' &&
-    representationKey(from.result) === representationKey(from.receiver) &&
-    from.result.ownership === 'shared-refcount' &&
-    to.result.ownership === from.result.ownership &&
-    to.result.ancestors.includes(from.result.declaration)
-      ? { source: from.result, target: to.result }
-      : null
+  const resultNarrowing = from !== null && to !== null ? resultNarrowingOf(from, to) : null
   if (
     from === null ||
     to === null ||
