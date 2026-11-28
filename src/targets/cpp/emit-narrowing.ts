@@ -4617,11 +4617,18 @@ export const genericFunctionSetWideningText = (source: Representation, target: R
  * sentinel, a populated one -- a real `undefined[]`, which the carrier cannot
  * tell apart -- is boxed element by element.
  */
-export const emptyArraySentinelText = (source: Representation, target: Representation, text: string, consumed = false): string | null => {
+export const emptyArraySentinelText = (
+  source: Representation,
+  target: Representation,
+  text: string,
+  consumed = false,
+  held = false
+): string | null => {
   if (source.kind !== 'array-object' || target.kind !== 'array-object' || source.element.kind !== 'undefined') return null
   if (source.ownership !== 'shared-refcount' || target.ownership !== 'shared-refcount') return null
   // `consumed`: an element an unshared rebuild released (`unsharedArrayRebuildText`).
-  const argument = consumed ? `${text}, gea::consumedSource` : text
+  // `held`: a record slot read through a live view (`gea::HeldSource`).
+  const argument = consumed ? `${text}, gea::consumedSource` : held ? `${text}, gea::heldSource` : text
   if (target.element.kind === 'dynamic') return `gea::emptyArraySentinelOrBoxed(${argument})`
   // A shared class or record reference holds `undefined` natively, so a
   // populated source is the same real `undefined[]` as for `any[]`.

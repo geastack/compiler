@@ -974,6 +974,7 @@ nested-literal-in-document-array-reads-absent-member.runtime.ts.cpp d02151c9bcfc
 nested-typed-array-union-narrowing.ts.cpp 164db4c8da23
 nested-union-arm-recast-keeps-inner-discriminant.ts.cpp 862de1d7b109
 never-arm-conditional-merge.ts.cpp 314bc90e6d70
+never-array-field-of-callback-record-is-fresh.runtime.ts.cpp d78859e7c13c
 never-array-fresh-map.ts.cpp 309db7ebfaf2
 never-array-fresh.ts.cpp b710bfffd5f3
 never-array-sentinel.ts.cpp 166bf4d7c214
