@@ -1099,7 +1099,7 @@ export const createIrBodyBuilder = (
       source,
       result,
       ...(rebuild ? { rebuild } : {}),
-      ...(rebuild === 'unshared-array' && releasesSource ? { releasesSource } : {}),
+      ...(releasesSource ? { releasesSource } : {}),
       ...(nativeCallableSource ? { nativeCallableSource } : {}),
       ...(nativeObjectSample ? { nativeObjectSample } : {})
     })

@@ -500,7 +500,7 @@ export const emptyValueFlowIndex: ValueFlowIndex = {
   bindingPatternReads: [],
   classDeclarations: [],
   arrayLiterals: [],
-  accessorNames: new Set(),
+  accessorNames: new Set<string>(),
   hasComputedAccessorName: false,
   memberReferencesToSymbol: () => [],
   targetOf: () => null,
@@ -511,6 +511,16 @@ export const emptyValueFlowIndex: ValueFlowIndex = {
   referencesToSymbol: () => NO_REFERENCES,
   referencesToDeclaration: () => NO_REFERENCES,
   allWrites: NO_WRITES,
-  edgeCounts: new Map(),
+  edgeCounts: new Map<FlowEdgeKind, number>(),
   writeCount: 0
+}
+
+/**
+ * A set's first member in insertion order. Read by a loop rather than
+ * `values().next().value`: a native build has no protocol for the iterator's
+ * result object.
+ */
+export const firstMemberOf = <T>(members: ReadonlySet<T>): T | undefined => {
+  for (const member of members) return member
+  return undefined
 }

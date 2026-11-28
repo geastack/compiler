@@ -35,7 +35,11 @@ export interface ArgumentsObjectCensus {
   readonly count: number
 }
 
-export const emptyArgumentsObjectCensus: ArgumentsObjectCensus = { phantomOrdinalOf: () => null, usesByOwner: new Map(), count: 0 }
+export const emptyArgumentsObjectCensus: ArgumentsObjectCensus = {
+  phantomOrdinalOf: () => null,
+  usesByOwner: new Map<ts.SignatureDeclaration, readonly ts.Identifier[]>(),
+  count: 0
+}
 
 /**
  * One walk, one checker question per candidate identifier.

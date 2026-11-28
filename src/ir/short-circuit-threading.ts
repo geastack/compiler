@@ -4,6 +4,7 @@ import type { IrBlock, IrBlockId, IrBody, IrOperand, IrOperation, IrPhiIncoming,
 import { allOperationsOf } from './model.js'
 import { operandsOfIrOperation, successorsOfTerminator } from './queries.js'
 import { verifyIrBody } from './verify.js'
+import { mapValues } from '../collection-lists.js'
 
 /**
  * Thread the edge of a short-circuit join whose value the edge already decides.
@@ -93,7 +94,7 @@ const threadedBody = (body: IrBody): IrBody => {
     }
   }
   // A block other facts name by id stays: removing it would leave them pointing nowhere.
-  const pinned = new Set<string>([body.entry, ...(body.bindingLifetimeOrigins?.values() ?? [])])
+  const pinned = new Set<string>([body.entry, ...mapValues(body.bindingLifetimeOrigins)])
   const loopPlan = body.denseLoopPlan === undefined ? '' : JSON.stringify(body.denseLoopPlan)
   // The truthiness `value` is known to have along the edge out of `from`, when
   // `from` branches on it (or on its `to-boolean` test) and the edge is one arm.

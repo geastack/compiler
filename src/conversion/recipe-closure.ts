@@ -16,12 +16,14 @@ export const recipeClosureOf = (roots: Iterable<ConversionNode>, resolve?: Conve
     capabilities.add(capability)
     if ('materializer' in capability) {
       const materializer = capability.materializer
-      for (const dependency of materializer.dependencies ?? []) visit(dependency)
-      for (const leaf of materializer.recordView?.leaves.values() ?? []) visit(leaf)
-      for (const leaf of materializer.iteratorObjectView?.leaves.values() ?? []) visit(leaf)
-      for (const leaf of materializer.iterableObjectView?.leaves.values() ?? []) visit(leaf)
-      for (const leaf of materializer.protocolIterator?.leaves.values() ?? []) visit(leaf)
-      for (const field of materializer.recordToArray?.fields ?? []) visit(field.conversion)
+      // Guarded rather than `?? []`: a native build has no iterator over the
+      // union of a map iterator and an empty array.
+      if (materializer.dependencies) for (const dependency of materializer.dependencies) visit(dependency)
+      if (materializer.recordView) for (const leaf of materializer.recordView.leaves.values()) visit(leaf)
+      if (materializer.iteratorObjectView) for (const leaf of materializer.iteratorObjectView.leaves.values()) visit(leaf)
+      if (materializer.iterableObjectView) for (const leaf of materializer.iterableObjectView.leaves.values()) visit(leaf)
+      if (materializer.protocolIterator) for (const leaf of materializer.protocolIterator.leaves.values()) visit(leaf)
+      if (materializer.recordToArray) for (const field of materializer.recordToArray.fields) visit(field.conversion)
     }
     switch (capability.kind) {
       case 'optional':

@@ -46,7 +46,8 @@ import {
   createDeferredIntrinsicProtocolLedger,
   deferredIntrinsicProtocolLedgerOf,
   failedIntrinsicProtocolRequirements,
-  type IntrinsicProtocolRequirement
+  type IntrinsicProtocolRequirement,
+  captureAnswer
 } from './deferred-intrinsic-protocols.js'
 import { symbolIsStandardLibraryMutator, symbolStatesHostInert, symbolWritesNoIntrinsicProperty } from './host-effect-contracts.js'
 import { createMutationKeyReader, hostAccessorNamesOf, keyOfName } from './host-mutation-key-reader.js'
@@ -107,13 +108,19 @@ class SmallSet<T> implements Iterable<T> {
     this.list = null
     this.members = null
   }
-  values(): Iterator<T> {
+  values(): Generator<T> {
     return this[Symbol.iterator]()
+  }
+  /** The members as a plain array, in insertion order (a native build has no range copy for a user iterable). */
+  toArray(): T[] {
+    if (this.members !== null) return [...this.members]
+    if (this.list !== null) return [...this.list]
+    return this.first === absent ? [] : [this.first]
   }
   // Each form holds the earlier form's members first and in order, so a
   // visit that sees the set grow into the next form resumes at the same
   // position in it.
-  *[Symbol.iterator](): Iterator<T> {
+  *[Symbol.iterator](): Generator<T> {
     let visited = 0
     for (;;) {
       if (this.members !== null) break
@@ -248,9 +255,9 @@ export const censusGlobalHostMutations = (
   hostBindings: ReadonlySet<DeclarationId>,
   flow: ValueFlowIndex,
   reachable: ProgramReachability = wholeProgram,
-  nativeReceiverDeclarations: ReadonlySet<DeclarationId> = new Set(),
-  nativeReceiverSymbols: ReadonlySet<ts.Symbol> = new Set(),
-  nativeConstructorSymbols: ReadonlySet<ts.Symbol> = new Set(),
+  nativeReceiverDeclarations: ReadonlySet<DeclarationId> = new Set<DeclarationId>(),
+  nativeReceiverSymbols: ReadonlySet<ts.Symbol> = new Set<ts.Symbol>(),
+  nativeConstructorSymbols: ReadonlySet<ts.Symbol> = new Set<ts.Symbol>(),
   // The completed inference pipeline owns the value type. Declaration and
   // alias identity still come from the checker and the shared flow index.
   publishedTypeAt: (expression: ts.Expression) => ts.Type = (expression) => checker.getTypeAtLocation(expression),
@@ -275,7 +282,11 @@ export const censusGlobalHostMutations = (
    * `unknownCalleeStampIsNarrowed` and the alias graph's call rule.
    */
   staticCommonJsRequireOutcomeOf: (call: ts.CallExpression) => StaticRequireOutcome['kind'] | null = () => null,
-  trustSeed: CensusSeed = initialCensusSeed
+  trustSeed: CensusSeed = initialCensusSeed,
+  // A type's prototype names are the checker's answer alone, never the seed's,
+  // so a re-run under a wider distrust seed reads the first run's instead of
+  // walking every property graph again.
+  inheritedPrototypeNames: WeakMap<ts.Type, ReadonlySet<string>> = new WeakMap<ts.Type, ReadonlySet<string>>()
 ): HostMutationTaint => {
   const tainted = new HostMutationTaint()
   const invocationRequirements = new Map<ts.Node, readonly IntrinsicProtocolRequirement[]>()
@@ -301,7 +312,7 @@ export const censusGlobalHostMutations = (
     const own: MutationKeySet | undefined = id === null ? { names: new Set<string>(), numeric: false, every: true } : taint.keysOf(id)
     const surface = taint.surfaceKeys
     return {
-      names: new Set([...surface.names, ...(own?.names ?? [])]),
+      names: new Set([...surface.names, ...(own?.names == null ? [] : [...own?.names])]),
       numeric: surface.numeric || (own?.numeric ?? false),
       programSymbols: surface.programSymbols === true || own?.programSymbols === true,
       every: surface.every || (own?.every ?? false)
@@ -795,7 +806,7 @@ export const censusGlobalHostMutations = (
     const current = unwrapErasedExpression(expression)
     if (!ts.isIdentifier(current)) return new Set()
     const declaration = bindingOf(current)
-    return declaration === null ? new Set() : (constructorAliases.get(declaration) ?? new Set())
+    return declaration === null ? new Set<IntrinsicConstructor>() : (constructorAliases.get(declaration) ?? new Set<IntrinsicConstructor>())
   }
   // Namespace intrinsics also own mutable members. The constructor alias
   // census above identifies the receiver even through a local alias.
@@ -892,7 +903,7 @@ export const censusGlobalHostMutations = (
    * An argument whose own type is primitive as well reaches nothing at all
    * (`primitiveArgumentReachesNothing` below).
    */
-  const NO_SCALAR_POSITIONS: ReadonlyMap<number, ts.Type> = new Map()
+  const NO_SCALAR_POSITIONS: ReadonlyMap<number, ts.Type> = new Map<number, ts.Type>()
   const hostNativeScalarParametersOf = (call: ts.CallExpression): ReadonlyMap<number, ts.Type> => {
     if (call.arguments.some(ts.isSpreadElement)) return NO_SCALAR_POSITIONS
     const signature = checker.getResolvedSignature(call)
@@ -1346,7 +1357,7 @@ export const censusGlobalHostMutations = (
       seen.delete(binding)
     }
   }
-  const isIntrinsicSurface = (expression: ts.Expression, seen: ReadonlySet<ts.Node> = new Set(), byType = true): boolean => {
+  const isIntrinsicSurface = (expression: ts.Expression, seen: ReadonlySet<ts.Node> = new Set<ts.Node>(), byType = true): boolean => {
     const current = unwrapErasedExpression(expression)
     if (hasFreshLiteralIdentity(current)) return false
     // A value that is always the program's own fresh allocation (a literal,
@@ -1539,7 +1550,8 @@ export const censusGlobalHostMutations = (
         isIntrinsicSurface(node.expression)
       ) {
         const actualKeys = keyReader.keysOfAccess(node)
-        if (actualKeys.length > 0 && actualKeys.every((key) => key.kind !== 'every')) {
+        // `: boolean`: an inferred type predicate would retype the keys as an array of a narrower union.
+        if (actualKeys.length > 0 && actualKeys.every((key): boolean => key.kind !== 'every')) {
           for (const key of actualKeys) {
             if (key.kind !== 'name') continue
             const member = actualSymbol(checker.getPropertyOfType(checker.getTypeAtLocation(node.expression), key.name))
@@ -1592,7 +1604,7 @@ export const censusGlobalHostMutations = (
     const declaration = bindingOf(expression)
     if (!declaration || !ts.isVariableDeclaration(declaration) || !declaration.initializer) return null
     if (trustSeed.rejectedCallableProofs.has(declaration)) return null
-    const proof = invocationLedger.capture(() => sourceBindingValuesOf(checker, flow, declaration))
+    const proof = captureAnswer(invocationLedger, () => sourceBindingValuesOf(checker, flow, declaration))
     if (proof.value?.length !== 1 || proof.value[0] !== declaration.initializer) return null
     retainRequirements(declaration, proof.requirements)
     return declaration.initializer
@@ -1602,13 +1614,15 @@ export const censusGlobalHostMutations = (
     if (allIntrinsicTrustInvalidated || trustSeed.rejectedCallableProofs.has(current)) return false
     const method = standardPrototypeMethodSourceOf(checker, current, isStandardLibraryDeclaration)
     if (method === null) return false
-    const proof = invocationLedger.capture(() => invocationLedger.requirePrototypeKeys(method.intrinsic, { names: [method.key] }, current))
+    const proof = captureAnswer(invocationLedger, () =>
+      invocationLedger.requirePrototypeKeys(method.intrinsic, { names: [method.key] }, current)
+    )
     if (!proof.value) return false
     retainRequirements(current, proof.requirements)
     invocationLedger.include(proof.requirements)
     return true
   }
-  const authenticatedNativeConstructor = (expression: ts.Expression, seen: Set<ts.Node> = new Set()): boolean => {
+  const authenticatedNativeConstructor = (expression: ts.Expression, seen: Set<ts.Node> = new Set<ts.Node>()): boolean => {
     const current = unwrapErasedExpression(expression)
     if (!ts.isIdentifier(current)) return false
     const symbol = actualSymbol(checker.getSymbolAtLocation(current))
@@ -1627,7 +1641,7 @@ export const censusGlobalHostMutations = (
     seen.add(declaration)
     return authenticatedNativeConstructor(initializer, seen)
   }
-  const standardGlobalValue = (expression: ts.Expression, seen: Set<ts.Node> = new Set()): boolean => {
+  const standardGlobalValue = (expression: ts.Expression, seen: Set<ts.Node> = new Set<ts.Node>()): boolean => {
     const current = unwrapErasedExpression(expression)
     if (ts.isIdentifier(current)) {
       const symbol = actualSymbol(checker.getSymbolAtLocation(current))
@@ -1659,7 +1673,7 @@ export const censusGlobalHostMutations = (
   const authenticatedCallable = (
     expression: ts.Expression,
     declaration: ts.SignatureDeclaration | ts.JSDocSignature,
-    seen: Set<ts.Node> = new Set()
+    seen: Set<ts.Node> = new Set<ts.Node>()
   ): boolean => {
     const current = unwrapErasedExpression(expression)
     if (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
@@ -1729,7 +1743,8 @@ export const censusGlobalHostMutations = (
       intrinsicSymbolIsOverwritten(proxyConstructorSymbol)
     )
       return null
-    const [target, handler] = construct.arguments ?? []
+    const target = construct.arguments?.[0]
+    const handler = construct.arguments?.[1]
     if (construct.arguments?.length !== 2 || !target || !handler || ts.isSpreadElement(target) || ts.isSpreadElement(handler)) return null
     const literal = unwrapErasedExpression(handler)
     if (!ts.isObjectLiteralExpression(literal)) return null
@@ -1909,7 +1924,7 @@ export const censusGlobalHostMutations = (
   const declaredCallableRepresentation = (
     expression: ts.Expression,
     construct: boolean,
-    seen: Set<ts.Node> = new Set()
+    seen: Set<ts.Node> = new Set<ts.Node>()
   ): PublishedRepresentation | null => {
     const current = unwrapErasedExpression(expression)
     const bound = boundCallableTarget(current)
@@ -2036,7 +2051,7 @@ export const censusGlobalHostMutations = (
     expression: ts.Expression,
     construct: boolean,
     expected: PublishedRepresentation,
-    seen: ReadonlySet<ts.Node> = new Set(),
+    seen: ReadonlySet<ts.Node> = new Set<ts.Node>(),
     /**
      * The signature the checker resolved at the call this question is asked
      * for, when there is one. A callee's TYPE can carry more signatures than
@@ -2099,7 +2114,10 @@ export const censusGlobalHostMutations = (
     const declaredValue =
       resolved && ts.isFunctionDeclaration(resolved)
         ? resolved
-        : [...(namedSymbol?.declarations ?? []), ...(symbol?.declarations ?? [])].find(
+        : [
+            ...(namedSymbol?.declarations == null ? [] : [...namedSymbol?.declarations]),
+            ...(symbol?.declarations == null ? [] : [...symbol?.declarations])
+          ].find(
             (declaration) =>
               ts.isVariableDeclaration(declaration) ||
               ts.isFunctionDeclaration(declaration) ||
@@ -2445,7 +2463,7 @@ export const censusGlobalHostMutations = (
   const noPublicationDependencies: readonly ts.Expression[] = Object.freeze([])
   const publicationVerdict = seededOriginSolver<ts.Expression>((expression) => {
     const recorded = publicationDependencies.get(expression)
-    const dependencies = recorded === undefined ? noPublicationDependencies : [...recorded]
+    const dependencies = recorded === undefined ? noPublicationDependencies : recorded.toArray()
     return {
       admitted: publishedRepresentations.get(expression) != null,
       seed: (dependencies.length === 0 || publicationAllocations.has(expression)) && publishedRepresentations.get(expression) != null,
@@ -2621,8 +2639,9 @@ export const censusGlobalHostMutations = (
   const invalidateIntrinsicMember = (target: ts.Expression, key: string | null, keyExpression?: ts.Expression): void => {
     if (!isIntrinsicSurface(target) && !standardGlobalValue(target)) return
     if (key === null) {
-      const actualKeys = keyExpression === undefined ? [] : keyReader.keysOfKeyExpression(keyExpression)
-      if (actualKeys.length > 0 && actualKeys.every((one) => one.kind !== 'every')) {
+      const actualKeys: readonly MutationKey[] = keyExpression === undefined ? [] : keyReader.keysOfKeyExpression(keyExpression)
+      // `: boolean`: an inferred type predicate would retype the keys as an array of a narrower union.
+      if (actualKeys.length > 0 && actualKeys.every((one): boolean => one.kind !== 'every')) {
         markIntrinsicPrototypeKeys(target, actualKeys)
         for (const actual of actualKeys) if (actual.kind === 'name') markOverwrittenMember(target, actual.name)
         return
@@ -3107,7 +3126,7 @@ export const censusGlobalHostMutations = (
     let invocationFact: SourceInvocationFact | null = null
     if (ts.isCallExpression(site.call) && !trustSeed.rejectedCallableProofs.has(site.call)) {
       const call = site.call
-      const proof = invocationLedger.capture(() => callableFrames.invocationFactOf(call))
+      const proof = captureAnswer(invocationLedger, () => callableFrames.invocationFactOf(call))
       if (proof.value !== null && proof.value.frames.length > 0) {
         invocationFact = proof.value
         sourceInvocationFacts.set(call, proof.value)
@@ -3134,7 +3153,7 @@ export const censusGlobalHostMutations = (
       ts.isCallExpression(site.call) && invocationFact !== null && !invocationFact.operands.explicitThis ? invocationFact : null
     if (frameFact !== null && frameFact.frames.every(frameForwardingIsModelled)) {
       if (sourceInvocationFactHasJointTargets(flow, frameFact)) sourceJointInvocationCalls.add(frameFact.call)
-      const proof = invocationLedger.capture(() => sourceIntrinsicMemberInvocationOf(checker, flow, frameFact))
+      const proof = captureAnswer(invocationLedger, () => sourceIntrinsicMemberInvocationOf(checker, flow, frameFact))
       if (proof.value !== null) {
         sourceIntrinsicReplacementCalls.add(frameFact.call)
         sourceIntrinsicInstallations.add(proof.value.installation)
@@ -3254,7 +3273,7 @@ export const censusGlobalHostMutations = (
     while (enclosing && !(isRealCallableDeclaration(enclosing) && !ts.isArrowFunction(enclosing))) enclosing = enclosing.parent
     if (!enclosing || !isRealCallableDeclaration(enclosing) || trustSeed.rejectedCallableProofs.has(enclosing)) return null
     const declaration = enclosing
-    const proof = invocationLedger.capture(() => callableFrames.receiverValuesOf?.(declaration) ?? null)
+    const proof = captureAnswer(invocationLedger, () => callableFrames.receiverValuesOf?.(declaration) ?? null)
     if (proof.value !== null) invocationRequirements.set(enclosing, proof.requirements)
     return proof.value
   }
@@ -3279,7 +3298,7 @@ export const censusGlobalHostMutations = (
     const owner = parameter.parent
     if (!isRealCallableDeclaration(owner) || trustSeed.rejectedCallableProofs.has(owner)) return null
     try {
-      const executing = invocationLedger.capture(() => sourceExecutingParameterValuesOf(checker, flow, parameter))
+      const executing = captureAnswer(invocationLedger, () => sourceExecutingParameterValuesOf(checker, flow, parameter))
       if (executing.value !== null) {
         retainRequirements(owner, executing.requirements)
         return executing.value
@@ -3295,7 +3314,7 @@ export const censusGlobalHostMutations = (
       // the same outcome a clean `null` would have produced, instead of
       // taking the whole compiler down over a question nothing asked before
       // this fix existed.
-      const proof = invocationLedger.capture(() => callableFrames.parameterValuesOf(parameter))
+      const proof = captureAnswer(invocationLedger, () => callableFrames.parameterValuesOf(parameter))
       if (proof.value !== null) retainRequirements(owner, proof.requirements)
       return proof.value
     } catch {
@@ -3479,7 +3498,7 @@ export const censusGlobalHostMutations = (
   // Most declarations have none of most write kinds; a kept list is copied at
   // its exact length, since `push` left each with room for seventeen.
   const noExpressions: readonly ts.Expression[] = []
-  const noMemberWrites: ReadonlyMap<string, readonly ts.Expression[]> = new Map()
+  const noMemberWrites: ReadonlyMap<string, readonly ts.Expression[]> = new Map<string, readonly ts.Expression[]>()
   const keptExpressions = (values: ts.Expression[]): readonly ts.Expression[] => (values.length === 0 ? noExpressions : values.slice())
   const noStagedMembers: readonly StagedMemberWrite[] = []
   const noStagedBulk: readonly StagedBulkWrite[] = []
@@ -3639,14 +3658,36 @@ export const censusGlobalHostMutations = (
   }
   type TermSet = SharedList<AliasTerm> | SmallSet<AliasTerm>
   // Most nodes and components never get an edge, and every node's seeds and
-  // edges are spent once the graph is condensed: an empty set is this one
+  // edges are spent once the graph is condensed: an empty set is one
   // frozen instance, which a write would throw on, and a set is built on the
-  // first member (`ownSet`).
-  const noMembers = Object.freeze(new SmallSet<never>()) as SmallSet<never>
-  const ownSet = <T>(set: SmallSet<T>): SmallSet<T> => (set === noMembers ? new SmallSet<T>() : set)
+  // first member (`ownSet`). One frozen instance per member type: a set of
+  // `never` held where a set of nodes is declared is a different class
+  // instantiation to a native build, with no conversion between them.
+  const noValueNodes = new SmallSet<ValueNode>()
+  const noComponents = new SmallSet<Component>()
+  const noSeeds = new SmallSet<AliasTerm>()
+  // Frozen apart from the declarations: `Object.freeze` returns a `Readonly` view type, not the class.
+  Object.freeze(noValueNodes)
+  Object.freeze(noComponents)
+  Object.freeze(noSeeds)
+  const ownSet = <T>(set: SmallSet<T>, empty: SmallSet<T>): SmallSet<T> => (set === empty ? new SmallSet<T>() : set)
   const addSeed = (node: ValueNode, term: AliasTerm): void => {
-    node.seeds = ownSet(node.seeds).add(term)
+    node.seeds = ownSet(node.seeds, noSeeds).add(term)
   }
+  // A term set is either form; each is read through its own class, never
+  // through the union, whose members a native build cannot dispatch to.
+  const termsHave = (terms: TermSet | null, term: AliasTerm): boolean =>
+    terms === null ? false : terms instanceof SmallSet ? terms.has(term) : terms.has(term)
+  const termCount = (terms: TermSet | null): number => (terms === null ? 0 : terms instanceof SmallSet ? terms.size : terms.size)
+  /** Visits `terms` as iterating the set itself would: a `SmallSet` live, a `SharedList` (never written) as its members. */
+  const forEachTerm = (terms: TermSet | null, visit: (term: AliasTerm) => void): void => {
+    if (terms === null) return
+    if (terms instanceof SmallSet) for (const term of terms) visit(term)
+    else for (const term of terms.members) visit(term)
+  }
+  const noTermMembers: readonly AliasTerm[] = []
+  const termMembers = (terms: TermSet | null): readonly AliasTerm[] =>
+    terms === null ? noTermMembers : terms instanceof SmallSet ? terms.toArray() : terms.members
   // Each short term set is the one shared list of exactly its members in their
   // order, reached from the list one member shorter. A transition is keyed by
   // that list's index and the added term's, both counted up from zero.
@@ -3655,9 +3696,9 @@ export const censusGlobalHostMutations = (
   const sharedTermLists = new Map<number, SharedList<AliasTerm>>()
   const noTerms = new SharedList<AliasTerm>([], 0)
   let sharedTermListCount = 1
-  const ownTerms = (terms: Iterable<AliasTerm>, term: AliasTerm): SmallSet<AliasTerm> => {
+  const ownTerms = (terms: SharedList<AliasTerm>, term: AliasTerm): SmallSet<AliasTerm> => {
     const own = new SmallSet<AliasTerm>()
-    for (const member of terms) own.add(member)
+    for (const member of terms.members) own.add(member)
     return own.add(term)
   }
   /** `terms` with `term` added, which it does not hold: a long set is private and grows in place. */
@@ -3698,7 +3739,6 @@ export const censusGlobalHostMutations = (
   const inheritedPrototypeTerms = new Map<DeclarationId, AliasTerm>()
   const constructorsByPrototype = new Map<DeclarationId, DeclarationId>()
   const prototypesByConstructor = new Map<DeclarationId, DeclarationId>()
-  const inheritedPrototypeNames = new WeakMap<ts.Type, ReadonlySet<string>>()
   const prototypeNamesOf = (type: ts.Type): ReadonlySet<string> => {
     const cached = inheritedPrototypeNames.get(type)
     if (cached) return cached
@@ -3855,9 +3895,9 @@ export const censusGlobalHostMutations = (
     const node: ValueNode = {
       expression,
       component: null,
-      out: noMembers,
-      incoming: noMembers,
-      seeds: noMembers,
+      out: noValueNodes,
+      incoming: noValueNodes,
+      seeds: noSeeds,
       expanded: expression === null
     }
     allValueNodes.push(node)
@@ -3875,9 +3915,9 @@ export const censusGlobalHostMutations = (
   const syntheticValueNode = (): ValueNode => newValueNode(null)
   const link = (source: ValueNode, target: ValueNode): void => {
     if (source === target || source.out.has(target)) return
-    source.out = ownSet(source.out)
+    source.out = ownSet(source.out, noValueNodes)
     source.out.add(target)
-    target.incoming = ownSet(target.incoming)
+    target.incoming = ownSet(target.incoming, noValueNodes)
     target.incoming.add(source)
   }
   const select = (source: ValueNode, key: string | null, target: ValueNode, mode: SelectorMode = 'own'): void => {
@@ -4450,15 +4490,19 @@ export const censusGlobalHostMutations = (
   for (const root of allValueNodes) {
     if (visited.has(root)) continue
     visited.add(root)
-    const stack: { readonly node: ValueNode; readonly outgoing: Iterator<ValueNode> }[] = [{ node: root, outgoing: root.out.values() }]
+    // Each frame walks a snapshot of its edges: the graph is frozen here, so
+    // a snapshot visits what a live iterator would, and a native build has a
+    // typed reader for an array but not for a hand-driven generator.
+    const stack: { readonly node: ValueNode; readonly outgoing: readonly ValueNode[]; next: number }[] = [
+      { node: root, outgoing: root.out.toArray(), next: 0 }
+    ]
     while (stack.length > 0) {
       const frame = stack[stack.length - 1]!
-      const next = frame.outgoing.next()
-      if (!next.done) {
-        const target = next.value
+      if (frame.next < frame.outgoing.length) {
+        const target = frame.outgoing[frame.next++]!
         if (!visited.has(target)) {
           visited.add(target)
-          stack.push({ node: target, outgoing: target.out.values() })
+          stack.push({ node: target, outgoing: target.out.toArray(), next: 0 })
         }
       } else {
         finishOrder.push(frame.node)
@@ -4471,7 +4515,7 @@ export const censusGlobalHostMutations = (
   // it every component, nearly all of one node, would keep an array.
   const componentNodes = process.env['GEA_HOST_MUTATION_SCALE_DEBUG'] === '1' ? new Map<Component, readonly ValueNode[]>() : null
   // Marks a node the walk below has claimed before its component exists.
-  const claimed: Component = { out: noMembers, terms: null }
+  const claimed: Component = { out: noComponents, terms: null }
   for (let finishIndex = finishOrder.length - 1; finishIndex >= 0; finishIndex--) {
     const root = finishOrder[finishIndex]!
     if (root.component !== null) continue
@@ -4487,7 +4531,7 @@ export const censusGlobalHostMutations = (
         stack.push(incoming)
       }
     }
-    const component: Component = { out: noMembers, terms: null }
+    const component: Component = { out: noComponents, terms: null }
     components.push(component)
     componentNodes?.set(component, members)
     for (const member of members) member.component = component
@@ -4497,7 +4541,7 @@ export const censusGlobalHostMutations = (
     for (const targetNode of node.out) {
       const target = targetNode.component!
       if (source !== target) {
-        source.out = ownSet(source.out)
+        source.out = ownSet(source.out, noComponents)
         source.out.add(target)
       }
     }
@@ -4505,8 +4549,8 @@ export const censusGlobalHostMutations = (
   // The condensation is done: the node edges, the walk's own state and the
   // expansion queue are spent, and only components carry edges from here.
   for (const node of allValueNodes) {
-    node.out = noMembers
-    node.incoming = noMembers
+    node.out = noValueNodes
+    node.incoming = noValueNodes
   }
   // Every question from here names an expression and wants its component, so
   // the tables answer that directly and the nodes go once they are seeded --
@@ -4588,7 +4632,7 @@ export const censusGlobalHostMutations = (
     )
     for (const [component, count] of top) {
       process.stderr.write(
-        `  count=${count} selectors=${selectorTargets.get(component)?.length ?? 0} terms=${component.terms?.size ?? 0} :: ${sampleTextOf(component)}\n`
+        `  count=${count} selectors=${selectorTargets.get(component)?.length ?? 0} terms=${termCount(component.terms)} :: ${sampleTextOf(component)}\n`
       )
     }
     if (top[0]) {
@@ -4624,7 +4668,7 @@ export const censusGlobalHostMutations = (
   }
   const addTerm = (component: Component, term: AliasTerm): void => {
     const terms = component.terms
-    if (terms === null || !terms.has(term)) {
+    if (!termsHave(terms, term)) {
       component.terms = withTerm(terms, term)
       pendingTermComponents.push(component)
       pendingTerms.push(term)
@@ -4639,11 +4683,11 @@ export const censusGlobalHostMutations = (
     }
     if (targets.has(target)) return
     targets.add(target)
-    for (const term of source.terms ?? []) addTerm(target, term)
+    forEachTerm(source.terms, (term) => addTerm(target, term))
   }
   const scheduleSelection = (selector: Selector, term: AliasTerm): void => {
     const expanded = selector.expanded
-    if (expanded !== null && expanded.has(term)) return
+    if (termsHave(expanded, term)) return
     selector.expanded = withTerm(expanded, term)
     pendingSelectors.push(selector)
     pendingSelections.push(term)
@@ -4667,7 +4711,7 @@ export const censusGlobalHostMutations = (
     if (!modes) deepComponents.set(source, (modes = [undefined, undefined, undefined]))
     const existing = modes[selectorModeSlot[mode]]
     if (existing) return existing
-    const deep: Component = { out: noMembers, terms: null }
+    const deep: Component = { out: noComponents, terms: null }
     components.push(deep)
     modes[selectorModeSlot[mode]] = deep
     addSelector(source, null, deep, mode)
@@ -4710,7 +4754,7 @@ export const censusGlobalHostMutations = (
     const selector: Selector = { source, key, target, mode, expanded: null }
     if (targets) targets.push(selector)
     else selectorTargets.set(source, [selector])
-    for (const term of source.terms ?? []) scheduleSelection(selector, term)
+    forEachTerm(source.terms, (term) => scheduleSelection(selector, term))
   }
   const addLiteralSelection = (
     literal: ts.ObjectLiteralExpression | ts.ArrayLiteralExpression,
@@ -4910,7 +4954,7 @@ export const censusGlobalHostMutations = (
           // selector is the terminating answer: it matches EVERY key, so it
           // over-approximates the enumeration it replaces rather than dropping
           // any of it.
-          if (term.rest.offset > 0 && source.terms?.has(term)) addSelector(source, null, target, selector.mode)
+          if (term.rest.offset > 0 && termsHave(source.terms, term)) addSelector(source, null, target, selector.mode)
           else addSelector(source, String(index + term.rest.offset), target, selector.mode)
         }
       }
@@ -4932,9 +4976,10 @@ export const censusGlobalHostMutations = (
       if (pendingIndex < pendingTerms.length) {
         const component = pendingTermComponents[pendingIndex]!
         const term = pendingTerms[pendingIndex++]!
-        if (!(component.terms?.has(term) ?? false)) continue
+        if (!termsHave(component.terms, term)) continue
         for (const target of component.out) addTerm(target, term)
-        for (const target of dynamicOut.get(component) ?? []) addTerm(target, term)
+        const dynamicTargets = dynamicOut.get(component)
+        if (dynamicTargets !== undefined) for (const target of dynamicTargets) addTerm(target, term)
         for (const selector of selectorTargets.get(component) ?? []) scheduleSelection(selector, term)
         continue
       }
@@ -4959,7 +5004,7 @@ export const censusGlobalHostMutations = (
   for (const node of allValueNodes) {
     const component = node.component!
     for (const seed of node.seeds) addTerm(component, seed)
-    node.seeds = noMembers
+    node.seeds = noSeeds
   }
   // Every node is seeded and reached through its expression's entry from
   // here; the list is kept only as the frozen graph's size, which a node
@@ -5011,17 +5056,18 @@ export const censusGlobalHostMutations = (
     selectorTargets.clear()
     selectorTargetsByKey.clear()
     dynamicOut.clear()
-    for (const component of components) component.out = noMembers
+    for (const component of components) component.out = noComponents
     for (const component of components) {
       let global = false
       let opaque = false
       let represented = false
       let prototypes: Set<DeclarationId> | null = null
-      for (const term of component.terms ?? []) {
+      // The solve is over: nothing adds to the set while this reads its members.
+      for (const term of termMembers(component.terms)) {
         opaque ||= term.kind === 'OPAQUE_UNKNOWN'
         global ||= term.kind === 'GLOBAL_TRUE'
         represented ||= term.kind === 'REPRESENTED_NON_GLOBAL'
-        if (term.kind === 'INTRINSIC_OBJECT') (prototypes ??= new Set()).add(term.declaration)
+        if (term.kind === 'INTRINSIC_OBJECT') (prototypes ??= new Set<DeclarationId>()).add(term.declaration)
       }
       factsByComponent.set(
         component,
@@ -5388,7 +5434,7 @@ export const censusGlobalHostMutations = (
     // the fail-closed answer its provenance already earned.
     return receiverTypeIsAssertionSeeded(current) || typeMayReachGlobal(checker.getTypeAtLocation(current))
   }
-  const authenticatedCalleeIdentity = (expression: ts.Expression, seen: Set<ts.Node> = new Set()): boolean => {
+  const authenticatedCalleeIdentity = (expression: ts.Expression, seen: Set<ts.Node> = new Set<ts.Node>()): boolean => {
     const current = unwrapErasedExpression(expression)
     const bound = boundCallableTarget(current)
     if (bound) return receiverHasPublishedRepresentation(bound.receiver) && authenticatedCalleeIdentity(bound.target, seen)
@@ -5476,11 +5522,13 @@ export const censusGlobalHostMutations = (
     const cached = ownKeysByComponent.get(root)
     if (cached) return cached
     const keys = new Set<string>()
-    const pending: AliasTerm[] = [...(root.terms ?? [])]
+    const pending: AliasTerm[] = root.terms == null ? [] : root.terms instanceof SmallSet ? root.terms.toArray() : [...root.terms.members]
     const seen = new Set<AliasTerm>()
     let unknown = false
     const addExpression = (value: ts.Expression): void => {
-      for (const term of componentOfExpression(value).terms ?? []) pending.push(term)
+      forEachTerm(componentOfExpression(value).terms, (term) => {
+        pending.push(term)
+      })
     }
     while (pending.length > 0) {
       const term = pending.pop()!
@@ -5980,7 +6028,7 @@ export const censusGlobalHostMutations = (
     if (trustSeed.rejectedCallableProofs.has(read)) return false
     const known = ownCallableReadAnswers.get(read)
     if (known !== undefined) return known
-    const proof = invocationLedger.capture(() => {
+    const proof = captureAnswer(invocationLedger, () => {
       const owner = sourceCallableObjectOf(checker, flow, read.expression)
       const key = staticKeyOf(read)
       if (owner === null || key === null || sourceCallableOwnDataWriteOf(checker, flow, owner, key, read) === null) return false
@@ -6145,7 +6193,7 @@ export const censusGlobalHostMutations = (
    * `toString`/`subarray`, whose implementation is the native carrier -- is
    * not, and keeps needing a stated contract.
    */
-  const ambientCallableIsProgramSupplied = (symbol: ts.Symbol, seen: ReadonlySet<ts.Symbol> = new Set()): boolean => {
+  const ambientCallableIsProgramSupplied = (symbol: ts.Symbol, seen: ReadonlySet<ts.Symbol> = new Set<ts.Symbol>()): boolean => {
     const declaration = symbol.declarations?.[0]
     if (!declaration) return false
     const inherited = classChainMemberOfMergedSignature(symbol)
@@ -6286,7 +6334,7 @@ export const censusGlobalHostMutations = (
     let closed = false
     let requirements: readonly IntrinsicProtocolRequirement[] = []
     try {
-      const proof = invocationLedger.capture(() => {
+      const proof = captureAnswer(invocationLedger, () => {
         if (!retainLibrarySourceProtocol(root)) return false
         const terminal = (reference: ts.Expression): boolean | null => {
           const current = outermostErasureOf(reference) as ts.Expression
@@ -6598,7 +6646,7 @@ export const censusGlobalHostMutations = (
    * already treat as where identity is decided), not the expression as a
    * whole.
    */
-  const receiverTypeIsAssertionSeeded = (expression: ts.Expression, seen: Set<ts.Node> = new Set()): boolean => {
+  const receiverTypeIsAssertionSeeded = (expression: ts.Expression, seen: Set<ts.Node> = new Set<ts.Node>()): boolean => {
     let current: ts.Expression = expression
     for (;;) {
       if (ts.isAsExpression(current) || ts.isTypeAssertionExpression(current)) {
@@ -7445,7 +7493,7 @@ export const censusGlobalHostMutations = (
         !trustSeed.rejectedCallableProofs.has(current)
       ) {
         try {
-          const proof = invocationLedger.capture(() => closedValueOriginAuthorityOf(checker, flow, current).fieldValuesOf(current))
+          const proof = captureAnswer(invocationLedger, () => closedValueOriginAuthorityOf(checker, flow, current).fieldValuesOf(current))
           if (proof.value === null) return refused
           invocationRequirements.set(current, proof.requirements)
           return through(proof.value)
@@ -7471,7 +7519,7 @@ export const censusGlobalHostMutations = (
   // trusted may have been written by its own visit; a `for-in` key set holds
   // every key Object.prototype may carry; and a key set's intrinsic
   // assumptions hold against this very result. See `CensusSeed`.
-  if (!tainted.has('*')) {
+  if (!tainted.hasEntry('*')) {
     // Evaluated before the ledger checks below: the parameter proofs it asks
     // file their intrinsic requirements with `invocationRequirements`.
     const unprovenSurfaceWrite = allIntrinsicTrustInvalidated
@@ -7557,7 +7605,8 @@ export const censusGlobalHostMutations = (
           },
           noComputedKeys: trustSeed.noComputedKeys || assumptionFailed,
           rejectedCallableProofs
-        }
+        },
+        inheritedPrototypeNames
       )
     }
   }

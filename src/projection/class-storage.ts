@@ -28,7 +28,7 @@ export const nativeClassFieldUsesOf = (
   deriver: RepresentationDeriver,
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   slots: SlotCensus,
-  ownerDispatchedReads: ReadonlySet<OperationId> = new Set()
+  ownerDispatchedReads: ReadonlySet<OperationId> = new Set<OperationId>()
 ): ReadonlyMap<DeclarationId, ReadonlySet<string>> => {
   const used = new Map<DeclarationId, Set<string>>()
   const mark = (receiver: Representation, key: string | null): void => {

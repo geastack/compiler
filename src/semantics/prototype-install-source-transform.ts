@@ -258,7 +258,14 @@ const installOf = (statement: ts.Statement, className: string, file: ts.SourceFi
   const callee = expression.expression
   if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'forEach') return null
   const list = unwrap(callee.expression)
-  if (!ts.isArrayLiteralExpression(list) || list.elements.length === 0 || !list.elements.every(ts.isStringLiteralLike)) return null
+  if (!ts.isArrayLiteralExpression(list) || list.elements.length === 0) return null
+  // Collected one by one into a typed list rather than narrowed with
+  // `every`'s type-guard overload, so each element's type is concrete.
+  const keys: ts.StringLiteralLike[] = []
+  for (const element of list.elements) {
+    if (!ts.isStringLiteralLike(element)) return null
+    keys.push(element)
+  }
   const arrow = unwrap(expression.arguments[0]!)
   if (!ts.isArrowFunction(arrow) || arrow.parameters.length !== 1 || arrow.modifiers?.length) return null
   const parameter = arrow.parameters[0]!
@@ -270,7 +277,7 @@ const installOf = (statement: ts.Statement, className: string, file: ts.SourceFi
     inner = only.expression
   } else inner = arrow.body
   const members: string[] = []
-  for (const element of list.elements as ts.NodeArray<ts.StringLiteralLike>) {
+  for (const element of keys) {
     const literal = JSON.stringify(element.text)
     // The key was a `string` in the loop; a bare literal would narrow every
     // comparison against it into a no-overlap type error.

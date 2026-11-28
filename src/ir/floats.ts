@@ -63,7 +63,7 @@ export const narrowableFloatsOf = (
   body: IrBody,
   admitsCell: (declaration: DeclarationId) => boolean,
   excluded: ReadonlySet<IrValueId>,
-  exactIntegers: ReadonlySet<IrValueId> = new Set()
+  exactIntegers: ReadonlySet<IrValueId> = new Set<IrValueId>()
 ): Float32Narrowing => {
   const stringKeys = new Map<IrValueId, string>()
   const float32Constants = new Set<IrValueId>()

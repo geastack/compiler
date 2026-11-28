@@ -1,6 +1,13 @@
 import type { Representation } from '../representation/model.js'
-import { abiKey, representationKey } from '../representation/model.js'
-import { nativeRecordBaseUpcastPlan, nativeSumPlan, nativeSumPreservesPayload, type NativeSumPlan } from './native-sum.js'
+import { absenceCarrier, abiKey, representationKey } from '../representation/model.js'
+import {
+  nativeRecordBaseUpcastPlan,
+  nativeSumHousesLeaves,
+  nativeSumLeavesOf,
+  nativeSumPlan,
+  nativeSumPreservesPayload,
+  type NativeSumPlan
+} from './native-sum.js'
 
 export type NativeSelectionStep =
   | { readonly kind: 'identity' }
@@ -24,6 +31,14 @@ export interface NativeSelectionRecipe {
 }
 
 type Selection = NativeSelectionStep | 'disjoint' | 'unknown'
+
+// One carrier per absence, as `native-sum.ts` keeps: `representationKey` is
+// memoized by identity, so a literal minted per question misses that memo and
+// adds a dead entry to it. Selection asks about absences for every sum pair
+// the conversion graph enumerates, and those misses dominated its cost.
+const nullCarrier = absenceCarrier('null')
+const undefinedCarrier = absenceCarrier('undefined')
+const absenceOf = (absence: 'null' | 'undefined'): Representation => (absence === 'null' ? nullCarrier : undefinedCarrier)
 
 /**
  * These carriers have distinct native runtime categories. A structural object,
@@ -49,7 +64,7 @@ const categoryOf = (value: Representation): string | null => {
 
 const disjoint = (source: Representation, target: Representation, sourcePresent = false): boolean => {
   if (target.kind === 'optional')
-    return disjoint(source, target.payload, sourcePresent) && disjoint(source, { kind: target.absence }, sourcePresent)
+    return disjoint(source, target.payload, sourcePresent) && disjoint(source, absenceOf(target.absence), sourcePresent)
   if (target.kind === 'tagged-union') return target.arms.every((arm) => disjoint(source, arm.value, sourcePresent))
   if (source.kind === 'class-ref' && target.kind === 'class-ref')
     return (
@@ -71,7 +86,7 @@ const select = (source: Representation, target: Representation): Selection => {
   if (transfer) return { kind: 'transfer', plan: transfer }
   if (source.kind === 'optional') {
     const present = select(source.payload, target)
-    const absent = select({ kind: source.absence }, target)
+    const absent = select(absenceOf(source.absence), target)
     if (present === 'unknown' || absent === 'unknown') return 'unknown'
     if (present === 'disjoint' && absent === 'disjoint') return 'disjoint'
     return {
@@ -99,8 +114,8 @@ const select = (source: Representation, target: Representation): Selection => {
   if (source.kind === 'null' && target.kind === 'class-ref' && target.ownership === 'shared-refcount') return { kind: 'null' }
   if (source.kind === 'class-ref' && source.ownership === 'shared-refcount') {
     if (target.kind === 'null') return { kind: 'reference-null', absent: { kind: 'null' } }
-    const absent = nativeSumPlan({ kind: 'null' }, target)
-    const undefinedHome = nativeSumPlan({ kind: 'undefined' }, target)
+    const absent = nativeSumPlan(nullCarrier, target)
+    const undefinedHome = nativeSumPlan(undefinedCarrier, target)
     if ((absent || undefinedHome) && disjoint(source, target, true)) {
       return {
         kind: 'reference-null',
@@ -172,7 +187,7 @@ export const nativeSubsetSelectionRecipeOf = (source: Representation, target: Re
       return { kind: 'transfer', plan: target.kind === 'optional' ? { kind: 'wrap', target, payload: upcast, index: null } : upcast }
     if (value.kind === 'optional') {
       const present = exact(value.payload)
-      const absent = exact({ kind: value.absence })
+      const absent = exact(absenceOf(value.absence))
       return present || absent ? { kind: 'optional', absence: value.absence, present, absent } : null
     }
     if (value.kind === 'tagged-union') {
@@ -245,7 +260,29 @@ export const nativeSelectionGuardContractOf = (
 }
 
 /** Widening may not discard an alternative or require a successful downcast. */
+/**
+ * A necessary condition for `select` to answer a total step, from per-carrier
+ * summaries instead of the recursion: the conversion graph asks this of every
+ * sum pair it enumerates and almost none are total.
+ *
+ * Read off `select` arm by arm. A sum source is total only if it is the target
+ * itself, transfers into it, or every alternative is total -- and each of those
+ * puts every leaf in a home. Into a sum target a leaf can only transfer, which
+ * `nativeSumHousesLeaves` bounds. Into any other target a leaf is total only as
+ * that very carrier, or as a class handle or `null` meeting a class handle;
+ * a sum is never keyed like a non-sum, so no inner sum can be the target.
+ */
+const totalSelectionMayExist = (source: Representation, target: Representation): boolean => {
+  if (source.kind !== 'optional' && source.kind !== 'tagged-union') return true
+  if (target.kind === 'optional' || target.kind === 'tagged-union') return nativeSumHousesLeaves(source, target)
+  const targetKey = representationKey(target)
+  return nativeSumLeavesOf(source).every(
+    (leaf) => representationKey(leaf) === targetKey || (target.kind === 'class-ref' && (leaf.kind === 'class-ref' || leaf.kind === 'null'))
+  )
+}
+
 export const nativeTotalSelectionRecipeOf = (source: Representation, target: Representation): NativeSelectionRecipe | null => {
+  if (!totalSelectionMayExist(source, target)) return null
   const recipe = nativeSelectionRecipeOf(source, target)
   return recipe && total(recipe.step) ? recipe : null
 }

@@ -192,6 +192,10 @@ export interface ConversionRuntimeRegistry {
    * later `set` survive. Only the all-dynamic target is admitted, where every
    * read is a widening and so total; a typed target would need a checked
    * narrowing of each entry, which no view installs.
+   *
+   * `Set<unknown>` is admitted the same way and for the same reasons: the
+   * brand check `v instanceof Set` made, plus a view of that same set whose
+   * members leave it boxed.
    */
   readonly dynamicMapViewMaterializer: (target: Representation) => ClassifierMaterializerPair | null
 

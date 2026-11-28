@@ -64,9 +64,7 @@ export const constructAbiOfCallee = (representation: Representation): CallableAb
  * are exactly `0..n-1` in order. Such a rest slot is filled field by field,
  * never by a runtime-sized array.
  */
-export const isClosedContiguousTupleRecord = (
-  representation: Representation
-): representation is Extract<Representation, { kind: 'record' }> =>
+export const isClosedContiguousTupleRecord = (representation: Representation): boolean =>
   representation.kind === 'record' &&
   representation.accessors.length === 0 &&
   representation.fields.length > 0 &&

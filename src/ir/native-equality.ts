@@ -7,9 +7,11 @@ export interface NativeEqualityRecipe {
   readonly negate: boolean
 }
 
-export const nativeEqualityOf = (
+// Generic in the operand: callers hold IrOperand arrays, and an array of one
+// element type does not flow natively into a narrower `{ representation }[]`.
+export const nativeEqualityOf = <Operand extends { readonly representation: Representation }>(
   operator: string,
-  operands: readonly { readonly representation: Representation }[]
+  operands: readonly Operand[]
 ): NativeEqualityRecipe | null => {
   if ((operator !== '===' && operator !== '!==') || operands.length !== 2) return null
   const left = operands[0]!.representation

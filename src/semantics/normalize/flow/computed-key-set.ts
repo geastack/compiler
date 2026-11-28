@@ -1,5 +1,5 @@
 import ts from '#typescript'
-import { isClassSpelledSourceClass, type ValueFlowIndex } from './model.js'
+import { isClassSpelledSourceClass, type SourceClass, type ValueFlowIndex } from './model.js'
 import { outermostErasureOf, unwrapErasedExpression } from '../producers/erasure.js'
 import { deferredIntrinsicProtocolLedgerOf } from '../deferred-intrinsic-protocols.js'
 import type { PrototypeKeyQuery } from '../host-mutation-keys.js'
@@ -103,7 +103,8 @@ const sameClassFamily = (checker: ts.TypeChecker, flow: ValueFlowIndex, inner: t
   if (!a || !b) return false
   if (a === b) return true
   return (
-    sourceClassFamilyOf(checker, flow, new Set([a]))?.has(b) === true || sourceClassFamilyOf(checker, flow, new Set([b]))?.has(a) === true
+    sourceClassFamilyOf(checker, flow, new Set<SourceClass>([a]))?.has(b) === true ||
+    sourceClassFamilyOf(checker, flow, new Set<SourceClass>([b]))?.has(a) === true
   )
 }
 const activeVerdicts = new WeakMap<ValueFlowIndex, { cause: Refusal | null; readonly key: ts.Expression }[]>()
@@ -119,7 +120,13 @@ const locationText = (node: ts.Node): string => {
 const callSites = new WeakMap<ValueFlowIndex, ReadonlyMap<ts.Node, ValueFlowIndex['calls'][number]>>()
 const callSiteOf = (flow: ValueFlowIndex, call: ts.CallExpression | ts.NewExpression): ValueFlowIndex['calls'][number] | undefined => {
   let index = callSites.get(flow)
-  if (!index) callSites.set(flow, (index = new Map(flow.calls.map((site) => [site.call, site]))))
+  if (!index) {
+    // Keyed by the wider node type the table is declared with, so the native
+    // map needs no key conversion.
+    const built = new Map<ts.Node, ValueFlowIndex['calls'][number]>()
+    for (const site of flow.calls) built.set(site.call, site)
+    callSites.set(flow, (index = built))
+  }
   return index.get(call)
 }
 
@@ -393,7 +400,7 @@ export const computedKeySetVerdictOf = (
       calleeDeclarationOf(checker, call),
       site?.checkerDeclaration,
       site?.inferredDeclaration,
-      ...(site?.targets ?? [])
+      ...(site?.targets == null ? [] : [...site?.targets])
     ]) {
       if (!candidate || ts.isJSDocSignature(candidate) || candidate.getSourceFile().isDeclarationFile) continue
       // A bodiless declaration (`declare function`, an overload, an abstract

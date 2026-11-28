@@ -14,6 +14,8 @@ import type { NativeOwnAssignmentValue } from './native-own-assignment.js'
 import { recordObjectShapeOf } from '../representation/unwritten-record-members.js'
 import { objectPrototypeMemberNames } from '../representation/record-fields.js'
 import { canonicalIndexLiteral } from '../representation/array-index.js'
+import { mapKeys } from '../collection-lists.js'
+import { setValues } from '../collection-lists.js'
 
 /** A fixed own slot belongs to the allocation that stores it, independently
  * of every structural view naming that object.
@@ -206,9 +208,11 @@ export const nativeObjectDataSlotSchemasOf = (graph: SemanticGraph): NativeObjec
   const closedBulkRoots = new Set<SemanticResultId>()
   const closedSlotWriters = new Map<NativeObjectDataAllocation, Map<string, Set<OperationId>>>()
   const bulkStoredValues = new Map<SemanticResultId, Map<string, NativeOwnAssignmentValue[]>>()
-  const addStoredValues = (
+  // Generic in the slot: target and source roots hold their own slot record
+  // types, and neither array converts natively to an array of this shape.
+  const addStoredValues = <Slot extends { readonly key: string; readonly values: readonly NativeOwnAssignmentValue[] }>(
     allocation: SemanticResultId,
-    slots: readonly { readonly key: string; readonly values: readonly NativeOwnAssignmentValue[] }[]
+    slots: readonly Slot[]
   ): void => {
     const stored = bulkStoredValues.get(allocation) ?? new Map<string, NativeOwnAssignmentValue[]>()
     for (const slot of slots) {
@@ -521,7 +525,12 @@ export const nativeObjectDataSlotSchemasOf = (graph: SemanticGraph): NativeObjec
       // A complete ordinary data-source closure accounts removal as a
       // descriptor absence, separately from its actual stored payloads.
       if (closedDataDeletionOf(allocation, mutation.operation)) continue
-      const slots = writers.get(allocation) ?? new Map()
+      const slots =
+        writers.get(allocation) ??
+        new Map<
+          string,
+          { readonly mutation: CallableWriteTarget; readonly value: CallableOwnDataValue | null; readonly spreadSource?: SemanticOperand }[]
+        >()
       for (const key of new Set(keys)) {
         const rows = slots.get(key) ?? []
         rows.push({ mutation: { ...mutation, key }, value: mutation.value === null ? null : actualValue(mutation.value) })
@@ -547,7 +556,12 @@ export const nativeObjectDataSlotSchemasOf = (graph: SemanticGraph): NativeObjec
     const allocation = receiver?.source.kind === 'result' ? origins.get(receiver.source.result) : undefined
     if (!receiver || !source || allocation?.family !== 'allocation') continue
     const overwritten = new Set(operation.overwrittenKeys ?? [])
-    const slots = writers.get(allocation) ?? new Map()
+    const slots =
+      writers.get(allocation) ??
+      new Map<
+        string,
+        { readonly mutation: CallableWriteTarget; readonly value: CallableOwnDataValue | null; readonly spreadSource?: SemanticOperand }[]
+      >()
     for (const key of new Set(operation.spreadKeys)) {
       if (overwritten.has(key)) continue
       const rows = slots.get(key) ?? []
@@ -575,7 +589,8 @@ export const nativeObjectDataSlotSchemasOf = (graph: SemanticGraph): NativeObjec
   const ownKeysOf = (allocation: NativeObjectDataAllocation): ReadonlySet<string> => {
     const keys = new Set<string>(writers.get(allocation)?.keys() ?? [])
     const source = resultOf(allocation, 'value')
-    for (const key of (source === undefined ? undefined : bulkStoredValues.get(source.id))?.keys() ?? []) keys.add(key)
+    const bulk = source === undefined ? undefined : bulkStoredValues.get(source.id)
+    if (bulk) for (const key of bulk.keys()) keys.add(key)
     const body = allocation.family === 'allocation' ? recordObjectShapeOf(graph.structuralTypes, allocation.shape) : null
     const shape = body === null ? undefined : graph.structuralTypes.get(body)?.shape
     if (shape?.kind === 'object') for (const member of shape.members) if (member.key.kind !== 'symbol') keys.add(String(member.key.value))
@@ -619,7 +634,7 @@ export const nativeObjectDataSlotSchemasOf = (graph: SemanticGraph): NativeObjec
         // property protocol; it reads a value and publishes no alias.
         if (!keys?.length) observe(allocation, operation)
         else {
-          const slots = reads.get(allocation) ?? new Map()
+          const slots = reads.get(allocation) ?? new Map<string, SemanticOperation[]>()
           for (const key of new Set(keys)) {
             const rows = slots.get(key) ?? []
             rows.push(operation)
@@ -650,7 +665,7 @@ export const nativeObjectDataSlotSchemasOf = (graph: SemanticGraph): NativeObjec
         lookup?.source.kind === 'result' &&
         lookup.source.result === operand.source.result &&
         complete.has(operand.source.result) &&
-        [...(aliasesOf(operand) ?? [])].every((held) => !ownKeysOf(held).has(key))
+        [...setValues(aliasesOf(operand))].every((held) => !ownKeysOf(held).has(key))
       )
         return
     }
@@ -714,7 +729,7 @@ export const nativeObjectDataSlotSchemasOf = (graph: SemanticGraph): NativeObjec
   for (const allocation of allocations) {
     const result = resultOf(allocation, 'value')
     const stored = result === undefined ? undefined : bulkStoredValues.get(result.id)
-    const keys = new Set([...(writers.get(allocation)?.keys() ?? []), ...(reads.get(allocation)?.keys() ?? []), ...(stored?.keys() ?? [])])
+    const keys = new Set([...mapKeys(writers.get(allocation)), ...mapKeys(reads.get(allocation)), ...mapKeys(stored)])
     schemas.set(
       allocation.id,
       new Map(
@@ -754,7 +769,11 @@ export const nativeObjectDataSlotSchemasOf = (graph: SemanticGraph): NativeObjec
   const singletons = new Map<NativeObjectDataAllocation, Set<NativeObjectDataAllocation>>()
   for (const [result, held] of aliases) {
     if (held.size !== 1) continue
-    const allocation = held.values().next().value as NativeObjectDataAllocation
+    // The one member, read by iterating: a hand-driven iterator result has no
+    // native typed view.
+    let allocation: NativeObjectDataAllocation | undefined
+    for (const only of held) allocation = only
+    if (allocation === undefined) continue
     const shared = singletons.get(allocation)
     if (shared === undefined) singletons.set(allocation, held)
     else aliases.set(result, shared)

@@ -27,7 +27,8 @@ import { representationKey } from '../representation/model.js'
  *     below a known constant bound is hoisted out of.
  *   - **The operation runs on every iteration.** Its block has to dominate
  *     every back edge, or the move turns a conditional load into an
- *     unconditional one -- the same fault, one level in.
+ *     unconditional one -- the same fault, one level in. An immutable
+ *     string's length or method read can fault on nothing and is exempt.
  *
  * Only operations that read: arithmetic, a cell whose loop writes nothing, and
  * an Array element load, or native immutable-string length/method reads. Never
@@ -41,7 +42,10 @@ export interface HoistPlan {
   readonly relocated: ReadonlySet<IrValueId>
 }
 
-export const emptyHoistPlan: HoistPlan = { into: new Map(), relocated: new Set() }
+export const emptyHoistPlan: HoistPlan = {
+  into: new Map<IrBlockId, readonly IrNonTerminatorOperation[]>(),
+  relocated: new Set<IrValueId>()
+}
 
 /** The operators whose C++ spelling reads nothing and traps on nothing. */
 const pureOperators: ReadonlySet<string> = new Set([
@@ -164,7 +168,7 @@ export const arrayStorageMutationOf = (
  */
 export const loopInvariantHoistsOf = (
   body: IrBody,
-  programConstants: ReadonlyMap<DeclarationId, number> = new Map(),
+  programConstants: ReadonlyMap<DeclarationId, number> = new Map<DeclarationId, number>(),
   copiedCapture: (declaration: DeclarationId) => boolean = () => false,
   settledCapture: (declaration: DeclarationId) => boolean = () => false,
   codeFreeStore: (operation: SetOperation) => boolean = () => false,
@@ -300,6 +304,15 @@ export const loopInvariantHoistsOf = (
     operation.kind === 'get' &&
     operation.receiver.representation.kind === 'string' &&
     ['length', 'charCodeAt'].includes(constantTexts.get(operation.key.value) ?? '')
+
+  // What an immutable string read names: only these leave a branch with it.
+  const stringReadOperands = new Set<IrValueId>()
+  for (const block of body.blocks.values())
+    for (const operation of block.operations)
+      if (operation.kind === 'get' && immutableStringRead(operation)) {
+        stringReadOperands.add(operation.receiver.value)
+        stringReadOperands.add(operation.key.value)
+      }
 
   const mayFault = (operation: IrNonTerminatorOperation): boolean =>
     operation.kind === 'get' && !immutableStringRead(operation) && constantTexts.get(operation.key.value) !== 'length'
@@ -489,7 +502,7 @@ export const loopInvariantHoistsOf = (
       const entered = entersAtLeastOnce(loop.header, loop.blocks)
       for (const blockId of body.blockOrder) {
         if (!loop.blocks.has(blockId)) continue
-        if (!dominatesEveryLatch(blockId, loop.header, loop.blocks, dominance)) continue
+        const everyTurn = dominatesEveryLatch(blockId, loop.header, loop.blocks, dominance)
         const block = body.blocks.get(blockId)
         if (!block) continue
         // Everything that renders here NOW: what the block owns, plus whatever
@@ -501,6 +514,14 @@ export const loopInvariantHoistsOf = (
           const result = 'result' in operation ? operation.result : null
           if (!result) continue
           if (location.get(result.id) !== blockId) continue
+          // An immutable string's length or method read faults on nothing, so
+          // running it on a turn that would have skipped it changes nothing.
+          // Left under its branch (`i < text.length ? text.charCodeAt(i) : 0`)
+          // every character re-measured the whole string natively. Its operands
+          // go with it: a constant, and a cell read the checks below prove
+          // assigned before the loop and unwritten in it. Any other such read
+          // stays, so code that names no string keeps its shape.
+          if (!everyTurn && !immutableStringRead(operation) && !stringReadOperands.has(result.id)) continue
           if (!isPureRead(operation, loop.blocks)) continue
           if (mayFault(operation) && !entered) continue
           // An element load and a `length` read both answer from storage this

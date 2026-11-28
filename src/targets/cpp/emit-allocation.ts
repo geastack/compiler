@@ -1419,6 +1419,22 @@ const emitSpreadIntoFields = (
     }
     if (ordered !== null && staticCopy !== null) {
       lines.push(`{ const auto ${staticCopy} = [&]() {`, ...copyLines, '};', ordered, '}')
+    } else if (ordered === null && copyLines.length > 0 && receiver.ownership === 'shared-refcount' && sharedRecordSpreadSource(from)) {
+      // Without the walk, nothing else here sees a source that is a live view
+      // at run time (a sealed literal handed out under a wider layout): its
+      // struct slots are inert, and the static copy alone would copy nothing.
+      const writer = viewSpreadWriterText(
+        from,
+        text,
+        receiverText,
+        receiverType,
+        sourceFields,
+        keys,
+        overwritten,
+        staticWrite,
+        createdBySkip
+      )
+      lines.push(`if (!gea::spreadThroughNativeView(${text}, ${receiverText}, ${writer}${laterArgument(later, '')})) {`, ...copyLines, '}')
     } else {
       if (ordered !== null) lines.push(ordered)
       lines.push(...copyLines)
@@ -1525,6 +1541,58 @@ const creationOrderedCopyOpening = (
  */
 const laterArgument = (later: readonly string[], lead: string): string =>
   later.length === 0 ? '' : `${lead}, {${later.map(cppStringLiteral).join(', ')}}`
+
+/**
+ * The per-key store a spread of a live-view source makes (`gea::spreadThroughNativeView`):
+ * each declared source field is read through the view's own route in that
+ * field's declared carrier -- never boxed, so a callable or union keeps its
+ * typed identity -- and stored by the same routing as the static copy. A key
+ * the writer does not name answers false; the runtime then puts an undeclared
+ * key on the receiver's expando. Defined once per source and receiver carrier.
+ */
+const viewSpreadWriterText = (
+  from: Representation,
+  sourceText: string,
+  receiverText: string,
+  receiverType: string,
+  sourceFields: readonly RecordField[],
+  keys: ReadonlySet<string> | null,
+  overwritten: ReadonlySet<string>,
+  staticWrite: (target: string, key: string, value: Representation, text: string) => string | null,
+  createdBySkip: (target: string, name: string) => string
+): string => {
+  const arms: string[] = []
+  for (const field of sourceFields) {
+    // The static copy's own field set: a field outside it has no certified store.
+    if (keys !== null && !keys.has(field.key)) continue
+    const test = `if (gea_spread_key.text() == ${cppStringLiteral(field.key)}) {`
+    if (overwritten.has(field.key)) {
+      arms.push(`${test} ${createdBySkip('gea_spread_target', field.key)} return true; }`)
+      continue
+    }
+    const type = cppTypeOf(field.value)
+    const read =
+      `gea::record::readDeclaredField<${type}, ${nativeFieldPolicyType(field.value)}>(gea_spread_source, ${cppStringLiteral(field.key)}, ` +
+      `[&]() -> ${type} { return ${tailAwareFieldReadText(sourceFields, field.key, 'gea_spread_source->')}; })`
+    const write = staticWrite('gea_spread_target', field.key, field.value, read)
+    if (write !== null) arms.push(`${test} ${write} return true; }`)
+  }
+  const body = `${arms.join(' ')} return false;`
+  const named = unitFunctionName(
+    'gea_spread_view_field',
+    (name) =>
+      `bool ${name}(const ${receiverType}& gea_spread_target, const ${cppTypeOf(from, 'shared-refcount')}& gea_spread_source, ` +
+      'const gea::PropertyKey& gea_spread_key)',
+    body
+  )
+  return named !== null
+    ? `[&](const gea::PropertyKey& gea_spread_key) { return ${named}(${receiverText}, ${sourceText}, gea_spread_key); }`
+    : `[&](const gea::PropertyKey& gea_spread_key) -> bool { const auto& gea_spread_target = ${receiverText}; ` +
+        `const auto& gea_spread_source = ${sourceText}; ${body} }`
+}
+
+const sharedRecordSpreadSource = (source: Representation): boolean =>
+  (source.kind === 'record' || source.kind === 'native-record-ref') && ownershipOfSpreadSource(source) !== 'owned'
 
 /** A source's ownership, which decides whether its members are reached through `.` or `->`. */
 const ownershipOfSpreadSource = (source: Representation): Ownership =>

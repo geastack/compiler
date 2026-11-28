@@ -1,5 +1,5 @@
 import type { Representation } from '../../representation/model.js'
-import { carriesNativeUndefined, representationKey } from '../../representation/model.js'
+import { absenceCarrier, carriesNativeUndefined, representationKey } from '../../representation/model.js'
 import { hasReferenceIdentity } from '../../representation/collections.js'
 import { absenceComparisonText } from './emit-presence.js'
 import { emptyArraySentinelText } from './emit-narrowing.js'
@@ -501,11 +501,11 @@ export const strictEqualityText = (
     if (compared === null) return null
     const leftAbsenceInRight = absenceComparisonText('===', rightPayload, {
       text: leftOptional.absence,
-      representation: { kind: leftOptional.absence }
+      representation: absenceCarrier(leftOptional.absence)
     })
     const rightAbsenceInLeft = absenceComparisonText('===', leftPayload, {
       text: rightOptional.absence,
-      representation: { kind: rightOptional.absence }
+      representation: absenceCarrier(rightOptional.absence)
     })
     const sameAbsence = leftOptional.absence === rightOptional.absence
     const absent =
@@ -539,7 +539,7 @@ export const strictEqualityText = (
           ? null
           : foldedCarrierMismatchText(optional.payload, other.representation))
     if (compared === null) return null
-    const absent = absenceComparisonText('===', { text: optional.absence, representation: { kind: optional.absence } }, other)
+    const absent = absenceComparisonText('===', { text: optional.absence, representation: absenceCarrier(optional.absence) }, other)
     if (absent !== null && absent !== 'false') {
       return negate(operator, `(${present} ? (${compared}) : (${absent}))`)
     }

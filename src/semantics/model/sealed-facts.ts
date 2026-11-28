@@ -39,7 +39,12 @@ type Writable<T> = { -readonly [K in keyof T]: T[K] }
  * reading one back is how a script reaches the table's copy. Same characters,
  * so no reader can tell the difference.
  */
-export const internedText = <T extends string>(text: T): T => (Object.keys({ [text]: 0 })[0] ?? text) as T
+export const internedText = <T extends string>(text: T): T => {
+  // Keyed through a plain `string`: a branded id fills `T` with an
+  // intersection, which has no property-key conversion of its own.
+  const key: string = text
+  return (Object.keys({ [key]: 0 })[0] ?? text) as T
+}
 
 /** String-valued identity fields of an operation, interned in place. */
 const operationIdentities = ['id', 'declaration', 'classDeclaration', 'classConstructorBodyOf', 'callable'] as const
@@ -164,7 +169,12 @@ export const internSealedFacts = (): ((operation: SemanticOperation) => Semantic
       const other = others?.find((candidate) => sameValue(candidate, value))
       if (other !== undefined) return other as T
       if (others) others.push(value)
-      else collided.set(hash, [value])
+      else {
+        // Built as `unknown[]` and pushed: a `T[]` literal is another array type.
+        const first: unknown[] = []
+        first.push(value)
+        collided.set(hash, first)
+      }
     }
     internStrings(value)
     return value

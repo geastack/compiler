@@ -8,7 +8,7 @@ import { extendsClass } from '../projection/dispatch.js'
 import { classMemberOf } from '../projection/fields.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import { representationKey, type Representation } from '../representation/model.js'
-import { allOperationsOf, type GetOperation, type IrBody } from './model.js'
+import { allOperationsOf, type GetOperation, type IrBlock, type IrBlockId, type IrBody, type IrNonTerminatorOperation } from './model.js'
 import type { ReflectionExposure } from './reflection-demand.js'
 
 type ClassRef = Extract<Representation, { kind: 'class-ref' }>
@@ -192,17 +192,17 @@ export const finalizeNativeFieldOwnership = (
         replacements.set(operation, replacement)
       }
   if (replacements.size === 0) return unchanged
-  const finalized = new Map(
-    [...bodies].map(([id, body]) => [
+  const finalized = new Map<PhysicalBodyId, IrBody>(
+    [...bodies].map(([id, body]): readonly [PhysicalBodyId, IrBody] => [
       id,
       {
         ...body,
-        blocks: new Map(
-          [...body.blocks].map(([blockId, block]) => [
+        blocks: new Map<IrBlockId, IrBlock>(
+          [...body.blocks].map(([blockId, block]): readonly [IrBlockId, IrBlock] => [
             blockId,
             {
               ...block,
-              operations: block.operations.map((operation) =>
+              operations: block.operations.map((operation): IrNonTerminatorOperation =>
                 operation.kind === 'get' ? (replacements.get(operation) ?? operation) : operation
               )
             }

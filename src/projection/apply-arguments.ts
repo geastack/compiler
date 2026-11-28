@@ -19,7 +19,7 @@ export const fixedApplyArgumentFieldsOf = (
   const shape = types.get(type)?.shape
   if (shape?.kind !== 'tuple' || shape.elements.some((element) => element.optional || element.rest || element.variadic)) return null
   if (carrier.kind === 'array-object') {
-    return shape.elements.map((_, index) => ({ key: String(index), value: carrier.element, required: true }))
+    return shape.elements.map((_, index): RecordField => ({ key: String(index), value: carrier.element, required: true }))
   }
   const layout = carrier.kind === 'native-record-ref' ? deriver.layoutOf(carrier.shapeId as StructuralTypeId) : carrier
   if (layout.kind !== 'record') return null

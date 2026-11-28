@@ -419,13 +419,14 @@ export const orderOwnerOperations = (
   // way) is not a prerequisite the statement has to wait for -- it is the
   // statement. Reading it as one added `catch -> marker` to the marker's own
   // `marker -> catch`, and every `try`/`catch`/`finally` cycled.
-  const dependencies = [...successors].flatMap(([before, afters]) => [...afters].map((after) => ({ before, after })))
-  for (const { before, after } of dependencies) {
+  const dependencies = [...successors].map(([before, afters]) => ({ before, afters: [...afters] }))
+  for (const { before, afters } of dependencies) {
     const beforeRegions = new Set(membership.requiredScopeOf(before).flatMap((ref) => (ref.kind === 'region' ? [ref.region] : [])))
-    for (const ref of membership.requiredScopeOf(after)) {
-      if (ref.kind !== 'region' || ref.region === before || beforeRegions.has(ref.region)) continue
-      addPrecedence(before, ref.region)
-    }
+    for (const after of afters)
+      for (const ref of membership.requiredScopeOf(after)) {
+        if (ref.kind !== 'region' || ref.region === before || beforeRegions.has(ref.region)) continue
+        addPrecedence(before, ref.region)
+      }
   }
 
   const evaluationOrdinalOf = (id: OperationId): number => graph.operations.get(id)?.evaluationOrdinal ?? 0
@@ -440,12 +441,23 @@ export const orderOwnerOperations = (
   // How much of two scope chains is the same nesting, counted from the
   // outside in. `0` means the two operations share no branch at all, and the
   // lowering has to close every frame one of them is in to reach the other.
+  // Asked for every ready operation at every step, so a ref's key is spelled
+  // once, and one ref object is its own key without spelling it at all.
+  const scopeKeys = new Map<ScopeRef, string>()
+  const keyOf = (ref: ScopeRef): string => {
+    let key = scopeKeys.get(ref)
+    if (key === undefined) {
+      key = scopeKeyOf(ref)
+      scopeKeys.set(ref, key)
+    }
+    return key
+  }
   const sharedScopeDepth = (left: readonly ScopeRef[], right: readonly ScopeRef[]): number => {
     let depth = 0
     while (depth < left.length && depth < right.length) {
       const outer = left[depth]
       const inner = right[depth]
-      if (!outer || !inner || scopeKeyOf(outer) !== scopeKeyOf(inner)) break
+      if (!outer || !inner || (outer !== inner && keyOf(outer) !== keyOf(inner))) break
       depth += 1
     }
     return depth
@@ -467,6 +479,9 @@ export const orderOwnerOperations = (
       if (depth > deepest) {
         deepest = depth
         chosen = index
+        // No chain shares more than the whole current one: nothing later can
+        // be strictly deeper, and scanning on made a large owner quadratic.
+        if (depth === currentScope.length) break
       }
     }
     const next = ready.splice(chosen, 1)[0]
@@ -479,9 +494,19 @@ export const orderOwnerOperations = (
       indegree.set(successor, remaining)
       if (remaining === 0) unlocked.push(successor)
     }
-    if (unlocked.length === 0) continue
-    ready.push(...unlocked)
-    ready.sort(compareReady)
+    // Each into its place, after every entry it does not precede -- what
+    // appending them all and re-sorting (a stable sort) gave, without
+    // re-sorting the whole ready list per step.
+    for (const id of unlocked) {
+      let low = 0
+      let high = ready.length
+      while (low < high) {
+        const middle = (low + high) >>> 1
+        if (compareReady(ready[middle]!, id) <= 0) low = middle + 1
+        else high = middle
+      }
+      ready.splice(low, 0, id)
+    }
   }
 
   if (ordered.length !== operations.length) {

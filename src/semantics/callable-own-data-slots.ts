@@ -247,8 +247,9 @@ export const refineCallableOwnDataCensus = (
 
 const inventoryOf = (graph: SemanticGraph, native: CallableOwnDataOriginInput | null): CallableOwnDataSlotCensus => {
   const origins = new Map<SemanticResultId, readonly FunctionId[]>([...callableOriginsOf(graph)].map(([id, source]) => [id, [source]]))
-  for (const [id, sources] of native?.origins ?? [])
-    if (graph.results.has(id) && sources.length > 0) origins.set(id, [...new Set([...(origins.get(id) ?? []), ...sources])])
+  if (native)
+    for (const [id, sources] of native.origins)
+      if (graph.results.has(id) && sources.length > 0) origins.set(id, [...new Set([...(origins.get(id) ?? []), ...sources])])
   const sourcesOf = (id: SemanticResultId | null): readonly FunctionId[] => (id === null ? [] : (origins.get(id) ?? []))
   const prototypes = functionPrototypeOriginsOf(graph)
   const allocations = new Map<FunctionId, AllocationOperation[]>()

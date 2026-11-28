@@ -1,5 +1,5 @@
-import type { CallableAbi, Ownership, RecordField, Representation } from '../../../representation/model.js'
-import { passingOf, representationKey } from '../../../representation/model.js'
+import type { AbiParameter, CallableAbi, Ownership, RecordField, Representation } from '../../../representation/model.js'
+import { absenceCarrier, passingOf, representationKey } from '../../../representation/model.js'
 import { hostMemberTemplateOf } from '../../../representation/host-templates.js'
 import type { FixedDataDefinitionRecipe } from '../../../ir/fixed-data-definition.js'
 import type { CallOperation, IrOperand } from '../../../ir/model.js'
@@ -9,7 +9,7 @@ import { evaluatedOnceText } from '../evaluated-once.js'
 import { canonicalIndexLiteral, memberAccessOperator } from '../emit-carrier-members.js'
 import { callableIdentityEqualityText } from '../emit-equality.js'
 import { classMemberOf, lazyArrowFieldPlanOf } from '../class-layout.js'
-import { alignedValueText, dynamicCarrierBoxText, namedConversionText, recipeText } from '../emit-narrowing.js'
+import { alignedValueText, dynamicCarrierBoxText, emptyArraySentinelText, namedConversionText, recipeText } from '../emit-narrowing.js'
 import { nativeAccessorDefinitionText, nativeAccessorObservedFunctionText } from '../emit-native-accessor-definition.js'
 import { nativeOwnAssignmentText } from '../emit-native-own-assignment.js'
 import { nativeArrayDescriptorSnapshotText, nativeDescriptorSnapshotDefinitionLines } from '../emit-descriptor-snapshot.js'
@@ -1229,12 +1229,13 @@ const hasOwnText = (ctx: EmitContext, operation: CallOperation): string => {
  */
 const mathShapedHostMethodValueText = (arity: number, spelling: string): string | null => {
   const parameter: Representation = { kind: 'scalar', domain: 'number' }
+  // Built into a declared array: `Array.from` over an inferred literal element
+  // is a different record carrier than `AbiParameter`.
+  const parameters: AbiParameter[] = []
+  for (let index = 0; index < arity; index += 1)
+    parameters.push({ value: parameter, ownership: 'owned', passing: passingOf(parameter, 'owned') })
   const abi: CallableAbi = {
-    parameters: Array.from({ length: arity }, () => ({
-      value: parameter,
-      ownership: 'owned' as const,
-      passing: passingOf(parameter, 'owned')
-    })),
+    parameters,
     result: parameter,
     receiver: null,
     restFrom: null
@@ -3846,7 +3847,10 @@ const pairWalkFromEntriesText = (ctx: EmitContext, operation: CallOperation, sou
   if (keyText === null) {
     return refuse(`its keys carry "${representationKey(halves.key)}", and ToPropertyKey of anything but a string is not spelled here`)
   }
-  const value = alignedValueText(ctx, 'host/emit-host-object.ts:fromEntries-pair', halves.value, result.value, halves.valueText)
+  // A `[key, []]` pair's `never[]` is its own array per entry, as for `new Map` (emit-callable.ts:mapSeedText).
+  const value =
+    emptyArraySentinelText(halves.value, result.value, halves.valueText, true) ??
+    alignedValueText(ctx, 'host/emit-host-object.ts:fromEntries-pair', halves.value, result.value, halves.valueText)
   if (value === null) {
     return refuse(
       `its values carry "${representationKey(halves.value)}" and no conversion is installed into the result's own value ` +
@@ -3998,7 +4002,7 @@ const composite = (
   leaf: (arm: Representation, text: string) => string
 ): string => {
   if (carrier.kind === 'optional') {
-    return `return ${name}.has_value() ? (${leaf(carrier.payload, `(*${name})`)}) : (${leaf({ kind: carrier.absence }, '')});`
+    return `return ${name}.has_value() ? (${leaf(carrier.payload, `(*${name})`)}) : (${leaf(absenceCarrier(carrier.absence), '')});`
   }
   const arms = carrier.arms.map((arm, index) => `if (${armIs(name, index)}) return ${leaf(arm.value, armAt(name, index))};`)
   return `${arms.join(' ')} return false;`

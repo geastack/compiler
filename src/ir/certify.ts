@@ -51,6 +51,7 @@ import {
 import { isNativeCallableCarrier } from '../representation/callable-object.js'
 import type { DeclarationId, FunctionId, IrValueId, SemanticResultId, StructuralTypeId } from '../identity/ids.js'
 import { recipeClosureOf } from '../conversion/recipe-closure.js'
+import type { ConversionNode } from '../conversion/algebra.js'
 import { nativeArrayViewPlanMatches } from '../conversion/array-view.js'
 import { nativeDescriptorSnapshotPlanMatches } from '../conversion/native-descriptor-snapshot.js'
 import { nativeArrayDescriptorSnapshotMatches, nativeArrayDescriptorReinstallationOf } from './native-array-descriptor-snapshot.js'
@@ -135,6 +136,7 @@ import { nativeIteratorFieldReadOf, nativeIteratorFieldReadMatches, type NativeI
 import { nativeEntryFieldReadsMatch, nativeEntryFieldReadsOf, nativeEntryFieldReadsRequired } from './native-entry-field-views.js'
 import { nativePropertyPrototypeAbsenceMatches } from './native-property-presence.js'
 import { nativeDocumentEntryOf, nativeDocumentEntryMatches } from './native-document-entries.js'
+import type { CallCalleeIdentity } from './model.js'
 
 /**
  * Certification of the lowered IR.
@@ -346,17 +348,6 @@ const embeddedNativeBoundaryDemands = (representation: Representation): Capabili
     if (boundary) demands.push(boundary)
   })
   return demands
-}
-
-const abiDemands = (manifest: TargetRuntimeManifest, abi: CallableAbi | null): CapabilityDemand[] => {
-  if (abi === null) return []
-  const carriers: Representation[] = [...abi.parameters.map((parameter) => parameter.value), abi.result]
-  if (abi.receiver !== null) carriers.push(abi.receiver)
-  return carriers.flatMap((carrier) => {
-    const boundary = nativeBoundaryDemand(carrier)
-    const embedded = embeddedNativeBoundaryDemands(carrier)
-    return boundary ? [physicalTypeDemand(manifest, carrier), boundary, ...embedded] : [physicalTypeDemand(manifest, carrier), ...embedded]
-  })
 }
 
 const getDemandsOf = (operation: Extract<IrOperation, { kind: 'get' }>, ctx: CertifyContext): CapabilityDemand[] => {
@@ -667,9 +658,9 @@ const ownDemandsOf = (operation: IrOperation, ctx: CertifyContext): CapabilityDe
         operation.nonNormalReceiverProof !== undefined &&
         nonNormalReceiverProofMatches(operation, {
           body: ctx.body,
-          bodies: ctx.bodies.values(),
+          bodies: [...ctx.bodies.values()],
           conversions: ctx.conversions,
-          callables: ctx.callableSources ?? new Map(),
+          callables: ctx.callableSources ?? new Map<IrValueId, CallCalleeIdentity>(),
           definitionOf: ctx.definitionOf,
           semantic: ctx.semanticOperationOf(operation.lineage),
           semanticOperationOf: ctx.semanticOperationOf
@@ -1022,7 +1013,7 @@ const ownDemandsOf = (operation: IrOperation, ctx: CertifyContext): CapabilityDe
       return nativeIteratorLogicalReceiverAdmitted(
         operation,
         ctx.deriver,
-        ctx.abis ?? new Map(),
+        ctx.abis ?? new Map<FunctionId, CallableAbi>(),
         ctx.ignoredLogicalReceivers ?? new Set(),
         sourceIgnores
       )
@@ -1154,6 +1145,14 @@ const ownDemandsOf = (operation: IrOperation, ctx: CertifyContext): CapabilityDe
   }
 }
 
+/**
+ * Each conditional arm below as one `CapabilityDemand[]`: written as bare
+ * array literals the arms were differently shaped records (and `[]` an
+ * element-less array), a sum no native range copy spreads.
+ */
+const NO_CAPABILITY_DEMANDS: readonly CapabilityDemand[] = []
+const oneDemand = (demand: CapabilityDemand): readonly CapabilityDemand[] => [demand]
+
 /** Every capability one operation needs, in the manifest's namespace. */
 export const capabilityKeysOf = (operation: IrOperation, ctx: CertifyContext): readonly CapabilityDemand[] => [
   ...(operation.kind === 'call' &&
@@ -1162,51 +1161,43 @@ export const capabilityKeysOf = (operation: IrOperation, ctx: CertifyContext): r
         ctx.nativeCallablePrototypeDescriptors?.receipts.get(operation),
         operation.nativeCallablePrototypeDescriptor
       )
-      ? [{ key: `conversion:${operation.nativeCallablePrototypeDescriptor!.materialization}` as CapabilityKey }]
-      : [
-          {
-            key: 'call-abi:native-callable-prototype' as CapabilityKey,
-            verdict: 'missing' as const,
-            detail: 'a descriptor value needs the original native prototype and current physical backpointer entry'
-          }
-        ]
-    : []),
+      ? oneDemand({ key: `conversion:${operation.nativeCallablePrototypeDescriptor!.materialization}` as CapabilityKey })
+      : oneDemand({
+          key: 'call-abi:native-callable-prototype' as CapabilityKey,
+          verdict: 'missing' as const,
+          detail: 'a descriptor value needs the original native prototype and current physical backpointer entry'
+        })
+    : NO_CAPABILITY_DEMANDS),
   ...(operation.kind === 'convert' &&
   (ctx.nativeCallablePrototypeObservations?.has(operation) || operation.nativeCallablePrototypeObservation !== undefined) &&
   !nativeCallablePrototypeMatches(ctx.nativeCallablePrototypeObservations?.get(operation), operation.nativeCallablePrototypeObservation)
-    ? [
-        {
-          key: 'call-abi:native-callable-prototype' as CapabilityKey,
-          verdict: 'missing' as const,
-          detail: 'an erased native prototype callback requires its actual physical allocation entry and declared-any conversion'
-        }
-      ]
-    : []),
+    ? oneDemand({
+        key: 'call-abi:native-callable-prototype' as CapabilityKey,
+        verdict: 'missing' as const,
+        detail: 'an erased native prototype callback requires its actual physical allocation entry and declared-any conversion'
+      })
+    : NO_CAPABILITY_DEMANDS),
   ...(operation.kind === 'get' &&
   (ctx.nativeCallablePrototypes?.required.has(operation) === true || operation.nativeCallablePrototype !== undefined)
     ? nativeCallablePrototypeMatches(ctx.nativeCallablePrototypes?.receipts.get(operation), operation.nativeCallablePrototype)
       ? operation.nativeCallablePrototype!.materialization === null
-        ? []
-        : [{ key: `conversion:${operation.nativeCallablePrototype!.materialization}` as CapabilityKey }]
-      : [
-          {
-            key: 'property-access:function:get:native-prototype' as CapabilityKey,
-            verdict: 'missing' as const,
-            detail: 'the native prototype requires its exact allocation, physical body entry and genuine observation recipe'
-          }
-        ]
-    : []),
+        ? NO_CAPABILITY_DEMANDS
+        : oneDemand({ key: `conversion:${operation.nativeCallablePrototype!.materialization}` as CapabilityKey })
+      : oneDemand({
+          key: 'property-access:function:get:native-prototype' as CapabilityKey,
+          verdict: 'missing' as const,
+          detail: 'the native prototype requires its exact allocation, physical body entry and genuine observation recipe'
+        })
+    : NO_CAPABILITY_DEMANDS),
   ...(operation.kind === 'call' &&
   (ctx.nativeCallableIntegrity?.required.has(operation) === true || operation.nativeCallableIntegrity !== undefined) &&
   !nativeCallableIntegrityMatches(ctx.nativeCallableIntegrity?.receipts.get(operation), operation.nativeCallableIntegrity)
-    ? [
-        {
-          key: 'call-abi:native-callable-integrity' as CapabilityKey,
-          verdict: 'missing' as const,
-          detail: 'native Function integrity requires the exact source family and complete own prototype descriptors'
-        }
-      ]
-    : []),
+    ? oneDemand({
+        key: 'call-abi:native-callable-integrity' as CapabilityKey,
+        verdict: 'missing' as const,
+        detail: 'native Function integrity requires the exact source family and complete own prototype descriptors'
+      })
+    : NO_CAPABILITY_DEMANDS),
   ...nativeOwnAssignmentDemandsOf(operation, ctx),
   ...(((operation.kind === 'has-property' || operation.kind === 'get') && operation.ordinaryObjectPrototypeKeyAbsent === true) ||
   (operation.kind === 'set' && operation.ordinaryObjectDataWriteAbsent === true)
@@ -1217,31 +1208,27 @@ export const capabilityKeysOf = (operation: IrOperation, ctx: CertifyContext): r
         ctx.conversions,
         ctx.semanticOperationOf
       )
-      ? [
-          {
-            key: `property-access:${operation.receiver.representation.kind}:${operation.kind}:source-prototype` as CapabilityKey,
-            verdict: 'missing' as const,
-            detail: 'the standard prototype absence fact does not authenticate this exact source property key and receiver'
-          }
-        ]
-      : []
-    : []),
+      ? oneDemand({
+          key: `property-access:${operation.receiver.representation.kind}:${operation.kind}:source-prototype` as CapabilityKey,
+          verdict: 'missing' as const,
+          detail: 'the standard prototype absence fact does not authenticate this exact source property key and receiver'
+        })
+      : NO_CAPABILITY_DEMANDS
+    : NO_CAPABILITY_DEMANDS),
   ...((operation.kind === 'allocate-record' || operation.kind === 'allocate-ordinary-object') &&
   operation.ordinaryObjectPrototype === true &&
   !nativeOrdinaryAllocationMatches(operation, ctx.semanticOperationOf(operation.lineage))
-    ? [
-        {
-          key: 'allocation:standard-object:source-prototype' as CapabilityKey,
-          verdict: 'missing' as const,
-          detail: 'a standard object prototype requires the exact plain-object allocation source'
-        }
-      ]
-    : []),
+    ? oneDemand({
+        key: 'allocation:standard-object:source-prototype' as CapabilityKey,
+        verdict: 'missing' as const,
+        detail: 'a standard object prototype requires the exact plain-object allocation source'
+      })
+    : NO_CAPABILITY_DEMANDS),
   ...nativeObjectDataSlotDemandsOf(operation, ctx),
   ...nativeCallableDataSlotDemandsOf(operation, ctx),
   ...nativeDocumentEntryDemandsOf(operation, ctx),
   ...nativeFieldViewDemandsOf(operation, ctx),
-  ...(operation.kind === 'construct' ? nativeEntryFieldDemandsOf(operation, ctx) : []),
+  ...(operation.kind === 'construct' ? nativeEntryFieldDemandsOf(operation, ctx) : NO_CAPABILITY_DEMANDS),
   ...(operation.kind === 'get-iterator' && operation.protocol !== 'enumerate'
     ? nativeIteratorFieldDemandsOf(
         { value: operation.result.id, representation: operation.result.representation },
@@ -1249,7 +1236,7 @@ export const capabilityKeysOf = (operation: IrOperation, ctx: CertifyContext): r
         operation.nativeNextMethodRead,
         ctx
       )
-    : []),
+    : NO_CAPABILITY_DEMANDS),
   ...(operation.kind === 'iterator-next' || operation.kind === 'iterator-close'
     ? nativeIteratorFieldDemandsOf(
         operation.iterator,
@@ -1257,18 +1244,16 @@ export const capabilityKeysOf = (operation: IrOperation, ctx: CertifyContext): r
         operation.nativeMethodRead,
         ctx
       )
-    : []),
+    : NO_CAPABILITY_DEMANDS),
   ...((operation.kind === 'get' || operation.kind === 'set') &&
   operation.privateNativeCallableSlot !== undefined &&
   !nativeCallablePrivateSlotMatches(ctx.privateNativeCallableSlots?.get(operation), operation.privateNativeCallableSlot)
-    ? [
-        {
-          key: 'property-access:function-and-constructor:get:private-native-slot' as CapabilityKey,
-          verdict: 'missing' as const,
-          detail: 'a private native callable slot disagrees with its actual source, initialization or observation closure'
-        }
-      ]
-    : []),
+    ? oneDemand({
+        key: 'property-access:function-and-constructor:get:private-native-slot' as CapabilityKey,
+        verdict: 'missing' as const,
+        detail: 'a private native callable slot disagrees with its actual source, initialization or observation closure'
+      })
+    : NO_CAPABILITY_DEMANDS),
   ...internalConversionDemandsOf(operation, ctx),
   ...ownDemandsOf(operation, ctx),
   ...propertyAccessKeysOf(operation, ctx),
@@ -1573,7 +1558,14 @@ const nativeIteratorFieldDemandsOf = (
   if (!required && receipt === undefined) return []
   const expected =
     required && ctx.nativeFieldViews
-      ? nativeIteratorFieldReadOf(receiver, key, ctx.deriver, ctx.abis ?? new Map(), ctx.nativeFieldViews, ctx.conversions)
+      ? nativeIteratorFieldReadOf(
+          receiver,
+          key,
+          ctx.deriver,
+          ctx.abis ?? new Map<FunctionId, CallableAbi>(),
+          ctx.nativeFieldViews,
+          ctx.conversions
+        )
       : null
   if (!nativeIteratorFieldReadMatches(expected, receipt))
     return [
@@ -1583,7 +1575,7 @@ const nativeIteratorFieldDemandsOf = (
         detail: `an internal iterator ${key} read lacks its exact original-allocation/native-frame receipt`
       }
     ]
-  return receipt!.read.sources.map((entry) => ({ key: `conversion:${entry.conversion}` }))
+  return receipt!.read.sources.map((entry): CapabilityDemand => ({ key: `conversion:${entry.conversion}` }))
 }
 
 const constantKeyTextOf = (operation: GetOperation | SetOperation, ctx: CertifyContext): string | null =>
@@ -1650,7 +1642,7 @@ const nativeFieldViewDemandsOf = (operation: IrOperation, ctx: CertifyContext): 
               ? nativeFieldViewOpenWriteOf(operation, ctx.nativeFieldViews, ctx.conversions)
               : null
       : null
-  if (!nativeFieldViewReceiptMatches(expected, receipt))
+  if (!nativeFieldViewReceiptMatches(expected, receipt)) {
     return [
       {
         key: `property-access:${operation.receiver.representation.kind}:${operation.kind}:native-field-view`,
@@ -1658,6 +1650,7 @@ const nativeFieldViewDemandsOf = (operation: IrOperation, ctx: CertifyContext): 
         detail: 'a live native view has no exact allocation/slot conversion receipt for this property operation'
       }
     ]
+  }
   const admitted = receipt!
   const ids =
     'sources' in admitted
@@ -1727,20 +1720,22 @@ const internalConversionDemandsOf = (operation: IrOperation, ctx: CertifyContext
     operation.kind !== 'call' ||
     intrinsicCallFlagsMatch(operation, ctx.semanticOperationOf(operation.lineage), ctx.calleeRendering, ctx.definitionOf)
   const unionTargetAuthentic = operation.kind !== 'call' || nativeUnionMethodTargetMatches(operation, ctx.classes, ctx.definitionOf)
-  const demands: CapabilityDemand[] =
-    flagsAuthentic && unionTargetAuthentic && operationConversionsMatch(expected, actual, ctx.conversions)
-      ? actual.map((recipe) => ({ key: `conversion:${recipe.conversion}` }))
-      : [
-          {
-            key: 'runtime-helper:internal-conversion-recipes',
-            verdict: 'missing',
-            detail: !unionTargetAuthentic
-              ? 'native union method targets disagree with the Function selected by the authenticated property read'
-              : flagsAuthentic
-                ? 'internal value recipes disagree with the operation storage and result carriers'
-                : 'intrinsic template flags disagree with the authenticated source invocation and callee rendering'
-          }
-        ]
+  // Filled rather than joined from `actual.map(...)` and a literal: a native
+  // build carries the two as different layouts of `CapabilityDemand[]`, and the
+  // join's store into the declared type selected one arm unchecked.
+  const demands: CapabilityDemand[] = []
+  if (flagsAuthentic && unionTargetAuthentic && operationConversionsMatch(expected, actual, ctx.conversions))
+    for (const recipe of actual) demands.push({ key: `conversion:${recipe.conversion}` })
+  else
+    demands.push({
+      key: 'runtime-helper:internal-conversion-recipes',
+      verdict: 'missing',
+      detail: !unionTargetAuthentic
+        ? 'native union method targets disagree with the Function selected by the authenticated property read'
+        : flagsAuthentic
+          ? 'internal value recipes disagree with the operation storage and result carriers'
+          : 'intrinsic template flags disagree with the authenticated source invocation and callee rendering'
+    })
   if (operation.kind === 'spread-copy') {
     if (!spreadCopyConversionPlanMatches(operation, operation.spreadConversionPlan, ctx.deriver, ctx.conversions))
       demands.push({
@@ -1790,9 +1785,11 @@ const internalConversionDemandsOf = (operation: IrOperation, ctx: CertifyContext
         verdict: 'missing',
         detail: 'Object walk recipes disagree with the admitted native callback routes'
       })
-    else
-      for (const leaves of operation.hostObjectWalkPlan?.routes.values() ?? [])
+    else if (operation.hostObjectWalkPlan) {
+      // Guarded rather than `?? []`: an iterator-or-array union has no single native iteration protocol.
+      for (const leaves of operation.hostObjectWalkPlan.routes.values())
         for (const node of leaves.values()) demands.push({ key: `conversion:${node.id}` })
+    }
   }
   if (operation.kind === 'get') {
     if (
@@ -2031,7 +2028,7 @@ const captureDemandsOf = (
  * capability the target lacks, not forty, and the row names which.
  */
 export const certifyIr = (input: CertifyInput): IrCertification => {
-  const virtualFrames = settledVirtualCallFramesOf(input.bodies.values(), input.classes, input.conversions)
+  const virtualFrames = settledVirtualCallFramesOf([...input.bodies.values()], input.classes, input.conversions)
   const hostMethodAliases = input.hosts
     ? buildHostMethodAliasIndex([...input.bodies.values()], input.placements, input.hosts)
     : new Map<DeclarationId, HostMethodAlias>()
@@ -2039,6 +2036,13 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
   const refusals: Refusal[] = []
   const refused = new Set<string>()
   const visitedConversions = new Set<string>()
+  // Both memos below answer from the manifest and the conversion census alone,
+  // and every context `decide` sees carries the input's own two. The census is
+  // append-only, so an answer that found every node it looked up stays the
+  // answer; one that missed a node is recomputed, as before, in case a later
+  // lookup mints it.
+  const cleanClosures = new Map<ConversionNode, readonly CapabilityKey[]>()
+  const verdicts = new Map<CapabilityKey, Decision>()
   const decide = (
     owner: string,
     demand: CapabilityDemand,
@@ -2050,7 +2054,13 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
     if (walkClosure && demand.key.startsWith('conversion:') && !visitedConversions.has(`${owner}|${demand.key}`)) {
       visitedConversions.add(`${owner}|${demand.key}`)
       const node = ctx.conversions.nodeById(discriminatorOf(demand.key))
-      if (node) {
+      const clean = node ? cleanClosures.get(node) : undefined
+      if (clean !== undefined)
+        for (const key of clean) {
+          visitedConversions.add(`${owner}|${key}`)
+          decide(owner, { key }, ctx, site, false)
+        }
+      else if (node) {
         try {
           const missingReferences = new Set<string>()
           const closure = recipeClosureOf([node], (id) => {
@@ -2058,10 +2068,14 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
             if (referenced === null) missingReferences.add(id)
             return referenced
           })
+          const childKeys: CapabilityKey[] = []
+          let canonicalClosure = missingReferences.size === 0
           for (const child of closure.values()) {
             if (child === node) continue
             visitedConversions.add(`${owner}|conversion:${child.id}`)
             const canonical = ctx.conversions.nodeById(child.id)
+            if (canonical === child) childKeys.push(`conversion:${child.id}`)
+            else canonicalClosure = false
             decide(
               owner,
               canonical === child
@@ -2076,6 +2090,7 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
               false
             )
           }
+          if (canonicalClosure && missingReferences.size === 0) cleanClosures.set(node, childKeys)
           for (const id of missingReferences)
             decide(
               owner,
@@ -2093,7 +2108,7 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
         }
       }
     }
-    const decision = verdictOf(demand, ctx)
+    const decision = demand.verdict !== undefined ? verdictOf(demand, ctx) : rememberedVerdictOf(demand, ctx)
     if (decision.verdict === 'installed') return
     const dedupe = `${owner}|${demand.key}`
     if (refused.has(dedupe)) return
@@ -2104,8 +2119,33 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
     refusals.push({ stage: 'certify', key: demand.key, owner, reason: site ? `${reason} (first at ${String(site.lineage)})` : reason })
   }
 
+  // A carrier's demands are a function of the carrier alone, and the program's
+  // SSA values share a few thousand carrier objects between them: spelling the
+  // C++ type and walking the embedded tree once per value repeated the same
+  // answer for every value of a common carrier.
+  const carrierDemands = new Map<Representation, readonly CapabilityDemand[]>()
+  const carrierDemandsOf = (representation: Representation): readonly CapabilityDemand[] => {
+    const remembered = carrierDemands.get(representation)
+    if (remembered !== undefined) return remembered
+    const demands: CapabilityDemand[] = [physicalTypeDemand(input.manifest, representation)]
+    const boundary = nativeBoundaryDemand(representation)
+    if (boundary) demands.push(boundary)
+    for (const demand of embeddedNativeBoundaryDemands(representation)) demands.push(demand)
+    carrierDemands.set(representation, demands)
+    return demands
+  }
+
+  const rememberedVerdictOf = (demand: CapabilityDemand, ctx: Pick<CertifyContext, 'manifest' | 'conversions'>): Decision => {
+    const remembered = verdicts.get(demand.key)
+    if (remembered !== undefined) return remembered
+    const decision = verdictOf(demand, ctx)
+    if (!demand.key.startsWith('conversion:') || ctx.conversions.nodeById(discriminatorOf(demand.key)) !== null)
+      verdicts.set(demand.key, decision)
+    return decision
+  }
+
   const programInputs = programConversionInputsOf({
-    bodies: input.bodies.values(),
+    bodies: [...input.bodies.values()],
     classes: input.classes,
     deriver: input.deriver,
     conversions: input.conversions,
@@ -2171,7 +2211,7 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
   const nativeObjectData = nativeObjectDataSlotAuthorityOf(input)
   const nativeObjectDataSlots = nativeObjectData.receipts
   const nativeFieldViewPlans = nativeFieldViewLivePlansOf(
-    input.bodies.values(),
+    [...input.bodies.values()],
     input.conversions,
     programRecipesMatch ? programRecipes : undefined
   )
@@ -2233,17 +2273,17 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
       else for (const node of denseLoopConversionsOf(body.denseLoopPlan)) decide(owner, { key: `conversion:${node.id}` }, ctx)
     }
     for (const demand of captureDemandsOf(body, input.placements, boxed)) decide(owner, demand, ctx)
-    for (const demand of abiDemands(input.manifest, body.abi)) decide(owner, demand, ctx)
-    for (const demand of abiDemands(input.manifest, body.construct)) decide(owner, demand, ctx)
+    for (const abi of [body.abi, body.construct]) {
+      if (abi === null) continue
+      // An ABI's carriers are demanded as an SSA value's are: parameters, result, receiver.
+      for (const parameter of abi.parameters) for (const demand of carrierDemandsOf(parameter.value)) decide(owner, demand, ctx)
+      for (const demand of carrierDemandsOf(abi.result)) decide(owner, demand, ctx)
+      if (abi.receiver !== null) for (const demand of carrierDemandsOf(abi.receiver)) decide(owner, demand, ctx)
+    }
     // Every SSA value's carrier must be spellable, and a `native-handle` among
     // them must name an authenticated protocol -- the two facts preflight read
     // off each published result, read here off the body's own value index.
-    for (const representation of body.values.values()) {
-      decide(owner, physicalTypeDemand(input.manifest, representation), ctx)
-      const boundary = nativeBoundaryDemand(representation)
-      if (boundary) decide(owner, boundary, ctx)
-      for (const demand of embeddedNativeBoundaryDemands(representation)) decide(owner, demand, ctx)
-    }
+    for (const representation of body.values.values()) for (const demand of carrierDemandsOf(representation)) decide(owner, demand, ctx)
     for (const region of body.iteratorCloseRegions ?? []) {
       if (!finiteIteratorCloseRegionMatches(region, ctx.semanticOperationOf(region.lineage), ctx.definitionOf, ctx.semanticOperationOf))
         decide(

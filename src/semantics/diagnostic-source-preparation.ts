@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
-import type ts from '#typescript'
+import ts from '#typescript'
 import type { PackageSource } from './package-sources.js'
 
 export interface DiagnosticSourcePreparationAudit {
@@ -25,15 +25,10 @@ const belongsToPackageSource = (fileName: string, packages: readonly PackageSour
   })
 }
 
-const commentRangeAt = (
-  typescript: typeof ts,
-  file: ts.SourceFile,
-  start: number,
-  end: number
-): { readonly start: number; readonly end: number } | null => {
-  const scanner = typescript.createScanner(file.languageVersion, false, file.languageVariant, file.text)
-  for (let token = scanner.scan(); token !== typescript.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
-    if (token !== typescript.SyntaxKind.SingleLineCommentTrivia && token !== typescript.SyntaxKind.MultiLineCommentTrivia) continue
+const commentRangeAt = (file: ts.SourceFile, start: number, end: number): { readonly start: number; readonly end: number } | null => {
+  const scanner = ts.createScanner(file.languageVersion, false, file.languageVariant, file.text)
+  for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
+    if (token !== ts.SyntaxKind.SingleLineCommentTrivia && token !== ts.SyntaxKind.MultiLineCommentTrivia) continue
     const commentStart = scanner.getTokenPos()
     const commentEnd = scanner.getTextPos()
     if (commentStart !== start || commentEnd !== end) continue
@@ -62,17 +57,13 @@ const blankRange = (text: string, start: number, end: number): string => {
  * source text, with only those exact comment bytes blanked, so offsets and node
  * identities remain stable and unrelated diagnostics remain ordinary errors.
  */
-export const diagnosticSourcePreparation = (
-  typescript: typeof ts,
-  program: ts.Program,
-  packages: readonly PackageSource[]
-): DiagnosticSourcePreparation => {
-  if (packages.length === 0) return { sourceText: new Map(), audit: [] }
+export const diagnosticSourcePreparation = (program: ts.Program, packages: readonly PackageSource[]): DiagnosticSourcePreparation => {
+  if (packages.length === 0) return { sourceText: new Map<string, string>(), audit: [] }
   const byFile = new Map<string, { source: ts.SourceFile; ranges: { start: number; end: number }[] }>()
   for (const diagnostic of program.getSemanticDiagnostics()) {
     if (diagnostic.code !== 2578 || !diagnostic.file || diagnostic.start === undefined || diagnostic.length === undefined) continue
     if (diagnostic.file.isDeclarationFile || !belongsToPackageSource(diagnostic.file.fileName, packages)) continue
-    const range = commentRangeAt(typescript, diagnostic.file, diagnostic.start, diagnostic.start + diagnostic.length)
+    const range = commentRangeAt(diagnostic.file, diagnostic.start, diagnostic.start + diagnostic.length)
     if (!range) continue
     const fileName = resolve(diagnostic.file.fileName)
     const current = byFile.get(fileName)
@@ -93,7 +84,7 @@ export const diagnosticSourcePreparation = (
         start: range.start,
         end: range.end,
         sourceHash,
-        typescriptVersion: typescript.version,
+        typescriptVersion: ts.version,
         diagnosticCode: 2578
       })
     }

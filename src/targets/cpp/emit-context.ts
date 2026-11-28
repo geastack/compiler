@@ -1,4 +1,5 @@
-import type { ConversionNodeId } from '../../conversion/algebra.js'
+import type { SunkStore } from '../../ir/transfer.js'
+import type { ConversionNode, ConversionNodeId } from '../../conversion/algebra.js'
 import type { NativeDebugSource } from './native-debug-source.js'
 import type { ProgramConversionRecipe } from '../../ir/program-conversions.js'
 import type { NativeSelectionHelper } from './native-selection-helpers.js'
@@ -9,6 +10,7 @@ import type { SharedStringLayout } from '../../ir/string-layout-reuse.js'
 import type { DenseReadWindow } from '../../ir/dense-read-windows.js'
 import type { LazySplit } from '../../ir/lazy-splits.js'
 import type { CapabilityKey } from '../../ir/certify.js'
+import { EmitBlockedError } from '../../ir/emit-blocked-error.js'
 import type { DeclarationId, FunctionId, IrValueId, RegionId, SemanticResultId } from '../../identity/ids.js'
 import type { CallableFlowCandidate } from '../../ir/callable-flow-candidates.js'
 import type { DeclaredIntegerWidth } from '../../ir/integers.js'
@@ -93,30 +95,35 @@ import { createCharCodeBufferFacts, type CharCodeBufferFacts } from './char-code
  */
 
 /**
- * `src/targets/` forbids `class` (`scripts/architecture.mjs`), so this is a
- * branded shape plus a factory and predicate instead of an `Error` subclass --
- * the same shape `ir/lower-graph.ts`'s `IrLoweringBlockedError` plays for the
- * IR layer, adapted to a plain object because this layer may not use a class
- * to carry it.
+ * `src/targets/` forbids `class` (`scripts/architecture.mjs`), so the refusal's
+ * class lives in `ir/emit-blocked-error.ts`; this layer keeps the factory and
+ * the predicate, the same pair `ir/lower-graph.ts`'s `IrLoweringBlockedError`
+ * plays for the IR layer.
  */
-export interface CppEmitBlockedError extends Error {
-  lineage?: SemanticResultId
-  readonly cppEmitBlocked: true
-  /**
-   * The capability this refusal lacked, in `ir/certify.ts`'s one key
-   * namespace. Typed by that union rather than `string` so a renderer cannot
-   * refuse with a kind the certifier could never have demanded: a print-stage
-   * refusal of a certified program is then always attributable to a demand
-   * the certifier failed to raise (the certifier has already passed).
-   */
-  readonly kind: CapabilityKey
+export type CppEmitBlockedError = EmitBlockedError
+
+export const createCppEmitBlockedError = (kind: CapabilityKey, reason: string): CppEmitBlockedError => {
+  return new EmitBlockedError(`cpp emission refuses to lower "${kind}": ${reason}`, kind)
 }
 
-export const createCppEmitBlockedError = (kind: CapabilityKey, reason: string): CppEmitBlockedError =>
-  Object.assign(new Error(`cpp emission refuses to lower "${kind}": ${reason}`), { cppEmitBlocked: true as const, kind })
+type IndexProtocolClass = Pick<ClassLayout, 'instance' | 'base' | 'nativeBase'>
+/**
+ * `classIndexProtocolsOf` over the deriver's record layouts. The map is
+ * re-projected entry by entry because a map of wider class layouts standing
+ * in for the narrower `Pick` the projection reads is a carrier change no
+ * native conversion makes.
+ */
+export const cppClassIndexProtocols = <C extends IndexProtocolClass>(
+  classes: ReadonlyMap<DeclarationId, C>,
+  deriver: RepresentationDeriver
+): ReadonlyMap<DeclarationId, boolean> => {
+  const projected = new Map<DeclarationId, IndexProtocolClass>()
+  for (const [declaration, layout] of classes)
+    projected.set(declaration, { instance: layout.instance, base: layout.base, nativeBase: layout.nativeBase })
+  return classIndexProtocolsOf(projected, (shapeId) => recordLayoutOfShapeId(deriver, shapeId))
+}
 
-export const isCppEmitBlockedError = (error: unknown): error is CppEmitBlockedError =>
-  error instanceof Error && (error as { readonly cppEmitBlocked?: unknown }).cppEmitBlocked === true
+export const isCppEmitBlockedError = (error: unknown): error is CppEmitBlockedError => error instanceof EmitBlockedError
 
 /** The standard `Symbol.<name>` identity encoded by a static `sym(declaration)` property key. */
 export const wellKnownSymbolMemberOf = (ctx: EmitContext, operand: IrOperand): string | null => {
@@ -788,6 +795,8 @@ export interface EmitBodyFacts {
   readonly transferDyingValues: ReadonlySet<IrValueId>
   /** See `EmitContext.receiverRenames`. */
   readonly receiverRenames: ReadonlyMap<IrValueId, IrValueId>
+  /** See `EmitContext.sunkStores`. */
+  readonly sunkStores: ReadonlyMap<IrValueId, SunkStore>
   /** See `EmitContext.consumingFormalConversions`. */
   readonly consumingFormalConversions: ReadonlySet<IrValueId>
   /** See `EmitContext.classTableRoots`. */
@@ -996,9 +1005,13 @@ export interface EmitContext {
    * (`emit-narrowing.ts`'s `alignedValueText`) asks it first.
    */
   readonly conversions: ConversionCensus
-  readonly conversionIsCertified?: (id: string) => boolean
-  readonly programConversionRecipes?: readonly ProgramConversionRecipe[]
-  readonly nativeSelectionHelpers?: ReadonlyMap<string, NativeSelectionHelper>
+  // These three are stated as `| undefined` and always written (see
+  // `createEmitContext`): a native build lays out an object literal holding a
+  // conditional spread with every collection field optional, and a mutable
+  // `Set` read back as optional has no conversion into a `ReadonlySet` slot.
+  readonly conversionIsCertified?: ((id: string) => boolean) | undefined
+  readonly programConversionRecipes?: readonly ProgramConversionRecipe[] | undefined
+  readonly nativeSelectionHelpers?: ReadonlyMap<string, NativeSelectionHelper> | undefined
   /** Where each binding cell lives, projected once for the whole program. */
   readonly placements: ReadonlyMap<DeclarationId, BindingPlacement>
   /** What each class is made of, so a key on a class receiver resolves to storage or to a method. */
@@ -1052,6 +1065,13 @@ export interface EmitContext {
    * the root's text and owns nothing of its own.
    */
   readonly receiverRenames: ReadonlyMap<IrValueId, IrValueId>
+  /**
+   * The stores `buildDyingArgumentIndex` moved to follow the reads of their
+   * formal (`ir/transfer.ts`'s `SunkStore`), keyed by the stored value's read.
+   * Carried beside `dyingArguments` rather than read off it, so the dying set
+   * stays a plain set every consumer reads the same way.
+   */
+  readonly sunkStores: ReadonlyMap<IrValueId, SunkStore>
   /** Settled from `EmitBodyFacts.consumingFormalConversions` -- see that type's own doc. */
   readonly consumingFormalConversions: ReadonlySet<IrValueId>
   /**
@@ -2166,24 +2186,24 @@ export const createEmitContext = (
   hosts: HostSpellings,
   deriver: RepresentationDeriver,
   bodyFacts: EmitBodyFacts,
-  wellKnownSymbols: ReadonlyMap<DeclarationId, string> = new Map(),
+  wellKnownSymbols: ReadonlyMap<DeclarationId, string> = new Map<DeclarationId, string>(),
   captures: CaptureIndex = emptyCaptureIndex,
-  symbolKeys: Map<string, string> = new Map(),
-  templateObjects: Map<string, TemplateObjectDefinition> = new Map(),
-  directCallableBindings: ReadonlyMap<DeclarationId, FunctionId> = new Map(),
-  virtualDispatch: ReadonlyMap<string, CallableAbi> = new Map(),
-  narrowedFormals: ReadonlySet<number> = new Set(),
-  repeatedConstructors: ReadonlyMap<DeclarationId, DeclarationId> = new Map(),
-  dyingArguments: ReadonlySet<IrValueId> = new Set(),
+  symbolKeys: Map<string, string> = new Map<string, string>(),
+  templateObjects: Map<string, TemplateObjectDefinition> = new Map<string, TemplateObjectDefinition>(),
+  directCallableBindings: ReadonlyMap<DeclarationId, FunctionId> = new Map<DeclarationId, FunctionId>(),
+  virtualDispatch: ReadonlyMap<string, CallableAbi> = new Map<string, CallableAbi>(),
+  narrowedFormals: ReadonlySet<number> = new Set<number>(),
+  repeatedConstructors: ReadonlyMap<DeclarationId, DeclarationId> = new Map<DeclarationId, DeclarationId>(),
+  dyingArguments: ReadonlySet<IrValueId> = new Set<IrValueId>(),
   instantiation: InstantiationFacts = noInstantiationFacts,
   abiOfCallable: (callable: FunctionId) => CallableAbi | null = () => null,
-  functionFacts: ReadonlyMap<FunctionId, CallableFactsSpelling> = new Map(),
-  constructEntries: ReadonlySet<FunctionId> = new Set(),
-  hostMethodAliases: ReadonlyMap<DeclarationId, HostMethodAlias> = new Map(),
-  callableMemberCandidates: ReadonlyMap<string, FunctionId> = new Map(),
-  callableFlowCandidates: ReadonlyMap<IrValueId, CallableFlowCandidate> = new Map(),
-  borrowableMemberBodies: ReadonlySet<FunctionId> = new Set(),
-  stableBorrowEntries: ReadonlyMap<string, StableBorrowEntry> = new Map(),
+  functionFacts: ReadonlyMap<FunctionId, CallableFactsSpelling> = new Map<FunctionId, CallableFactsSpelling>(),
+  constructEntries: ReadonlySet<FunctionId> = new Set<FunctionId>(),
+  hostMethodAliases: ReadonlyMap<DeclarationId, HostMethodAlias> = new Map<DeclarationId, HostMethodAlias>(),
+  callableMemberCandidates: ReadonlyMap<string, FunctionId> = new Map<string, FunctionId>(),
+  callableFlowCandidates: ReadonlyMap<IrValueId, CallableFlowCandidate> = new Map<IrValueId, CallableFlowCandidate>(),
+  borrowableMemberBodies: ReadonlySet<FunctionId> = new Set<FunctionId>(),
+  stableBorrowEntries: ReadonlyMap<string, StableBorrowEntry> = new Map<string, StableBorrowEntry>(),
   printerDrift: PrinterDrift[] = [],
   // A context built without the program's census (the value-contract
   // checks) gets one over the same tables with nothing pre-minted: the
@@ -2193,8 +2213,8 @@ export const createEmitContext = (
   callableIdentityDemand: CallableIdentityDemand = observesEveryCallableIdentity,
   nativeIntegrityRestricted: IntegrityRestrictions = restrictsEveryCarrier,
   fixedFieldStateConstant = false,
-  definitionCells: ReadonlySet<DeclarationId> = new Set(),
-  keyOrderUnobserved: ReadonlySet<string> = new Set(),
+  definitionCells: ReadonlySet<DeclarationId> = new Set<DeclarationId>(),
+  keyOrderUnobserved: ReadonlySet<string> = new Set<string>(),
   conversionIsCertified?: (id: string) => boolean,
   programConversionRecipes?: readonly ProgramConversionRecipe[],
   physicalIndexProtocols?: ReadonlyMap<DeclarationId, boolean>
@@ -2268,21 +2288,24 @@ export const createEmitContext = (
     owner,
     placements,
     classes,
-    classIndexProtocols: physicalIndexProtocols ?? classIndexProtocolsOf(classes, (shapeId) => recordLayoutOfShapeId(deriver, shapeId)),
+    classIndexProtocols: physicalIndexProtocols ?? cppClassIndexProtocols(classes, deriver),
     captures,
     deriver,
     layouts,
     keyOrderUnobserved,
-    ...(nativeSelections === undefined ? {} : { nativeSelectionHelpers: nativeSelections }),
-    conversions: conversions ?? createConversionNodes({ registry: createCppConversionRegistry(layouts), nodes: new Map() }),
-    ...(conversionIsCertified ? { conversionIsCertified } : {}),
-    ...(programConversionRecipes ? { programConversionRecipes } : {}),
+    nativeSelectionHelpers: nativeSelections,
+    conversions:
+      conversions ??
+      createConversionNodes({ registry: createCppConversionRegistry(layouts), nodes: new Map<ConversionNodeId, ConversionNode>() }),
+    conversionIsCertified,
+    programConversionRecipes,
     valueNames: new Map(),
-    ownedValues: new Set(),
+    ownedValues: new Set<IrValueId>(),
     deliveredReturnValues: new Set(),
     ownedDyingValues: bodyFacts.ownedDyingValues,
     transferDyingValues: bodyFacts.transferDyingValues,
     receiverRenames: bodyFacts.receiverRenames,
+    sunkStores: bodyFacts.sunkStores,
     consumingFormalConversions: bodyFacts.consumingFormalConversions,
     bindingWriteCounts: bodyFacts.bindingWriteCounts,
     formalCells,

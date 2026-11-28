@@ -40,10 +40,23 @@ import { cppDateType } from './prototype/emit-prototype-date.js'
 /** Native object families whose identity survives an explicitly dynamic boundary. */
 const dynamicNativeInstanceTests: ReadonlyMap<string, string> = new Map([
   ['MapConstructor', 'gea::host::instanceOfMap'],
+  // `Value::box` records the Set brand beside the Map one (`IsSetPayload`).
+  ['SetConstructor', 'gea::host::instanceOfSet'],
   ['DateConstructor', 'gea::host::instanceOfDate'],
   ['RegExpConstructor', 'gea::host::instanceOfRegExp'],
   ['ArrayBufferConstructor', 'gea::host::instanceOfArrayBuffer'],
   ['DataViewConstructor', 'gea::host::instanceOfDataView']
+])
+
+/**
+ * The `keyed-collection` family each collection constructor's instances are
+ * carried as. A carrier of one family is a `gea::Map`/`gea::Set`/weak
+ * sibling and no other kind of object (a subclass instance stored there is
+ * still an instance of the base), so the family alone answers the test.
+ */
+const keyedCollectionFamilies: ReadonlyMap<string, string> = new Map([
+  ['MapConstructor', 'map'],
+  ['SetConstructor', 'set']
 ])
 
 /** A carrier that can never hold an object and therefore always fails OrdinaryHasInstance. */
@@ -491,6 +504,9 @@ export const cppInstanceofHelperKeys: ReadonlySet<string> = new Set([
   // absence -- `instanceofOptionalPromiseText` above.
   'computation:instanceof:optional:native-handle(PromiseConstructor)',
   'computation:instanceof:tagged-union(map-testable):native-handle(MapConstructor)',
+  // A `keyed-collection` left operand against Map or Set: settled by its family
+  // (`keyedCollectionInstanceText` below).
+  ...[...keyedCollectionFamilies.keys()].map((protocol) => `computation:instanceof:keyed-collection:native-handle(${protocol})`),
   // `v instanceof Promise` for a BOXED left operand -- the branch above that
   // reads `gea::host::instanceOfPromise`'s family table.
   'computation:instanceof:dynamic:native-handle(PromiseConstructor)',
@@ -542,7 +558,10 @@ export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOpera
   // refusing would reject a library whose guard already made the test dead.
   // The instance-test census publishes the same answer for every non-Object
   // carrier (`throws-non-object`), which is what reflection consumes.
-  if (recipe?.test.kind === 'throws-non-object') return classInstanceTestText(recipe.test, operandText(ctx, left))
+  // Tested through a local: `recipe.test` narrowed as a property path has no
+  // native widening back to the whole test union the renderer takes.
+  const test = recipe === undefined ? undefined : recipe.test
+  if (test !== undefined && test.kind === 'throws-non-object') return classInstanceTestText(test, operandText(ctx, left))
   if (constructor.kind === 'undefined') {
     return `(gea::host::throwInstanceofNonObject("undefined"), false)`
   }
@@ -593,6 +612,10 @@ export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOpera
   if (left.representation.kind === 'dynamic') {
     const nativeTest = dynamicNativeInstanceTests.get(constructor.protocol)
     if (nativeTest !== undefined) return `${nativeTest}(${operandText(ctx, left)})`
+  }
+  const family = left.representation.kind === 'keyed-collection' ? keyedCollectionFamilies.get(constructor.protocol) : undefined
+  if (family !== undefined && left.representation.kind === 'keyed-collection') {
+    return settledInstanceText(operandText(ctx, left), left.representation.family === family)
   }
   // A native Dictionary is an ordinary object whose physical allocation is
   // neither a Map exotic nor a Date/RegExp object. Its static carrier proves

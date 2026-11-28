@@ -125,14 +125,14 @@ export const nativeFieldViewBodyCitationsOf = (body: IrBody): readonly Conversio
 
 /** Only exact cited live recipes can require a field-view protocol on a carrier. */
 export const nativeFieldViewTargetsOf = (
-  bodies: Iterable<IrBody>,
+  bodies: readonly IrBody[],
   conversions: Pick<ConversionCensus, 'nodeById'>,
   programConversions?: readonly ProgramConversionRecipe[]
 ): ReadonlySet<string> => nativeFieldViewTargetSetOf(nativeFieldViewLivePlansOf(bodies, conversions, programConversions))
 
 /** The installed live plans themselves: a consumer reading a view's fields needs each plan's source carriers. */
 export const nativeFieldViewLivePlansOf = (
-  bodies: Iterable<IrBody>,
+  bodies: readonly IrBody[],
   conversions: Pick<ConversionCensus, 'nodeById'>,
   programConversions?: readonly ProgramConversionRecipe[]
 ): readonly NativeFieldViewPlan[] => {
@@ -140,7 +140,7 @@ export const nativeFieldViewLivePlansOf = (
   for (const recipe of programConversions ?? [])
     if (conversions.nodeById(recipe.conversion.id) === recipe.conversion) nodes.push(recipe.conversion)
   const admitted = nodes.filter((node): node is ConversionNode => node !== null)
-  return nativeFieldViewPlansOf(recipeClosureOf(admitted, conversions.nodeById).values())
+  return nativeFieldViewPlansOf([...recipeClosureOf(admitted, conversions.nodeById).values()])
 }
 
 export const nativeFieldViewTargetSetOf = (plans: readonly NativeFieldViewPlan[]): ReadonlySet<string> =>
@@ -286,13 +286,16 @@ export const nativeFieldViewCarrierNeedsReceipt = (value: Representation, target
   return 'shapeId' in value && 'ownership' in value && value.ownership === 'shared-refcount' && targets.has(value.shapeId)
 }
 
-/** The actual allocation slots, rather than a structural alias's covariant declaration. */
+/** The actual allocation slots, rather than a structural alias's covariant declaration.
+ * Whole domains rather than a `Pick` view: the flow's domain arrays are returned
+ * as they are, and a narrower element type would need a per-element copy.
+ */
 const fieldSourcesOf = (
   flow: FieldFlow,
   receiver: IrValueId,
   key: string,
   at?: GetOperation
-): readonly Pick<NativeFieldStorageDomain, 'read' | 'checkedRead' | 'originalAbsent' | 'dynamicGet' | 'nativeData'>[] | null => {
+): readonly NativeFieldStorageDomain[] | null => {
   const actual = at === undefined ? undefined : flow.nativeFieldOperationStorageValues?.get(at)
   if (actual !== undefined) return actual.get(key) ?? null
   const data = flow.nativeFieldStorageValues.get(receiver)?.get(key)
@@ -312,9 +315,10 @@ const fieldSourcesOf = (
   )
     ? undefined
     : carried
-  const routes = physical.flatMap((read) => {
+  const routes = physical.flatMap((read): readonly NativeFieldStorageDomain[] => {
     const selected = domains?.filter((entry) => representationKey(entry.read) === representationKey(read))
-    return selected?.length ? selected : [{ read }]
+    // The only consumer reads `read` and the optional route flags; `write` is never asked of a route.
+    return selected?.length ? selected : [{ read, write: null }]
   })
   // Heaps name only allocations. A value that arrived through an installed
   // live view (a record parent recast into a class-or-record union)
@@ -594,7 +598,9 @@ export const nativeFieldViewWriteSelectionOf = (
     for (const target of write!.targets) targets.set(target.target === null ? 'no-setter' : representationKey(target.target), target)
   const forwardedKeys = writes.flatMap((write) => write!.forwardedKeys ?? [])
   const open = writes.find((write) => write!.open !== undefined)?.open
-  const { open: _open, forwardedKeys: _forwarded, ...first } = writes[0]!
+  const head = writes[0]
+  if (head == null) return null
+  const { open: _open, forwardedKeys: _forwarded, ...first } = head
   return {
     ...first,
     keyDomain,
@@ -694,17 +700,22 @@ export const nativeFieldViewReceiptMatches = (
     expected.keyDomain?.some((key, index) => key !== actual.keyDomain?.[index])
   )
     return false
-  if ('sources' in expected && 'sources' in actual)
+  if ('sources' in expected && 'sources' in actual) {
+    // The same routes, compared as a set: each source carrier appears once in
+    // a read, and the publication pass and certification can meet a read's
+    // allocations in different orders. A receipt listing the identical
+    // (source, conversion) pairs in another order is the same proof; a
+    // differing pair still refuses.
+    const held = new Map(actual.sources.map((entry) => [representationKey(entry.source), entry.conversion]))
     return (
       expected.originalAbsent === actual.originalAbsent &&
       expected.openKeys === actual.openKeys &&
       expected.result === actual.result &&
       expected.sources.length === actual.sources.length &&
-      expected.sources.every((entry, index) => {
-        const held = actual.sources[index]!
-        return entry.conversion === held.conversion && representationKey(entry.source) === representationKey(held.source)
-      })
+      held.size === actual.sources.length &&
+      expected.sources.every((entry) => held.get(representationKey(entry.source)) === entry.conversion)
     )
+  }
   if ('targets' in expected && 'targets' in actual)
     return (
       expected.value === actual.value &&

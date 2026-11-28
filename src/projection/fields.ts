@@ -96,7 +96,7 @@ export const recordShapeLayoutsOf = (
       // class an existing instance was allocated as.
       return [...classes.values()]
         .filter((layout) => layout.layoutOnly !== true && layout.uninstantiable !== true && extendsIt(layout.declaration))
-        .map((layout) => ({ declaration: layout.declaration, construct: layout.construct }))
+        .map((layout) => ({ declaration: layout.declaration, construct: layout.construct, instance: layout.instance ?? null }))
     },
     classMethodFor: (declaration, key) => {
       const member = classMemberOf(classes, declaration, key)
@@ -282,10 +282,16 @@ export const declaredRecordFieldOf = (
     return physicalField(representation.declaration, new Set())
   }
   const classShape = representation.kind === 'class-ref' ? (classes?.get(representation.declaration)?.instance ?? null) : null
-  const shapeId =
-    classShape !== null && classShape.kind === 'class-ref' && 'shapeId' in representation
-      ? classShape.shapeId
-      : (representation as { shapeId?: string }).shapeId
+  // The four carriers that name a shape, spelled out: an `in` probe and a cast
+  // to `{ shapeId?: string }` read a field a native build cannot locate.
+  const ownShapeId =
+    representation.kind === 'class-ref' ||
+    representation.kind === 'record' ||
+    representation.kind === 'record-with-index' ||
+    representation.kind === 'native-record-ref'
+      ? representation.shapeId
+      : undefined
+  const shapeId = classShape !== null && classShape.kind === 'class-ref' && ownShapeId !== undefined ? classShape.shapeId : ownShapeId
   const fields =
     representation.kind === 'record' || representation.kind === 'record-with-index'
       ? representation.fields
@@ -581,9 +587,9 @@ export const classPrototypeMethodFamilyMutableOf = (
   key: string
 ): boolean => {
   let byDeclaration = prototypeFamilyMutabilityCache.get(classes)
-  if (!byDeclaration) prototypeFamilyMutabilityCache.set(classes, (byDeclaration = new Map()))
+  if (!byDeclaration) prototypeFamilyMutabilityCache.set(classes, (byDeclaration = new Map<DeclarationId, Map<string, boolean>>()))
   let answers = byDeclaration.get(declaration)
-  if (!answers) byDeclaration.set(declaration, (answers = new Map()))
+  if (!answers) byDeclaration.set(declaration, (answers = new Map<string, boolean>()))
   const previous = answers.get(key)
   if (previous !== undefined) return previous
   const remember = (answer: boolean): boolean => {

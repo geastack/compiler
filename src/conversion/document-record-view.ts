@@ -4,7 +4,7 @@ import { dictionaryEntryReadIsLive, dictionaryEntryWriteIsTotal } from './dictio
 import { nativeFieldViewDynamicValueIsNative, nativeFieldViewIdentityTransportOf, type NativeFieldViewPlan } from './native-field-view.js'
 import { nativePayloadTransportMatches } from './native-payload-transport.js'
 import type { AcceptedConversion } from './structural-plan.js'
-import { isOpenDocument, representationKey, type Representation } from '../representation/model.js'
+import { absenceCarrier, isOpenDocument, representationKey, type Representation } from '../representation/model.js'
 import type { RecordLayoutPolicy } from '../representation/policies.js'
 import { canonicalIndexLiteral } from '../representation/array-index.js'
 import { nativeEntryWriterOf, type NativeEntryStoreOptions, type NativeEntryWriter } from './native-entry-writer.js'
@@ -262,7 +262,7 @@ export const composedDocumentRecordViewPlanOf = (
     if (from.kind === 'dynamic' || (fieldlessObject(from) && into.kind !== 'optional' && !fieldlessObject(into))) {
       if (into.kind === 'optional') {
         const present = build(from, into.payload)
-        const absent = accepted({ kind: into.absence }, into)
+        const absent = accepted(absenceCarrier(into.absence), into)
         if (!present || !absent || !recipeIsMaterializableWithoutPriorSourceGuard(absent, resolve)) return null
         dependencies.set(absent.id, absent)
         return { kind: 'dynamic-optional', absence: into.absence, present, absent }
@@ -283,14 +283,22 @@ export const composedDocumentRecordViewPlanOf = (
     }
     if (from.kind === 'optional') {
       const present = build(from.payload, into)
-      const absent = accepted({ kind: from.absence }, into)
+      const absent = accepted(absenceCarrier(from.absence), into)
       if (!present || !absent || !recipeIsMaterializableWithoutPriorSourceGuard(absent, resolve)) return null
       dependencies.set(absent.id, absent)
       return { kind: 'optional', present, absent }
     }
     if (from.kind === 'tagged-union') {
-      const arms = from.arms.map((arm) => build(arm.value, into))
-      return arms.some((arm) => arm === null) ? null : { kind: 'dispatch', arms: arms as DocumentRecordViewStep[] }
+      // Collected into a typed array: a native build has no conversion from an
+      // array of nullable steps to an array of steps.
+      const arms: DocumentRecordViewStep[] = []
+      let failed = false
+      for (const arm of from.arms) {
+        const step = build(arm.value, into)
+        if (step === null) failed = true
+        else arms.push(step)
+      }
+      return failed ? null : { kind: 'dispatch', arms }
     }
     if (into.kind === 'optional') {
       const payload = build(from, into.payload)

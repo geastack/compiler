@@ -99,6 +99,7 @@ import { nativeClassReferenceIdentityOf } from '../../conversion/native-class-re
 import { certifiedIterableObjectViewPlan, certifiedProtocolIteratorPlan } from '../../conversion/certified-iterator-protocols.js'
 import {
   isRecordViewTarget,
+  laysOutItself,
   ownedRecordMaterializationPlan,
   recordViewDispatchesArms,
   recordViewResidualReflection,
@@ -124,12 +125,33 @@ const nativeClassPresence = (value: Representation): boolean => {
   return value.kind === 'tagged-union' && value.arms.every((arm) => nativeClassPresence(arm.value))
 }
 
-const nativeCallableTransport = (source: Representation, target: Representation) => {
+/**
+ * The callable transport facts a materializer spreads in. One declared layout
+ * rather than `{} | { ... }`: a native build normalized that union's `{}` arm
+ * to all-optional fields and still allocated the literal `{}` as a record of
+ * its own, which the selection into the declared union had no arm for -- the
+ * converting-ctor branch below aborted "native sum selection has no matching
+ * alternative".
+ */
+interface NativeCallableTransport {
+  readonly nativeFieldProtocol?: 'unused'
+  readonly callableAdapter?: { readonly from: CallableAbi; readonly to: CallableAbi }
+  readonly callableIdentityTransport?: 'preserved'
+}
+
+const nativeCallableTransport = (source: Representation, target: Representation): NativeCallableTransport => {
   const from = callableObjectAbi(source)
   const to = callableObjectAbi(target)
-  return from === null || to === null
-    ? {}
-    : { nativeFieldProtocol: 'unused' as const, callableAdapter: { from, to }, callableIdentityTransport: 'preserved' as const }
+  if (from === null || to === null) {
+    const none: NativeCallableTransport = {}
+    return none
+  }
+  const transport: NativeCallableTransport = {
+    nativeFieldProtocol: 'unused',
+    callableAdapter: { from, to },
+    callableIdentityTransport: 'preserved'
+  }
+  return transport
 }
 
 const nativeSumConversion = (source: Representation, target: Representation): ClassifierMaterializerPair | null => {
@@ -622,6 +644,15 @@ const dynamicCallableReadAbiSupported = (abi: CallableAbi): boolean =>
 
 type NativeNarrowingContract = Pick<MaterializerContract, 'nativeFieldProtocol' | 'nativePayloadTransport' | 'requiresSourceGuard'>
 
+// The contract itself, never a bare `cond ? { nativeFieldProtocol } : {}`:
+// nested in a conditional chain, the two literals' own union is what a natively
+// built compiler selected an arm of, after it had already merged both into the
+// contract record -- so neither arm matched and the selection refused.
+const fieldTableUnusedWhen = (unused: boolean): NativeNarrowingContract => {
+  if (unused) return { nativeFieldProtocol: 'unused' }
+  return {}
+}
+
 /** Record/array construction immediately performs every cited payload conversion. */
 const sourceGuardsOf = (
   nodes: readonly ConversionNode[],
@@ -656,7 +687,7 @@ const sourceGuardsOf = (
 const classArmWithoutHome = (layouts: RecordLayoutPolicy, source: Representation, target: Representation): boolean => {
   const union = source.kind === 'optional' ? source.payload : source
   const selected = target.kind === 'optional' ? target.payload : target
-  if (union.kind !== 'tagged-union' || !isRecordViewTarget(selected)) return false
+  if (union.kind !== 'tagged-union' || !isRecordViewTarget(selected) || !laysOutItself(selected)) return false
   const key = representationKey(selected)
   return union.arms.some(
     ({ value }) =>
@@ -1048,9 +1079,17 @@ const cppConversionTables = (
       }
     },
     dynamicMapViewMaterializer: (target) => {
-      if (target.kind !== 'keyed-collection' || target.family !== 'map' || target.ownership !== 'shared-refcount') return null
-      if (target.recursive !== undefined || target.readOnlyView === true) return null
-      if (target.key.kind !== 'dynamic' || target.value?.kind !== 'dynamic') return null
+      if (target.kind !== 'keyed-collection' || target.ownership !== 'shared-refcount') return null
+      if (target.recursive !== undefined || target.readOnlyView === true || target.key.kind !== 'dynamic') return null
+      if (target.family === 'set') {
+        if (target.value !== null) return null
+        const domain = `dynamic-set-view:${representationKey(target)}`
+        return {
+          classifier: { id: 'gea::Value::isSetPayload', domain },
+          materializer: { id: 'gea::detail::unboxDynamicSet', domain, allocates: true }
+        }
+      }
+      if (target.family !== 'map' || target.value?.kind !== 'dynamic') return null
       const domain = `dynamic-map-view:${representationKey(target)}`
       return {
         classifier: { id: 'gea::Value::isMapPayload', domain },
@@ -1355,7 +1394,7 @@ const cppConversionTables = (
       // `staticRecipe` below once this table declines -- the same plan
       // `emit-narrowing.ts`'s `narrowedLoadText` defers to, asked here so the
       // admission and the render agree.
-      if (isRecordViewTarget(selected)) {
+      if (isRecordViewTarget(selected) && laysOutItself(selected)) {
         const view = viewPlanFor(layouts, source, target)
         if (view !== null && recordViewDispatchesArms(view)) return null
       }
@@ -1401,7 +1440,7 @@ const cppConversionTables = (
       // below, and an `as` assertion takes `assertedUnionFor`'s checked
       // projection instead.
       const exactSelection =
-        isRecordViewTarget(selected) || selected.kind === 'record-with-index' || selected.kind === 'dictionary'
+        (isRecordViewTarget(selected) && laysOutItself(selected)) || selected.kind === 'record-with-index' || selected.kind === 'dictionary'
           ? nativeSubsetSelectionRecipeOf(source, target)
           : null
       if (exactSelection) return nativeSelectionConversion(source, target, exactSelection)
@@ -1855,15 +1894,16 @@ const cppConversionTables = (
         const adapter = nativeConstructor || restRebase ? null : resultAdapterTransportOf(source, payload)
         if (nativeConstructor || restRebase || adapter !== null) {
           const domain = `payload-callable:${sourceKey}->${representationKey(payload)}`
-          const native = nativeConstructor
-            ? nativeCallableTransport(source, payload)
-            : adapter?.nativeConventions
-              ? {
-                  nativeFieldProtocol: 'unused' as const,
-                  callableAdapter: adapter.nativeConventions,
-                  callableIdentityTransport: 'preserved' as const
-                }
-              : {}
+          let native: NativeCallableTransport = {}
+          if (nativeConstructor) native = nativeCallableTransport(source, payload)
+          else if (adapter?.nativeConventions) {
+            const adapted: NativeCallableTransport = {
+              nativeFieldProtocol: 'unused',
+              callableAdapter: adapter.nativeConventions,
+              callableIdentityTransport: 'preserved'
+            }
+            native = adapted
+          }
           return {
             classifier: { id: 'gea::Optional::converting-ctor', domain },
             materializer: { id: 'gea::Optional::converting-ctor', domain, allocates: true, ...native }
@@ -2178,15 +2218,15 @@ const cppConversionTables = (
             if (structuralIndex >= 0) projected.splice(structuralIndex, 1)
             projected.push({ key: field.key, value: field.value, required: true })
           }
-          const sourceView = {
-            kind: 'record' as const,
+          const sourceView: Representation = {
+            kind: 'record',
             shapeId: source.shapeId,
             ownership: source.ownership,
             fields: projected,
             accessors: []
           }
-          const targetView = {
-            kind: 'record' as const,
+          const targetView: Representation = {
+            kind: 'record',
             shapeId: target.shapeId,
             ownership: target.ownership,
             fields: targetFields,
@@ -2247,17 +2287,17 @@ const cppConversionTables = (
       if (source.kind === 'record-with-index' && target.kind === 'native-record-ref' && target.native === null) {
         const targetFields = layouts.forShape(target.shapeId)
         const targetIndexes = layouts.indexesForShape(target.shapeId)
-        const sourceFields = {
+        const sourceFields: Representation = {
           kind: 'record',
           shapeId: source.shapeId,
           ownership: source.ownership,
           fields: source.fields,
           accessors: []
-        } as const
-        const targetFieldsView =
+        }
+        const targetFieldsView: Representation | null =
           targetFields === null
             ? null
-            : ({ kind: 'record', shapeId: target.shapeId, ownership: target.ownership, fields: targetFields, accessors: [] } as const)
+            : { kind: 'record', shapeId: target.shapeId, ownership: target.ownership, fields: targetFields, accessors: [] }
         if (
           targetFieldsView !== null &&
           targetIndexes.length === source.indexes.length &&
@@ -2296,10 +2336,10 @@ const cppConversionTables = (
         // source sidecar into that expando table after rebuilding the named
         // fields, so no property is dropped and the typed target stays native.
         const plainTargetFields = layouts.plainFieldsForShape?.(target.shapeId) ?? null
-        const plainTargetView =
+        const plainTargetView: Representation | null =
           plainTargetFields === null
             ? null
-            : ({ kind: 'record', shapeId: target.shapeId, ownership: target.ownership, fields: plainTargetFields, accessors: [] } as const)
+            : { kind: 'record', shapeId: target.shapeId, ownership: target.ownership, fields: plainTargetFields, accessors: [] }
         if (
           targetIndexes.length === 0 &&
           target.ownership === 'shared-refcount' &&
@@ -2823,11 +2863,11 @@ const cppConversionTables = (
         const plan = callableViewPlan(source, target, accepted, resolve, classDowncast)
         if (plan !== null) {
           const dependencies = [
-            ...(plan.logicalReceiver?.materializers ?? []),
+            ...(plan.logicalReceiver?.materializers == null ? [] : [...plan.logicalReceiver?.materializers]),
             ...(plan.receiver === null ? [] : [plan.receiver]),
             ...plan.parameters,
-            ...(plan.omittedArguments ?? []),
-            ...(plan.restPacking?.elements ?? []),
+            ...(plan.omittedArguments == null ? [] : [...plan.omittedArguments]),
+            ...(plan.restPacking?.elements == null ? [] : [...plan.restPacking?.elements]),
             ...(plan.restUnpacking?.elements.flatMap((element) =>
               element.absent === null ? [element.present] : [element.present, element.absent]
             ) ?? []),
@@ -2906,14 +2946,10 @@ const cppConversionTables = (
                       // table, so each reads one exactly when its element
                       // conversions do.
                       recipe.id === 'array-to-tuple' && source.kind === 'array-object' && target.kind === 'record'
-                      ? target.fields.every((field) => elementPairUnused(source.element, field.value))
-                        ? { nativeFieldProtocol: 'unused' }
-                        : {}
+                      ? fieldTableUnusedWhen(target.fields.every((field) => elementPairUnused(source.element, field.value)))
                       : recipe.id === 'array-copy-recast' && source.kind === 'array-object' && target.kind === 'array-object'
-                        ? elementPairUnused(source.element, target.element)
-                          ? { nativeFieldProtocol: 'unused' }
-                          : {}
-                        : {}
+                        ? fieldTableUnusedWhen(elementPairUnused(source.element, target.element))
+                        : fieldTableUnusedWhen(false)
         return {
           id: `chain:${recipe.id}`,
           domain: `static:${recipe.id}`,

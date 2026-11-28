@@ -1,4 +1,5 @@
 import { mergeNativeIterableProviders } from './plugins/native-iterable-providers.js'
+import { keepUnchangedBodies } from './ir/body-identity.js'
 import type { NativeDebugInfo } from './targets/cpp/native-debug-source.js'
 import { progress } from './semantics/frontend-timing.js'
 import { nodeOfOperation, operationOfResult } from './identity/ids.js'
@@ -29,20 +30,22 @@ import {
   projectClasses,
   type PhysicalClassLayoutPublication
 } from './projection/classes.js'
-import { isMaterializable, type ConversionNode } from './conversion/algebra.js'
+import { isMaterializable } from './conversion/algebra.js'
 import { recipeClosureOf } from './conversion/recipe-closure.js'
-import { buildConversionGraph, resetNarrowingMemos } from './conversion/build.js'
+import { buildConversionGraph, resetNarrowingMemos, type ConversionGraph } from './conversion/build.js'
+import { forgetRememberedCallableFlows } from './ir/callable-class-flow.js'
 import { createConversionNodes, type ConversionCensus } from './conversion/nodes.js'
 import type { ConversionRuntimeRegistry } from './conversion/registry.js'
 import type { DiagnosticLocation, DiagnosticReport } from './diagnostics/model.js'
 import { sweepDiagnostics } from './diagnostics/sweep.js'
-import type { DeclarationId, FunctionId, NodeId, OperationFamily, PhysicalBodyId, SemanticResultId } from './identity/ids.js'
-import type { CallableAbi } from './representation/model.js'
+import type { DeclarationId, FunctionId, NodeId, OperationFamily, PhysicalBodyId, RegionId, SemanticResultId } from './identity/ids.js'
+import type { CallableAbi, Representation } from './representation/model.js'
 import type { ClassLayout } from './projection/classes.js'
 import type { BindingPlacement } from './projection/bindings.js'
 import type { SlotHook } from './projection/slots.js'
 import type { CapabilityCertificate } from './ir/certificate.js'
 import { refusalsOf, type Refusal } from './ir/refusal.js'
+import type { CensusRefusal } from './semantics/normalize/census-refusal.js'
 import { mintCapabilityCertificate } from './ir/certificate.js'
 import type { TargetRuntimeManifest } from './preflight/obligations.js'
 import type { PreflightReport } from './preflight/run.js'
@@ -52,8 +55,9 @@ import type { RepresentationPublication } from './representation/publish.js'
 import { defaultOwnershipPolicy } from './representation/derive.js'
 import { publishRepresentations } from './representation/publish.js'
 import { valueRecordTypesOf } from './representation/value-records.js'
-import { createAmbientTypeRealizationTransform } from './semantics/ambient-type-realization-transform.js'
+import { createAmbientTypeRealizationTransform, type AmbientTypeRealization } from './semantics/ambient-type-realization-transform.js'
 import { declarationOverlayTransform } from './semantics/declaration-overlay-transform.js'
+import { importMetaUrlTransform } from './semantics/import-meta-url-transform.js'
 import { createSubclassMemberOverlayTransform, type DeclarerReader } from './semantics/subclass-member-overlay-transform.js'
 import { aliasThisFieldDeclarationTransform } from './semantics/alias-this-field-declaration-transform.js'
 import { definePropertySourceTransform } from './semantics/define-property-source-transform.js'
@@ -127,6 +131,8 @@ import {
   type CppRenderedUnit,
   type CppTranslationUnitLayout
 } from './targets/cpp/translation-unit.js'
+import type { HostConstructor } from './targets/cpp/host/host-members.js'
+import type { ReactiveDependency } from './targets/cpp/reactive-dependencies.js'
 
 /**
  * The compilation pipeline.
@@ -148,6 +154,13 @@ import {
  * halfway through emission, that a capability it needed was never installed,
  * which is the failure mode preflight exists to remove.
  */
+
+/** Copied element by element: a list of census refusals is not itself a list of `Refusal`. */
+const censusRefusalsOf = (refusals: readonly CensusRefusal[]): readonly Refusal[] => {
+  const all: Refusal[] = []
+  for (const refusal of refusals) all.push(refusal)
+  return all
+}
 
 export interface CompilationRequest {
   /** Package checkouts prepared by the project loader; the compiler discovers their implementation entries. */
@@ -267,7 +280,7 @@ export interface CompilationResult {
    * of reasons the first time this was asked, after being ranked as separate
    * problems by pair key.
    */
-  readonly conversionNodes: ReadonlyMap<string, ConversionNode>
+  readonly conversionNodes: ConversionGraph['nodes']
   /**
    * The conversion census over the same registry: one node per carrier
    * pair, the eager graph's where it minted one and otherwise minted on
@@ -381,7 +394,23 @@ const declarerReaderFor = (plugins: readonly PluginInstance[]): DeclarerReader =
   }
 }
 
+// Every plugin's realizations in plugin order, a later plugin's entry winning a
+// shared name. Copied entry by entry rather than spread into an entry list: a
+// native build lays a `ReadonlyMap` field out as a declared record, and an
+// array literal has no range copy out of one.
+const ambientTypeRealizationsOf = (plugins: readonly PluginInstance[]): ReadonlyMap<string, AmbientTypeRealization> => {
+  const realizations = new Map<string, AmbientTypeRealization>()
+  // A `for...of` rather than `forEach`: a native build has no erased receiver
+  // protocol for a host `forEach` callback over a plugin-supplied map.
+  for (const plugin of plugins)
+    for (const [name, realization] of plugin.capabilities.ambientTypeRealizations) realizations.set(name, realization)
+  return realizations
+}
+
 export const sourceTransformsFor = (plugins: readonly PluginInstance[], rootFileNames: readonly string[]): readonly SourceTransform[] => [
+  // `import.meta.url` first: every later transform sees the module's own URL
+  // already spelled as the constant it is (see the transform's comment).
+  importMetaUrlTransform,
   // A pre-class constructor function and its `F.prototype.m = function` methods
   // become the class they are, before anything below reads either as a class.
   constructorFunctionClassSourceTransform,
@@ -445,11 +474,11 @@ export const sourceTransformsFor = (plugins: readonly PluginInstance[], rootFile
   // types that transform just injected, not only the program's own source. A
   // package states, as data, that an ambient name a library documents is
   // realised by a concrete class the package ships; nothing here names one.
-  createAmbientTypeRealizationTransform(new Map(plugins.flatMap((plugin) => [...plugin.capabilities.ambientTypeRealizations]))),
+  createAmbientTypeRealizationTransform(ambientTypeRealizationsOf(plugins)),
   ...plugins.flatMap((plugin) => (plugin.transformSource ? [plugin.transformSource] : []))
 ]
 
-export const compile = (request: CompilationRequest): CompilationResult => {
+const compileRequest = (request: CompilationRequest): CompilationResult => {
   resetNarrowingMemos()
   // One instance per compilation. A plugin that learns something from a program
   // and acts on it later has to remember it in between, and a registry of
@@ -496,7 +525,9 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     }
     if (stopAfterStage === name) process.exit(0)
   }
-  const plugins = (request.plugins ?? installedPlugins).map((plugin) => plugin.instantiate(request.pluginOptions ?? new Map()))
+  const plugins = (request.plugins ?? installedPlugins).map((plugin) =>
+    plugin.instantiate(request.pluginOptions ?? new Map<string, string>())
+  )
   // Which declared type names the installed hosts own, unioned once. It reaches
   // the frontend because only the frontend can turn a name into a declaration
   // identity, and it reaches the manifest below because only the manifest can
@@ -508,7 +539,11 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // space. A plugin row wins a collision, because a target that implements
   // `TextDecoder` itself is describing its own platform.
   const nativeTypes = new Map([...coreNativeTypes, ...plugins.flatMap((plugin) => [...plugin.capabilities.nativeTypes])])
-  const nativeTypesByDeclaration = new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.nativeTypesByDeclaration ?? new Map())]))
+  const nativeTypesByDeclaration = new Map(
+    plugins.flatMap((plugin) => [
+      ...(plugin.capabilities.nativeTypesByDeclaration == null ? [] : [...plugin.capabilities.nativeTypesByDeclaration])
+    ])
+  )
   const hostNamespaceRootDeclarations = plugins.flatMap((plugin) => plugin.capabilities.hostNamespaceRootDeclarations ?? [])
   const hostProvidedNames = new Set([
     ...coreHostFunctions.keys(),
@@ -530,7 +565,9 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   const frontend = runFrontend({
     nativeFunctionDeclarations: plugins.flatMap((plugin) => plugin.capabilities.nativeFunctionDeclarations ?? []),
     ...(request.packageSources ? { packageSources: request.packageSources } : {}),
-    declarationModules: new Set(plugins.flatMap((plugin) => [...(plugin.capabilities.declarationModules ?? [])])),
+    declarationModules: new Set(
+      plugins.flatMap((plugin) => [...(plugin.capabilities.declarationModules == null ? [] : [...plugin.capabilities.declarationModules])])
+    ),
     rootFileNames: request.rootFileNames,
     projectFileName: request.projectFileName ?? null,
     javaScriptSources: request.javaScriptSources ?? false,
@@ -545,7 +582,11 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     nativeTypes,
     nativeIterableProviders: mergeNativeIterableProviders(plugins.map((plugin) => plugin.capabilities.nativeIterableProviders)),
     nativeTypesByDeclaration,
-    hostSingletonDeclarations: new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.hostSingletonDeclarations ?? new Map())])),
+    hostSingletonDeclarations: new Map(
+      plugins.flatMap((plugin) => [
+        ...(plugin.capabilities.hostSingletonDeclarations == null ? [] : [...plugin.capabilities.hostSingletonDeclarations])
+      ])
+    ),
     standardClasses: new Set(coreNativeTypes.keys()),
     // An optional feature cannot erase a global another installed host
     // actually supplies (for example WebGL absence versus Gea worker self).
@@ -587,12 +628,22 @@ export const compile = (request: CompilationRequest): CompilationResult => {
       ['Reflect', 'gea::ReflectNamespace'],
       ...plugins.flatMap((plugin) => [...plugin.capabilities.hostNamespaceRootTypes])
     ]),
-    commonJsGlobals: new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.commonJsGlobals ?? new Map())])),
-    commonJsBuiltinModules: new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.commonJsBuiltinModules ?? new Map())])),
-    commonJsBuiltinModuleSources: new Map(
-      plugins.flatMap((plugin) => [...(plugin.capabilities.commonJsBuiltinModuleSources ?? new Map())])
+    commonJsGlobals: new Map(
+      plugins.flatMap((plugin) => [...(plugin.capabilities.commonJsGlobals == null ? [] : [...plugin.capabilities.commonJsGlobals])])
     ),
-    hostMethodBindings: new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.hostMethodBindings ?? [])])),
+    commonJsBuiltinModules: new Map(
+      plugins.flatMap((plugin) => [
+        ...(plugin.capabilities.commonJsBuiltinModules == null ? [] : [...plugin.capabilities.commonJsBuiltinModules])
+      ])
+    ),
+    commonJsBuiltinModuleSources: new Map(
+      plugins.flatMap((plugin) => [
+        ...(plugin.capabilities.commonJsBuiltinModuleSources == null ? [] : [...plugin.capabilities.commonJsBuiltinModuleSources])
+      ])
+    ),
+    hostMethodBindings: new Map(
+      plugins.flatMap((plugin) => [...(plugin.capabilities.hostMethodBindings == null ? [] : [...plugin.capabilities.hostMethodBindings])])
+    ),
     // `definePropertySourceTransform` runs first and unconditionally: it is a
     // language-level rewrite (`Object.defineProperty`/`defineProperties` into
     // the assignment they define), not a host's data, so it applies to every
@@ -618,8 +669,14 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // done once, here, so the carrier states the transitive answer and nobody
   // downstream has to walk anything (see `Representation`'s `native-handle`).
   const hostBases = new Map(plugins.flatMap((plugin) => [...plugin.capabilities.nativeBases]))
-  const hostReferenceIdentities = new Set(plugins.flatMap((plugin) => [...(plugin.capabilities.nativeReferenceIdentities ?? [])]))
-  const hostViews = new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.nativeViews ?? [])]))
+  const hostReferenceIdentities = new Set(
+    plugins.flatMap((plugin) => [
+      ...(plugin.capabilities.nativeReferenceIdentities == null ? [] : [...plugin.capabilities.nativeReferenceIdentities])
+    ])
+  )
+  const hostViews = new Map(
+    plugins.flatMap((plugin) => [...(plugin.capabilities.nativeViews == null ? [] : [...plugin.capabilities.nativeViews])])
+  )
   const hostBaseChain = (native: string | null): readonly string[] => {
     const chain: string[] = []
     const seen = new Set<string>()
@@ -654,7 +711,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
       forDeclaration: (declaration) => frontend.hostProtocols.get(declaration) ?? null,
       basesOf: (native) => hostBaseChain(native),
       referenceIdentityOf: (native) => native !== null && hostReferenceIdentities.has(native),
-      viewsInto: (native) => (native === null ? new Map() : (hostViews.get(native) ?? new Map()))
+      viewsInto: (native) => (native === null ? new Map<string, string>() : (hostViews.get(native) ?? new Map<string, string>()))
     },
     {
       forDeclaration: (declaration) => frontend.typedArrayElements.get(declaration) ?? null
@@ -817,24 +874,27 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // the manifest because the manifest publishes this table's keys
   // (`hostMembers`) for certification to check host member reads against.
   const hostMembers: HostMemberTable = new Map([...plugins.flatMap((plugin) => [...plugin.capabilities.hostMembers]), ...coreHostMembers])
+  // Listed, not generated: an iterator is not the `Iterable` the manifest
+  // declares. The manifest reads the typeof operands before the ObjectTag ones
+  // and derives nothing first, so the derivation order is unchanged.
+  const typeofOperands: Representation[] = []
+  for (const operation of frontend.graph.operations.values()) {
+    if (operation.family !== 'computation' || operation.form !== 'typeof') continue
+    const representation = typeofOperandRepresentationOf(operation, representations.plan, representations.deriver)
+    if (representation !== undefined) typeofOperands.push(representation)
+  }
+  const objectTagOperands: Representation[] = []
+  for (const operation of frontend.graph.operations.values()) {
+    if (operation.family !== 'computation' || operation.operator !== 'ObjectTag') continue
+    const representation = typeofOperandRepresentationOf(operation, representations.plan, representations.deriver)
+    if (representation !== undefined) objectTagOperands.push(representation)
+  }
   const backend = createCppTargetManifest(
     representations.plan,
     undefined,
-    (function* () {
-      for (const operation of frontend.graph.operations.values()) {
-        if (operation.family !== 'computation' || operation.form !== 'typeof') continue
-        const representation = typeofOperandRepresentationOf(operation, representations.plan, representations.deriver)
-        if (representation !== undefined) yield representation
-      }
-    })(),
+    typeofOperands,
     coreHostMembers,
-    (function* () {
-      for (const operation of frontend.graph.operations.values()) {
-        if (operation.family !== 'computation' || operation.operator !== 'ObjectTag') continue
-        const representation = typeofOperandRepresentationOf(operation, representations.plan, representations.deriver)
-        if (representation !== undefined) yield representation
-      }
-    })(),
+    objectTagOperands,
     new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.hostInstanceTests ?? new Map<string, string>())]))
   )
   // A plugin's capabilities are unioned in, never allowed to remove a row. A
@@ -864,7 +924,9 @@ export const compile = (request: CompilationRequest): CompilationResult => {
         (carrier) => `${carrier}@1`
       )
     ]),
-    hostInvocations: new Set(plugins.flatMap((plugin) => [...(plugin.capabilities.hostInvocations ?? new Map()).keys()])),
+    hostInvocations: new Set(
+      plugins.flatMap((plugin) => [...(plugin.capabilities.hostInvocations ?? new Map<string, HostConstructor>()).keys()])
+    ),
     hostConstructors: union(
       backend.hostConstructors ?? new Set(),
       plugins.flatMap((plugin) => [...plugin.capabilities.hostConstructors.keys()])
@@ -893,15 +955,27 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     intrinsicMembers,
     voidResults: new Set(plugins.flatMap((plugin) => [...plugin.capabilities.hostMemberVoidResults])),
     constructors: new Map(plugins.flatMap((plugin) => [...plugin.capabilities.hostConstructors])),
-    invocations: new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.hostInvocations ?? new Map())])),
-    instanceTests: new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.hostInstanceTests ?? new Map())])),
+    invocations: new Map(
+      plugins.flatMap((plugin) => [...(plugin.capabilities.hostInvocations == null ? [] : [...plugin.capabilities.hostInvocations])])
+    ),
+    instanceTests: new Map(
+      plugins.flatMap((plugin) => [...(plugin.capabilities.hostInstanceTests == null ? [] : [...plugin.capabilities.hostInstanceTests])])
+    ),
     // The language's own global functions (`parseInt`, `isNaN`, ...) unioned on
     // top of the plugins' the same way `hostMembers` is above, and with the same
     // precedence rule: a plugin may add a global the backend does not have, and
     // may not redefine one it does. They are ECMAScript's, present in every
     // conforming environment, so the backend is where they belong.
-    arraySnapshotFunctions: new Set(plugins.flatMap((plugin) => [...(plugin.capabilities.hostArraySnapshotFunctions ?? [])])),
-    nativeArrayFunctions: new Set(plugins.flatMap((plugin) => [...(plugin.capabilities.hostNativeArrayFunctions ?? [])])),
+    arraySnapshotFunctions: new Set(
+      plugins.flatMap((plugin) => [
+        ...(plugin.capabilities.hostArraySnapshotFunctions == null ? [] : [...plugin.capabilities.hostArraySnapshotFunctions])
+      ])
+    ),
+    nativeArrayFunctions: new Set(
+      plugins.flatMap((plugin) => [
+        ...(plugin.capabilities.hostNativeArrayFunctions == null ? [] : [...plugin.capabilities.hostNativeArrayFunctions])
+      ])
+    ),
     functions: new Map([...plugins.flatMap((plugin) => [...plugin.capabilities.hostFunctions]), ...coreHostFunctions]),
     // Unioned the same way, one table per question. Two plugins claiming the
     // same global would be two hosts claiming one name, which is a
@@ -951,13 +1025,13 @@ export const compile = (request: CompilationRequest): CompilationResult => {
       cellPreamble: [...new Set(plugins.flatMap((plugin) => [...plugin.capabilities.nativeReactiveCellPreamble]))],
       // Empty here, filled by `translation-unit.ts`: the answer is read off the
       // lowered IR, which does not exist yet at this point in the pipeline.
-      dependencies: new Map(),
-      nodeDependencies: new Map(),
-      projections: new Map(),
-      revisions: new Map(),
-      celled: new Map(),
-      boundRecordFields: new Map(),
-      revisionBoundRecordFields: new Map()
+      dependencies: new Map<FunctionId | RegionId, readonly ReactiveDependency[]>(),
+      nodeDependencies: new Map<FunctionId | RegionId, readonly ReactiveDependency[]>(),
+      projections: new Map<FunctionId | RegionId, ReactiveDependency>(),
+      revisions: new Map<string, ReadonlySet<string>>(),
+      celled: new Map<string, ReadonlySet<string>>(),
+      boundRecordFields: new Map<string, ReadonlySet<string>>(),
+      revisionBoundRecordFields: new Map<string, ReadonlySet<string>>()
     }
   }
   stage('representations')
@@ -1056,19 +1130,17 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     createCppConversionRegistry(
       recordLayoutPolicyOf(representations.deriver, classes, frontend.wellKnownSymbols, (callable) => abis.abis.get(callable) ?? null)
     )
-  const conversions = buildConversionGraph(
-    representations.plan,
-    conversionRegistry,
-    // Inline constants have no published result in the plan, but lowering
-    // still converts them when they enter a merge or another typed slot.
-    (function* () {
-      for (const operation of frontend.graph.operations.values()) {
-        for (const operand of operation.operands) {
-          if (operand.source.kind === 'constant') yield representations.deriver.derive(operand.type)
-        }
-      }
-    })()
-  )
+  // Inline constants have no published result in the plan, but lowering
+  // still converts them when they enter a merge or another typed slot. Listed
+  // rather than generated, like the manifest's operands: the graph reads them
+  // first, before deriving anything itself.
+  const constantOperands: Representation[] = []
+  for (const operation of frontend.graph.operations.values()) {
+    for (const operand of operation.operands) {
+      if (operand.source.kind === 'constant') constantOperands.push(representations.deriver.derive(operand.type))
+    }
+  }
+  const conversions = buildConversionGraph(representations.plan, conversionRegistry, constantOperands)
   const conversionCensus = createConversionNodes({ registry: conversionRegistry, nodes: conversions.nodes })
   // A build stops here once no translation unit can come out of it
   // (`CompilationRequest.stopWhenUnemittable`): a sweep that is not clean
@@ -1104,7 +1176,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
       units: [],
       loweringBlockers,
       certification: null,
-      refusals: refusalsOf(frontend.censusRefusals, abis.blocked, loweringBlockers, [], []),
+      refusals: refusalsOf(censusRefusalsOf(frontend.censusRefusals), abis.blocked, loweringBlockers, [], []),
       slotDrift: [],
       printerDrift: [],
       abiBlockers: abis.blocked,
@@ -1179,7 +1251,9 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // bodies -- and which placements, since a bridged cell mints its own -- the
   // program actually has.
   let split = complete && loweredProgram ? inFrame(() => splitGeneratorBodies(loweredProgram!.bodies, placements)) : null
-  let splitBodies: ReadonlyMap<PhysicalBodyId, IrBody> | null = inFrame(() => split?.bodies ?? loweredProgram?.bodies ?? new Map())
+  let splitBodies: ReadonlyMap<PhysicalBodyId, IrBody> | null = inFrame(
+    () => split?.bodies ?? loweredProgram?.bodies ?? new Map<PhysicalBodyId, IrBody>()
+  )
   const splitPlacements = inFrame(() => split?.placements ?? placements)
   loweredProgram = null
   split = null
@@ -1198,42 +1272,49 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   const prunedSlotDrift = inFrame(() => provenPruned!.slotDrift)
   // Run after the set rewrite so a body it left alone is still judged on its own;
   // the copy elision needs the placements to prove its cell is frame-local.
-  let prunedBodies: ReadonlyMap<PhysicalBodyId, IrBody> | null = inFrame(() =>
-    publishLogicalReceivers(
-      publishNativeHostMethodReads(
-        publishNativeCallableDataSlots({
-          bodies: publishNativeCallablePrivateSlots({
-            bodies: elideReadOnlySpreadCopies(
-              rewriteLiteralSetMembership(reuseFieldReads(threadShortCircuitJoins(provenPruned!.bodies), classes, representations.deriver)),
-              splitPlacements,
-              representations.deriver
-            ),
-            placements: splitPlacements,
-            conversions: conversionCensus,
-            deriver: representations.deriver,
-            classes,
-            graph: frontend.graph
-          }),
-          placements: splitPlacements,
-          conversions: conversionCensus,
-          deriver: representations.deriver,
-          classes,
-          calleeRendering: slotsForClasses(classes).input,
-          graph: frontend.graph,
-          nativeCallableData: representations.nativeCallableData,
-          programConversions: null
-        }),
-        slotsForClasses(classes).input,
-        hosts.members
-      ),
-      splitPlacements,
-      classes,
-      conversionCensus,
-      representations.deriver,
-      hosts
+  //
+  // One statement per pass, each overwriting `bodies`, and never one nested
+  // call expression: a nested call parks every inner result in a register of
+  // this closure's interpreted frame, and those registers stay live until the
+  // closure returns, so the outermost pass ran with all eight earlier
+  // generations of the program's IR still reachable. The order the passes and
+  // their other arguments are evaluated in is the nested expression's own.
+  let prunedBodies: ReadonlyMap<PhysicalBodyId, IrBody> | null = inFrame(() => {
+    let bodies = provenPruned!.bodies
+    provenPruned = null
+    bodies = threadShortCircuitJoins(bodies)
+    bodies = reuseFieldReads(bodies, classes, representations.deriver)
+    bodies = rewriteLiteralSetMembership(bodies)
+    bodies = elideReadOnlySpreadCopies(bodies, splitPlacements, representations.deriver)
+    // The two literal-taking passes run in frames of their own: a literal's
+    // register here would outlive its call, pinning the generation it carries
+    // through every later pass.
+    bodies = inFrame(() =>
+      publishNativeCallablePrivateSlots({
+        bodies,
+        placements: splitPlacements,
+        conversions: conversionCensus,
+        deriver: representations.deriver,
+        classes,
+        graph: frontend.graph
+      })
     )
-  )
-  provenPruned = null
+    bodies = inFrame(() =>
+      publishNativeCallableDataSlots({
+        bodies,
+        placements: splitPlacements,
+        conversions: conversionCensus,
+        deriver: representations.deriver,
+        classes,
+        calleeRendering: slotsForClasses(classes).input,
+        graph: frontend.graph,
+        nativeCallableData: representations.nativeCallableData,
+        programConversions: null
+      })
+    )
+    bodies = publishNativeHostMethodReads(bodies, slotsForClasses(classes).input, hosts.members)
+    return publishLogicalReceivers(bodies, splitPlacements, classes, conversionCensus, representations.deriver, hosts)
+  })
   stage('prune')
   // What the entry can reach, computed once over the whole lowered program.
   //
@@ -1275,7 +1356,19 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // An incomplete program has no shaken list, so it certifies the pruned one.
   if (shakeResult) prunedBodies = null
   let shakenBodies = inFrame(() => shakeResult?.bodies ?? null)
-  const shaken = inFrame(() => shakeResult && { ...shakeResult, bodies: null })
+  // Named field by field rather than spread and overwritten: a spread copy
+  // would first hold the body map in a slot typed `null`.
+  const shaken = inFrame(
+    () =>
+      shakeResult && {
+        bodies: null,
+        classes: shakeResult.classes,
+        unreferencedCells: shakeResult.unreferencedCells,
+        droppedBodies: shakeResult.droppedBodies,
+        droppedOperations: shakeResult.droppedOperations,
+        refused: shakeResult.refused
+      }
+  )
   shakeResult = null
   stage('shake')
   // Which cells a closure captures, and whether a captured cell is boxed
@@ -1345,85 +1438,123 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     operationClasses: ReadonlyMap<DeclarationId, ClassLayout>
   ): ReadonlyMap<PhysicalBodyId, IrBody> => {
     const calleeRendering = slotsForClasses(operationClasses).input
-    let bodies = discardUnreadCallResults(take())
-    bodies = publishConversionRecipes({
-      calleeRendering,
-      wellKnownSymbols: frontend.wellKnownSymbols,
+    // Taken into `bodies` first, not passed inline: an inline call's result
+    // sits in a register of this frame that nothing below is sure to
+    // overwrite, which would pin the generation through every pass here.
+    let bodies = take()
+    bodies = keepUnchangedBodies(bodies, discardUnreadCallResults(bodies))
+    bodies = keepUnchangedBodies(
       bodies,
-      placements: splitPlacements,
-      classes: operationClasses,
-      abis: abis.abis,
-      deriver: representations.deriver,
-      conversions: conversionCensus,
-      hosts
-    })
-    bodies = publishNativeCallablePrivateSlots({
+      publishConversionRecipes({
+        calleeRendering,
+        wellKnownSymbols: frontend.wellKnownSymbols,
+        bodies,
+        placements: splitPlacements,
+        classes: operationClasses,
+        abis: abis.abis,
+        deriver: representations.deriver,
+        conversions: conversionCensus,
+        hosts
+      })
+    )
+    bodies = keepUnchangedBodies(
       bodies,
-      placements: splitPlacements,
-      conversions: conversionCensus,
-      deriver: representations.deriver,
-      classes: operationClasses,
-      graph: frontend.graph
-    })
-    bodies = publishNativeCallableDataSlots({
+      publishNativeCallablePrivateSlots({
+        bodies,
+        placements: splitPlacements,
+        conversions: conversionCensus,
+        deriver: representations.deriver,
+        classes: operationClasses,
+        graph: frontend.graph
+      })
+    )
+    bodies = keepUnchangedBodies(
       bodies,
-      placements: splitPlacements,
-      conversions: conversionCensus,
-      deriver: representations.deriver,
-      classes: operationClasses,
-      calleeRendering: slotsForClasses(operationClasses).input,
-      graph: frontend.graph,
-      nativeCallableData: representations.nativeCallableData,
-      programConversions: nativeProgramConversions ?? null
-    })
-    bodies = publishNativeObjectDataSlots({
+      publishNativeCallableDataSlots({
+        bodies,
+        placements: splitPlacements,
+        conversions: conversionCensus,
+        deriver: representations.deriver,
+        classes: operationClasses,
+        calleeRendering: slotsForClasses(operationClasses).input,
+        graph: frontend.graph,
+        nativeCallableData: representations.nativeCallableData,
+        programConversions: nativeProgramConversions ?? null
+      })
+    )
+    bodies = keepUnchangedBodies(
       bodies,
-      placements: splitPlacements,
-      conversions: conversionCensus,
-      deriver: representations.deriver,
-      graph: frontend.graph
-    })
-    bodies = publishNativeOwnAssignments({
+      publishNativeObjectDataSlots({
+        bodies,
+        placements: splitPlacements,
+        conversions: conversionCensus,
+        deriver: representations.deriver,
+        graph: frontend.graph
+      })
+    )
+    bodies = keepUnchangedBodies(
       bodies,
-      graph: frontend.graph,
-      deriver: representations.deriver,
-      conversions: conversionCensus,
-      placements: splitPlacements,
-      selected: representations.plan.selected,
-      calleeRendering: slotsForClasses(operationClasses).input
-    })
-    bodies = publishNativeArrayDescriptorSnapshots({
+      publishNativeOwnAssignments({
+        bodies,
+        graph: frontend.graph,
+        deriver: representations.deriver,
+        conversions: conversionCensus,
+        placements: splitPlacements,
+        selected: representations.plan.selected,
+        calleeRendering: slotsForClasses(operationClasses).input
+      })
+    )
+    bodies = keepUnchangedBodies(
       bodies,
-      placements: splitPlacements,
-      classes: operationClasses,
-      conversions: conversionCensus,
-      deriver: representations.deriver,
-      calleeRendering: slotsForClasses(operationClasses).input
-    })
-    bodies = publishNativeFieldViewFacts({
+      publishNativeArrayDescriptorSnapshots({
+        bodies,
+        placements: splitPlacements,
+        classes: operationClasses,
+        conversions: conversionCensus,
+        deriver: representations.deriver,
+        calleeRendering: slotsForClasses(operationClasses).input
+      })
+    )
+    bodies = keepUnchangedBodies(
       bodies,
-      placements: splitPlacements,
-      classes: operationClasses,
-      conversions: conversionCensus,
-      deriver: representations.deriver,
-      ...(nativeProgramConversions ? { programConversions: nativeProgramConversions } : {})
-    })
-    bodies = publishNativeDataDefinitions({
+      publishNativeFieldViewFacts({
+        bodies,
+        placements: splitPlacements,
+        classes: operationClasses,
+        conversions: conversionCensus,
+        deriver: representations.deriver,
+        ...(nativeProgramConversions ? { programConversions: nativeProgramConversions } : {})
+      })
+    )
+    bodies = keepUnchangedBodies(
       bodies,
-      classes: operationClasses,
-      deriver: representations.deriver,
-      conversions: conversionCensus,
-      graph: frontend.graph,
-      calleeRendering: slotsForClasses(operationClasses).input
-    })
-    bodies = publishNativeAccessorDefinitions({
+      publishNativeDataDefinitions({
+        bodies,
+        classes: operationClasses,
+        deriver: representations.deriver,
+        conversions: conversionCensus,
+        graph: frontend.graph,
+        calleeRendering: slotsForClasses(operationClasses).input
+      })
+    )
+    // In its own frame: the literal it is handed would otherwise stay in a
+    // register here, pinning the generation before it through the last pass.
+    bodies = keepUnchangedBodies(
       bodies,
-      graph: frontend.graph,
-      abis: abis.abis,
-      conversions: conversionCensus,
-      calleeRendering: slotsForClasses(operationClasses).input
-    })
-    return publishLogicalReceivers(bodies, splitPlacements, operationClasses, conversionCensus, representations.deriver, hosts)
+      inFrame(() =>
+        publishNativeAccessorDefinitions({
+          bodies,
+          graph: frontend.graph,
+          abis: abis.abis,
+          conversions: conversionCensus,
+          calleeRendering: slotsForClasses(operationClasses).input
+        })
+      )
+    )
+    return keepUnchangedBodies(
+      bodies,
+      publishLogicalReceivers(bodies, splitPlacements, operationClasses, conversionCensus, representations.deriver, hosts)
+    )
   }
   let dispatchedBodies = captureFacts
   captureFacts = null
@@ -1440,16 +1571,19 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // every later round and on into certification.
   const dispatchRound = (exposure: ReflectionExposure | undefined): void => {
     const recipes = publishNativeOperationFacts(takeDispatched, shaken!.classes)
-    dispatchedBodies = fillCallDispatchTargets(
+    dispatchedBodies = keepUnchangedBodies(
       recipes,
-      splitPlacements,
-      shaken!.classes,
-      (callable) => abis.abis.get(callable) ?? null,
-      capturesNothingOf,
-      dispatchVerdict!,
-      representations.deriver,
-      conversionCensus,
-      exposure
+      fillCallDispatchTargets(
+        recipes,
+        splitPlacements,
+        shaken!.classes,
+        (callable) => abis.abis.get(callable) ?? null,
+        capturesNothingOf,
+        dispatchVerdict!,
+        representations.deriver,
+        conversionCensus,
+        exposure
+      )
     )
   }
   if (dispatchedBodies && shaken && dispatchVerdict) dispatchRound(undefined)
@@ -1513,7 +1647,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     let count = closedFactsOf()
     const programRecipesOf = (exposure: ReflectionExposure): readonly ProgramConversionRecipe[] =>
       publishProgramConversionRecipes({
-        bodies: dispatchedBodies!.values(),
+        bodies: [...dispatchedBodies!.values()],
         classes: shaken.classes,
         deriver: representations.deriver,
         conversions: conversionCensus,
@@ -1536,7 +1670,9 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     for (;;) {
       nativeProgramConversions = programRecipesOf(reflection)
       const nextProgramSignature = JSON.stringify(
-        nativeProgramConversions.map((recipe) => [programConversionKey(recipe), recipe.conversion.id]).sort()
+        // Joined before sorting: the default order compares each entry's
+        // string form, and a pair's is exactly this join.
+        nativeProgramConversions.map((recipe) => `${programConversionKey(recipe)},${recipe.conversion.id}`).sort()
       )
       const programChanged = nextProgramSignature !== programSignature
       programSignature = nextProgramSignature
@@ -1549,9 +1685,15 @@ export const compile = (request: CompilationRequest): CompilationResult => {
       reflection = nextReflectionOf(emissionRepresentations)
     }
   }
+  // Two statements rather than one nested call, so the dispatched generation
+  // is released before the finalizing pass runs (see the prune stage above).
   let finalizedReads =
     shaken && reflection
-      ? inFrame(() => finalizeTypedComputedReads(confirmUnboxedMethodBinds(dispatchedBodies!, reflection!, shaken.classes), reflection!))
+      ? inFrame(() => {
+          const confirmed = confirmUnboxedMethodBinds(dispatchedBodies!, reflection!, shaken.classes)
+          dispatchedBodies = null
+          return finalizeTypedComputedReads(confirmed, reflection!)
+        })
       : null
   dispatchedBodies = null
   let fieldOwnership =
@@ -1578,12 +1720,16 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // impossible without treating its declared return type as a runtime fact.
   let normalResultPruned: { bodies: ReadonlyMap<PhysicalBodyId, IrBody> | null; slotDrift: readonly SlotDrift[] } | null =
     fieldOwnership || finalizedReads
-      ? inFrame(() =>
-          pruneProvenBranches(fieldOwnership?.bodies ?? finalizedReads!, frontend.graph, prunedSlotDrift, {
+      ? inFrame(() => {
+          // Nothing reads the pre-ownership generation past this point when
+          // the ownership pass produced its own.
+          const input = fieldOwnership?.bodies ?? finalizedReads!
+          finalizedReads = null
+          return pruneProvenBranches(input, frontend.graph, prunedSlotDrift, {
             conversions: conversionCensus,
             placements: splitPlacements
           })
-        )
+        })
       : { bodies: null, slotDrift: prunedSlotDrift }
   const normalResultSlotDrift = inFrame(() => normalResultPruned!.slotDrift)
   let finalizedBodies = inFrame(() => (normalResultPruned!.bodies ? withPresenceChecks(normalResultPruned!.bodies, readsUnchecked) : null))
@@ -1640,6 +1786,10 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     sharedEmptyBodies ? dropUnreadPureConversions(sharedEmptyBodies, conversionCensus) : sharedEmptyBodies
   )
   sharedEmptyBodies = null
+  // The remembered flow solutions were solved over the bodies before the
+  // pass above rewrote them, and each whole-program solution is gigabytes on
+  // a large program: held into certification they are the bulk of its peak.
+  forgetRememberedCallableFlows()
   stage('reflection')
   // Certification is a walk of the IR lowering actually built
   // (one question, one census): every capability the printer
@@ -1663,7 +1813,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // iterator built in this frame stays in one of its registers until the
   // frame returns, and kept every spent generation alive through the
   // certification walk -- the compile's heap floor.
-  const programRecipesOver = (bodies: () => Iterable<IrBody>): readonly ProgramConversionRecipe[] =>
+  const programRecipesOver = (bodies: () => readonly IrBody[]): readonly ProgramConversionRecipe[] =>
     publishProgramConversionRecipes({
       bodies: bodies(),
       classes: executableClasses,
@@ -1672,7 +1822,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
       representations: emissionRepresentations?.representations ?? [...representations.plan.selected.values()],
       ...(reflection ? { reflection } : {})
     })
-  nativeProgramConversions = unsealedBodies ? programRecipesOver(() => unsealedBodies!.values()) : undefined
+  nativeProgramConversions = unsealedBodies ? programRecipesOver(() => [...unsealedBodies!.values()]) : undefined
   const takeUnsealed = (): ReadonlyMap<PhysicalBodyId, IrBody> => {
     const taken = unsealedBodies!
     unsealedBodies = null
@@ -1701,15 +1851,19 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     const taken = finalRecipeBodies!
     finalRecipeBodies = null
     const plainFieldRead = plainFieldReadOf(executableClasses, representations.deriver)
-    const codeFreeFieldRead = codeFreeFieldReadOf(taken.values(), executableClasses, representations.deriver)
+    const codeFreeFieldRead = codeFreeFieldReadOf([...taken.values()], executableClasses, representations.deriver)
     return new Map(
       [...taken].map(([id, body]) => [id, publishDenseLoopPlan(body, splitPlacements, conversionCensus, plainFieldRead, codeFreeFieldRead)])
     )
   }
   const certifiedBodies = finalRecipeBodies ? denseLoopPlannedOf() : null
   finalRecipeBodies = null
-  const programConversionRecipes = certifiedBodies ? programRecipesOver(() => certifiedBodies.values()) : []
-  const parallelRegionEntries = new Set(plugins.flatMap((plugin) => [...(plugin.capabilities.parallelRegionEntries ?? [])]))
+  const programConversionRecipes = certifiedBodies ? programRecipesOver(() => [...certifiedBodies.values()]) : []
+  const parallelRegionEntries = new Set(
+    plugins.flatMap((plugin) => [
+      ...(plugin.capabilities.parallelRegionEntries == null ? [] : [...plugin.capabilities.parallelRegionEntries])
+    ])
+  )
   const certificationManifest = certifiedBodies ? withCppIrOperandHelpers(manifest, certifiedBodies.values()) : manifest
   const certification: IrCertification | null =
     lowered && certifiedBodies
@@ -1851,7 +2005,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     loweringBlockers: lowered?.blocked ?? [],
     certification,
     refusals: refusalsOf(
-      frontend.censusRefusals,
+      censusRefusalsOf(frontend.censusRefusals),
       abis.blocked,
       lowered?.blocked ?? [],
       certification?.refusals ?? [],
@@ -1880,5 +2034,13 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     reflection: reflection ?? null,
     irBodies: request.includeIr && certifiedBodies ? [...certifiedBodies.values()] : null,
     physicalClasses: physicalClasses ?? null
+  }
+}
+
+export const compile = (request: CompilationRequest): CompilationResult => {
+  try {
+    return compileRequest(request)
+  } finally {
+    forgetRememberedCallableFlows()
   }
 }

@@ -148,7 +148,7 @@ export const classInstanceTestOf = (
   const misanswered = [
     ...[...prototypes.materialized].filter((declaration) => right.members.includes(declaration) && !strictlyBelow(declaration)),
     // A plain object is never an instance of anything, whatever the family.
-    ...(prototypes.plainObjects ?? [])
+    ...(prototypes.plainObjects == null ? [] : [...prototypes.plainObjects])
   ]
   const mayHoldMisanswered = (declaration: DeclarationId): boolean =>
     misanswered.some((prototype) => prototype === declaration || extendsClass(classes, prototype, declaration))

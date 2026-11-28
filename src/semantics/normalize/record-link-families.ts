@@ -310,8 +310,10 @@ const sameArguments = (left: readonly ts.Type[], right: readonly ts.Type[]): boo
   left.length === right.length && left.every((argument, index) => argument === right[index])
 
 /** Whether some member's field names a member of the family -- the links that make the arms one object. */
-const linksWithin = (
-  family: readonly { readonly declaration: ts.TypeAliasDeclaration }[],
+// Generic in the member, like `discriminated`: the caller's candidate list
+// is its own record type, which no array of the bare shape converts from.
+const linksWithin = <Member extends { readonly declaration: ts.TypeAliasDeclaration }>(
+  family: readonly Member[],
   inFamily: ReadonlySet<ts.TypeAliasDeclaration>,
   aliasDeclarationOf: (node: ts.TypeNode) => ts.Declaration | undefined
 ): boolean => {
@@ -330,7 +332,7 @@ const linksWithin = (
 }
 
 /** Whether a key every member declares as a pairwise-distinct non-null literal tells the members apart. */
-const discriminated = (family: readonly { readonly declaration: ts.TypeAliasDeclaration }[]): boolean => {
+const discriminated = <Member extends { readonly declaration: ts.TypeAliasDeclaration }>(family: readonly Member[]): boolean => {
   const literalsByKey = new Map<string, string[]>()
   for (const { declaration } of family) {
     if (!ts.isTypeLiteralNode(declaration.type)) return false

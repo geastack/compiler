@@ -45,6 +45,7 @@ import {
   defaultValueRecordPolicy
 } from './derive.js'
 import { abiKey, isArrayPatternCapable, representationKey, soleArrayPatternCapableArm, type Representation } from './model.js'
+import { isMapEntryPairCarrier } from './collections.js'
 import { literalDestinationsOf } from './literal-destination.js'
 import { proxyCarriersOf } from './proxy-carriers.js'
 import { staticFieldAbsenceOf, staticMembersOf, withStaticFieldAbsence } from './static-field-cells.js'
@@ -216,20 +217,13 @@ const mapPairCursorElementOf = (
   const elementType = iteratorRecordElementTypeOf(structuralTypes, result.type)
   if (elementType === null) return null
   const pair = deriver.derive(elementType)
-  // `[unknown, unknown]` derives as an Array of its one shared carrier, not a
-  // record of two positions; the cursor then mints that Array per step.
-  if (pair.kind === 'array-object' && pair.extension === null && pair.element.kind === 'dynamic') {
-    return source.key.kind === 'dynamic' && source.value.kind === 'dynamic' ? pair : null
-  }
-  if (pair.kind !== 'record' || pair.fields.length !== 2) return null
-  const [first, second] = pair.fields
-  if (!first || !second || first.key !== '0' || second.key !== '1') return null
-  if (representationKey(first.value) !== representationKey(source.key)) return null
-  if (representationKey(second.value) !== representationKey(source.value)) return null
+  // A pair whose halves share one carrier (`[string, string]`, `[unknown,
+  // unknown]`) derives as that carrier's Array rather than a record of two
+  // positions; the cursor then mints that Array per step.
   // `operation` is unread beyond the caller's own family/step check; naming it
   // keeps this helper's signature the same shape as its sibling above.
   void operation
-  return pair
+  return isMapEntryPairCarrier(pair, source.key, source.value) ? pair : null
 }
 
 /**
@@ -520,11 +514,8 @@ const instanceConstructorReadOf = (
   // An Error that may be intrinsic -- a bare `Error`, or a union beside
   // compiled subclasses -- has no class evaluation to name, and the instance
   // stands for its constructor instead (`model.ts`'s `error-constructor`).
-  const arms =
-    carrier.kind === 'tagged-union'
-      ? carrier.arms.map((arm) => [arm.value, arm.semanticType] as const)
-      : [[carrier, receiver.type] as const]
-  return arms.every(([arm, type]) => isErrorInstance(arm, type)) ? { kind: 'error-constructor' } : null
+  if (carrier.kind !== 'tagged-union') return isErrorInstance(carrier, receiver.type) ? { kind: 'error-constructor' } : null
+  return carrier.arms.every((arm) => isErrorInstance(arm.value, arm.semanticType)) ? { kind: 'error-constructor' } : null
 }
 
 /**
@@ -749,6 +740,24 @@ const commonJsBoundaryOf = (graph: SemanticGraph, operation: SemanticOperation |
   return null
 }
 
+/**
+ * The carrier of a read that may also see the `undefined` an unwritten cell
+ * holds. A provenance carrier keeps one absence flag where that suffices;
+ * where it already answers `null` the read's own type is derived with its
+ * `undefined` instead, so the two absences stay apart (a tagged union)
+ * rather than stacking a second flag no single bit can carry.
+ */
+const absenceWidenedWith =
+  (deriver: {
+    readonly deriveStoredWithUndefined: (type: StructuralTypeId) => Representation
+    readonly deriveStored: (type: StructuralTypeId) => Representation
+  }) =>
+  (provenance: Representation | null, type: StructuralTypeId): Representation => {
+    if (provenance === null) return deriver.deriveStoredWithUndefined(type)
+    const widened = withStaticFieldAbsence(provenance)
+    return widened.kind === 'unresolved' && provenance.kind !== 'unresolved' ? deriver.deriveStoredWithUndefined(type) : widened
+  }
+
 export const publishRepresentations = (
   graph: SemanticGraph,
   ownership: OwnershipPolicy = defaultOwnershipPolicy,
@@ -817,9 +826,9 @@ export const publishRepresentations = (
   implementors: InterfaceImplementorPolicy = defaultInterfaceImplementorPolicy,
   errors: ErrorDeclarationPolicy = defaultErrorDeclarationPolicy,
   dynamicFallback = false,
-  dynamicFallbackTypes: ReadonlySet<StructuralTypeId> = new Set(),
-  dynamicFallbackCallables: ReadonlySet<FunctionId> = new Set(),
-  dynamicWrittenTypes: ReadonlySet<StructuralTypeId> = new Set(),
+  dynamicFallbackTypes: ReadonlySet<StructuralTypeId> = new Set<StructuralTypeId>(),
+  dynamicFallbackCallables: ReadonlySet<FunctionId> = new Set<FunctionId>(),
+  dynamicWrittenTypes: ReadonlySet<StructuralTypeId> = new Set<StructuralTypeId>(),
   // The copies of every generic class whose copies can differ in layout; see
   // `ClassCopyPolicy` (policies.ts) and the deriver's `physicalClassDeclarationOf`.
   classCopies?: ClassCopyPolicy
@@ -870,6 +879,7 @@ export const publishRepresentations = (
     classCopies,
     unwrittenMembers.members
   )
+  const absenceWidened = absenceWidenedWith(deriver)
   const builder = createRepresentationPlanBuilder()
   // A fresh object literal whose one consumer is a declared cell is minted as
   // that cell's record (`literal-destination.ts`).
@@ -898,7 +908,11 @@ export const publishRepresentations = (
     if (staticAbsence.fields.has(field.declaration))
       staticFieldCarriers.set(
         field.declaration,
-        withStaticFieldAbsence(proxies.staticFields.get(field.declaration) ?? deriver.derive(field.type))
+        // A proxy carrier is not a type to re-derive; a declared type is
+        // derived with its `undefined`, keeping `T | null` two absences.
+        proxies.staticFields.has(field.declaration)
+          ? withStaticFieldAbsence(proxies.staticFields.get(field.declaration)!)
+          : deriver.deriveStoredWithUndefined(field.type)
       )
 
   // Evidence for every published result, including the ones that derive to
@@ -935,10 +949,7 @@ export const publishRepresentations = (
     const unwrittenStatic = staticAbsence.reads.has(resultId)
     const unassignedBinding = unassignedBindings.results.has(resultId)
     const unwrittenMember = unwrittenMembers.reads.has(resultId)
-    const override =
-      unwrittenStatic || unassignedBinding || unwrittenMember
-        ? withStaticFieldAbsence(provenance ?? deriver.deriveStored(result.type))
-        : provenance
+    const override = unwrittenStatic || unassignedBinding || unwrittenMember ? absenceWidened(provenance, result.type) : provenance
     // A `binding` operation's result is not a transient expression value --
     // it *is* the cell (`initialize`/`declare` introduce it, `read`/`write`
     // observe or mutate it), which is exactly the "value is actually kept"

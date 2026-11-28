@@ -700,11 +700,11 @@ export const renderTryRegion = (
   // terminator note already records.
   lines.push(`${rendering.labelOf(rendering.labels, region.tryEntry)}:`)
   if (finallyPart && finallySuspends) {
-    const statementOwned = new Set([...tryPart.owned, ...(catchPart?.owned ?? [])])
+    const statementOwned = new Set([...tryPart.owned, ...(catchPart?.owned == null ? [] : [...catchPart?.owned])])
     renderSuspendingFinally(ctx, lines, body, region, rendering, statementOwned, finallyPart, (partRendering) =>
       renderTryAndCatch(ctx, body, region, partRendering, tryPart, catchPart, binding, catchSuspends)
     )
-    return [...tryPart.owned, ...(catchPart?.owned ?? []), ...finallyPart.owned]
+    return [...tryPart.owned, ...(catchPart?.owned == null ? [] : [...catchPart?.owned]), ...finallyPart.owned]
   }
   // The guard's own scope opens OUTSIDE the label's statement, so a `goto` to
   // the region enters this block from the top and initializes the guard on the
@@ -734,7 +734,11 @@ export const renderTryRegion = (
     // with no return and clang warns -Wreturn-type.
     if (region.join === null) lines.push('__builtin_unreachable();')
   }
-  return [...tryPart.owned, ...(catchPart?.owned ?? []), ...(finallyPart?.owned ?? [])]
+  return [
+    ...tryPart.owned,
+    ...(catchPart?.owned == null ? [] : [...catchPart?.owned]),
+    ...(finallyPart?.owned == null ? [] : [...finallyPart?.owned])
+  ]
 }
 
 type PreparedPart = { readonly owned: ReadonlySet<IrBlockId>; readonly order: readonly IrBlockId[] }

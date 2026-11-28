@@ -566,6 +566,8 @@ const denseCellText = (
   }
 }
 
+const typedArrayElementCarrier: Representation = { kind: 'scalar', domain: 'number' }
+
 /** The same, as a read: `flag ? base[i].value : <the general form>`. */
 const denseElementText = (ctx: EmitContext, operation: GetOperation): string | null => {
   const dense = denseCellText(ctx, operation)
@@ -588,12 +590,12 @@ const denseElementText = (ctx: EmitContext, operation: GetOperation): string | n
   // the result's carrier the same way the general half's guarded arm is --
   // see `presentElementText`. Without it the two arms are a bare element and
   // an `Optional<T>`, and only the converting constructor makes that a type.
-  const element: Representation | null =
-    operation.receiver.representation.kind === 'array-object'
-      ? operation.receiver.representation.element
-      : operation.receiver.representation.kind === 'typed-array'
-        ? { kind: 'scalar', domain: 'number' }
-        : null
+  // Assigned rather than joined in one conditional: the join of the element
+  // carrier with a fresh literal made a sum nesting the whole `Representation`
+  // sum beside a twin scalar record, which no native recast homes arm by arm.
+  let element: Representation | null = null
+  if (operation.receiver.representation.kind === 'array-object') element = operation.receiver.representation.element
+  else if (operation.receiver.representation.kind === 'typed-array') element = typedArrayElementCarrier
   const value =
     operation.receiver.representation.kind === 'typed-array'
       ? `static_cast<double>(gea::TypedArray<${cppScalarType(operation.receiver.representation.element)}>::readInBounds(${dense.pointer}, ${dense.index}))`
@@ -736,9 +738,16 @@ const emitGetRendering = (ctx: EmitContext, lines: string[], operation: GetOpera
         return
       }
     }
-    const rendered =
-      (ctx.borrowedFieldReads.has(operation.result.id) ? nativeFieldViewBorrowedReadText(ctx, operation, ordinaryReadOf) : null) ??
-      nativeFieldViewReadText(ctx, operation, ordinaryReadOf)
+    // A borrowed read's live-view answer goes to a frame slot too, never a
+    // temporary of its own expression: its consumer may bind the reference by
+    // name (`const auto& gea_read_receiver = ...;`) and read through it in a
+    // later statement, after such a temporary has died. -O0 kept the dead stack
+    // slot intact; -O2 reused it and the next member read found a null handle.
+    const borrowSlot = ctx.borrowedFieldReads.has(operation.result.id) ? `gea_field_slot_${ctx.declarations.length}` : null
+    const borrowed = borrowSlot === null ? null : nativeFieldViewBorrowedReadText(ctx, operation, ordinaryReadOf, borrowSlot)
+    if (borrowed !== null && borrowSlot !== null)
+      ctx.declarations.push({ name: borrowSlot, type: cppTypeOf(operation.result.representation) })
+    const rendered = borrowed ?? nativeFieldViewReadText(ctx, operation, ordinaryReadOf)
     if (rendered === null) throw new Error('a published field-view read lost its receipt')
     lines.push(`${defineValue(ctx, operation.result)} = ${rendered};`)
     return
@@ -1710,21 +1719,14 @@ const isDefaultDataDescriptor = (operation: SetOperation | DefineOwnPropertyOper
  * has nowhere to put the value, and a struct member with that name does not
  * exist to write into either.
  */
-const classAccessorSetter = (ctx: EmitContext, receiver: IrOperand, key: string): FunctionId | null => {
+const classAccessorSetter = (ctx: EmitContext, receiver: IrOperand, key: string): FunctionId | null | 'getter-only' => {
   const representation = receiver.representation
   if (representation.kind !== 'class-ref') return null
   // [[Set]] resolves the same inherited member as [[Get]]. Looking only at
   // this class's own accessors mistakes a base setter for instance storage.
   const site = classMemberOf(ctx.classes, representation.declaration, key)
   if (site?.kind !== 'accessor') return null
-  const accessor = site.accessor
-  if (!accessor.setter) {
-    throw createCppEmitBlockedError(
-      'property-access:class-ref:set:false',
-      `accessor "${key}" of class ${representation.declaration} declares only a getter, so writing it has no body to call`
-    )
-  }
-  return accessor.setter
+  return site.accessor.setter ?? 'getter-only'
 }
 
 /**
@@ -1957,6 +1959,25 @@ export const emitFieldStore = (
  * the dispatch: `defineValueAlias` forbids a second definition of one SSA
  * value, and every arm would otherwise publish the same one.
  */
+/**
+ * djb2 over the id's code points, each contributing its FIRST code unit -- what
+ * the spread-and-reduce this replaces computed. Indexed rather than spread: a
+ * native build has no iterator over a string.
+ */
+const computedKeyHash = (text: string): number => {
+  let hash = 5381
+  for (let index = 0; index < text.length; index += 1) {
+    const unit = text.charCodeAt(index)
+    hash = (hash * 33 + unit) >>> 0
+    // A surrogate pair is one code point: its trailing unit is skipped.
+    if (unit >= 0xd800 && unit <= 0xdbff && index + 1 < text.length) {
+      const next = text.charCodeAt(index + 1)
+      if (next >= 0xdc00 && next <= 0xdfff) index += 1
+    }
+  }
+  return hash
+}
+
 const emitTypedComputedWrite = (
   ctx: EmitContext,
   lines: string[],
@@ -1974,13 +1995,19 @@ const emitTypedComputedWrite = (
   }
   // An SSA id is not an identifier (`ssa|body|fn|decl|...`); the ordinal alone
   // distinguishes one closed dispatch from another nested inside it.
-  const keyName = `gea_computed_key_${[...operation.key.value].reduce((hash, character) => (hash * 33 + character.charCodeAt(0)) >>> 0, 5381).toString(36)}`
+  const keyName = `gea_computed_key_${computedKeyHash(operation.key.value).toString(36)}`
   const body: string[] = [`const std::string& ${keyName} = ${operandText(ctx, operation.key)};`]
   for (const key of recipe.keys) {
     const armContext: EmitContext = { ...ctx, staticKeyTexts: new Map(ctx.staticKeyTexts).set(operation.key.value, key) }
     const arm: string[] = []
-    const { typedComputedWrite: _sealed, ...constantKeyStore } = operation
-    emitFieldStoreLines(armContext, arm, { ...constantKeyStore, result: null }, label)
+    // One rest per kind: a rest over `set | define-own-property` has no single record layout.
+    if (operation.kind === 'set') {
+      const { typedComputedWrite: _sealed, ...constantKeyStore } = operation
+      emitFieldStoreLines(armContext, arm, { ...constantKeyStore, result: null }, label)
+    } else {
+      const { typedComputedWrite: _sealed, ...constantKeyStore } = operation
+      emitFieldStoreLines(armContext, arm, { ...constantKeyStore, result: null }, label)
+    }
     body.push(`if (${keyName} == ${cppStringLiteral(key)}) {`, ...arm.map((line) => `  ${line}`), '}')
   }
   lines.push('{', ...body.map((line) => `  ${line}`), '}')
@@ -2409,7 +2436,28 @@ const emitFieldStoreLines = (
   // struct member instead. See citations.md finding 1.
   // Accessors have no field storage. Reconcile their argument against the
   // emitted setter parameter instead, including setters inherited from a base.
-  const setter = classAccessorSetter(ctx, operation.receiver, fieldName) ?? recordAccessorBody(ctx, operation.receiver, fieldName, 'setter')
+  const classSetter = classAccessorSetter(ctx, operation.receiver, fieldName)
+  if (classSetter === 'getter-only') {
+    // OrdinarySet (10.1.9.2) step 5: an accessor whose [[Set]] is undefined
+    // answers false, which PutValue turns into a TypeError in strict code and
+    // discards in sloppy code. Defining over it is a different operation
+    // ([[DefineOwnProperty]] replaces a configurable accessor) and stays refused.
+    if (operation.kind !== 'set') {
+      throw createCppEmitBlockedError(
+        'property-access:class-ref:set:false',
+        `accessor "${fieldName}" of class ${operation.receiver.representation.kind === 'class-ref' ? operation.receiver.representation.declaration : '?'} ` +
+          'declares only a getter, and defining an own property over it is not rendered'
+      )
+    }
+    if (operation.strict) {
+      lines.push(
+        `gea::host::throwRuntimeError("TypeError", ${cppStringLiteral(`Cannot set property ${fieldName}, which has only a getter`)});`
+      )
+    }
+    if (operation.result) defineValueAlias(ctx, operation.result, receiverText)
+    return
+  }
+  const setter = classSetter ?? recordAccessorBody(ctx, operation.receiver, fieldName, 'setter')
   const setterParameter = setter === null ? null : ctx.abiOfCallable(setter)?.parameters[0]?.value
   if (setter !== null && !setterParameter) {
     throw createCppEmitBlockedError(`call-abi:accessor-setter:${fieldName}`, `setter "${fieldName}" has no emitted parameter convention`)
@@ -2598,7 +2646,7 @@ const propertyAppendLines = (
   // Withheld or aliased to the field itself: see `compoundAppendLines`
   // (emit-bindings.ts) for why both forms read the storage in place.
   if (ctx.deferredTexts.has(left.value) || ctx.valueNames.get(left.value) === target) return [stringAppendStatement(ctx, target, suffix)]
-  if (!ctx.ownedValues.has(left.value) || !ctx.ownedDyingValues.has(left.value)) return null
+  if (!ctx.ownedValues.has(left.value) || !ctx.ownedDyingValues.has(left.value) || ctx.hoistedResults.has(left.value)) return null
   const snapshot = operandText(ctx, left)
   return [stringAppendStatement(ctx, snapshot, suffix), `${target} = std::move(${snapshot});`]
 }

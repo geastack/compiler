@@ -33,6 +33,10 @@ export interface NativeCallableReadonlySet {
   readonly conversions: readonly ConversionNodeId[]
 }
 
+// Not a type guard on purpose: a source narrowed to its `result` arm would
+// reach `matches` as that one arm rather than as an `OperandSource`.
+const namesResult = (source: OperandSource, result: SemanticResultId): boolean => source.kind === 'result' && source.result === result
+
 const sameSource = (left: OperandSource, right: OperandSource): boolean =>
   left.kind === right.kind &&
   (left.kind === 'result' && right.kind === 'result'
@@ -94,8 +98,9 @@ export const nativeCallableReadonlySetsOf = (input: NativeCallableDataSlotInput)
       !proof ||
       semantic?.family !== 'property' ||
       semantic.strict !== operation.strict ||
-      receiver?.source.kind !== 'result' ||
-      receiver.source.result !== proof.receiver ||
+      // Explicit presence test: `receiver?.source` keeps the narrowed source optional.
+      !receiver ||
+      !namesResult(receiver.source, proof.receiver) ||
       !key ||
       !value ||
       !sameSource(key.source, proof.key) ||

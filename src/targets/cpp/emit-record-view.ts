@@ -39,6 +39,7 @@ import {
 import { evaluatedOnceText } from './evaluated-once.js'
 import {
   cppBodyName,
+  cppClassName,
   cppRecordFieldName,
   cppRecordAccessorEnvironmentName,
   cppRecordFieldPresenceName,
@@ -248,12 +249,12 @@ const structuralLeafText = (ctx: RecordViewSite, source: Representation, target:
 }
 
 export const certifiedRecordViewText = (ctx: ConversionSite, plan: CertifiedRecordViewPlan, text: string): string | null => {
-  const closure = recipeClosureOf(plan.leaves.values(), ctx.conversions?.nodeById)
+  const closure = recipeClosureOf([...plan.leaves.values()], ctx.conversions?.nodeById)
   const viewCtx: RecordViewSite = {
     ...ctx,
     structuralConversions: plan.leaves,
     structuralMethods: plan.methods,
-    nativeFieldViews: nativeFieldViewPlanIsLive(plan) ? plan.fieldViews! : new Map(),
+    nativeFieldViews: nativeFieldViewPlanIsLive(plan) ? plan.fieldViews! : new Map<RecordViewPlan, NativeFieldViewPlan>(),
     conversions: {
       ...ctx.conversions,
       nodeById: (id) => closure.get(id) ?? null,
@@ -601,6 +602,25 @@ const recordFieldsBuiltText = (
       continue
     }
     if (read.kind === 'native-descriptor') return null
+    if (read.kind === 'subclass-field') {
+      // The allocated class decides, exactly: one test per class that holds
+      // the field, the class's own presence bit beside it.
+      const fieldType = cppTypeOf(field.value)
+      const branches: string[] = []
+      const presentWhen: string[] = []
+      for (const arm of read.arms) {
+        const struct = cppClassName(arm.declaration)
+        const test = `gea::host::hasNativeClassLayoutRef<${struct}>(${text})`
+        const owner = `gea::host::downcastClassRef<${struct}>(${text})`
+        const converted = structuralLeafText(ctx, arm.held.value, field.value, tailAwareFieldReadText(arm.fields, field.key, `${owner}->`))
+        if (converted === null) return null
+        branches.push(`if (${test}) return ${memberCast(field, arm.held.value, converted)};`)
+        presentWhen.push(arm.held.required ? test : `(${test} && ${owner}->${cppRecordFieldPresenceName(field.key)})`)
+      }
+      reads.push(`([&]() -> ${fieldType} { ${branches.join(' ')} return ${fieldType}{}; }())`)
+      presences.push([field.key, `(${presentWhen.join(' || ')})`])
+      continue
+    }
     if (read.kind === 'sidecar') {
       const fromIndex = read.from === 'index' && source.kind === 'record-with-index'
       if (expandoAbsent && !fromIndex) {

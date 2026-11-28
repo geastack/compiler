@@ -21,7 +21,16 @@ import type { NativeOwnAssignmentValue } from '../semantics/native-own-assignmen
 import { nativeObjectDataSlotSchemasOf, type NativeObjectDataSlotSchema } from '../semantics/native-object-data-slots.js'
 import { authenticatedTemplateCallEntry } from './call-entry.js'
 import { authenticatedNativeHostMethodReadOf, intrinsicCallArgumentMatches } from './intrinsic-call-facts.js'
-import { allOperationsOf, type CallOperation, type IrBody, type IrOperand, type IrOperation } from './model.js'
+import {
+  allOperationsOf,
+  type CallOperation,
+  type IrBlock,
+  type IrBlockId,
+  type IrBody,
+  type IrNonTerminatorOperation,
+  type IrOperand,
+  type IrOperation
+} from './model.js'
 import { resultOfIrOperation } from './queries.js'
 
 /** Exact all-writer proof for one allocation's physical slot.
@@ -682,8 +691,8 @@ export const nativeOwnAssignmentRecipesMatch = (
 export const publishNativeOwnAssignments = (
   input: NativeOwnAssignmentInputs & { readonly bodies: ReadonlyMap<PhysicalBodyId, IrBody> }
 ): ReadonlyMap<PhysicalBodyId, IrBody> =>
-  new Map(
-    [...input.bodies].map(([id, body]) => {
+  new Map<PhysicalBodyId, IrBody>(
+    [...input.bodies].map(([id, body]): readonly [PhysicalBodyId, IrBody] => {
       const definitions = new Map(
         [...body.blocks.values()].flatMap((block) =>
           allOperationsOf(block).flatMap((operation) => {
@@ -697,14 +706,14 @@ export const publishNativeOwnAssignments = (
         id,
         {
           ...body,
-          blocks: new Map(
-            [...body.blocks].map(([blockId, block]) => {
+          blocks: new Map<IrBlockId, IrBlock>(
+            [...body.blocks].map(([blockId, block]): readonly [IrBlockId, IrBlock] => {
               const operations = allOperationsOf(block)
               return [
                 blockId,
                 {
                   ...block,
-                  operations: block.operations.map((operation) => {
+                  operations: block.operations.map((operation): IrNonTerminatorOperation => {
                     if (operation.kind !== 'call') return operation
                     const { nativeOwnAssignment: old, ...ordinary } = operation
                     const receipt = nativeOwnAssignmentRecipeOf(operation, operations, bodyInput)

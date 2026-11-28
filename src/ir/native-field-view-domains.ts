@@ -43,7 +43,8 @@ export interface NativeFieldStorageDomain {
 }
 
 export interface NativeFieldViewDomains {
-  (receiver: Representation): ReadonlyMap<string, readonly NativeFieldStorageDomain[]> | null
+  /** The storage domains of every named descriptor of a live record carrier, or null for a carrier no view installs. */
+  readonly fieldsOf: (receiver: Representation) => ReadonlyMap<string, readonly NativeFieldStorageDomain[]> | null
   /**
    * The routes of a static key no installed plan or layout of a live record
    * carrier names (`options.mapping` over a `setOptions( options = {} )`
@@ -57,7 +58,8 @@ export interface NativeFieldViewDomains {
 
 const binaryViewDataKeys = ['buffer', 'byteLength', 'byteOffset', 'length', 'BYTES_PER_ELEMENT'] as const
 
-const noRoutes: ReadonlyMap<string, readonly NativeFieldStorageDomain[]> = new Map()
+// Typed at construction: an untyped `new Map()` is a dynamic map, with no native conversion to this one.
+const noRoutes: ReadonlyMap<string, readonly NativeFieldStorageDomain[]> = new Map<string, readonly NativeFieldStorageDomain[]>()
 
 /** A canonical array index: the decimal spelling of an integer below 2^32 - 1. */
 const declaredAnyEntryTable = (value: Representation): boolean =>
@@ -168,7 +170,7 @@ export const nativeFieldViewDomainsOf = (
   nodes: Iterable<ConversionNode>,
   layoutOf: Pick<RepresentationDeriver, 'layoutOf'> | null | undefined,
   abiOf: (id: FunctionId) => CallableAbi | null,
-  classes: ReadonlyMap<DeclarationId, ClassLayout> = new Map(),
+  classes: ReadonlyMap<DeclarationId, ClassLayout> = new Map<DeclarationId, ClassLayout>(),
   /** The native carriers copies store under `key` in the expando of an
    * allocation carried as `shapeId` (`spread-conversions.ts`'s `expandoData`). */
   expandoStoredOf: (shapeId: string, key: string | null) => readonly Representation[] = () => [],
@@ -370,7 +372,10 @@ export const nativeFieldViewDomainsOf = (
       const arms: Map<string, NativeFieldStorageDomain[]>[] = []
       for (const layout of family) {
         const fields = new Map<string, NativeFieldStorageDomain[]>(
-          layout.nativeStorage!.fields.map((field) => [field.key, [{ read: field.value, write: field.value }]])
+          layout.nativeStorage!.fields.map((field): [string, NativeFieldStorageDomain[]] => [
+            field.key,
+            [{ read: field.value, write: field.value }]
+          ])
         )
         const walked = new Set<DeclarationId>()
         for (
@@ -490,10 +495,12 @@ export const nativeFieldViewDomainsOf = (
       // still delegates that key to the immediate source, including a getter
       // whose Function identity has escaped.
       const inherited = domainsOf(plan.source, true, plan)
-      for (const [key, domains] of inherited ?? []) {
-        const checked = plan.fields.find((field) => field.key === key)?.checkedRead
-        for (const domain of domains) add(key, checked ? { ...domain, checkedRead: checked } : domain)
-      }
+      // Guarded rather than `?? []`: a map-or-array union has no single native iteration protocol.
+      if (inherited)
+        for (const [key, domains] of inherited) {
+          const checked = plan.fields.find((field) => field.key === key)?.checkedRead
+          for (const domain of domains) add(key, checked ? { ...domain, checkedRead: checked } : domain)
+        }
       for (const field of plan.fields) {
         if (!field.descriptorForward) add(field.key, field)
         // A forwarded key the source never stores answers from its expando
@@ -573,5 +580,5 @@ export const nativeFieldViewDomainsOf = (
     }
     return routes
   }
-  return Object.assign(domainsOf, { absentRoutesOf })
+  return { fieldsOf: (receiver) => domainsOf(receiver), absentRoutesOf }
 }

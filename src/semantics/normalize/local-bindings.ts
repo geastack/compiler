@@ -1,4 +1,5 @@
 import ts from '#typescript'
+import { checkerUnionOf } from '../checker-union.js'
 import {
   annotationStatesNothing,
   exactEmptyObjectLiteralType,
@@ -765,8 +766,7 @@ export const censusLocalBindings = (
 
   const unionTypeOf = (arms: readonly ts.Type[] | null): ts.Type | null => {
     if (!arms || arms.length === 0) return null
-    const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
-    return typeof constructing.getUnionType === 'function' ? constructing.getUnionType(arms) : null
+    return checkerUnionOf(checker, arms)
   }
 
   /** Whether the checker's raw answer at a write is a REAL fact refusing storage (`void`/`never`), as opposed to silence. */

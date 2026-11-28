@@ -114,8 +114,11 @@ export const callbackOverloadJoinedAbi = (abis: readonly CallableAbi[]): Callabl
   const first = valued[0]
   if (first === undefined || valued.length === abis.length) return null
   if (valued.some((abi) => representationKey(abi.result) !== representationKey(first.result))) return null
-  if (first.result.kind === 'optional') return null
-  const result = optionalOf(first.result, 'undefined')
+  // Narrowed as a local: a native build reads a narrowed `first.result` path
+  // back as an optional arm.
+  const joined = first.result
+  if (joined.kind === 'optional') return null
+  const result = optionalOf(joined, 'undefined')
   const widened = widestSubsumingAbi(abis.map((abi) => ({ ...abi, result })))
   return typeof widened === 'string' ? null : { ...widened, result, overloadJoined: true }
 }

@@ -12,6 +12,7 @@ import type { RepresentationDeriver } from '../representation/derive.js'
 import { isNativeCallableCarrier } from '../representation/callable-object.js'
 import {
   abiKey,
+  absenceCarrier,
   carriesUndefined,
   recordIndexForKeyCarrier,
   representationKey,
@@ -86,7 +87,7 @@ const dynamic: Representation = { kind: 'dynamic', reason: 'declared-any-never-n
 
 const leavesOf = (value: Representation): readonly Representation[] =>
   value.kind === 'optional'
-    ? [...leavesOf(value.payload), { kind: value.absence }]
+    ? [...leavesOf(value.payload), absenceCarrier(value.absence)]
     : value.kind === 'tagged-union'
       ? value.arms.flatMap((arm) => leavesOf(arm.value))
       : [value]
@@ -297,7 +298,7 @@ export const operationConversionInputsOf = (
       if (keyText === null)
         for (const key of new Set([
           ...((operation.kind === 'set' ? operation.provenKeyTexts : undefined) ?? []),
-          ...(operation.typedComputedWrite?.keys ?? [])
+          ...(operation.typedComputedWrite?.keys == null ? [] : [...operation.typedComputedWrite?.keys])
         ])) {
           const field = declaredRecordFieldOf(deriver, receiver, key, classes)
           if (field) add('field-write', operation.value.representation, field.value)
@@ -577,8 +578,16 @@ export const operationConversionsOf = (
     ConversionCensus,
     'nodeFor' | 'fieldReadFor' | 'absentIndexReadFor' | 'callArgumentFor' | 'nativeBaseViewFor' | 'nativeMethodFor'
   >
-): readonly OperationConversion[] =>
-  inputs.length === 0 ? noOperationConversions : inputs.map((input) => ({ ...input, conversion: conversionNodeOf(input, conversions).id }))
+): readonly OperationConversion[] => {
+  if (inputs.length === 0) return noOperationConversions
+  // Pushed into the declared array rather than joined with `inputs.map(...)`:
+  // a native build carries the mapped literals and the shared empty array as
+  // different layouts of `OperationConversion[]`, and the join's store into the
+  // declared result selected one arm unchecked.
+  const recipes: OperationConversion[] = []
+  for (const input of inputs) recipes.push({ ...input, conversion: conversionNodeOf(input, conversions).id })
+  return recipes
+}
 
 export const operationConversionsMatch = (
   expected: readonly OperationConversionInput[],

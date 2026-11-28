@@ -28,8 +28,8 @@ export const closePhysicalClassReflection = (
     return {
       level: 'full',
       ...(restricted ? { fieldOperations } : {}),
-      reasons: new Set([...(existing?.reasons ?? []), ...demand.reasons, 'inherited-physical-protocol']),
-      representations: new Set([...(existing?.representations ?? []), ...demand.representations])
+      reasons: new Set([...(existing?.reasons == null ? [] : [...existing?.reasons]), ...demand.reasons, 'inherited-physical-protocol']),
+      representations: new Set([...(existing?.representations == null ? [] : [...existing?.representations]), ...demand.representations])
     }
   }
   for (const layout of layouts.values()) {

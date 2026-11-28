@@ -28,6 +28,7 @@ import type { RepresentationDeriver } from '../representation/derive.js'
 import { recordFieldKeyOf } from '../representation/object-shape.js'
 import type { FamilyMemberKeys } from '../conversion/record-view.js'
 import {
+  absenceCarrier,
   isOpenDocument,
   representationKey,
   type CallableAbi,
@@ -42,7 +43,7 @@ import { conversionRoleTargetOf, type SemanticOperation } from '../semantics/mod
 import type { IrBodyBuilder } from './build.js'
 import { anchorResultOf, IrLoweringBlockedError, requireRepresentation } from './lower-graph.js'
 import type { PendingShortCircuit } from './lower-short-circuit.js'
-import type { IrBlockId, IrOperand } from './model.js'
+import type { IrArrayElement, IrBlockId, IrOperand } from './model.js'
 
 /**
  * Reading an operation's inputs and publishing its result.
@@ -451,10 +452,37 @@ export const convertTo = (
     (ordinary.capability.kind === 'never' || conversionRequiresSourceGuard(ordinary.capability, ctx.program.conversions.nodeById))
       ? (ctx.program.conversions.readOnlyDictionaryFor(operand.representation, slot) ?? ordinary)
       : ordinary
-  if (node.capability.kind === 'never') return null
+  if (node.capability.kind === 'never') return presentPayloadEntry(ctx, block, lineage, operand, slot, via)
   const value = ctx.builder.convert(block, lineage, node.id, operand, slot)
   traceSpeculativeLoad(lineage, via, node, value)
   return { value, representation: slot }
+}
+
+/**
+ * An optional entering a slot that is neither the optional nor its payload,
+ * where no single node converts the pair: `this.sets[i]!` returned as a
+ * `ReadonlySet`, or `args[0]!` passed where `Node | Record` is expected. The
+ * checker only admits that pair where the program asserted or proved
+ * presence, so the value is the payload: unwrapped by the census's
+ * `present-optional` load (which `withPresenceChecks` tests unless a guard
+ * proves it), then converted onward as the payload. Two `convert`s, each a
+ * node the census already knows, rather than one composite pair.
+ */
+const presentPayloadEntry = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  operand: IrOperand,
+  slot: Representation,
+  via: string
+): IrOperand | null => {
+  const source = operand.representation
+  if (source.kind !== 'optional' || slot.kind === 'optional' || slot.kind === source.absence) return null
+  const unwrap = ctx.program.conversions.nodeFor(source, source.payload)
+  if (unwrap.capability.kind === 'never') return null
+  if (ctx.program.conversions.nodeFor(source.payload, slot).capability.kind === 'never') return null
+  const held = { value: ctx.builder.convert(block, lineage, unwrap.id, operand, source.payload), representation: source.payload }
+  return convertTo(ctx, block, lineage, held, slot, via)
 }
 
 /**
@@ -543,6 +571,7 @@ export const enter = (
     assertedUnionEntry(ctx, block, lineage, operation, operand, resolved, answer.representation) ??
     unsharedFreshTableEntry(ctx, block, lineage, operand, resolved, answer.representation) ??
     unprovenClassEntry(ctx, block, lineage, operand, resolved, answer.representation) ??
+    freshEmptyArrayLiteralEntry(ctx, block, lineage, operand, resolved, answer.representation) ??
     convertTo(ctx, block, lineage, resolved, answer.representation) ??
     familyMemberEntry(ctx, block, lineage, operation, operand, resolved, answer.representation) ??
     assertedArmEntry(ctx, block, lineage, operand, resolved, answer.representation) ??
@@ -630,7 +659,8 @@ export const perArmUnionEntry = (
   )
     return null
   const slotKey = representationKey(slot)
-  const arms = [...union.arms.map((arm) => arm.value), ...(source.kind === 'optional' ? [{ kind: source.absence } as const] : [])]
+  const arms: Representation[] = union.arms.map((arm) => arm.value)
+  if (source.kind === 'optional') arms.push(absenceCarrier(source.absence))
   const everyArmConverts = arms.every(
     (arm) => representationKey(arm) === slotKey || ctx.program.conversions.nodeFor(arm, slot).capability.kind !== 'never'
   )
@@ -1162,6 +1192,39 @@ const unsharedFreshTableEntry = (
  * document: doc } }))` -- an array of that record -- handed to
  * `bulkWrite(operations: ReadonlyArray<AnyWriteOperation>)` is the case.
  */
+/**
+ * An empty array literal (`never[]`) entering an `E[]` slot directly --
+ * `{ bodies: [] }` stored as a record whose field is `string[]`. The
+ * literal's value is used here and nowhere else, so the conversion CONSUMES
+ * it (`ConvertOperation.releasesSource`) and `gea::emptyArraySentinel`'s
+ * unshared test makes each such literal its own fresh array, as in JS. The
+ * plain sentinel conversion gave every one of them the single shared empty
+ * array, so pushes through one record's field landed in every record's. A
+ * `never[]` read through a binding (a shared `emptyArray`) is not a literal
+ * result and keeps the sentinel's identity.
+ */
+const freshEmptyArrayLiteralEntry = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  operand: SemanticOperand,
+  resolved: IrOperand,
+  slot: Representation
+): IrOperand | null => {
+  const source = resolved.representation
+  if (source.kind !== 'array-object' || slot.kind !== 'array-object' || source.element.kind !== 'undefined') return null
+  if (slot.element.kind === 'undefined') return null
+  if (operand.source.kind !== 'result') return null
+  const producer = ctx.graph.operations.get(operationOfResult(operand.source.result))
+  if (producer?.family !== 'allocation' || producer.allocated !== 'array-literal') return null
+  const node = ctx.program.conversions.nodeFor(source, slot)
+  if (node.capability.kind !== 'atom' || node.capability.materializer.id !== 'gea::emptyArraySentinel') return null
+  return {
+    value: ctx.builder.convert(block, lineage, node.id, resolved, slot, undefined, undefined, undefined, true),
+    representation: slot
+  }
+}
+
 const freshIntrinsicArrayEntry = (
   ctx: LoweringContext,
   block: IrBlockId,
@@ -1177,8 +1240,15 @@ const freshIntrinsicArrayEntry = (
   const producer = ctx.graph.operations.get(operationOfResult(operand.source.result))
   if (producer?.family !== 'invocation') return null
   // `Array.from`/`Array.of` answer a fresh array off the intrinsic constructor
-  // itself, whose elements the program's own mapper produced: consumed here,
-  // so each element is moved into its conversion (`ConvertOperation.releasesSource`).
+  // itself, whose elements the program's own mapper produced. Either way the
+  // fresh array is consumed here and nowhere else, so each element is moved
+  // into its conversion (`ConvertOperation.releasesSource`): moving out of a
+  // dead array changes no holder of an element. Copying instead left every
+  // element the source alone held looking shared, so `rows.map(() => [])`'s
+  // inner `never[]`s all became the one `gea::emptyArraySentinel` and later
+  // pushes landed in a single array shared by every row. An element the
+  // receiver also holds (`filter`, `slice`, `map(x => x)`) keeps that holder,
+  // which the sentinel's unshared test still sees.
   const factory = producer.freshIntrinsicArrayFactory === true
   if (!factory) {
     if (producer.freshIntrinsicArrayResult !== true) return null
@@ -1189,17 +1259,7 @@ const freshIntrinsicArrayEntry = (
   const element = ctx.program.conversions.nodeFor(source.element, slot.element)
   if (element.capability.kind === 'never') return null
   return {
-    value: ctx.builder.convert(
-      block,
-      lineage,
-      element.id,
-      resolved,
-      slot,
-      'unshared-array',
-      undefined,
-      undefined,
-      factory ? true : undefined
-    ),
+    value: ctx.builder.convert(block, lineage, element.id, resolved, slot, 'unshared-array', undefined, undefined, true),
     representation: slot
   }
 }
@@ -1594,7 +1654,7 @@ export const packRestArguments = (
   // A tuple carried as a positional record has a bounded field set.
   // Optional trailing positions may be omitted: leave those fields absent,
   // preserving the difference from a present argument whose value is undefined.
-  if (isClosedContiguousTupleRecord(slot.value)) {
+  if (slot.value.kind === 'record' && isClosedContiguousTupleRecord(slot.value)) {
     const tail = passed.slice(packingFrom)
     if (firstSpread >= 0) {
       throw new IrLoweringBlockedError(
@@ -1637,7 +1697,7 @@ export const packRestArguments = (
   // it rather than aliasing it. That is also why a mixed `f(a, ...xs, b)`
   // needs no special case: the copy and the push are both just elements of the
   // array being built, in written order.
-  const elements = passed.slice(packingFrom).map((entry) => {
+  const elements = passed.slice(packingFrom).map((entry): IrArrayElement => {
     // A positional element enters the pack's element slot the way a literal's
     // element enters an array literal's: converted here, so the printer's
     // folded push (`emit-arrays.ts`) and the packed array agree on the carrier.

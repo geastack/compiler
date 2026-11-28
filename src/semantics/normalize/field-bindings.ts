@@ -1,4 +1,5 @@
 import ts from '#typescript'
+import { checkerHasUnion, checkerUnionOf } from '../checker-union.js'
 import { inheritedAccessorOfAssignment } from '../inherited-accessor.js'
 import {
   annotationStatesNothing,
@@ -263,9 +264,25 @@ const dictionaryTypeOf = (checker: ts.TypeChecker, valueType: ts.Type): ts.Type 
 }
 
 interface SymbolConstructingChecker {
-  createSymbol(flags: ts.SymbolFlags, name: ts.__String): ts.Symbol & { links: { type?: ts.Type } }
-  getUnionType(types: readonly ts.Type[]): ts.Type
+  createSymbol(flags: ts.SymbolFlags, name: ts.__String): ts.Symbol
 }
+
+/**
+ * The type slot of a symbol `createSymbol` minted (TypeScript's transient
+ * `links`), or `undefined` for a checker whose symbols carry none. Asked
+ * apart from `createSymbol` so the checker's own declared `createSymbol` is
+ * the one called: a native build has no conversion from a checker to a
+ * record whose `createSymbol` promises an extra member. The symbol is read
+ * as `unknown` for the same reason -- an `in` test on the symbol itself
+ * would narrow it to a record the symbol's class has no conversion to.
+ */
+const transientLinksOf = (symbol: ts.Symbol): { type?: ts.Type | undefined } | undefined => {
+  const value: unknown = symbol
+  if (typeof value !== 'object' || value === null || !('links' in value)) return undefined
+  const links: unknown = value.links
+  return typeof links === 'object' && links !== null ? (links as { type?: ts.Type | undefined }) : undefined
+}
+
 const optionalRecords = new WeakMap<ts.TypeChecker, Map<ts.Type, ts.Type>>()
 /**
  * `record` with every member optional, or `null` unless `record` is a plain
@@ -284,14 +301,16 @@ const recordWithOptionalMembersOf = (checker: ts.TypeChecker, record: ts.Type): 
   const constructing = checker as unknown as Partial<SymbolConstructingChecker & DictionaryConstructingChecker>
   if (
     typeof constructing.createSymbol !== 'function' ||
-    typeof constructing.getUnionType !== 'function' ||
+    !checkerHasUnion(checker) ||
     typeof constructing.createAnonymousType !== 'function'
   )
     return null
   const members = new Map<ts.__String, ts.Symbol>()
   for (const property of properties) {
     const optional = constructing.createSymbol(ts.SymbolFlags.Property | ts.SymbolFlags.Optional, property.escapedName)
-    optional.links.type = constructing.getUnionType([checker.getTypeOfSymbol(property), checker.getUndefinedType()])
+    const links = transientLinksOf(optional)
+    if (!links) return null
+    links.type = checkerUnionOf(checker, [checker.getTypeOfSymbol(property), checker.getUndefinedType()]) ?? undefined
     if (property.declarations) optional.declarations = property.declarations
     if (property.valueDeclaration) optional.valueDeclaration = property.valueDeclaration
     members.set(property.escapedName, optional)
@@ -303,16 +322,10 @@ const recordWithOptionalMembersOf = (checker: ts.TypeChecker, record: ts.Type): 
   return answer
 }
 
-/** The internal checker method backing a union type literal (`ts.Type[] -> ts.Type`); same category as `DictionaryConstructingChecker` above. */
-interface UnionConstructingChecker {
-  getUnionType(types: readonly ts.Type[]): ts.Type
-}
 /** `type | null | undefined`, joining ONLY the nullish members of `nullish` -- a real `undefined`/`null` write the field's own whole-value evidence made is a FACT this module must not drop just because a separate pool of evidence (a write made THROUGH the field) answered its shape. */
 const withNullish = (checker: ts.TypeChecker, type: ts.Type, nullish: readonly ts.Type[]): ts.Type | null => {
   if (nullish.length === 0) return type
-  const constructing = checker as unknown as Partial<UnionConstructingChecker>
-  if (typeof constructing.getUnionType !== 'function') return null
-  return constructing.getUnionType([type, ...nullish])
+  return checkerUnionOf(checker, [type, ...nullish])
 }
 
 /** A plain `x.field = expr` assignment -- what TypeScript's JS-class inference leaves in `declarations` for a field the program never declares. */
@@ -1055,7 +1068,14 @@ export const censusFieldBindings = (
           node.arguments.length === 3
         ) {
           const [target, key, descriptor] = node.arguments
-          if (target && key && descriptor && ts.isStringLiteralLike(key) && key.text === name && isThisReceiver(target)) {
+          if (
+            target &&
+            key &&
+            descriptor &&
+            (ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key)) &&
+            key.text === name &&
+            isThisReceiver(target)
+          ) {
             const literal = descriptorLiteralOf(descriptor)
             const value = literal?.properties.find(
               (property): property is ts.PropertyAssignment =>
@@ -1571,7 +1591,9 @@ export const censusFieldBindings = (
     return dynamic
   }
   const forgetCleanVerdicts = (): void => {
-    for (const byNode of reachSettled?.values() ?? []) for (const [node, dynamic] of byNode) if (!dynamic) byNode.delete(node)
+    // Guarded rather than `?? []`: a map iterator or an array has no single native iteration protocol.
+    if (!reachSettled) return
+    for (const byNode of reachSettled.values()) for (const [node, dynamic] of byNode) if (!dynamic) byNode.delete(node)
   }
   /**
    * The candidate field a member read copies, by declaration: a read through a
@@ -2041,7 +2063,11 @@ export const censusFieldBindings = (
         if (WIDEN_DEBUG) {
           const file = evidence.getSourceFile()
           const line = file.getLineAndCharacterOfPosition(evidence.getStart()).line + 1
-          const owner = ownersOf(symbol).values().next().value?.name?.text ?? '?'
+          let owner = '?'
+          for (const declaration of ownersOf(symbol)) {
+            owner = declaration.name?.text ?? '?'
+            break
+          }
           const kind = statedFieldSymbols.has(symbol) ? 'stated' : 'inferred'
           process.stderr.write(
             `[WIDEN] ${owner}.${symbol.name} ${kind} <- ${file.fileName}:${line} ${evidence.getText().replace(/\s+/g, ' ').slice(0, 120)}\n`

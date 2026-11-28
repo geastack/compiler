@@ -33,12 +33,14 @@ const unmodelled = (reason: string): KeyofOutcome => ({ kind: 'unmodelled', reas
 
 export const createKeyofResolver = (table: StructuralTypeTable): ((id: StructuralTypeId) => KeyofOutcome) => {
   /** The literal (or unique-symbol) key type `keyof` contributes for one member. */
-  const literalKeyShapeOf = (key: PropertyKeyShape): StructuralShape =>
-    key.kind === 'symbol'
-      ? { kind: 'unique-symbol', declaration: key.declaration }
-      : key.kind === 'number'
-        ? { kind: 'literal', primitive: 'number', text: String(key.value) }
-        : { kind: 'literal', primitive: 'string', text: key.value }
+  // Returns rather than a conditional chain: each literal converts straight
+  // into `StructuralShape` instead of into an intermediate merge of two
+  // same-layout records.
+  const literalKeyShapeOf = (key: PropertyKeyShape): StructuralShape => {
+    if (key.kind === 'symbol') return { kind: 'unique-symbol', declaration: key.declaration }
+    if (key.kind === 'number') return { kind: 'literal', primitive: 'number', text: String(key.value) }
+    return { kind: 'literal', primitive: 'string', text: key.value }
+  }
 
   const anyKeyDomain = (): StructuralTypeId =>
     table.intern({

@@ -27,6 +27,7 @@ import { nativeClassConstructionOf } from './native-class-construction.js'
 import { closedCallFrameOf, nativeCallFrameOf } from './call-entry.js'
 import { nativeCallableSourceAliasesOf } from './native-callable-argument.js'
 import { intrinsicCallArgumentMatches, intrinsicCallFlagsMatch } from './intrinsic-call-facts.js'
+import { setValues } from '../collection-lists.js'
 
 /** Exact native source identities augment the canonical owner/writer census;
  * they do not grant an executable physical call frame or a stock-chain proof.
@@ -300,7 +301,7 @@ const createOwnerAuthority = (
           graph: input.graph,
           plan: input.calleeRendering.plan,
           abis,
-          constructs: new Map(),
+          constructs: new Map<FunctionId, CallableAbi>(),
           callableOrigins: callableOriginsOf(input.graph),
           classes: input.classes
         },
@@ -492,7 +493,7 @@ const createOwnerAuthority = (
     const sources = sourcesOf(receiver, semantic)
     if (
       sources.some((source) =>
-        [...(flow.callablePublications.get(source) ?? [])].some(
+        [...setValues(flow.callablePublications.get(source))].some(
           (publication) => publication === null || !nativeObservation(publication, source)
         )
       )
@@ -528,7 +529,7 @@ const createOwnerAuthority = (
       sources.some(
         (source) =>
           !ordinarySources.has(source) ||
-          [...(flow.callablePublications.get(source) ?? [])].some(
+          [...setValues(flow.callablePublications.get(source))].some(
             (publication) => publication === null || !nativeObservation(publication, source)
           )
       )
@@ -566,7 +567,7 @@ const createOwnerAuthority = (
     // constructed instance reaches its constructor dynamically.
     if (
       sources.some((source) =>
-        [...(flow.callablePublications.get(source) ?? [])].some(
+        [...setValues(flow.callablePublications.get(source))].some(
           (publication) => publication === null || publication.kind === 'construct' || !nativeObservation(publication, source)
         )
       )

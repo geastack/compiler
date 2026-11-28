@@ -405,7 +405,10 @@ const computeCaptureFacts = (
   const groupList = captureGroupsOf(bodies, placements, transitive, writeCounts, closureInitialized)
   const captured = new Map(transitive)
   const receiverNeeds = new Map(transitiveReceivers)
-  const groupOf = new Map<FunctionId | RegionId, IrCaptureGroup & { readonly first: AllocationSite }>()
+  // The first allocation is kept beside the group rather than in its element
+  // type: the published `groups` map holds plain `IrCaptureGroup`s.
+  const groupOf = new Map<FunctionId | RegionId, IrCaptureGroup>()
+  const firstOf = new Map<FunctionId | RegionId, AllocationSite>()
   for (const group of groupList) {
     const members = new Set(group.members.map((member) => member.declaration))
     const union: DeclarationId[] = []
@@ -423,6 +426,7 @@ const computeCaptureFacts = (
       captured.set(member.functionId, union)
       receiverNeeds.set(member.functionId, receiver)
       groupOf.set(member.functionId, group)
+      firstOf.set(member.functionId, group.first)
     }
   }
 
@@ -461,7 +465,7 @@ const computeCaptureFacts = (
     for (const allocation of allocations) {
       // A group member's environment is the group's, built at its FIRST
       // allocation, so that is where every capture must already be written.
-      const built = groupOf.get(allocation.functionId)?.first ?? allocation
+      const built = firstOf.get(allocation.functionId) ?? allocation
       for (const declaration of captured.get(allocation.functionId) ?? []) {
         const placement = placements.get(declaration)
         if (placement?.storage.kind !== 'local' || placement.storage.owner !== body.sourceOwner) continue
@@ -606,7 +610,7 @@ export const publishCaptureFacts = (
    * value, so it is the one kind this walk cannot recognise from the
    * operations alone -- the shape names it, nothing allocates it.
    */
-  capturingAccessors: ReadonlySet<FunctionId> = new Set()
+  capturingAccessors: ReadonlySet<FunctionId> = new Set<FunctionId>()
 ): ReadonlyMap<PhysicalBodyId, IrBody> => {
   const bodyList = [...bodies.values()]
   const facts = computeCaptureFacts(bodyList, placements, capturingAccessors)

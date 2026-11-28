@@ -15,6 +15,7 @@ import {
 } from './derived-expression-type.js'
 import { isUnreducedTypeForm } from './unreduced-type-form.js'
 import ts from '#typescript'
+import { checkerUnionOf } from '../checker-union.js'
 import { inheritedImplementationOf } from './merged-declaration.js'
 import { emptyAbsentGlobalCensus, type AbsentGlobalCensus } from './absent-globals.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
@@ -645,7 +646,7 @@ export const createLayoutTypeResolver = (
   const genericTargetOf = (type: ts.Type): ts.Type | null => {
     if ((type.flags & ts.TypeFlags.Object) === 0) return null
     if (((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) === 0) return null
-    return (type as ts.TypeReference).target
+    return (type as ts.TypeReference).target ?? null
   }
 
   /**
@@ -839,8 +840,7 @@ export const createLayoutTypeResolver = (
     // mutable array), whose carrier held one arm's payload converted -- read
     // unchecked out of whichever arm the value really was in.
     if (compatible.length > 1) {
-      const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
-      return typeof constructing.getUnionType === 'function' ? constructing.getUnionType(compatible) : null
+      return checkerUnionOf(checker, compatible)
     }
     return null
   }
@@ -1656,20 +1656,29 @@ export const createLayoutTypeResolver = (
     if (!read || !ts.isPropertyAccessExpression(read) || read.expression !== node) return null
     if (!answer.isUnion()) return null
     const vacuous = ts.TypeFlags.Any | ts.TypeFlags.Unknown
-    const narrowed = checker.getTypeAtLocation(read)
-    if ((narrowed.flags & vacuous) !== 0) return null
+    // `p?.kind`'s own type carries the `undefined` the chain short-circuits to
+    // when `p` is absent -- a value no arm's member holds -- so it is not part
+    // of the narrowing. Kept, it made `'b' | 'c' | undefined` overlap no
+    // present arm's `'a' | 'b' | 'c'` by assignability, dropped the object arm
+    // after `if (p?.kind === 'a') return`, and typed the next `p` as `undefined`.
+    const chained = checker.getTypeAtLocation(read)
+    const narrowed = ts.isOptionalChain(read) ? checker.getNonNullableType(chained) : chained
+    if ((narrowed.flags & vacuous) !== 0 || (narrowed.flags & ts.TypeFlags.Never) !== 0) return null
+    // Values in common is the question, and two unions can share one without
+    // either containing the other (`'a' | 'b'` against `'b' | 'c'`), so each
+    // narrowed constituent is tested on its own.
+    const parts = narrowed.isUnion() ? narrowed.types : [narrowed]
     const live = answer.types.filter((arm) => {
       const property = checker.getPropertyOfType(arm, read.name.text)
       if (!property) return true
       const held = checker.getTypeOfSymbolAtLocation(property, read)
       if ((held.flags & vacuous) !== 0) return true
-      return overlaps(held, narrowed)
+      return parts.some((part) => overlaps(held, part))
     })
     if (live.length === answer.types.length || live.length === 0) return null
     const sole = live.length === 1 ? live[0] : undefined
     if (sole) return sole
-    const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
-    return typeof constructing.getUnionType === 'function' ? constructing.getUnionType(live) : null
+    return checkerUnionOf(checker, live)
   }
 
   // A resolver closes over one checker and one census snapshot. Reusing an

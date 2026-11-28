@@ -48,7 +48,7 @@ export const neverOverrideResultOf = (checker: ts.TypeChecker, declaration: ts.D
       if (member === undefined) continue
       const result = memberResultOf(checker, member, method)
       if (result !== null && !isNever(result)) return result
-      const target = (base as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference ? (base as ts.TypeReference).target : base
+      const target = (base as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference ? (base as ts.TypeReference).target! : base
       if (target.isClassOrInterface()) next.push(...checker.getBaseTypes(target))
     }
     frontier = next

@@ -1301,7 +1301,8 @@ export interface ConvertOperation extends IrOperationBase {
    */
   readonly rebuild?: 'unshared-array' | 'unshared-dictionary'
   /**
-   * On an `unshared-array` rebuild only: the source array is CONSUMED here --
+   * On an `unshared-array` rebuild, or a plain `never[]` conversion of an
+   * empty array literal (`freshEmptyArrayLiteralEntry`): the source array is CONSUMED here --
    * a fresh factory result, or a local returned as its last use -- so each
    * element is moved out of it into its conversion rather than copied. An
    * element the source alone held then reaches its conversion with no other

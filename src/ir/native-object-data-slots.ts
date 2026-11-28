@@ -13,7 +13,7 @@ import {
 } from '../projection/native-object-data.js'
 import { objectPrototypeMemberNames } from '../representation/record-fields.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
-import { representationKey, type Representation } from '../representation/model.js'
+import { absenceCarrier, representationKey, type Representation } from '../representation/model.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import { operandOf } from '../semantics/model/operands.js'
 import { nativeObjectDataSlotSchemasOf, type NativeObjectDataSlotSchema } from '../semantics/native-object-data-slots.js'
@@ -21,7 +21,15 @@ import type { SemanticOperation } from '../semantics/model/operations.js'
 
 type NativeObjectDataSlotSchemaWriter = NativeObjectDataSlotSchema['writers'][number]
 import { recordObjectShapeOf } from '../representation/unwritten-record-members.js'
-import { allOperationsOf, type IrBody, type IrOperand, type IrOperation } from './model.js'
+import {
+  allOperationsOf,
+  type IrBlock,
+  type IrBlockId,
+  type IrBody,
+  type IrNonTerminatorOperation,
+  type IrOperand,
+  type IrOperation
+} from './model.js'
 import { resultOfIrOperation } from './queries.js'
 
 /** Exact source allocation and native extension carrier. The public view's
@@ -250,7 +258,7 @@ export const nativeObjectDataSlotAuthorityOf = (input: NativeObjectDataSlotInput
       let materialization: ConversionNodeId | undefined
       if (operation.kind === 'get') {
         if (operation.result.representation.kind === 'dynamic') return null
-        for (const physical of [storage.storage, { kind: 'undefined' } as const]) {
+        for (const physical of [storage.storage, absenceCarrier('undefined')]) {
           const node = input.conversions.nodeFor(physical, operation.result.representation)
           if (!recipeIsMaterializableWithoutPriorSourceGuard(node, input.conversions.nodeById)) return null
           read.push({ source: physical, conversion: node.id })
@@ -459,7 +467,7 @@ export const nativeObjectDataSlotAuthorityOf = (input: NativeObjectDataSlotInput
             )
           })
         let admitted = true
-        for (const physical of present ? [storage.storage] : [storage.storage, { kind: 'undefined' } as const]) {
+        for (const physical of present ? [storage.storage] : [storage.storage, absenceCarrier('undefined')]) {
           const node = input.conversions.nodeFor(physical, operation.result.representation)
           if (!recipeIsMaterializableWithoutPriorSourceGuard(node, input.conversions.nodeById)) {
             admitted = false
@@ -533,29 +541,37 @@ export const nativeObjectDataSlotMatches = (
 
 export const publishNativeObjectDataSlots = (input: NativeObjectDataSlotInput): ReadonlyMap<PhysicalBodyId, IrBody> => {
   const receipts = nativeObjectDataSlotsOf(input)
-  return new Map(
-    [...input.bodies].map(([id, body]) => [
+  return new Map<PhysicalBodyId, IrBody>(
+    [...input.bodies].map(([id, body]): readonly [PhysicalBodyId, IrBody] => [
       id,
       {
         ...body,
-        blocks: new Map(
-          [...body.blocks].map(([blockId, block]) => [
+        blocks: new Map<IrBlockId, IrBlock>(
+          [...body.blocks].map(([blockId, block]): readonly [IrBlockId, IrBlock] => [
             blockId,
             {
               ...block,
-              operations: block.operations.map((operation) => {
+              operations: block.operations.map((operation): IrNonTerminatorOperation => {
                 if (operation.kind !== 'get' && operation.kind !== 'set') return operation
-                const { nativeObjectDataSlot: previous, ...ordinary } = operation
                 const receipt = receipts.get(operation)
+                // One rest per kind: a rest over `get | set` has no single record layout.
+                if (operation.kind === 'get') {
+                  const { nativeObjectDataSlot: _previous, ...ordinary } = operation
+                  return receipt === undefined
+                    ? ordinary
+                    : {
+                        ...ordinary,
+                        nativeObjectDataSlot: receipt,
+                        conversionRecipes: operation.conversionRecipes?.filter((recipe) => recipe.role !== 'field-read') ?? []
+                      }
+                }
+                const { nativeObjectDataSlot: _previous, ...ordinary } = operation
                 return receipt === undefined
                   ? ordinary
                   : {
                       ...ordinary,
                       nativeObjectDataSlot: receipt,
-                      conversionRecipes:
-                        operation.conversionRecipes?.filter(
-                          (recipe) => recipe.role !== (operation.kind === 'get' ? 'field-read' : 'field-write')
-                        ) ?? []
+                      conversionRecipes: operation.conversionRecipes?.filter((recipe) => recipe.role !== 'field-write') ?? []
                     }
               })
             }

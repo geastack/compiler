@@ -62,8 +62,27 @@ export const createUnionDeriver = (
     return null
   }
 
+  // Each member's carrier, remembered for the one union being derived. The
+  // member rules below (promise folding, carrier grouping, nominal
+  // subsumption, the arms themselves) each ask for every member, and a member
+  // the owner cannot memoize -- one derived under a recursive container's
+  // replay, or below a guard -- was derived afresh by each of them, at every
+  // nesting level: a recursive recipe type took 76M derivations and 40 s for
+  // one layout. The owner's derivation is a function of the member and of
+  // state this union's own frame holds fixed, so the first answer is the one
+  // every later ask would rebuild.
+  let unionScope: Map<StructuralTypeId, Representation> | null = null
+
   /** The carrier an arm holds -- the same `storedCarrier` rule `derive.ts` applies to every other stored position. */
-  const deriveStored = (id: StructuralTypeId): Representation => storedCarrier(derive(id))
+  const deriveStored = (id: StructuralTypeId): Representation => {
+    const scope = unionScope
+    if (scope === null) return storedCarrier(derive(id))
+    const known = scope.get(id)
+    if (known !== undefined) return known
+    const value = storedCarrier(derive(id))
+    scope.set(id, value)
+    return value
+  }
 
   /**
    * Runtime identity carried by a union arm in addition to its physical
@@ -111,6 +130,16 @@ export const createUnionDeriver = (
   const isNever = (id: StructuralTypeId): boolean => isNeverType(id)
 
   const deriveUnion = (shape: Extract<StructuralShape, { kind: 'union' }>): Representation => {
+    const outer = unionScope
+    unionScope = new Map<StructuralTypeId, Representation>()
+    try {
+      return deriveUnionMembers(shape)
+    } finally {
+      unionScope = outer
+    }
+  }
+
+  const deriveUnionMembers = (shape: Extract<StructuralShape, { kind: 'union' }>): Representation => {
     // `never` contributes no arm. It is the empty type, so `T | never` is `T`
     // -- TypeScript's own union normalization says so, and the checker usually
     // applies it before this deriver ever sees the members. It does not always:
@@ -121,7 +150,20 @@ export const createUnionDeriver = (
     // carrier one flag cannot discriminate, so a field that is plainly just
     // `null` was refused.
     const stated = [...new Set(shape.members)]
-    const members = stated.filter((member) => !isNever(member))
+    const inhabited = stated.filter((member) => !isNever(member))
+    // `cond ? xs : []` and `xs ?? []` type the fallback `never[]`, an array
+    // that can hold no element. Beside a real array arm it is that array's
+    // empty value, not a second carrier: kept, it made `T[] | never[]` a sum
+    // whose second arm no range copy, iteration or element read accepts. The
+    // merge builds the `[]` straight in the surviving array's carrier
+    // (`merge.ts`'s `empty-array` materialization).
+    const isEmptyArrayMember = (member: StructuralTypeId): boolean => {
+      const memberShape = shapeOf(member)
+      return memberShape?.kind === 'array' && isNever(memberShape.element)
+    }
+    const members = inhabited.some((member) => shapeOf(member)?.kind === 'array' && !isEmptyArrayMember(member))
+      ? inhabited.filter((member) => !isEmptyArrayMember(member))
+      : inhabited
     if (members.length === 0) return { kind: 'void' }
     const absent = members.filter((member) => absenceOf(member) !== null)
     const present = members.filter((member) => absenceOf(member) === null)

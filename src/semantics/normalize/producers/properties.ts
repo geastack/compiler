@@ -220,7 +220,8 @@ const presentValueTypeOf = (
   valueType: StructuralTypeId,
   context: ProducerContext
 ): StructuralTypeId => {
-  if (key.source.kind !== 'constant') return valueType
+  const keySource = key.source
+  if (keySource.kind !== 'constant') return valueType
   // The `undefined` an arm lacking the member answers is the READ's, not the
   // operator's; the asserted receiver below declares the member and would
   // take it off.
@@ -231,7 +232,7 @@ const presentValueTypeOf = (
   // `getPropertyOfType` below finds nothing and this whole strip silently
   // never fires.
   const receiver = context.checker.getNonNullableType(context.types.rawTypeAt(node.expression))
-  const property = context.checker.getPropertyOfType(receiver, key.source.text)
+  const property = context.checker.getPropertyOfType(receiver, keySource.text)
   // An optional property declares its own `undefined` in the modifier rather
   // than in the type, and a location-sensitive read can hand it back already
   // stripped, so the modifier is consulted first and believed.
@@ -450,7 +451,7 @@ const classConstructorCalleeTypeOf = (context: ProducerContext, node: AccessNode
 const isHostMethodPresenceRead = (context: ProducerContext, node: AccessNode): boolean => {
   if (!isHostMethodPresenceTest(context.checker, node, context.types.rawTypeAt(node.expression))) return false
   const taint = context.globalHostMutationTaint
-  return !taint.has('*') && !keySetTouches(taint.surfaceKeys, { names: [(node as ts.PropertyAccessExpression).name.text] })
+  return !taint.hasEntry('*') && !keySetTouches(taint.surfaceKeys, { names: [(node as ts.PropertyAccessExpression).name.text] })
 }
 
 /** Host getters retain their declared result even when this read is flow-narrowed. */
@@ -570,7 +571,7 @@ const isIndexedObjectFor = (
   context: ProducerContext,
   type: StructuralTypeId,
   key: 'string' | 'number' | 'symbol',
-  visiting: Set<StructuralTypeId> = new Set()
+  visiting: Set<StructuralTypeId> = new Set<StructuralTypeId>()
 ): boolean => {
   if (visiting.has(type)) return false
   const next = new Set(visiting)
@@ -894,29 +895,31 @@ const buildOperations = (
     effects: EffectBehavior
   ): PropertyOperation => {
     const id = mintOperationId(context.ordinals, candidate.id, 'property')
+    // A local, so each kind test narrows the reads that follow it.
+    const keySource = key.source
     const stored = internalMethod === 'set' ? storedValue() : null
     const hostMethod = internalMethod === 'get' ? context.hostMethodOf?.(node) : null
     const hostReadType = internalMethod === 'get' ? hostReadTypeOf(context, node) : null
     const intrinsicValue =
       internalMethod === 'get' &&
       !key.computed &&
-      key.source.kind === 'constant' &&
-      key.source.text === 'prototype' &&
+      keySource.kind === 'constant' &&
+      keySource.text === 'prototype' &&
       isGlobalFunctionConstructor(context.checker, node.expression, context.checker.getTypeAtLocation(node.expression))
         ? 'function-prototype'
         : null
     // A computed key whose proven name set is one text is that key exactly.
     const callableBuiltinDataWrite =
-      internalMethod === 'set' && key.source.kind === 'constant' && key.source.literal === 'string'
-        ? ordinaryCallableBuiltinDataWriteOf(key.source.text, node, context)
+      internalMethod === 'set' && keySource.kind === 'constant' && keySource.literal === 'string'
+        ? ordinaryCallableBuiltinDataWriteOf(keySource.text, node, context)
         : internalMethod === 'set' && provenKeyTexts?.length === 1
           ? ordinaryCallableBuiltinDataWriteOf(provenKeyTexts[0]!, node, context)
           : null
     const readonlyCallableSet =
-      internalMethod === 'set' ? nativeCallableReadonlySetSourceOf(context, node, receiverSource, key.source) : null
+      internalMethod === 'set' ? nativeCallableReadonlySetSourceOf(context, node, receiverSource, keySource) : null
     const nativeOwnSlot =
-      (internalMethod === 'get' || internalMethod === 'set') && key.source.kind === 'constant' && key.source.literal === 'string'
-        ? nativeOwnSlotOf(context, node.expression, key.source.text)
+      (internalMethod === 'get' || internalMethod === 'set') && keySource.kind === 'constant' && keySource.literal === 'string'
+        ? nativeOwnSlotOf(context, node.expression, keySource.text)
         : null
     const nativeOwnSlots =
       (internalMethod === 'get' || internalMethod === 'set') && nativeOwnSlot === null && provenKeyTexts?.length
@@ -927,8 +930,8 @@ const buildOperations = (
     // declares no member of this name reads the key as the source's own any.
     const assertedDynamicIndex =
       assertedType !== null &&
-      key.source.kind === 'constant' &&
-      assertedType.getProperty(key.source.text) === undefined &&
+      keySource.kind === 'constant' &&
+      assertedType.getProperty(keySource.text) === undefined &&
       ((context.checker.getIndexTypeOfType(assertedType, ts.IndexKind.String)?.flags ?? 0) & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !==
         0
     // `Object.assign(target, source)` the program types `T & U`, which is
@@ -949,21 +952,21 @@ const buildOperations = (
         : {}),
       ...(callableBuiltinDataWrite === null ? {} : { ordinaryCallableBuiltinDataWrite: callableBuiltinDataWrite }),
       ...(internalMethod === 'get' &&
-      key.source.kind === 'constant' &&
-      key.source.literal === 'string' &&
-      ordinaryObjectDataWriteIsAbsent(key.source.text, node, context)
+      keySource.kind === 'constant' &&
+      keySource.literal === 'string' &&
+      ordinaryObjectDataWriteIsAbsent(keySource.text, node, context)
         ? { ordinaryObjectPrototypeKeyAbsent: true as const }
         : {}),
       ...(internalMethod === 'set' &&
-      key.source.kind === 'constant' &&
-      key.source.literal === 'string' &&
-      ordinaryCallableDataWriteIsAbsent(key.source.text, node, context)
+      keySource.kind === 'constant' &&
+      keySource.literal === 'string' &&
+      ordinaryCallableDataWriteIsAbsent(keySource.text, node, context)
         ? { ordinaryCallableDataWriteAbsent: true as const }
         : {}),
       ...(internalMethod === 'set' &&
       receiverMayBeCallable(context.checker, context.types.rawTypeAt(node.expression)) &&
       ordinaryCallableStockChainWriteOf(
-        key.source.kind === 'constant' && key.source.literal === 'string' ? [key.source.text] : (provenKeyTexts ?? []),
+        keySource.kind === 'constant' && keySource.literal === 'string' ? [keySource.text] : (provenKeyTexts ?? []),
         node,
         context
       )
@@ -975,8 +978,8 @@ const buildOperations = (
         ? { ordinaryCallableProgramSymbolDataWriteAbsent: true as const }
         : {}),
       ...(internalMethod === 'set' &&
-      (key.source.kind === 'constant' && key.source.literal === 'string'
-        ? ordinaryObjectDataWriteIsAbsent(key.source.text, node, context)
+      (keySource.kind === 'constant' && keySource.literal === 'string'
+        ? ordinaryObjectDataWriteIsAbsent(keySource.text, node, context)
         : provenKeyTexts !== undefined &&
           provenKeyTexts.length > 0 &&
           provenKeyTexts.every((text) => ordinaryObjectDataWriteIsAbsent(text, node, context)))
@@ -990,9 +993,9 @@ const buildOperations = (
       ...(internalMethod === 'get' && shortCircuitAlwaysPresent ? { shortCircuitAlwaysPresent: true as const } : {}),
       ...(intrinsicValue ? { intrinsicValue } : {}),
       ...(internalMethod === 'set' &&
-      key.source.kind === 'constant' &&
-      key.source.literal === 'string' &&
-      ordinaryFunctionDataWriteIsUnintercepted(context.types.rawTypeAt(node.expression), key.source.text, node, context)
+      keySource.kind === 'constant' &&
+      keySource.literal === 'string' &&
+      ordinaryFunctionDataWriteIsUnintercepted(context.types.rawTypeAt(node.expression), keySource.text, node, context)
         ? { ordinaryFunctionDataWrite: true as const }
         : {}),
       ...(internalMethod === 'get' && normalReadIsAbsent(context, node) ? { normalResult: 'undefined' as const } : {}),
@@ -1015,7 +1018,7 @@ const buildOperations = (
           : receiverIsAssertedCensusUnion || receiverIsAssertedDynamic || receiverIsAssertedClassArm
             ? { ...operand('receiver', 0, receiverSource, receiverType, receiverEvaluation), asserted: true as const }
             : operand('receiver', 0, receiverSource, receiverType, receiverEvaluation),
-        operand('key', 0, key.source, key.type, keyEvaluation),
+        operand('key', 0, keySource, key.type, keyEvaluation),
         ...(stored
           ? [
               unsharedFreshTableStore()
@@ -1135,7 +1138,8 @@ const namespaceMemberBindingOf = (
   key: Extract<KeyResolution, { kind: 'key' }>,
   context: ProducerContext
 ): DeclarationId | null => {
-  if (key.computed || key.source.kind !== 'constant') return null
+  const keySource = key.source
+  if (key.computed || keySource.kind !== 'constant') return null
   const receiver = node.expression
   // Any alias chain that ends at a source module names its namespace object
   // (`moduleNamespaceOf`), not only a `NamespaceImport` spelled right here.
@@ -1145,7 +1149,7 @@ const namespaceMemberBindingOf = (
   if (ts.isPropertyAccessExpression(node) && moduleNamespaceOf(context.checker, node) !== null) return null
   const member = ts.isPropertyAccessExpression(node)
     ? context.checker.getSymbolAtLocation(node.name)
-    : context.checker.getPropertyOfType(context.types.rawTypeAt(receiver), key.source.text)
+    : context.checker.getPropertyOfType(context.types.rawTypeAt(receiver), keySource.text)
   return member ? context.identities.symbolValueDeclarationId(member, node) : null
 }
 
@@ -1187,12 +1191,13 @@ const hostGlobalMemberDeclarationOf = (
   key: Extract<KeyResolution, { kind: 'key' }>,
   context: ProducerContext
 ): DeclarationId | null => {
-  if (key.source.kind !== 'constant') return null
+  const keySource = key.source
+  if (keySource.kind !== 'constant') return null
   const receiver = unwrapErasedExpression(node.expression)
   if (!ts.isIdentifier(receiver) || !context.unresolvableNames.isIntrinsicGlobalThis(receiver)) return null
   const member = ts.isPropertyAccessExpression(node)
     ? context.checker.getSymbolAtLocation(node.name)
-    : context.checker.getPropertyOfType(context.types.rawTypeAt(receiver), key.source.text)
+    : context.checker.getPropertyOfType(context.types.rawTypeAt(receiver), keySource.text)
   if (!member) return null
   const declaration = context.identities.symbolValueDeclarationId(member, node)
   if (declaration === null) return null
@@ -1207,7 +1212,7 @@ const hostGlobalMemberBindingOf = (
 ): DeclarationId | null => {
   const declaration = hostGlobalMemberDeclarationOf(node, key, context)
   if (declaration === null) return null
-  return context.globalHostMutationTaint.has('*') || context.globalHostMutationTaint.has(declaration) ? null : declaration
+  return context.globalHostMutationTaint.hasEntry('*') || context.globalHostMutationTaint.hasEntry(declaration) ? null : declaration
 }
 
 /**
@@ -1234,12 +1239,13 @@ const scriptGlobalMemberDeclarationOf = (
   key: Extract<KeyResolution, { kind: 'key' }>,
   context: ProducerContext
 ): DeclarationId | null => {
-  if (key.source.kind !== 'constant') return null
+  const keySource = key.source
+  if (keySource.kind !== 'constant') return null
   const receiver = unwrapErasedExpression(node.expression)
   if (!ts.isIdentifier(receiver) || !context.unresolvableNames.isIntrinsicGlobalThis(receiver)) return null
   const member = ts.isPropertyAccessExpression(node)
     ? context.checker.getSymbolAtLocation(node.name)
-    : context.checker.getPropertyOfType(context.types.rawTypeAt(receiver), key.source.text)
+    : context.checker.getPropertyOfType(context.types.rawTypeAt(receiver), keySource.text)
   const valueDeclaration = member?.valueDeclaration
   if (!member || valueDeclaration === undefined || !isScriptGlobalObjectPropertyDeclaration(valueDeclaration)) return null
   return context.identities.symbolValueDeclarationId(member, node)
@@ -1254,7 +1260,7 @@ export const isAlwaysPresentHostExpression = (expression: ts.Expression, context
     const declaration = symbol ? context.identities.symbolValueDeclarationId(symbol, current) : null
     if (declaration === null) return false
     if (!context.hostSingletonBindings.has(declaration) && !context.hostNamespaceBindings.has(declaration)) return false
-    return !context.globalHostMutationTaint.has('*') && !context.globalHostMutationTaint.has(declaration)
+    return !context.globalHostMutationTaint.hasEntry('*') && !context.globalHostMutationTaint.hasEntry(declaration)
   }
   if (!ts.isPropertyAccessExpression(current) && !ts.isElementAccessExpression(current)) return false
   const key = keyOf(current, context)
@@ -1388,7 +1394,10 @@ const contributeAccess = (candidate: CensusCandidate, node: AccessNode, context:
   const key = keyOf(node, context)
   if (key.kind === 'blocked') return { kind: 'blocked', blocker: blocked(candidate.id, 'property', key.reason, key.missingPrimitive) }
   const globalDeclaration = hostGlobalMemberDeclarationOf(node, key, context)
-  if (globalDeclaration !== null && (context.globalHostMutationTaint.has('*') || context.globalHostMutationTaint.has(globalDeclaration))) {
+  if (
+    globalDeclaration !== null &&
+    (context.globalHostMutationTaint.hasEntry('*') || context.globalHostMutationTaint.hasEntry(globalDeclaration))
+  ) {
     return {
       kind: 'blocked',
       blocker: blocked(
@@ -1402,7 +1411,7 @@ const contributeAccess = (candidate: CensusCandidate, node: AccessNode, context:
   const scriptGlobalDeclaration = scriptGlobalMemberDeclarationOf(node, key, context)
   if (
     scriptGlobalDeclaration !== null &&
-    (context.globalHostMutationTaint.has('*') || context.globalHostMutationTaint.has(scriptGlobalDeclaration))
+    (context.globalHostMutationTaint.hasEntry('*') || context.globalHostMutationTaint.hasEntry(scriptGlobalDeclaration))
   ) {
     return {
       kind: 'blocked',

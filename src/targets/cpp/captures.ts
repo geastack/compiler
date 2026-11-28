@@ -37,12 +37,16 @@ const isAdmittedOwnership = (representation: Representation): boolean => {
   return ownership !== null && currentCppRuntimeCapabilities.captureOwnershipSupport.has(ownership)
 }
 
-const frameSlotOf = (
+// Built field by field rather than spreading an optional `frame` in: a spread
+// of a two-armed object into the slot's declared type has no native lowering.
+const captureSlotOf = (
   declaration: DeclarationId,
+  representation: Representation,
+  boxed: boolean,
   frameMemberOf: CaptureIndex['frameMemberOf']
-): { readonly frame: NonNullable<CaptureSlot['frame']> } | Record<string, never> => {
+): CaptureSlot => {
   const member = frameMemberOf(declaration)
-  return member === null ? {} : { frame: member }
+  return member === null ? { declaration, representation, boxed } : { declaration, representation, boxed, frame: member }
 }
 
 /**
@@ -88,7 +92,7 @@ const admissionForBody = (
         refusal = `${declaration} is captured but the representation plan selected no carrier for it`
         continue
       }
-      slots.push({ declaration, representation: placement.representation, boxed: true, ...frameSlotOf(declaration, frameMemberOf) })
+      slots.push(captureSlotOf(declaration, placement.representation, true, frameMemberOf))
       continue
     }
     if (!placement.representation) {
@@ -102,7 +106,7 @@ const admissionForBody = (
         : `${declaration} is captured but carries "${placement.representation.kind}", which has no ownership this backend can prove a copy stays safe under`
       continue
     }
-    slots.push({ declaration, representation: placement.representation, boxed: false, ...frameSlotOf(declaration, frameMemberOf) })
+    slots.push(captureSlotOf(declaration, placement.representation, false, frameMemberOf))
   }
 
   // A body with no receiver of its own that nonetheless needs one either
@@ -380,7 +384,7 @@ const frameIdentitiesOf = (
 export const buildCaptureIndex = (
   bodies: readonly IrBody[],
   placements: ReadonlyMap<DeclarationId, BindingPlacement>,
-  capturingAccessors: ReadonlySet<FunctionId> = new Set()
+  capturingAccessors: ReadonlySet<FunctionId> = new Set<FunctionId>()
 ): CaptureIndex => {
   const boxedDeclarations = new Set<DeclarationId>()
   const requiresEarlyBoxDeclarations = new Set<DeclarationId>()
@@ -413,7 +417,7 @@ export const buildCaptureIndex = (
     if (group !== undefined) groups.set(group.id, group)
   }
   const dissolved = new Set<FunctionId>(groups.keys())
-  let frames: ReadonlyMap<FunctionId | RegionId, CaptureFrame> = new Map()
+  let frames: ReadonlyMap<FunctionId | RegionId, CaptureFrame> = new Map<FunctionId | RegionId, CaptureFrame>()
   let frameMemberOf: (declaration: DeclarationId) => { readonly frame: CaptureFrame; readonly index: number } | null = () => null
   for (;;) {
     const offered = new Set(capturedDeclarations)

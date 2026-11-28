@@ -156,7 +156,7 @@ export interface BindingPlacement {
 export const hostDeclarationFileKey = (file: string): string => file.replace(/\\/g, '/')
 
 /** A per-declaration-file host table with every key in `hostDeclarationFileKey` spelling. */
-export const hostDeclarationFileTable = <T>(entries: Iterable<readonly [string, T]>): Map<string, T> => {
+export const hostDeclarationFileTable = <T>(entries: readonly (readonly [string, T])[]): Map<string, T> => {
   const table = new Map<string, T>()
   for (const [file, value] of entries) table.set(hostDeclarationFileKey(file), value)
   return table
@@ -535,19 +535,22 @@ export const projectBindingPlacements = (input: BindingPlacementInput): Readonly
   // carries the same type, so any one of them answers. A cell with no read
   // reaches nothing and needs no `extern`.
   const reads = readsByDeclaration(input.graph)
-  for (const [declaration, linkageName] of input.externals ?? []) {
-    if (placements.has(declaration)) continue
-    const representation = readCarrierOf(input, reads, declaration)
-    if (!representation) continue
-    // A host that DENIED the name is answered before any host that might claim
-    // it, because a denial is the one claim that cannot be outvoted by the
-    // generic external fallback below: falling through would emit an `extern`
-    // for a symbol this compiler has just concluded is not there.
-    const storage: BindingStorage = input.absentBindings?.has(declaration)
-      ? { kind: 'absent', linkageName }
-      : (hostStorageOf(input, declaration, linkageName, representation) ?? { kind: 'external', linkageName })
-    placements.set(declaration, { storage, representation })
-  }
+  // Guarded rather than `?? []`: a native build has no iterator over the
+  // union of the externals collection and an empty array.
+  if (input.externals)
+    for (const [declaration, linkageName] of input.externals) {
+      if (placements.has(declaration)) continue
+      const representation = readCarrierOf(input, reads, declaration)
+      if (!representation) continue
+      // A host that DENIED the name is answered before any host that might claim
+      // it, because a denial is the one claim that cannot be outvoted by the
+      // generic external fallback below: falling through would emit an `extern`
+      // for a symbol this compiler has just concluded is not there.
+      const storage: BindingStorage = input.absentBindings?.has(declaration)
+        ? { kind: 'absent', linkageName }
+        : (hostStorageOf(input, declaration, linkageName, representation) ?? { kind: 'external', linkageName })
+      placements.set(declaration, { storage, representation })
+    }
 
   // A program cell that is written but whose introduction nothing reached:
   // every read folded to what the initializer named (a script-global

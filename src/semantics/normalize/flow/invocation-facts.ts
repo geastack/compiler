@@ -168,16 +168,21 @@ export const sourceInvocationFrame = (
           uses: parameterUses(slot.parameter),
           elementUses: []
         })
-  if (layout.receiver.kind === 'expression')
+  if (layout.receiver.kind === 'expression') {
+    // Copied element by element: a `this`/`super` list is not an expression
+    // list for a native build, which has no array conversion between them.
+    const receiverExpressions: ts.Expression[] = []
+    for (const reference of receiverUses) receiverExpressions.push(reference)
     entries.push({
       value: layout.receiver.expression,
       parameter: null,
       argumentPosition: null,
       restElementPosition: null,
       activation: 'always',
-      uses: receiverUses,
+      uses: receiverExpressions,
       elementUses: []
     })
+  }
   // An arrow still evaluates its explicit/member receiver operand, but never
   // binds it to this. Retain the discarded operand's empty continuation.
   if (layout.receiver.kind === 'lexical' && layout.receiver.source === 'arrow' && operands.receiver)

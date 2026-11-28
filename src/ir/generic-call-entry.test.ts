@@ -10,7 +10,7 @@ import { nativeGenericCallEntriesOf, nativeGenericSelectorMatches } from './gene
 
 const first = declarationId('generic-entry', 0)
 const second = declarationId('generic-entry', 1)
-const sourceIds = new Set([functionId(first), functionId(second)])
+const sourceIds: readonly FunctionId[] = [functionId(first), functionId(second)]
 const firstCopy = `${functionId(first)}@0` as FunctionId
 const secondCopy = `${functionId(second)}@0` as FunctionId
 const number: Representation = { kind: 'scalar', domain: 'number' }
@@ -89,8 +89,8 @@ test('incomplete families, unrelated sources, specialized substitutions and wron
     nativeGenericCallEntriesOf(one, origins, lookup, census)
   assert.equal(entries({ ...complete, family: call.family!.slice(0, 1) }), null)
   assert.equal(entries({ ...complete, family: [call.family![0]!, call.family![0]!] }), null)
-  assert.equal(entries(complete, new Set([functionId(declarationId('unrelated', 0))])), null)
-  assert.equal(entries(complete, new Set([`${functionId(first)}@1` as FunctionId])), null)
+  assert.equal(entries(complete, [functionId(declarationId('unrelated', 0))]), null)
+  assert.equal(entries(complete, [`${functionId(first)}@1` as FunctionId]), null)
   assert.equal(entries({ ...complete, argumentsAreSpread: true }), null)
   assert.equal(entries({ ...complete, receiver: { value: 'receiver' as never, representation: number } }), null)
   assert.equal(

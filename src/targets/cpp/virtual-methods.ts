@@ -281,7 +281,7 @@ export const virtualMethodEmission = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   abiOf: (callable: FunctionId) => CallableAbi | null,
   verdict: VirtualDispatchVerdict,
-  reparentTargets: ReadonlyMap<DeclarationId, ReadonlySet<DeclarationId>> = new Map()
+  reparentTargets: ReadonlyMap<DeclarationId, ReadonlySet<DeclarationId>> = new Map<DeclarationId, ReadonlySet<DeclarationId>>()
 ): VirtualMethodEmission => {
   const membersByStruct = new Map<string, string[]>()
   const definitions: string[] = []
@@ -494,7 +494,7 @@ export const prototypeReadHooks = (
   abiOf: (callable: FunctionId) => CallableAbi | null,
   capturesNothing: (callable: FunctionId) => boolean,
   readDynamically: (declaration: DeclarationId) => boolean,
-  wellKnownSymbols: ReadonlyMap<DeclarationId, string> = new Map(),
+  wellKnownSymbols: ReadonlyMap<DeclarationId, string> = new Map<DeclarationId, string>(),
   hasNatively: (declaration: DeclarationId) => boolean = () => false,
   site?: ConversionSite
 ): PrototypeReadHooks => {
@@ -645,14 +645,17 @@ export const prototypeReadHooks = (
         }
       const source = `gea_receiver.as<${cppClassName(layout.declaration)}>()`
       let receiver: string | null = null
-      if (abi.receiver !== null) {
+      // Narrowed through a local: a property path narrowed to one arm
+      // (`abi.receiver` as a class-ref) has no native widening back.
+      const receiverCarrier = abi.receiver
+      if (receiverCarrier !== null) {
         const recipe = site.programConversionRecipes?.find(
           (entry) => entry.role === 'prototype-setter-receiver' && entry.owner === String(layout.declaration) && entry.slot === accessor.key
         )
         if (
-          abi.receiver.kind !== 'class-ref' ||
-          (representationKey(abi.receiver) !== representationKey(layout.instance) &&
-            !nativeClassReferenceTransportMatches(layout.instance, abi.receiver, recipe?.conversion))
+          receiverCarrier.kind !== 'class-ref' ||
+          (representationKey(receiverCarrier) !== representationKey(layout.instance) &&
+            !nativeClassReferenceTransportMatches(layout.instance, receiverCarrier, recipe?.conversion))
         )
           return {
             key: accessor.key,
@@ -664,7 +667,7 @@ export const prototypeReadHooks = (
           String(layout.declaration),
           accessor.key,
           layout.instance,
-          abi.receiver,
+          receiverCarrier,
           source
         )
         if (receiver === null)

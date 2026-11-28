@@ -479,8 +479,10 @@ export const stableFieldReadsAndCellsOf = (
   admits: (declaration: DeclarationId) => boolean,
   effects: WriteEffects = everyStoreEffects
 ): { readonly reads: ReadonlySet<IrValueId>; readonly cells: ReadonlySet<DeclarationId> } => {
-  const reads = new Set(stableFieldReadsOf(body, receivers, fields, integrity, dying))
-  for (const value of windowStableFieldReadsOf(body, receivers, integrity, dying, effects)) reads.add(value)
+  // The readers take a bare `has`, which a Set does not become natively; hand them one.
+  const dyingMembership = { has: (value: IrValueId): boolean => dying.has(value) }
+  const reads = new Set(stableFieldReadsOf(body, receivers, fields, integrity, dyingMembership))
+  for (const value of windowStableFieldReadsOf(body, receivers, integrity, dyingMembership, effects)) reads.add(value)
   const uses = new Map<IrValueId, number>()
   const written = new Map<IrValueId, DeclarationId>()
   for (const block of body.blocks.values())

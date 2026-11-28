@@ -18,6 +18,7 @@ import { allOperationsOf, type CallOperation, type IrBody, type IrOperand, type 
 import { operandsOfIrOperation } from './queries.js'
 import { indexedRecordViewOf } from './certify/carrier-keys.js'
 import { nativePrototypeCallClaimsOf } from './native-prototype-calls.js'
+import { flatMapFlatteningOf } from './flat-map-flattening.js'
 import type { HostMethodAlias } from './host-method-aliases.js'
 import type { OperationConversionInput } from './operation-conversions.js'
 
@@ -178,6 +179,20 @@ export const hostTemplateConversionInputsOf = (
           callback.abi.receiver === null
         )
           add('prototype-result', storedCarrier(callback.abi.result), result.element)
+        // `flatMap` mints its result too, flattening each callback result
+        // into it. A flattened value the runtime template cannot store
+        // as-is -- an element of one of two arrays of different fresh
+        // records beside a declared `flatMap<Route>` -- enters the element
+        // through this call's own conversion (`flat-map-flattening.ts`).
+        const flattener = callback?.kind === 'optional' && callback.payload.kind === 'function-value-dispatch' ? callback.payload : callback
+        if (
+          member === 'flatMap' &&
+          result?.kind === 'array-object' &&
+          flattener?.kind === 'function-value-dispatch' &&
+          flattener.abi.receiver === null
+        )
+          for (const value of flatMapFlatteningOf(flattener.abi.result, result)?.converted ?? [])
+            add('prototype-result', value, result.element)
       }
       // `reduce(cb, initialValue)` threads ONE accumulator through the seed,
       // every callback argument 0 and every callback answer (23.1.3.24), so
@@ -198,6 +213,24 @@ export const hostTemplateConversionInputsOf = (
         const comparator = operation.arguments[0]?.representation
         if (comparator?.kind === 'function-value-dispatch' && comparator.abi.receiver === null)
           for (const parameter of comparator.abi.parameters.slice(0, 2)) add('prototype-callback', element, parameter.value)
+      }
+      // A reducer with an initial value threads ONE accumulator carrier -- the
+      // call's result, `reduce<U>`'s `U` -- through the runtime template
+      // (`reduceText`): the initial value enters it, it enters the callback's
+      // first parameter, the element its second, and the callback's result
+      // re-enters it.
+      if ((member === 'reduce' || member === 'reduceRight') && operation.arguments.length === 2) {
+        const callback = operation.arguments[0]?.representation
+        const initial = operation.arguments[1]!.representation
+        const dispatch = callback?.kind === 'function-value-dispatch' && callback.abi.receiver === null ? callback : null
+        const accumulator = result ?? dispatch?.abi.parameters[0]?.value ?? initial
+        add('prototype-argument', initial, accumulator)
+        if (dispatch && dispatch.abi.result.kind !== 'void') {
+          const [previous, current] = dispatch.abi.parameters
+          if (previous) add('prototype-callback', accumulator, previous.value)
+          if (current) add('prototype-callback', element, current.value)
+          add('prototype-result', dispatch.abi.result, accumulator)
+        }
       }
       if (result && ['find', 'findLast', 'at', 'pop', 'shift'].includes(member))
         add('prototype-result', { kind: 'optional', payload: element, absence: 'undefined' }, result)

@@ -1,7 +1,7 @@
 import type { CallableAbi, RecordField, RecordIndexSidecar, Representation } from '../representation/model.js'
 import { representationKey, standInRefuses } from '../representation/model.js'
 import type { RecordLayoutPolicy } from '../representation/policies.js'
-import type { FunctionId } from '../identity/ids.js'
+import type { DeclarationId, FunctionId } from '../identity/ids.js'
 
 /**
  * One record viewed as another whose declared shape it satisfies -- the
@@ -130,6 +130,16 @@ export type RecordFieldRead =
     }
   /** An optional field the source does not carry: default-constructed, presence false. */
   | { readonly kind: 'absent' }
+  /**
+   * An optional field a class instance's STATIC class does not declare but
+   * some class extending it does: read from the class the instance was
+   * allocated as, absent for every other. A value typed by its base class --
+   * a syntax tree node read as `Declaration & { typeParameters?: ... }` --
+   * is routinely an instance of a subclass that holds the member, and a view
+   * that started it absent answered `undefined` where every JavaScript read
+   * of the object answers the subclass's field.
+   */
+  | { readonly kind: 'subclass-field'; readonly arms: readonly SubclassFieldArm[] }
   /** A shared alias forwards an undeclared key's native descriptor. Its
    * actual source allocation/writer receipt selects storage at Get/Set time;
    * allocating this view neither samples a value nor licenses a dynamic box.
@@ -160,6 +170,29 @@ export type RecordFieldRead =
    */
   | { readonly kind: 'view'; readonly held: RecordField; readonly plan: RecordViewPlan }
 
+/** One allocated class a `subclass-field` read can find: the class, its field under the key, and its whole layout (for a tail-held field). */
+export interface SubclassFieldArm {
+  readonly declaration: DeclarationId
+  readonly held: RecordField
+  readonly fields: readonly RecordField[]
+}
+
+/**
+ * The instantiable classes extending `declaration` whose layout holds `key`,
+ * one arm per allocated class (the runtime's class test is exact, not
+ * `instanceof`). A held `undefined` is the absence a view already answers.
+ */
+const subclassFieldArmsOf = (layouts: RecordLayoutPolicy, declaration: DeclarationId, key: string): readonly SubclassFieldArm[] => {
+  const arms: SubclassFieldArm[] = []
+  for (const entry of layouts.classSubtreeOf?.(declaration) ?? []) {
+    if (entry.declaration === declaration || entry.instance?.kind !== 'class-ref') continue
+    const fields = layouts.forShape(entry.instance.shapeId)
+    const held = fields?.find((candidate) => candidate.key === key)
+    if (fields && held && held.value.kind !== 'undefined') arms.push({ declaration: entry.instance.declaration, held, fields })
+  }
+  return arms
+}
+
 export interface RecordFieldPlan {
   readonly field: RecordField
   readonly read: RecordFieldRead
@@ -176,8 +209,16 @@ export interface DispatchArmPlan {
   readonly via: 'exact' | 'convert' | 'absent' | RecordViewPlan
 }
 
+/**
+ * The record kinds a view can target. Only the kind: whether this compiler lays
+ * the record out itself is `laysOutItself`, a separate test, so a false answer
+ * here never tells the checker a host-declared record is something else.
+ */
 export const isRecordViewTarget = (value: Representation): value is RecordViewTarget =>
-  value.kind === 'record' || (value.kind === 'native-record-ref' && value.native === null)
+  value.kind === 'record' || value.kind === 'native-record-ref'
+
+/** A view target this compiler lays out itself, not one a host declared (`native` names its struct). */
+export const laysOutItself = (value: RecordViewTarget): boolean => value.kind === 'record' || value.native === null
 
 /** Whether this view dispatches on a sum's live arm somewhere along its spine (`dispatch`, possibly under an optional or an assert). */
 export const recordViewDispatchesArms = (plan: RecordViewPlan): boolean =>
@@ -345,16 +386,22 @@ export type FamilyMemberKeys = ReadonlyMap<string, ReadonlySet<string>>
  * member declaring `unknown` where the method returns `this` publishes that
  * result through the dynamic boundary.
  */
-const boundMethodFrameIsNative = (member: CallableAbi, own: CallableAbi | null): boolean =>
-  own !== null &&
-  member.restFrom === own.restFrom &&
-  member.argumentsFrame === own.argumentsFrame &&
-  member.parameters.length === own.parameters.length &&
-  member.parameters.every((parameter, index) => {
-    const held = own.parameters[index]
-    return held !== undefined && representationKey(held.value) === representationKey(parameter.value)
-  }) &&
-  (member.result.kind === 'void' || representationKey(member.result) === representationKey(own.result))
+const boundMethodFrameIsNative = (member: CallableAbi, own: CallableAbi | null): boolean => {
+  // Narrowed as a local: a narrowed read of the `result` field path is not
+  // the field's own carrier in a native build.
+  const result = member.result
+  return (
+    own !== null &&
+    member.restFrom === own.restFrom &&
+    member.argumentsFrame === own.argumentsFrame &&
+    member.parameters.length === own.parameters.length &&
+    member.parameters.every((parameter, index) => {
+      const held = own.parameters[index]
+      return held !== undefined && representationKey(held.value) === representationKey(parameter.value)
+    }) &&
+    (result.kind === 'void' || representationKey(result) === representationKey(own.result))
+  )
+}
 
 /**
  * `heldPairUnused(from, to)`: the conversion registry's claim that converting a
@@ -375,6 +422,12 @@ const fieldReadIsDirect = (
     (representationKey(read.held.value) === representationKey(field.value) ||
       (heldPairUnused !== undefined && heldPairUnused(read.held.value, field.value)))) ||
   (read.kind === 'view' && direct(read.plan)) ||
+  (read.kind === 'subclass-field' &&
+    read.arms.every(
+      (arm) =>
+        representationKey(arm.held.value) === representationKey(field.value) ||
+        (heldPairUnused !== undefined && heldPairUnused(arm.held.value, field.value))
+    )) ||
   (read.kind === 'bound-method' && read.nativeFrame === true)
 
 export const recordViewUsesOnlyDirectFields = (plan: RecordViewPlan, heldPairUnused?: PairConvertible): boolean => {
@@ -467,6 +520,7 @@ export const recordViewResidualReflection = (plan: RecordViewPlan, heldPairUnuse
             // even when the accessor returns only a primitive.
             out.push(inner.source, field.value)
           } else if (read.kind === 'held') out.push(read.held.value, field.value)
+          else if (read.kind === 'subclass-field') for (const arm of read.arms) out.push(arm.held.value, field.value)
           else return false
         }
         return true
@@ -547,8 +601,21 @@ export const restPacks = (member: CallableAbi, own: CallableAbi, convertible?: P
 export const optionalMethodPayloadOf = (member: Representation): Representation =>
   member.kind === 'optional' && member.absence === 'undefined' && abiOf(member.payload) !== null ? member.payload : member
 
-const abiOf = (member: Representation): { readonly receiver: unknown; readonly restFrom: unknown } | null =>
-  'abi' in member && member.abi !== null && typeof member.abi === 'object' ? (member.abi as { receiver: unknown; restFrom: unknown }) : null
+// Every carrier that holds an `abi` field, named: an `'abi' in member` probe
+// reads an erased field a native build cannot type.
+const abiOf = (member: Representation): CallableAbi | null => {
+  switch (member.kind) {
+    case 'function':
+    case 'function-family':
+    case 'constructor-family':
+    case 'constructor-value-dispatch':
+    case 'function-value-family':
+    case 'function-value-dispatch':
+      return member.abi
+    default:
+      return null
+  }
+}
 
 /**
  * The two homes of a record that ties between `IteratorResult`'s arms, told
@@ -629,13 +696,20 @@ const presentFieldHomes = (
   const firstNeeds = needs(first)
   const secondNeeds = needs(second)
   if (firstNeeds === null || secondNeeds === null) return null
-  const [presentHome, absentHome, key] =
-    firstNeeds.length === 1 && secondNeeds.length === 0
-      ? [first, second, firstNeeds[0]!]
-      : secondNeeds.length === 1 && firstNeeds.length === 0
-        ? [second, first, secondNeeds[0]!]
-        : [null, null, null]
-  if (presentHome === null || key === null) return null
+  // Chosen branch by branch, not destructured out of a conditional of tuples:
+  // each arm of such a union would answer a position with its own carrier.
+  let presentHome: IteratorResultHome
+  let absentHome: IteratorResultHome
+  let key: string
+  if (firstNeeds.length === 1 && secondNeeds.length === 0) {
+    presentHome = first
+    absentHome = second
+    key = firstNeeds[0]!
+  } else if (secondNeeds.length === 1 && firstNeeds.length === 0) {
+    presentHome = second
+    absentHome = first
+    key = secondNeeds[0]!
+  } else return null
   // The test reads the held value's presence flag: an `undefined`-absent
   // optional, the one carrier whose empty state is exactly "holds no value".
   const field = held.get(key)!
@@ -656,9 +730,8 @@ export const holdsAbsence = (carrier: Representation): boolean =>
 const isNullableReferenceField = (value: Representation): boolean => value.kind === 'native-record-ref' && value.native === null
 
 /** Whether a member convention's receiver is the viewed class itself or one of its bases: an instance of `source` is a value of it. */
-const receivesInstanceOf = (receiver: unknown, source: Extract<Representation, { kind: 'class-ref' }>): boolean => {
-  if (receiver === null || typeof receiver !== 'object') return false
-  const carrier = receiver as Representation
+const receivesInstanceOf = (carrier: Representation | null, source: Extract<Representation, { kind: 'class-ref' }>): boolean => {
+  if (carrier === null) return false
   return (
     carrier.kind === 'class-ref' &&
     carrier.ownership === source.ownership &&
@@ -797,7 +870,7 @@ export const structuralRecordViewPlan = (
   // A bare sum carrying the target optional's absence as an ARM: the absent
   // arm is the optional's empty state and every other arm dispatches into
   // the payload, so the optional cannot be peeled first here.
-  if (target.kind === 'optional' && source.kind === 'tagged-union' && isRecordViewTarget(target.payload)) {
+  if (target.kind === 'optional' && source.kind === 'tagged-union' && isRecordViewTarget(target.payload) && laysOutItself(target.payload)) {
     const dispatched = dispatchUnionPlan(layouts, source, target, convertible, members)
     if (dispatched !== null) return dispatched
   }
@@ -832,7 +905,8 @@ export const structuralRecordViewPlan = (
   }
   if (source.kind === 'tagged-union' && target.kind === 'tagged-union')
     return recastUnionPlan(layouts, source, target, convertible, members)
-  if (source.kind === 'tagged-union' && isRecordViewTarget(target)) return dispatchUnionPlan(layouts, source, target, convertible, members)
+  if (source.kind === 'tagged-union' && isRecordViewTarget(target) && laysOutItself(target))
+    return dispatchUnionPlan(layouts, source, target, convertible, members)
   const sourceIsRecord = source.kind === 'record' || source.kind === 'record-with-index' || source.kind === 'native-record-ref'
   if (!sourceIsRecord && (source.kind !== 'class-ref' || source.ownership !== 'shared-refcount')) return null
   if (source.kind === 'native-record-ref' && source.native !== null) return null
@@ -895,9 +969,9 @@ export const structuralRecordViewPlan = (
       abi !== null &&
       abi.receiver === null &&
       layouts.classMethodFor?.(source.declaration, field.key) === true &&
-      restForwards(abi as CallableAbi, layouts.classMethodAbiFor?.(source.declaration, field.key) ?? null, convertible)
+      restForwards(abi, layouts.classMethodAbiFor?.(source.declaration, field.key) ?? null, convertible)
     ) {
-      const nativeFrame = boundMethodFrameIsNative(abi as CallableAbi, layouts.classMethodAbiFor?.(source.declaration, field.key) ?? null)
+      const nativeFrame = boundMethodFrameIsNative(abi, layouts.classMethodAbiFor?.(source.declaration, field.key) ?? null)
       fields.push({ field, read: nativeFrame ? { kind: 'bound-method', nativeFrame: true } : { kind: 'bound-method' } })
       continue
     }
@@ -968,6 +1042,14 @@ export const structuralRecordViewPlan = (
       if (field.required || !convertible(SIDECAR_VALUE, field.value)) return null
       fields.push({ field, read: { kind: 'sidecar', from: 'index' } })
       continue
+    }
+    if (!held && source.kind === 'class-ref' && !field.required && !undeclaredByMember) {
+      const arms = subclassFieldArmsOf(layouts, source.declaration, field.key)
+      if (arms.length > 0) {
+        if (!arms.every((arm) => convertible(arm.held.value, field.value, 'field-read'))) return null
+        fields.push({ field, read: { kind: 'subclass-field', arms } })
+        continue
+      }
     }
     if (!held) {
       if (field.required && !onlyAdds) return null
@@ -1182,7 +1264,8 @@ const nestedFieldViewPlan = (
   // `structuralRecordViewPlan` enters the one arm the record can become, and
   // refuses a tie, exactly as it does for a top-level sum target.
   const reachesRecord =
-    isRecordViewTarget(inner) || (inner.kind === 'tagged-union' && inner.arms.some((arm) => isRecordViewTarget(arm.value)))
+    (isRecordViewTarget(inner) && laysOutItself(inner)) ||
+    (inner.kind === 'tagged-union' && inner.arms.some((arm) => isRecordViewTarget(arm.value) && laysOutItself(arm.value)))
   if (!reachesRecord || holdsClassInstance(held)) return null
   const key = `${representationKey(held)}->${representationKey(target)}`
   if (nestedViewsInProgress.has(key)) return null
@@ -1213,7 +1296,7 @@ const dispatchUnionPlan = (
   members?: FamilyMemberKeys
 ): RecordViewPlan | null => {
   const payload = target.kind === 'optional' ? target.payload : target
-  if (!isRecordViewTarget(payload)) return null
+  if (!isRecordViewTarget(payload) || !laysOutItself(payload)) return null
   const key = representationKey(payload)
   const arms: DispatchArmPlan[] = []
   let viewed = false
@@ -1258,20 +1341,42 @@ const recastUnionPlan = (
       arms.push({ index: exact, via: 'exact' })
       continue
     }
+    // A nested union arm holds values of several target arms at once, so only
+    // a target arm that is itself a sum can be its single home. Viewing it into
+    // a record arm turned every inner arm into that record: `{ kind, bottom? }`
+    // (`void`) is reachable from any record with a `kind`, and a `class-ref`
+    // came out as a view on the `void` arm.
+    const nested = arm.value.kind === 'tagged-union' || arm.value.kind === 'optional'
     let home: RecastArmPlan | null = null
+    const viewHomes: RecastArmPlan[] = []
     for (const [index, candidate] of target.arms.entries()) {
+      if (nested && candidate.value.kind !== 'tagged-union' && candidate.value.kind !== 'optional') continue
+      if (literalDisagrees(arm, candidate)) continue
       if (convertible(arm.value, candidate.value, 'sum-home')) {
         home = { index, via: 'convert' }
         break
       }
       const viewed = structuralRecordViewPlan(layouts, arm.value, candidate.value, convertible, members)
-      if (viewed !== null) {
-        home = { index, via: viewed }
-        break
-      }
+      if (viewed !== null) viewHomes.push({ index, via: viewed })
     }
+    // A field subset views into every arm whose fields it covers, and only the
+    // run-time discriminator says which one holds. One plan home cannot carry
+    // that dispatch, so an ambiguous arm refuses the plan and the printer's
+    // `recastedUnionText` decides it per value (`literalDiscriminatorChoice`).
+    if (home === null && viewHomes.length === 1) home = viewHomes[0]!
     if (home === null) return null
     arms.push(home)
   }
   return { kind: 'recast-union', source, target, arms }
+}
+
+const literalDisagrees = (from: TaggedUnion['arms'][number], into: TaggedUnion['arms'][number]): boolean => {
+  const own = from.runtimeDiscriminator
+  const theirs = into.runtimeDiscriminator
+  return (
+    own.kind === 'record-literal' &&
+    theirs.kind === 'record-literal' &&
+    own.key === theirs.key &&
+    (own.primitive !== theirs.primitive || own.text !== theirs.text)
+  )
 }

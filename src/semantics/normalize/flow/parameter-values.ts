@@ -138,7 +138,7 @@ export const constructorCallsOf = (
   constructor: ts.ConstructorDeclaration
 ): Call[] | null => {
   const owner = constructor.parent
-  const inventory = ownedClassReceiverInventoryOf(checker, flow, new Set([owner]))
+  const inventory = ownedClassReceiverInventoryOf(checker, flow, new Set<SourceClass>([owner]))
   if (!inventory) return null
   const calls: Call[] = []
   for (const { call, familyProjection } of inventory.constructionFacts) {
@@ -241,7 +241,7 @@ export const parameterValuesOf = (
   parameter: ts.ParameterDeclaration
 ): readonly ts.Expression[] | null => {
   let held = answers.get(flow)
-  if (!held) answers.set(flow, (held = new Map()))
+  if (!held) answers.set(flow, (held = new Map<ts.ParameterDeclaration, readonly ts.Expression[] | null>()))
   if (held.has(parameter)) {
     // The recursive `null` below is a HYPOTHESIS, not a result, and a caller
     // that keeps a refusal must know it leaned on one: the settled answer is

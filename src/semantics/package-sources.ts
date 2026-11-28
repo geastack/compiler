@@ -1,5 +1,6 @@
 import ts from '#typescript'
 import { dirname, resolve, relative, sep } from 'node:path'
+import { mapKeys } from '../collection-lists.js'
 
 export interface PackageSource {
   readonly root: string
@@ -214,7 +215,7 @@ export const createPackageSourceHost = (host: ts.ModuleResolutionHost = ts.sys, 
       // the implementation behind this public types export; never guess src/
       // from dist/ or execute a package's build script.
       const declaration = host.readFile(absolute)
-      const mapUrl = declaration?.match(/\/\/# sourceMappingURL=([^\s]+)\s*$/)?.[1]
+      const mapUrl = declaration === undefined ? undefined : declaration.match(/\/\/# sourceMappingURL=([^\s]+)\s*$/)?.[1]
       if (mapUrl && !/^(?:[a-z][a-z\d+.-]*:|\/|\\)/i.test(mapUrl)) {
         const mapFile = resolve(dirname(absolute), mapUrl)
         if (inside(mapFile, root)) {
@@ -321,7 +322,10 @@ export const createPackageSourceHost = (host: ts.ModuleResolutionHost = ts.sys, 
     const buildFiles = new Set<string>()
     for (const [name, script] of Object.entries(recordOf(manifest.scripts) ?? {})) {
       if (!/^(?:build|compile)(?::|$)/.test(name) || typeof script !== 'string') continue
-      for (const token of script.matchAll(/(?:^|\s)([\w./-]+\.(?:mjs|cjs|js|ts))(?=\s|$)/g)) buildFiles.add(resolve(root, token[1]!))
+      // An exec walk over a fresh global pattern visits exactly matchAll's
+      // matches; every match consumes at least one character, so it advances.
+      const scriptFile = /(?:^|\s)([\w./-]+\.(?:mjs|cjs|js|ts))(?=\s|$)/g
+      for (let token = scriptFile.exec(script); token !== null; token = scriptFile.exec(script)) buildFiles.add(resolve(root, token[1]!))
     }
     for (const file of buildFiles) {
       if (!inside(file, root)) continue
@@ -353,7 +357,8 @@ export const createPackageSourceHost = (host: ts.ModuleResolutionHost = ts.sys, 
     // evaluating the script. It cannot create a new source association.
     for (const script of Object.values(recordOf(manifest.scripts) ?? {})) {
       if (typeof script !== 'string') continue
-      for (const match of script.matchAll(/(?:^|&&|;)\s*mv\s+([\w./-]+)\/\*\.js\s+([\w./-]+)(?=\s*(?:&&|;|$))/g)) {
+      const move = /(?:^|&&|;)\s*mv\s+([\w./-]+)\/\*\.js\s+([\w./-]+)(?=\s*(?:&&|;|$))/g
+      for (let match = move.exec(script); match !== null; match = move.exec(script)) {
         const from = resolve(root, match[1]!)
         const to = resolve(root, match[2]!)
         for (const [output, input] of [...mappings]) if (dirname(output) === from) add(resolve(to, relative(from, output)), input)
@@ -412,7 +417,7 @@ export const createPackageSourceHost = (host: ts.ModuleResolutionHost = ts.sys, 
       if (host.directoryExists?.(dir) || (dir === resolve(directory) && host.directoryExists?.(directory))) return true
       const root = packageOf(`${dir}/__module__.ts`)
       const record = root ? readRecord(root) : undefined
-      if ([...(record?.mappings.keys() ?? [])].some((file) => inside(file, dir))) return true
+      if ([...mapKeys(record?.mappings)].some((file) => inside(file, dir))) return true
       if (record?.patterns.some(([pattern]) => inside(pattern, dir) || dir.startsWith(pattern.split('*')[0]!))) return true
       return (record?.roots ?? []).some(
         ([output, source]) => inside(dir, output) && host.directoryExists?.(resolve(source, relative(output, dir)))

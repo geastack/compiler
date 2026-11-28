@@ -148,9 +148,10 @@ export const classCopyHeritageOf = (
     for (let depth = 0; depth < 32; depth += 1) {
       const next = heritageCopyOf(identities.declarationOfSymbol, specializations, identities.prefixFor, node, current)
       const step = next?.[next.length - 1]
-      if (next && step && ts.isClassLike(step.owner)) {
-        chain.push({ declaration: identities.declarationIdOf(step.owner), ordinal: step.ordinal })
-        node = step.owner
+      const stepOwner = step?.owner
+      if (next && step && stepOwner && ts.isClassLike(stepOwner)) {
+        chain.push({ declaration: identities.declarationIdOf(stepOwner), ordinal: step.ordinal })
+        node = stepOwner
         current = next
         continue
       }

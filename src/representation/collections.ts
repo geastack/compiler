@@ -65,6 +65,15 @@ export const hasReferenceIdentity = (representation: Representation): boolean =>
     // `WeakMap<object, T>` outright, since `object` carries dynamically.
     case 'dynamic':
       return true
+    // A function is an object: ECMA-262 admits it as a weak key, and its
+    // carrier (`gea::CallableObject`) holds the function object's shared
+    // identity (`functionObjectIdentity()`), which every copy of it agrees on
+    // once the callable-identity census has identified the allocation -- a
+    // collection key is one of the observations that census counts.
+    // `weakCollectionIdentity` in `runtime/gea_runtime.h` reads it.
+    case 'function':
+    case 'function-value-dispatch':
+      return true
     default:
       return false
   }
@@ -149,6 +158,44 @@ export const deriveKeyedCollection = (
         'objects as weak keys, and this runtime compares a weak key by pointer'
     )
   }
-  const carrier = { kind: 'keyed-collection', family, key, value, ownership: ownership.forShape(shape, id) } as const
-  return readOnlyView ? { ...carrier, readOnlyView: true } : carrier
+  // Each return is its own literal of the carrier arm: a conditional between
+  // a literal and its spread is a two-shape union a native build cannot
+  // recast into the carrier.
+  const stored = ownership.forShape(shape, id)
+  if (readOnlyView) return { kind: 'keyed-collection', family, key, value, ownership: stored, readOnlyView: true }
+  return { kind: 'keyed-collection', family, key, value, ownership: stored }
+}
+
+/**
+ * Whether `pair` is a carrier a `Map`'s own `[K, V]` step can be minted into
+ * (ECMA-262 24.1.5.1 CreateArrayFromList of the entry's key and value).
+ *
+ * Two layouts exist because `derive.ts`'s `deriveTuple` gives a closed tuple
+ * two: a positional RECORD of fields "0" and "1" when the halves differ (or a
+ * value-record proof cleared it), and the shared Array of the one carrier both
+ * halves share otherwise -- `Map<string, string>`'s `[string, string]` is a
+ * real two-element Array, as is `Map<unknown, unknown>`'s. The runtime's
+ * `makeMapEntry` builds either, so the cursor (`publish.ts`), the spread
+ * (`emit-arrays.ts`) and `Array.from` all ask this one question.
+ */
+export const isMapEntryPairCarrier = (pair: Representation, key: Representation, value: Representation): boolean => {
+  if (pair.kind === 'array-object') {
+    const element = representationKey(pair.element)
+    return (
+      pair.extension === null &&
+      pair.ownership === 'shared-refcount' &&
+      element === representationKey(key) &&
+      element === representationKey(value)
+    )
+  }
+  if (pair.kind !== 'record' || pair.fields.length !== 2) return false
+  const [first, second] = pair.fields
+  return (
+    first !== undefined &&
+    second !== undefined &&
+    first.key === '0' &&
+    second.key === '1' &&
+    representationKey(first.value) === representationKey(key) &&
+    representationKey(second.value) === representationKey(value)
+  )
 }

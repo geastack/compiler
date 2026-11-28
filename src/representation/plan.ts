@@ -47,8 +47,11 @@ export interface RepresentationConflict {
 export interface SealedRepresentationPlan {
   /** The selected carrier for every published result. */
   readonly selected: ReadonlyMap<SemanticResultId, Representation>
-  /** Every row ever published, retained for diagnostics only. */
-  readonly evidence: ReadonlyMap<SemanticResultId, readonly RepresentationEvidence[]>
+  /**
+   * Every row ever published, retained for diagnostics only. A sealed plan
+   * holds the column-wise table; a plan built by hand holds a plain map.
+   */
+  readonly evidence: SealedEvidence | ReadonlyMap<SemanticResultId, readonly RepresentationEvidence[]>
   readonly conflicts: readonly RepresentationConflict[]
 }
 
@@ -103,8 +106,14 @@ const JOINS_CLOSED_FAMILY = 2
  * The columns keep exactly what a row says, and every read materializes the
  * same rows, with the same keys in the same order, as the producers published,
  * so the digest and every consumer see the table they saw before.
+ *
+ * It holds its columns rather than extending `Map`: a native build has no
+ * conversion from a class to a `Map`, so the plan's field names this class
+ * beside the plain map a hand-built plan holds. `toJSON` answers the map the
+ * table stands for, which is what the certificate's digest and
+ * `JSON.stringify` read, so both see the bytes the `Map` subclass gave them.
  */
-class SealedEvidence extends Map<SemanticResultId, readonly RepresentationEvidence[]> {
+export class SealedEvidence {
   readonly #results: readonly SemanticResultId[]
   /** Exclusive end of each result's rows in the row columns. */
   readonly #ends: Uint32Array
@@ -114,7 +123,6 @@ class SealedEvidence extends Map<SemanticResultId, readonly RepresentationEviden
   #index: Map<SemanticResultId, number> | null = null
 
   constructor(published: ReadonlyMap<SemanticResultId, readonly RepresentationEvidence[]>) {
-    super()
     const results: SemanticResultId[] = []
     const representations: Representation[] = []
     const producers: string[] = []
@@ -156,56 +164,39 @@ class SealedEvidence extends Map<SemanticResultId, readonly RepresentationEviden
     return this.#index.get(result)
   }
 
-  override get size(): number {
+  get size(): number {
     return this.#results.length
   }
 
-  override get(result: SemanticResultId): readonly RepresentationEvidence[] | undefined {
+  get(result: SemanticResultId): readonly RepresentationEvidence[] | undefined {
     const at = this.#indexOf(result)
     return at === undefined ? undefined : this.#rowsAt(at)
   }
 
-  override has(result: SemanticResultId): boolean {
+  has(result: SemanticResultId): boolean {
     return this.#indexOf(result) !== undefined
   }
 
-  override *entries(): MapIterator<[SemanticResultId, readonly RepresentationEvidence[]]> {
+  *entries(): MapIterator<[SemanticResultId, readonly RepresentationEvidence[]]> {
     for (let at = 0; at < this.#results.length; at++) yield [this.#results[at] as SemanticResultId, this.#rowsAt(at)]
   }
 
-  override *keys(): MapIterator<SemanticResultId> {
-    yield* this.#results
+  *keys(): MapIterator<SemanticResultId> {
+    for (const delegated of this.#results) yield delegated
   }
 
-  override *values(): MapIterator<readonly RepresentationEvidence[]> {
+  *values(): MapIterator<readonly RepresentationEvidence[]> {
     for (let at = 0; at < this.#results.length; at++) yield this.#rowsAt(at)
   }
 
-  override [Symbol.iterator](): MapIterator<[SemanticResultId, readonly RepresentationEvidence[]]> {
+  [Symbol.iterator](): MapIterator<[SemanticResultId, readonly RepresentationEvidence[]]> {
     return this.entries()
   }
 
-  override forEach(
-    visit: (
-      rows: readonly RepresentationEvidence[],
-      result: SemanticResultId,
-      map: Map<SemanticResultId, readonly RepresentationEvidence[]>
-    ) => void,
-    thisArg?: unknown
-  ): void {
-    for (const [result, rows] of this.entries()) visit.call(thisArg, rows, result, this)
-  }
-
-  override set(): this {
-    throw new Error('the sealed evidence table is read-only')
-  }
-
-  override delete(): boolean {
-    throw new Error('the sealed evidence table is read-only')
-  }
-
-  override clear(): void {
-    throw new Error('the sealed evidence table is read-only')
+  toJSON(): Map<SemanticResultId, readonly RepresentationEvidence[]> {
+    const table = new Map<SemanticResultId, readonly RepresentationEvidence[]>()
+    for (const [result, rows] of this.entries()) table.set(result, rows)
+    return table
   }
 }
 
@@ -248,11 +239,13 @@ export const createRepresentationPlanBuilder = (): RepresentationPlanBuilder => 
 
   const seal = (): SealedRepresentationPlan => {
     sealed = true
-    return Object.freeze({
+    // Stated as the plan so the literal is allocated as it, not recast into it.
+    const plan: SealedRepresentationPlan = {
       selected: new Map(selected),
       evidence: new SealedEvidence(evidence),
       conflicts: Object.freeze([...conflicts])
-    })
+    }
+    return Object.freeze(plan)
   }
 
   return { publish, commitComponent, seal }

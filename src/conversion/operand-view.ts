@@ -61,7 +61,7 @@ const isProxyArm = (arm: TaggedUnionArm): boolean => arm.value.kind === 'proxy-o
  * the narrowed arm unchecked would read the wrong payload while the proxy is
  * the one held.
  */
-const narrowedKeepingProxies = (source: Representation & { kind: 'tagged-union' }, target: Representation): Representation => {
+const narrowedKeepingProxies = (source: Extract<Representation, { kind: 'tagged-union' }>, target: Representation): Representation => {
   const ordinary = source.arms.filter((arm) => !isProxyArm(arm))
   const wanted = new Set(
     (target.kind === 'tagged-union' ? target.arms.map((arm) => arm.value) : [target]).map((value) => representationKey(value))

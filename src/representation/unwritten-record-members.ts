@@ -53,7 +53,10 @@ export interface UnwrittenRecordMembers {
   readonly reads: ReadonlySet<SemanticResultId>
 }
 
-export const noUnwrittenRecordMembers: UnwrittenRecordMembers = { members: new Map(), reads: new Set() }
+export const noUnwrittenRecordMembers: UnwrittenRecordMembers = {
+  members: new Map<StructuralTypeId, ReadonlySet<string>>(),
+  reads: new Set<SemanticResultId>()
+}
 
 /** The object shape a record carrier of `id` is laid out under, or `null` for a type that is not one. */
 export const recordObjectShapeOf = (

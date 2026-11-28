@@ -3,7 +3,7 @@ import { classLayoutOfCopy, constructTargetNamesConstructorOf, type ClassLayout 
 import { abiKey, representationKey, type Representation } from '../representation/model.js'
 import { conversionNodeIdOf, type ConversionCensus } from '../conversion/nodes.js'
 import { nativePayloadTransportMatches } from '../conversion/native-payload-transport.js'
-import type { ConstructOperation, IrBody } from './model.js'
+import type { ConstructOperation, IrBody, IrOperand } from './model.js'
 import { receivableArguments } from './call-entry.js'
 import { nativeClassInitializationOf, type NativeInitializationEntry } from './native-class-initialization.js'
 
@@ -35,7 +35,7 @@ export const nativeClassConstructionOf = (
     const received = receivableArguments(abi, operation.arguments)
     // These are frame views after the cited, payload-preserving conversions,
     // not new SSA values or permission to reinterpret an emitted operand.
-    const frame = []
+    const frame: IrOperand[] = []
     for (let index = 0; index < received.length; index++) {
       const source = received[index]!
       const target = abi.parameters[index]?.value

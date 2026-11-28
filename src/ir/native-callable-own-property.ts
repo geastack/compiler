@@ -10,7 +10,17 @@ import { operandOf, resultOf } from '../semantics/model/operands.js'
 import type { SemanticOperation } from '../semantics/model/operations.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import { operationOfResult } from '../identity/ids.js'
-import { allOperationsOf, type GetOperation, type IrBody, type IrOperation, type SetOperation, type IrOperand } from './model.js'
+import {
+  allOperationsOf,
+  type GetOperation,
+  type IrBlock,
+  type IrBlockId,
+  type IrBody,
+  type IrNonTerminatorOperation,
+  type IrOperand,
+  type IrOperation,
+  type SetOperation
+} from './model.js'
 import { nativeBodyIgnoresLogicalReceiver } from './native-logical-receiver-body.js'
 import { observesNativeCarrierOnly, operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 
@@ -85,6 +95,35 @@ const originalOperands = (operation: IrOperation): readonly IrOperand[] =>
  * external property protocol. This supplies source provenance, never an
  * erased receiver payload for arbitrary constructor Functions.
  */
+/**
+ * Whether `representation` can hold the instance carrier `instanceKey` names,
+ * through every container that stores a payload. At module level so its
+ * recursion names itself rather than a closure the native backend would have to
+ * capture from inside its own enclosing frame.
+ */
+const containsInstance = (
+  representation: Representation,
+  instanceKey: string,
+  deriver: RepresentationDeriver | null,
+  seen = new Set<string>()
+): boolean => {
+  const key = representationKey(representation)
+  if (key === instanceKey) return true
+  if (seen.has(key)) return false
+  seen.add(key)
+  const inner = (value: Representation): boolean => containsInstance(value, instanceKey, deriver, seen)
+  if (representation.kind === 'optional') return inner(representation.payload)
+  if (representation.kind === 'tagged-union') return representation.arms.some((arm) => inner(arm.value))
+  if (representation.kind === 'array-object') return inner(representation.element)
+  if (representation.kind === 'dictionary') return inner(representation.value)
+  if (representation.kind === 'record' || representation.kind === 'record-with-index')
+    return representation.fields.some((field) => inner(field.value))
+  if (representation.kind === 'native-record-ref' && representation.native === null && deriver !== null)
+    return recordFieldsOfShape(deriver, representation.shapeId)?.some((field) => inner(field.value)) ?? false
+  // A callable's declared return type is not a stored instance payload.
+  return false
+}
+
 const createOwnPropertyPlans = (
   bodies: readonly IrBody[],
   placements: ReadonlyMap<DeclarationId, BindingPlacement>,
@@ -236,22 +275,6 @@ const createOwnPropertyPlans = (
     const constructorAbi = constructor.result.representation.construct
     const instance = constructorAbi.result
     const instanceKey = representationKey(instance)
-    const containsInstance = (representation: Representation, seen = new Set<string>()): boolean => {
-      const key = representationKey(representation)
-      if (key === instanceKey) return true
-      if (seen.has(key)) return false
-      seen.add(key)
-      if (representation.kind === 'optional') return containsInstance(representation.payload, seen)
-      if (representation.kind === 'tagged-union') return representation.arms.some((arm) => containsInstance(arm.value, seen))
-      if (representation.kind === 'array-object') return containsInstance(representation.element, seen)
-      if (representation.kind === 'dictionary') return containsInstance(representation.value, seen)
-      if (representation.kind === 'record' || representation.kind === 'record-with-index')
-        return representation.fields.some((field) => containsInstance(field.value, seen))
-      if (representation.kind === 'native-record-ref' && representation.native === null && authority)
-        return recordFieldsOfShape(authority.deriver, representation.shapeId)?.some((field) => containsInstance(field.value, seen)) ?? false
-      // A callable's declared return type is not a stored instance payload.
-      return false
-    }
     const primitiveData = (value: Representation): boolean => {
       if (value.kind === 'optional') return primitiveData(value.payload)
       if (value.kind === 'tagged-union') return value.arms.every((arm) => primitiveData(arm.value))
@@ -289,9 +312,11 @@ const createOwnPropertyPlans = (
       )
         return false
       for (const operation of operations) {
-        const incoming = originalOperands(operation).filter((operand) => containsInstance(operand.representation))
+        const incoming = originalOperands(operation).filter((operand) =>
+          containsInstance(operand.representation, instanceKey, authority?.deriver ?? null)
+        )
         const result = resultOfIrOperation(operation)
-        const produces = result !== null && containsInstance(result.representation)
+        const produces = result !== null && containsInstance(result.representation, instanceKey, authority?.deriver ?? null)
         if (incoming.length === 0 && !produces) continue
         if (
           incoming.some((operand) => representationKey(operand.representation) !== instanceKey) ||
@@ -581,20 +606,25 @@ export const nativeCallablePrivateSlotMatches = (
 
 export const publishNativeCallablePrivateSlots = (input: NativeCallablePrivateSlotInput): ReadonlyMap<PhysicalBodyId, IrBody> => {
   const receipts = nativeCallablePrivateSlotsOf(input)
-  return new Map(
-    [...input.bodies].map(([id, body]) => [
+  return new Map<PhysicalBodyId, IrBody>(
+    [...input.bodies].map(([id, body]): readonly [PhysicalBodyId, IrBody] => [
       id,
       {
         ...body,
-        blocks: new Map(
-          [...body.blocks].map(([key, block]) => [
+        blocks: new Map<IrBlockId, IrBlock>(
+          [...body.blocks].map(([key, block]): readonly [IrBlockId, IrBlock] => [
             key,
             {
               ...block,
-              operations: block.operations.map((operation) => {
+              operations: block.operations.map((operation): IrNonTerminatorOperation => {
                 if (operation.kind !== 'get' && operation.kind !== 'set') return operation
-                const { privateNativeCallableSlot: _old, ...source } = operation
                 const receipt = receipts.get(operation)
+                // One rest per kind: a rest over `get | set` has no single record layout.
+                if (operation.kind === 'get') {
+                  const { privateNativeCallableSlot: _old, ...source } = operation
+                  return receipt === undefined ? source : { ...source, privateNativeCallableSlot: receipt }
+                }
+                const { privateNativeCallableSlot: _old, ...source } = operation
                 return receipt === undefined ? source : { ...source, privateNativeCallableSlot: receipt }
               })
             }

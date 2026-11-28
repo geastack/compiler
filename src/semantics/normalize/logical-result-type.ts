@@ -1,4 +1,5 @@
 import ts from '#typescript'
+import { checkerUnionOf } from '../checker-union.js'
 
 export type LogicalOperator = '&&' | '||' | '??'
 
@@ -77,8 +78,7 @@ const keptPartsOf = (
   return { kept, evaluatesRight }
 }
 
-const unionOf = (checker: ts.TypeChecker, members: readonly ts.Type[]): ts.Type | null =>
-  (checker as unknown as { getUnionType?: (parts: readonly ts.Type[]) => ts.Type }).getUnionType?.(members) ?? null
+const unionOf = (checker: ts.TypeChecker, members: readonly ts.Type[]): ts.Type | null => checkerUnionOf(checker, members)
 
 /**
  * The value `left` contributes to `left <op> right` on the branch that does

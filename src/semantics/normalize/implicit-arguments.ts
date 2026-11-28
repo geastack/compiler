@@ -9,7 +9,7 @@ export interface ImplicitArgumentsSlot {
 export const implicitArgumentsSlotOf = (signature: ts.Signature): ImplicitArgumentsSlot | null => {
   const parameters = signature.getParameters()
   const symbol = parameters[parameters.length - 1]
-  if (!symbol || symbol.valueDeclaration || symbol.declarations?.length) return null
+  if (!symbol || symbol.valueDeclaration !== undefined || (symbol.declarations?.length ?? 0) > 0) return null
   if (parameters.slice(0, -1).some((parameter) => !parameter.valueDeclaration && !parameter.declarations?.length)) return null
   return { ordinal: parameters.length - 1, symbol }
 }

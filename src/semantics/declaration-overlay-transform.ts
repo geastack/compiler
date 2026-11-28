@@ -186,6 +186,27 @@ const typeArgumentDefaults = (
   return defaults
 }
 
+/**
+ * The type expression a tag states, for every tag kind that can carry one as
+ * a `JSDocTypeExpression` (a callback's or overload's signature, and a
+ * typedef's type literal, are not one). Guards per kind rather than a cast of
+ * the tag to a `{ typeExpression }` record: a native build has no conversion
+ * from one tag's field union into a structural record's.
+ */
+const statedTagTypeExpressionOf = (tag: ts.JSDocTag): ts.JSDocTypeExpression | undefined => {
+  if (ts.isJSDocTypeTag(tag) || ts.isJSDocReturnTag(tag) || ts.isJSDocThisTag(tag) || ts.isJSDocEnumTag(tag)) return tag.typeExpression
+  if (ts.isJSDocSatisfiesTag(tag)) return tag.typeExpression
+  // A throws tag's children are its name, its type expression and its
+  // comment, so its one `JSDocTypeExpression` child is its type expression.
+  // Found by walking rather than by a cast: the native facade has no
+  // throws-tag guard or node class to cast to.
+  if (tag.kind === ts.SyntaxKind.JSDocThrowsTag)
+    return ts.forEachChild(tag, (child) => (ts.isJSDocTypeExpression(child) ? child : undefined))
+  if (ts.isJSDocParameterTag(tag) || ts.isJSDocPropertyTag(tag)) return tag.typeExpression
+  if (ts.isJSDocTypedefTag(tag) && tag.typeExpression && ts.isJSDocTypeExpression(tag.typeExpression)) return tag.typeExpression
+  return undefined
+}
+
 const overlayCache = new Map<string, Overlay | null>()
 
 /**
@@ -1089,8 +1110,9 @@ const paramLinesFor = (
   if (written.some((line) => line !== null)) {
     for (let index = jsSignature.parameters.length - 1; index >= 0; index--) {
       const parameter = jsSignature.parameters[index]!
-      if (written[index] !== null) {
-        if (!written[index]!.endsWith(']')) break
+      const line = written[index]
+      if (line !== null && line !== undefined) {
+        if (!line.endsWith(']')) break
         continue
       }
       if (parameter.type || parameter.dotDotDotToken || !ts.isIdentifier(parameter.name) || ts.getJSDocParameterTags(parameter).length > 0)
@@ -1276,7 +1298,7 @@ const recordPropertiesOf = (record: ts.ObjectLiteralExpression): ReadonlyMap<str
   const properties = new Map<string, ts.ObjectLiteralElementLike>()
   const repeated = new Set<string>()
   for (const property of record.properties) {
-    if (ts.isSpreadAssignment(property)) return new Map()
+    if (ts.isSpreadAssignment(property)) return new Map<string, ts.ObjectLiteralElementLike>()
     const name = ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) ? property.name.text : null
     if (name === null) continue
     if (properties.has(name)) repeated.add(name)
@@ -1410,7 +1432,7 @@ const recordMethodsIn = (file: ts.SourceFile, records: RecordSurface): ReadonlyM
   const reach = (record: ts.ObjectLiteralExpression, target: Target, depth: number): void => {
     if (depth > MAX_RECORD_DEPTH) return
     let known = reached.get(record)
-    if (!known) reached.set(record, (known = new Map()))
+    if (!known) reached.set(record, (known = new Map<string, Target>()))
     if (known.has(keyOf(target))) return
     known.set(keyOf(target), target)
     for (const [name, property] of recordPropertiesOf(record)) {
@@ -1665,7 +1687,7 @@ const memberOverlay = (input: {
     // whenever the file's first statement also earns a `@param` block, so a
     // second pass would not see it and would import the same name again.
     const blocks = (statement as ts.Node & { readonly jsDoc?: readonly ts.JSDoc[] }).jsDoc ?? []
-    for (const tag of blocks.flatMap((block) => [...(block.tags ?? [])])) {
+    for (const tag of blocks.flatMap((block) => [...(block.tags == null ? [] : [...block.tags])])) {
       if ((ts.isJSDocTypedefTag(tag) || ts.isJSDocCallbackTag(tag)) && tag.name) boundHere.add(tag.name.text)
       if (!ts.isJSDocImportTag(tag)) continue
       const bindings = tag.importClause?.namedBindings
@@ -1724,7 +1746,7 @@ const memberOverlay = (input: {
    * rather than silently emitting a dangling reference.
    */
   const spellingOf = (name: string): string | null => {
-    const resolved = resolveNameFrom(name, ownHome, 0, new Set())
+    const resolved = resolveNameFrom(name, ownHome, 0, new Set<string>())
     if (resolved !== null) return resolved
     return overlay.aliases.has(name) || overlay.interfaces.has(name) || declarationOnly(name) ? null : name
   }
@@ -2308,8 +2330,8 @@ const memberOverlay = (input: {
   }
   const scanJsDoc = (node: ts.Node): void => {
     for (const tag of uncachedJsDocTags(node)) {
-      const typeExpression = (tag as { readonly typeExpression?: ts.JSDocTypeExpression | ts.JSDocSignature }).typeExpression
-      if (typeExpression && ts.isJSDocTypeExpression(typeExpression)) considerStatedType(typeExpression.type)
+      const typeExpression = statedTagTypeExpressionOf(tag)
+      if (typeExpression) considerStatedType(typeExpression.type)
     }
     ts.forEachChild(node, scanJsDoc)
   }

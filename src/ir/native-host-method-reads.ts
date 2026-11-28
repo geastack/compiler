@@ -69,7 +69,10 @@ export const publishNativeHostMethodReads = (
         const operation = block.operations[at]!
         if (operation.kind !== 'get') continue
         const proof = proofs.get(operation)
-        if (proof === undefined && !Object.prototype.hasOwnProperty.call(operation, 'nativeHostMethodRead')) continue
+        // Asked by value, not by `in`: a native build's object rest marks every
+        // declared optional key present, and the value is never a stored
+        // `undefined` under exactOptionalPropertyTypes.
+        if (proof === undefined && operation.nativeHostMethodRead === undefined) continue
         const { nativeHostMethodRead: _previous, ...current } = operation
         ;(operations ??= block.operations.slice())[at] = proof === undefined ? current : { ...current, nativeHostMethodRead: proof.receipt }
       }

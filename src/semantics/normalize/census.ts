@@ -593,6 +593,35 @@ const callerOf = (
 
 const callerKey = (caller: SemanticCaller): string => (caller.kind === 'function' ? `fn|${caller.functionId}` : `region|${caller.regionId}`)
 
+/**
+ * A candidate spells its identity when asked rather than holding it: the
+ * spelling is a function of the node and the copy, both of which it holds,
+ * and every candidate is alive from the census to its family's production --
+ * all of them at once when normalization starts, where a 48K-line app's
+ * 211k identities were 24 MB of strings. Readers compare ids by value, never
+ * by identity, so a fresh copy of the same spelling answers them the same.
+ */
+class Candidate implements CensusCandidate {
+  declare readonly classLayoutOnly?: boolean
+  declare readonly classConstructionDeferred?: boolean
+  constructor(
+    private readonly identities: IdentityTable,
+    readonly node: ts.Node,
+    readonly family: OperationFamily,
+    readonly caller: SemanticCaller,
+    readonly evaluationOrdinal: number,
+    readonly specialization: SpecializationPath,
+    layoutOnly: boolean,
+    constructionDeferred: boolean
+  ) {
+    if (layoutOnly) this.classLayoutOnly = true
+    if (constructionDeferred) this.classConstructionDeferred = true
+  }
+  get id(): NodeId {
+    return this.identities.nodeIdOf(this.node, this.specialization)
+  }
+}
+
 export const censusProgram = (
   files: readonly ts.SourceFile[],
   identities: IdentityTable,
@@ -614,33 +643,6 @@ export const censusProgram = (
     if (known) return known
     callers.set(key, caller)
     return caller
-  }
-  /**
-   * A candidate spells its identity when asked rather than holding it: the
-   * spelling is a function of the node and the copy, both of which it holds,
-   * and every candidate is alive from the census to its family's production --
-   * all of them at once when normalization starts, where a 48K-line app's
-   * 211k identities were 24 MB of strings. Readers compare ids by value, never
-   * by identity, so a fresh copy of the same spelling answers them the same.
-   */
-  class Candidate implements CensusCandidate {
-    declare readonly classLayoutOnly?: boolean
-    declare readonly classConstructionDeferred?: boolean
-    constructor(
-      readonly node: ts.Node,
-      readonly family: OperationFamily,
-      readonly caller: SemanticCaller,
-      readonly evaluationOrdinal: number,
-      readonly specialization: SpecializationPath,
-      layoutOnly: boolean,
-      constructionDeferred: boolean
-    ) {
-      if (layoutOnly) this.classLayoutOnly = true
-      if (constructionDeferred) this.classConstructionDeferred = true
-    }
-    get id(): NodeId {
-      return identities.nodeIdOf(this.node, this.specialization)
-    }
   }
   const ordinals = new Map<string, number>()
   const nextOrdinal = (caller: SemanticCaller): number => {
@@ -667,6 +669,7 @@ export const censusProgram = (
       for (const family of families) {
         candidates.push(
           new Candidate(
+            identities,
             node,
             family,
             caller,
@@ -737,7 +740,12 @@ export const censusProgram = (
       const holder = path[path.length - 1]
       if (holder !== undefined && holder.owner === node) {
         forEachEvaluationChild(node, (child) => visit(child, path))
-        record(node, path, path)
+        // The arrow's own allocation evaluates in the frame that encloses it,
+        // which is not inside this copy: resolving its caller under the copy's
+        // entry named `outer@<ordinal>` for a generic arrow local to `outer`, a
+        // function no allocation publishes, and ABI projection refused it. At
+        // module level the caller is a region and the entry was never read.
+        record(node, path.slice(0, -1), path)
         return
       }
       const subject = identities.genericSubjectOf(node as ts.Declaration)

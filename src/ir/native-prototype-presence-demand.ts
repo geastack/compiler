@@ -37,7 +37,7 @@ export const nativePrototypePresenceDemandOf = (
     const node = conversions.nodeById(id)
     return node === null ? [] : [node]
   })
-  const plans = nativeFieldViewPlansOf(recipeClosureOf(nodes, conversions.nodeById).values())
+  const plans = nativeFieldViewPlansOf([...recipeClosureOf(nodes, conversions.nodeById).values()])
   const visited = new Set<(typeof plans)[number]>()
   let pending = true
   while (pending) {

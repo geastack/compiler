@@ -222,6 +222,7 @@ export const normalizeProgram = (input: NormalizationInput): NormalizationResult
     if (all) reachingEdges.push(entry)
     else for (const edge of edgesStatedBy(entry)) if (reaches(edge)) reachingEdges.push(edge)
   }
+  for (const edge of gated.ordered ?? []) if (reaches(edge)) reachingEdges.push(edge)
 
   const graph: SemanticGraph = {
     regions,

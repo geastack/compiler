@@ -374,7 +374,7 @@ const viewHoldersOf = (
         named: new Map(carrier.fields.map((field) => [field.key, field.value])),
         rest: carrier.indexes.map((index) => index.value)
       }
-    if (carrier.kind === 'dictionary') return { named: new Map(), rest: [carrier.value] }
+    if (carrier.kind === 'dictionary') return { named: new Map<string, Representation>(), rest: [carrier.value] }
     if (carrier.kind === 'native-record-ref' && carrier.native === null && carrier.recursive === undefined)
       return membersOf(deriver.layoutOf(carrier.shapeId as StructuralTypeId))
     return null
@@ -525,12 +525,12 @@ const viewHoldersOf = (
       return pairMembers({ named: new Map([...from.named].map(([key, value]) => [key, [value]])), rest: from.rest }, into)
     }
     // An array with named extension members lines up by more than its element.
-    const elementOf = (carrier: Representation): Representation | null =>
-      (carrier.kind === 'array-object' && (carrier.extension ?? []).length === 0) ||
-      carrier.kind === 'dense-buffer' ||
-      carrier.kind === 'native-sequence'
-        ? carrier.element
-        : null
+    const elementOf = (carrier: Representation): Representation | null => {
+      if (carrier.kind === 'array-object') return (carrier.extension ?? []).length === 0 ? carrier.element : null
+      if (carrier.kind === 'dense-buffer') return carrier.element
+      if (carrier.kind === 'native-sequence') return carrier.element
+      return null
+    }
     const sourceElement = elementOf(source)
     const targetElement = elementOf(target)
     if (sourceElement !== null && targetElement !== null) return pair(sourceElement, targetElement)
@@ -741,7 +741,7 @@ const parameterCallablesOf = (
         }
       }
   }
-  if (parameterCells.size === 0) return new Map()
+  if (parameterCells.size === 0) return new Map<DeclarationId, FunctionId>()
 
   const escaped = new Set<FunctionId | RegionId>()
   const passed = new Map<FunctionId | RegionId, Map<number, FunctionId | null>>()
@@ -838,9 +838,15 @@ interface ResolvedCall {
 
 const unresolvedCall: ResolvedCall = { target: unresolvedTarget }
 
-const identityOfFunctions = (ids: readonly FunctionId[]): CallCalleeIdentity => {
+// Each arm is built whole rather than spread over with `nativeEntryAbi`: a
+// spread of the identity union has no single native layout to copy from.
+const identityOfFunctions = (ids: readonly FunctionId[], nativeEntryAbi?: CallableAbi): CallCalleeIdentity => {
   const functionIds = [...new Set(ids)]
-  return functionIds.length === 1 ? { kind: 'exact', functionId: functionIds[0]! } : { kind: 'closed-family', functionIds }
+  if (functionIds.length === 1)
+    return nativeEntryAbi === undefined
+      ? { kind: 'exact', functionId: functionIds[0]! }
+      : { kind: 'exact', functionId: functionIds[0]!, nativeEntryAbi }
+  return nativeEntryAbi === undefined ? { kind: 'closed-family', functionIds } : { kind: 'closed-family', functionIds, nativeEntryAbi }
 }
 
 /**
@@ -959,10 +965,7 @@ const resolveClassMethod = (
     ...(functionIds.length === 0
       ? {}
       : {
-          closedCallee: {
-            ...identityOfFunctions(functionIds),
-            ...(nativeEntryAbi === undefined ? {} : { nativeEntryAbi })
-          }
+          closedCallee: identityOfFunctions(functionIds, nativeEntryAbi)
         })
   }
 }

@@ -27,7 +27,8 @@ export const deferredMethodValuesOf = (body: IrBody): ReadonlySet<IrValueId> => 
   for (const block of body.blocks.values())
     for (const operation of allOperationsOf(block)) {
       if (operation.kind === 'call') {
-        if (operation.target && operation.target.kind !== 'unresolved') immediate.add(operation.callee.value)
+        const target = operation.target
+        if (target !== undefined && target.kind !== 'unresolved') immediate.add(operation.callee.value)
         else escaped.add(operation.callee.value)
       }
       for (const operand of operandsOfIrOperation(operation)) {
@@ -127,9 +128,13 @@ export const nativeMethodSourceInputsOf = (
       }
       if (member?.kind !== 'method') continue
       const overridden = !staticDispatch && classFamilyOverridesOf(classes, receiver.declaration, key).length > 0
-      const methods: readonly ClassMethod[] = overridden
-        ? (classPresentMethodArmsOf(classes, receiver.declaration, key)?.map((arm) => arm.method) ?? [])
-        : [member.method]
+      // Filled element by element rather than joined from `arms.map(...)` and
+      // `[member.method]`: a native build carries those two arrays as different
+      // layouts of `ClassMethod[]`, and the join's store into the declared type
+      // selected one arm unchecked and read the other's records through it.
+      const methods: ClassMethod[] = []
+      if (overridden) for (const arm of classPresentMethodArmsOf(classes, receiver.declaration, key) ?? []) methods.push(arm.method)
+      else methods.push(member.method)
       for (const method of methods) {
         const selected = union
           ? publishedMethodCopyOf(classes, abiOf, method, key, target)

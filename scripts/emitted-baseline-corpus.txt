@@ -15,14 +15,14 @@ base-placeholder-unknown.ts.cpp d984f1af772b
 bigint-constructor-repro.ts.cpp b64c33cb0d71
 bigint-native.ts.cpp 0e9b236cb9ea
 binding-carrier-repro.ts.cpp 212b3bf28bfa
-boxed-identity-round-trip.ts.cpp 47b28599856c
+boxed-identity-round-trip.ts.cpp 836eea82f082
 branded-primitive.ts.cpp c79ac4d7f2d6
 class-accessors.ts.cpp 5394903aa2d0
 class-inheritance.ts.cpp cfcc34bc3169
 class-intersection-ancestor.ts.cpp a60d5a1d12d9
 class-named-only-by-type-instance.ts.cpp 097dbb0b7341
 class-named-only-by-type.ts.cpp 21a19bc262f2
-class-static-assignment.ts.cpp c4b4848e8714
+class-static-assignment.ts.cpp f59db284af14
 class-static-block-identity.ts.cpp d4f2fa878fae
 class-upcast-merge.ts.cpp 8d657d503485
 collection-literal-arguments.ts.cpp 26906e86908e
@@ -49,7 +49,7 @@ explicit-void-this.ts.cpp 9b9a6b7db59a
 expression-carrier-repro.ts.cpp 6d4e10eb2bfd
 fn.ts.cpp 748a85b07306
 for-in-narrowed-optional-field.ts.cpp d52ba306bc34
-function-call-rewrite.ts.cpp 4f2508d874db
+function-call-rewrite.ts.cpp 1334586596dd
 function-typed-value.ts.cpp 98a0ec93058a
 function-value-dispatch-get-repro.ts.cpp 0b7426b2b77c
 generator-method-receiver.ts.cpp 7e4dbc6d7cc4
@@ -87,7 +87,7 @@ language.ts.cpp 7f13764b63eb
 literal-receiver-properties.ts.cpp a4497e0fc3e6
 logical-guard-optional-instance.ts.cpp 89a513dfff49
 logical-merge-boolean-left.ts.cpp 1f92efe0175a
-logical-merge-nullable-reference.ts.cpp 81b786723feb
+logical-merge-nullable-reference.ts.cpp 48c37b06312a
 logical-merge-truthiness.ts.cpp 9eb777b71c1f
 logical.ts.cpp f9b3a5edd223
 loop-iteration-helper-repro.ts.cpp 8adf36b2bd22
@@ -118,7 +118,7 @@ optional-call.ts.cpp 25e140362a19
 optional-callable-prefix.ts.cpp 9a424f7d08a5
 optional-chain-as-guard.ts.cpp b778d788a012
 optional-chain-boundaries.ts.cpp 44463decb179
-optional-chain-tails.ts.cpp 0e60d3bde2bc
+optional-chain-tails.ts.cpp bfed21232b16
 optional-chain.ts.cpp a14b0b17bbaa
 optional-collection-cell.ts.cpp 55d6260faeaf
 optional-slot-holds-null.ts.cpp 711bf812eea6
@@ -134,7 +134,7 @@ record-structural-return.ts.cpp f9c869793bf8
 recursive-native-list.ts.cpp 1ee1b7e48cc8
 recursive-native-map.ts.cpp 90575fab70d6
 recursive-native-record.ts.cpp 6d2ff867a266
-rest-tuple-argument-pack.ts.cpp d6456c67dae7
+rest-tuple-argument-pack.ts.cpp 549cca67f105
 rest.ts.cpp 6820bfd14002
 runtime-built-in-errors.ts.cpp ed3359dad9ef
 spread.ts.cpp e4001a300f93
@@ -161,7 +161,7 @@ typed-array-pcm-map.ts.cpp 6be973175056
 typeof-narrowed-union-field-store.js.cpp d6d1bc7773b9
 typeof-narrowed-union-field-store.ts.cpp eb4a9368fa4c
 uncertified.txt 0adda55fb5c5
-uniform-value-union.ts.cpp 2db3bc2b80d3
+uniform-value-union.ts.cpp cce6c2abc309
 uninhabited-intersection-branch.ts.cpp 0eb4281ae240
 uninstantiated-generic.ts.cpp 1621e1aebca3
 union-absent-class-arm.js.cpp 7b18a0bcb92b

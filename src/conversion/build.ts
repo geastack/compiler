@@ -1,10 +1,11 @@
 import type { SealedRepresentationPlan } from '../representation/plan.js'
-import type { Representation } from '../representation/model.js'
-import { abiKey, arrayExtensionKey, containsUnresolved, representationKey } from '../representation/model.js'
+import type { CallableAbi, Representation } from '../representation/model.js'
+import { absenceCarrier, abiKey, arrayExtensionKey, containsUnresolved, representationKey } from '../representation/model.js'
 import { optionalOf } from '../representation/optional.js'
 import type { ClassifierContract, ConversionCapability, ConversionNode, ConversionNodeId, MaterializerContract } from './algebra.js'
 import { createConversionDerivationContext, deriveConversionCapability } from './derive.js'
 import { validateConversionGraph } from './graph-validation.js'
+import { plainFieldsOf } from '../ir/reflective.js'
 import type { ClassifierMaterializerPair, ConversionRuntimeRegistry } from './registry.js'
 
 /**
@@ -21,7 +22,7 @@ import type { ClassifierMaterializerPair, ConversionRuntimeRegistry } from './re
  */
 
 export interface ConversionGraph {
-  readonly nodes: ReadonlyMap<ConversionNodeId, ConversionNode>
+  readonly nodes: ConversionNodeTable
 }
 
 /**
@@ -96,7 +97,7 @@ const dropOneArmUnionsOf = (union: Extract<Representation, { kind: 'tagged-union
   // tags citing their OLD position, so this subset's key never matches the
   // real, independently-derived representation of the same union elsewhere
   // in the plan, and no conversion node ever gets minted for it.
-  return union.arms.map((_, dropped) => ({
+  return union.arms.map((_, dropped): Representation => ({
     kind: 'tagged-union' as const,
     arms: union.arms.filter((__, index) => index !== dropped).map((arm, position) => ({ ...arm, tag: String(position) }))
   }))
@@ -181,13 +182,13 @@ const narrowingStepsOf = (source: Representation): NarrowingSteps => {
     // pairing was missing.
     const absences: readonly ('null' | 'undefined')[] = [
       ...new Set(
-        source.arms.flatMap((arm) =>
+        source.arms.flatMap((arm): readonly ('null' | 'undefined')[] =>
           arm.value.kind === 'optional'
             ? [arm.value.absence]
             : arm.value.kind === 'undefined'
-              ? (['undefined'] as const)
+              ? ['undefined']
               : arm.value.kind === 'null'
-                ? (['null'] as const)
+                ? ['null']
                 : []
         )
       )
@@ -208,7 +209,7 @@ const narrowingStepsOf = (source: Representation): NarrowingSteps => {
   // C++ value is `nullptr`, or `undefined`. This enumeration offered only the
   // present side, so those reads asked for an `optional(T,null) -> null`
   // conversion that nothing had ever proposed a node for.
-  const absent = { kind: source.absence } as const
+  const absent = absenceCarrier(source.absence)
   const payload = source.payload
   if (payload.kind !== 'tagged-union') return { nested: distinctByKey([payload, absent]), subsets: [] }
   const arms = payload.arms.map((arm) => arm.value)
@@ -218,7 +219,7 @@ const narrowingStepsOf = (source: Representation): NarrowingSteps => {
       payload,
       absent,
       ...arms,
-      ...arms.map((arm) => ({ kind: 'optional', payload: arm, absence: source.absence }) as const)
+      ...arms.map((arm): Representation => ({ kind: 'optional', payload: arm, absence: source.absence }))
     ]),
     subsets: distinctByKey([
       ...subsetUnions,
@@ -467,8 +468,55 @@ export const narrowsToDescendantClassUnion = (source: Representation, target: Re
   // union; it never invents one, and it never changes which absence is worn.
   if (target.kind === 'optional' && source.kind === 'optional' && source.absence !== target.absence) return false
   const union = target.kind === 'optional' ? target.payload : target
-  if (union.kind !== 'tagged-union' || union.arms.length === 0) return false
-  return union.arms.every((arm) => narrowsToDescendantClass(held, arm.value))
+  if (union.kind !== 'tagged-union') return false
+  return descendantClassLeavesOf(held, union) !== null
+}
+
+/** One step into a tagged union: the arm a leaf is injected through. */
+export interface DescendantClassStep {
+  readonly union: Extract<Representation, { kind: 'tagged-union' }>
+  readonly index: number
+}
+
+/** A descendant class a base handle can be downcast to, and the union arms (outermost first) that carry it. */
+export interface DescendantClassLeaf {
+  readonly arm: Extract<Representation, { kind: 'class-ref' }>
+  readonly path: readonly DescendantClassStep[]
+}
+
+/**
+ * The descendant classes a target union is built from, or null when some arm
+ * is not one.
+ *
+ * An arm may itself be a union of descendants: a type alias such as
+ * `BooleanLiteral = TrueLiteral | FalseLiteral` used as one arm of a wider
+ * union keeps its own tagged-union carrier inside the outer one. It is the
+ * same family test one level in -- allocation identity still picks exactly
+ * one leaf -- so it is walked here rather than refused, and
+ * `narrowsToDescendantClassUnion` (the proposal and admission) and
+ * `targets/cpp/emit-narrowing.ts`'s `classFamilyLoadText` (the renderer) both
+ * read this one walk, so they cannot disagree about which targets install.
+ */
+export const descendantClassLeavesOf = (
+  held: Extract<Representation, { kind: 'class-ref' }>,
+  union: Extract<Representation, { kind: 'tagged-union' }>
+): readonly DescendantClassLeaf[] | null => {
+  if (union.arms.length === 0) return null
+  const leaves: DescendantClassLeaf[] = []
+  for (let index = 0; index < union.arms.length; index += 1) {
+    const value = union.arms[index]!.value
+    const step: DescendantClassStep = { union, index }
+    if (value.kind === 'class-ref') {
+      if (!narrowsToDescendantClass(held, value)) return null
+      leaves.push({ arm: value, path: [step] })
+      continue
+    }
+    if (value.kind !== 'tagged-union') return null
+    const inner = descendantClassLeavesOf(held, value)
+    if (inner === null) return null
+    for (const leaf of inner) leaves.push({ arm: leaf.arm, path: [step, ...leaf.path] })
+  }
+  return leaves
 }
 
 /**
@@ -705,7 +753,7 @@ const callableResultArmSourcesOf = (target: Representation): readonly Representa
   ) {
     return []
   }
-  return target.abi.result.arms.map((arm) => ({
+  return target.abi.result.arms.map((arm): Representation => ({
     kind: 'function-value-dispatch' as const,
     abi: { parameters: [], result: arm.value, receiver: null, restFrom: null }
   }))
@@ -769,7 +817,13 @@ const wideningSourcesOf = (target: Representation): readonly Representation[] =>
       ...callableResultArmSourcesOf(payload),
       ...(payload.kind === 'optional' || payload.kind === 'tagged-union' ? wideningSourcesOf(payload) : [])
     ]
-    return distinctByKey([{ kind: target.absence }, payload, ...arms, ...payloadSources, ...optionalArmSourcesOf(arms, [target.absence])])
+    return distinctByKey([
+      absenceCarrier(target.absence),
+      payload,
+      ...arms,
+      ...payloadSources,
+      ...optionalArmSourcesOf(arms, [target.absence])
+    ])
   }
   if (target.kind !== 'tagged-union') return []
   // The bare mirror of the branch above: `||`/`??` prove presence before
@@ -837,11 +891,9 @@ const keyedDistinct = (representations: Iterable<Representation>): readonly (rea
  * A callable convention's own carriers -- every one of a conversion's
  * candidate sources or targets, the same way any other representation is.
  */
-const abiRepresentations = (abi: {
-  parameters: readonly { value: Representation }[]
-  result: Representation
-  receiver: Representation | null
-}): readonly Representation[] => [
+// Typed as `CallableAbi`, the one ABI every caller holds: a native build has
+// no conversion from it to an anonymous structural shape, generic or not.
+const abiRepresentations = (abi: CallableAbi): readonly Representation[] => [
   ...abi.parameters.map((parameter) => parameter.value),
   abi.result,
   ...(abi.receiver ? [abi.receiver] : [])
@@ -957,10 +1009,13 @@ const nestedRepresentationsOf = (representation: Representation): readonly Repre
  */
 const referencedRepresentations = (
   plan: SealedRepresentationPlan,
-  constants: Iterable<Representation>
+  // An array, not an `Iterable`: a native build iterates an erased iterable
+  // as dynamic values with no reader back into `Representation`.
+  constants: readonly Representation[]
 ): ReadonlyMap<string, Representation> => {
   const known = new Map<string, Representation>()
-  const queue: Representation[] = [...plan.selected.values(), ...constants]
+  const queue: Representation[] = [...plan.selected.values()]
+  for (const constant of constants) queue.push(constant)
   while (queue.length > 0) {
     const representation = queue.pop()
     if (!representation) continue
@@ -987,12 +1042,19 @@ const referencedRepresentations = (
  * Every other field must be a primitive, so a rebuilt half is
  * indistinguishable from the one the registry returned; and the domain names
  * the pair, so that object was never shared with another node.
+ *
+ * A half is rebuilt by spreading the first pair's own object with the new
+ * domain: `plainFieldsOf` admitted it only as own, enumerable, primitive data
+ * properties, so the spread copies exactly those keys, in order, with the
+ * domain in its own slot -- and stays typed as the contract it is.
  */
 class PairAtomShape {
   constructor(
     readonly prefix: string,
     readonly classifier: readonly (readonly [string, unknown])[],
-    readonly materializer: readonly (readonly [string, unknown])[]
+    readonly materializer: readonly (readonly [string, unknown])[],
+    readonly classifierTemplate: ClassifierContract,
+    readonly materializerTemplate: MaterializerContract
   ) {}
 
   matches(prefix: string, classifier: readonly (readonly [string, unknown])[], materializer: readonly (readonly [string, unknown])[]) {
@@ -1003,45 +1065,14 @@ class PairAtomShape {
     const domain = `${this.prefix}${id}`
     return {
       kind: 'atom',
-      classifier: withDomain(this.classifier, domain) as unknown as ClassifierContract,
-      materializer: withDomain(this.materializer, domain) as unknown as MaterializerContract
+      classifier: { ...this.classifierTemplate, domain },
+      materializer: { ...this.materializerTemplate, domain }
     }
   }
 }
 
 const sameFields = (left: readonly (readonly [string, unknown])[], right: readonly (readonly [string, unknown])[]): boolean =>
   left.length === right.length && left.every(([key, value], index) => right[index]?.[0] === key && Object.is(right[index]?.[1], value))
-
-const withDomain = (fields: readonly (readonly [string, unknown])[], domain: string): Record<string, unknown> => {
-  const rebuilt: Record<string, unknown> = {}
-  for (const [key, value] of fields) rebuilt[key] = key === 'domain' ? domain : value
-  return rebuilt
-}
-
-/**
- * The fields of a plain data object, in order, when each is an ordinary
- * primitive data property and `domain` holds the domain given; else `null`.
- * The domain's own slot keeps its position and is filled in on rebuild.
- */
-const plainFieldsOf = (value: object, domain: string): readonly (readonly [string, unknown])[] | null => {
-  if (Object.getPrototypeOf(value) !== Object.prototype) return null
-  const fields: (readonly [string, unknown])[] = []
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== 'string') return null
-    const property = Object.getOwnPropertyDescriptor(value, key)
-    if (property === undefined || !('value' in property) || !property.writable || !property.enumerable || !property.configurable)
-      return null
-    if (key === 'domain') {
-      if (property.value !== domain) return null
-      fields.push([key, undefined])
-      continue
-    }
-    const field: unknown = property.value
-    if (field !== null && (typeof field === 'object' || typeof field === 'function')) return null
-    fields.push([key, field])
-  }
-  return fields.some(([key]) => key === 'domain') ? fields : null
-}
 
 /**
  * The eager graph's node table: a `Map` from node id to node, stored by the
@@ -1060,9 +1091,16 @@ const plainFieldsOf = (value: object, domain: string): readonly (readonly [strin
  * A pair whose capability is a `PairAtomShape` is stored as that shape and its
  * two carriers, and its node is built on first lookup and then kept, so every
  * lookup of one id answers the same object, as a stored node would.
+ *
+ * It answers the reads of a `ReadonlyMap` without extending `Map`, and keeps
+ * a stored node and a shape in two columns rather than one array of either: a
+ * native build has no conversion from a class to a `Map`, nor an `instanceof`
+ * narrowing of a node-or-shape union.
  */
-class ConversionNodeTable extends Map<ConversionNodeId, ConversionNode> {
-  readonly #order: (ConversionNode | PairAtomShape)[] = []
+export class ConversionNodeTable {
+  /** By position: the node stored whole, or `undefined` where `#shapeEntries` holds a shape. */
+  readonly #nodeEntries: (ConversionNode | undefined)[] = []
+  readonly #shapeEntries: (PairAtomShape | undefined)[] = []
   /** The two carriers of each entry stored as a shape; unused for a stored node. */
   readonly #sources: (Representation | undefined)[] = []
   readonly #targets: (Representation | undefined)[] = []
@@ -1097,11 +1135,14 @@ class ConversionNodeTable extends Map<ConversionNodeId, ConversionNode> {
     }
     let at = targets.get(targetKey)
     if (at === undefined) {
-      at = this.#order.length
+      at = this.#nodeEntries.length
       targets.set(targetKey, at)
     }
-    this.#store(at, shape ?? { id: `${sourceKey}->${targetKey}`, source, target, capability })
-    if (shape === null) return
+    if (shape === null) {
+      this.#store(at, { id: `${sourceKey}->${targetKey}`, source, target, capability }, undefined)
+      return
+    }
+    this.#store(at, undefined, shape)
     this.#sources[at] = source
     this.#targets[at] = target
   }
@@ -1124,15 +1165,16 @@ class ConversionNodeTable extends Map<ConversionNodeId, ConversionNode> {
   putSole(targetKey: string, node: ConversionNode): void {
     let at = this.#sole.get(targetKey)
     if (at === undefined) {
-      at = this.#order.length
+      at = this.#nodeEntries.length
       this.#sole.set(targetKey, at)
     }
-    this.#store(at, node)
+    this.#store(at, node, undefined)
   }
 
-  #store(at: number, entry: ConversionNode | PairAtomShape): void {
+  #store(at: number, node: ConversionNode | undefined, shape: PairAtomShape | undefined): void {
     this.#built.delete(at)
-    this.#order[at] = entry
+    this.#nodeEntries[at] = node
+    this.#shapeEntries[at] = shape
     this.#sources[at] = undefined
     this.#targets[at] = undefined
   }
@@ -1156,15 +1198,18 @@ class ConversionNodeTable extends Map<ConversionNodeId, ConversionNode> {
     }
     const known = candidates.find((one) => one.matches(prefix, classifier, materializer))
     if (known !== undefined) return known
-    const shape = new PairAtomShape(prefix, classifier, materializer)
+    const shape = new PairAtomShape(prefix, classifier, materializer, capability.classifier, capability.materializer)
     candidates.push(shape)
     return shape
   }
 
   #nodeAt(at: number): ConversionNode {
-    const entry = this.#order[at]
-    if (entry === undefined) throw new Error(`conversion node table has no entry ${at}`)
-    if (!(entry instanceof PairAtomShape)) return entry
+    const entry = this.#shapeEntries[at]
+    if (entry === undefined) {
+      const node = this.#nodeEntries[at]
+      if (node === undefined) throw new Error(`conversion node table has no entry ${at}`)
+      return node
+    }
     const built = this.#built.get(at)
     if (built !== undefined) return built
     const source = this.#sources[at]
@@ -1176,7 +1221,7 @@ class ConversionNodeTable extends Map<ConversionNodeId, ConversionNode> {
     return node
   }
 
-  *pairKeys(): IterableIterator<readonly [string, string]> {
+  *pairKeys(): Generator<readonly [string, string]> {
     for (const [sourceKey, targets] of this.#pairs) for (const targetKey of targets.keys()) yield [sourceKey, targetKey]
   }
 
@@ -1187,18 +1232,19 @@ class ConversionNodeTable extends Map<ConversionNodeId, ConversionNode> {
    * materializer by itself, and nothing in it refers to another node.
    */
   storedNodes(): readonly ConversionNode[] {
-    return this.#order.filter((entry): entry is ConversionNode => !(entry instanceof PairAtomShape))
+    const stored: ConversionNode[] = []
+    for (const node of this.#nodeEntries) if (node !== undefined) stored.push(node)
+    return stored
   }
 
   storedNodeOf(id: ConversionNodeId): ConversionNode | undefined {
     const at = this.#indexOf(id)
-    const entry = at === undefined ? undefined : this.#order[at]
-    return entry instanceof PairAtomShape ? undefined : entry
+    return at === undefined ? undefined : this.#nodeEntries[at]
   }
 
   isShaped(id: ConversionNodeId): boolean {
     const at = this.#indexOf(id)
-    return at !== undefined && this.#order[at] instanceof PairAtomShape
+    return at !== undefined && this.#shapeEntries[at] !== undefined
   }
 
   // A joined id is split back into its parts at each `->` it contains, left to
@@ -1212,62 +1258,47 @@ class ConversionNodeTable extends Map<ConversionNodeId, ConversionNode> {
     return this.#sole.get(id)
   }
 
-  override get size(): number {
-    return this.#order.length
+  get size(): number {
+    return this.#nodeEntries.length
   }
 
-  override get(id: ConversionNodeId): ConversionNode | undefined {
+  get(id: ConversionNodeId): ConversionNode | undefined {
     const at = this.#indexOf(id)
     return at === undefined ? undefined : this.#nodeAt(at)
   }
 
-  override has(id: ConversionNodeId): boolean {
+  has(id: ConversionNodeId): boolean {
     return this.#indexOf(id) !== undefined
   }
 
-  override *entries(): MapIterator<[ConversionNodeId, ConversionNode]> {
-    for (let at = 0; at < this.#order.length; at++) {
+  *entries(): MapIterator<[ConversionNodeId, ConversionNode]> {
+    for (let at = 0; at < this.#nodeEntries.length; at++) {
       const node = this.#nodeAt(at)
       yield [node.id, node]
     }
   }
 
-  override *keys(): MapIterator<ConversionNodeId> {
+  *keys(): MapIterator<ConversionNodeId> {
     for (const [id] of this.entries()) yield id
   }
 
-  override *values(): MapIterator<ConversionNode> {
-    for (let at = 0; at < this.#order.length; at++) yield this.#nodeAt(at)
+  *values(): MapIterator<ConversionNode> {
+    for (let at = 0; at < this.#nodeEntries.length; at++) yield this.#nodeAt(at)
   }
 
-  override [Symbol.iterator](): MapIterator<[ConversionNodeId, ConversionNode]> {
+  [Symbol.iterator](): MapIterator<[ConversionNodeId, ConversionNode]> {
     return this.entries()
   }
 
-  override forEach(
-    visit: (node: ConversionNode, id: ConversionNodeId, map: Map<ConversionNodeId, ConversionNode>) => void,
-    thisArg?: unknown
-  ): void {
+  forEach(visit: (node: ConversionNode, id: ConversionNodeId, table: ConversionNodeTable) => void, thisArg?: unknown): void {
     for (const [id, node] of this.entries()) visit.call(thisArg, node, id, this)
-  }
-
-  override set(): this {
-    throw new Error('the conversion node table is written only while the graph is built')
-  }
-
-  override delete(): boolean {
-    throw new Error('the conversion node table is read-only')
-  }
-
-  override clear(): void {
-    throw new Error('the conversion node table is read-only')
   }
 }
 
 export const buildConversionGraph = (
   plan: SealedRepresentationPlan,
   registry: ConversionRuntimeRegistry = emptyConversionRegistry,
-  constants: Iterable<Representation> = []
+  constants: readonly Representation[] = []
 ): ConversionGraph => {
   const context = createConversionDerivationContext(registry)
   const nodes = new ConversionNodeTable()
@@ -1683,10 +1714,21 @@ export const buildConversionGraph = (
     }
     sources.add(sourceKey)
   }
-  for (const [targetKey, target] of recastable) {
+  // Indexed rather than destructured: the inner body runs once per ordered
+  // pair, and `keyedDistinct` keys are distinct, so the same index is the
+  // same carrier.
+  const recastableKeys = recastable.map(([key]) => key)
+  const recastableCarriers = recastable.map(([, carrier]) => carrier)
+  const recastableCount = recastable.length
+  for (let targetIndex = 0; targetIndex < recastableCount; targetIndex += 1) {
+    const targetKey = recastableKeys[targetIndex]!
+    const target = recastableCarriers[targetIndex]!
     const existing = sourcesWithNodeInto.get(targetKey)
-    for (const [sourceKey, source] of recastable) {
-      if (sourceKey === targetKey || existing?.has(sourceKey)) continue
+    for (let sourceIndex = 0; sourceIndex < recastableCount; sourceIndex += 1) {
+      if (sourceIndex === targetIndex) continue
+      const sourceKey = recastableKeys[sourceIndex]!
+      if (existing !== undefined && existing.has(sourceKey)) continue
+      const source = recastableCarriers[sourceIndex]!
       const installed = registry.recasting(source, target)
       if (!installed) continue
       nodes.putAtom(sourceKey, targetKey, source, target, installed)

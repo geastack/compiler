@@ -76,7 +76,7 @@ export const typeQueryResultsOf = (
       changed = true
     }
   }
-  const isComparison = (operation: IrOperation): operation is ComputeOperation =>
+  const isComparison = (operation: IrOperation): boolean =>
     operation.kind === 'compute' &&
     (operation.form === 'equality' || operation.form === 'binary') &&
     ['===', '!==', '==', '!='].includes(operation.operator) &&
@@ -108,7 +108,7 @@ export const typeQueryResultsOf = (
   const operandOf = (operand: IrOperand): TypeQueryOperand =>
     values.has(operand.value) ? { kind: 'tag', operand } : { kind: 'literal', text: constants.get(operand.value)! }
   for (const operation of operations)
-    if (isComparison(operation) && operation.operands.some((operand) => values.has(operand.value)))
+    if (operation.kind === 'compute' && isComparison(operation) && operation.operands.some((operand) => values.has(operand.value)))
       comparisons.set(operation, {
         left: operandOf(operation.operands[0]!),
         right: operandOf(operation.operands[1]!),

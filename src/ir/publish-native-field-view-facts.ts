@@ -4,7 +4,7 @@ import type { BindingPlacement } from '../projection/bindings.js'
 import type { ClassLayout } from '../projection/classes.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import { nativeCallableFlowOf } from './callable-class-flow.js'
-import { allOperationsOf, type IrBody, type IrOperation } from './model.js'
+import { allOperationsOf, type IrBlock, type IrBlockId, type IrBody, type IrIteratorCloseRegion, type IrOperation } from './model.js'
 import {
   nativeFieldViewLivePlansOf,
   nativeFieldViewTargetSetOf,
@@ -36,7 +36,7 @@ export interface PublishNativeFieldViewFactsInput {
 
 /** Final native heap facts replace public-layout guesses after every operation recipe is published. */
 export const publishNativeFieldViewFacts = (input: PublishNativeFieldViewFactsInput): ReadonlyMap<PhysicalBodyId, IrBody> => {
-  const plans = nativeFieldViewLivePlansOf(input.bodies.values(), input.conversions, input.programConversions)
+  const plans = nativeFieldViewLivePlansOf([...input.bodies.values()], input.conversions, input.programConversions)
   const targets = nativeFieldViewTargetSetOf(plans)
   const documents = nativeFieldViewDocumentTargetSetOf(plans)
   if (targets.size === 0) return input.bodies
@@ -53,7 +53,7 @@ export const publishNativeFieldViewFacts = (input: PublishNativeFieldViewFactsIn
     [...input.bodies.values()].flatMap((body) => (body.abi === null ? [] : [[body.sourceOwner as FunctionId, body.abi] as const]))
   )
   return new Map(
-    [...input.bodies].map(([id, body]) => {
+    [...input.bodies].map(([id, body]): [PhysicalBodyId, IrBody] => {
       const keys = new Map<IrValueId, string>()
       for (const block of body.blocks.values())
         for (const operation of allOperationsOf(block)) {
@@ -63,19 +63,26 @@ export const publishNativeFieldViewFacts = (input: PublishNativeFieldViewFactsIn
       const publish = (operation: IrOperation): IrOperation => {
         let output = operation
         if ((operation.kind === 'get' || operation.kind === 'set') && operation.nativeObjectDataSlot !== undefined) return operation
-        if (operation.kind === 'get' || operation.kind === 'set') {
-          const { nativeDocumentEntry: previous, ...ordinary } = operation
+        // One rest per kind: a rest over `get | set` has no single record layout.
+        if (operation.kind === 'get') {
+          const { nativeDocumentEntry: _previous, ...ordinary } = operation
           const nativeDocumentEntry = nativeDocumentEntryOf(ordinary, flow, input.conversions, input.deriver, keys.get(operation.key.value))
-          if (nativeDocumentEntry !== null) {
+          if (nativeDocumentEntry !== null)
             return {
               ...ordinary,
               nativeDocumentEntry,
-              conversionRecipes:
-                operation.conversionRecipes?.filter(
-                  (recipe) => recipe.role !== (operation.kind === 'get' ? 'field-read' : 'field-write')
-                ) ?? []
+              conversionRecipes: operation.conversionRecipes?.filter((recipe) => recipe.role !== 'field-read') ?? []
             }
-          }
+          output = ordinary
+        } else if (operation.kind === 'set') {
+          const { nativeDocumentEntry: _previous, ...ordinary } = operation
+          const nativeDocumentEntry = nativeDocumentEntryOf(ordinary, flow, input.conversions, input.deriver, keys.get(operation.key.value))
+          if (nativeDocumentEntry !== null)
+            return {
+              ...ordinary,
+              nativeDocumentEntry,
+              conversionRecipes: operation.conversionRecipes?.filter((recipe) => recipe.role !== 'field-write') ?? []
+            }
           output = ordinary
         }
         if (operation.kind === 'construct') {
@@ -95,7 +102,6 @@ export const publishNativeFieldViewFacts = (input: PublishNativeFieldViewFactsIn
           return nativeNextMethodRead === null ? ordinary : { ...ordinary, nativeNextMethodRead }
         }
         if (operation.kind === 'iterator-next' || operation.kind === 'iterator-close') {
-          const { nativeMethodRead: previousRead, ...ordinary } = operation
           const nativeMethodRead = nativeFieldViewCarrierNeedsReceipt(operation.iterator.representation, targets)
             ? nativeIteratorFieldReadOf(
                 operation.iterator,
@@ -106,6 +112,12 @@ export const publishNativeFieldViewFacts = (input: PublishNativeFieldViewFactsIn
                 input.conversions
               )
             : null
+          // One rest per kind: a rest over `iterator-next | iterator-close` has no single record layout.
+          if (operation.kind === 'iterator-next') {
+            const { nativeMethodRead: _previous, ...ordinary } = operation
+            return nativeMethodRead === null ? ordinary : { ...ordinary, nativeMethodRead }
+          }
+          const { nativeMethodRead: _previous, ...ordinary } = operation
           return nativeMethodRead === null ? ordinary : { ...ordinary, nativeMethodRead }
         }
         if (
@@ -122,8 +134,10 @@ export const publishNativeFieldViewFacts = (input: PublishNativeFieldViewFactsIn
           return output
         const key = keys.get(operation.key.value)
         if (nativeFieldViewOpenDocumentRead(operation, key, targets, documents)) {
-          const { nativeFieldViewRead: previousRead, ...open } = output as typeof operation & { nativeFieldViewRead?: unknown }
-          return open as IrOperation
+          // Only a `get` carries a field-view read to drop.
+          if (output.kind !== 'get') return output
+          const { nativeFieldViewRead: _previous, ...open } = output
+          return open
         }
         if (operation.kind === 'get') {
           const { nativeDocumentEntry: previous, ...ordinary } = operation
@@ -170,16 +184,28 @@ export const publishNativeFieldViewFacts = (input: PublishNativeFieldViewFactsIn
           ...(body.iteratorCloseRegions === undefined
             ? {}
             : {
-                iteratorCloseRegions: body.iteratorCloseRegions.map((region) => {
-                  const { nativeMethodRead: previousRead, ...ordinary } = region
+                // Field by field, not a rest spread: both arms then build the
+                // one declared region record, so the array is of that record.
+                iteratorCloseRegions: body.iteratorCloseRegions.map((region): IrIteratorCloseRegion => {
                   const nativeMethodRead = nativeFieldViewCarrierNeedsReceipt(region.iterator.representation, targets)
                     ? nativeIteratorFieldReadOf(region.iterator, 'return', input.deriver, abis, flow, input.conversions)
                     : null
-                  return nativeMethodRead === null ? ordinary : { ...ordinary, nativeMethodRead }
+                  return {
+                    loop: region.loop,
+                    lineage: region.lineage,
+                    iterator: region.iterator,
+                    entry: region.entry,
+                    blocks: region.blocks,
+                    dismissTargets: region.dismissTargets,
+                    onlyIfOpen: region.onlyIfOpen,
+                    ...(region.completeOnStepAbrupt === undefined ? {} : { completeOnStepAbrupt: region.completeOnStepAbrupt }),
+                    bodyEntry: region.bodyEntry,
+                    ...(nativeMethodRead === null ? {} : { nativeMethodRead })
+                  }
                 })
               }),
           blocks: new Map(
-            [...body.blocks].map(([blockId, block]) => [
+            [...body.blocks].map(([blockId, block]): [IrBlockId, IrBlock] => [
               blockId,
               { ...block, operations: block.operations.map((operation) => publish(operation) as typeof operation) }
             ])

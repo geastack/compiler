@@ -1,4 +1,5 @@
 import ts from '#typescript'
+import { checkerUnionOf } from '../checker-union.js'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import type { StructuralShape } from '../model/structural-types.js'
 import type { StructuralTypeTable } from '../model/structural-type-table.js'
@@ -582,8 +583,7 @@ export const statedCollectionTypeAt = (checker: ts.TypeChecker, node: ts.Node): 
     if (!right) return null
     const left = checker.getNonNullableType(statedCollectionTypeAt(checker, node.left) ?? checker.getTypeAtLocation(node.left))
     if (left === right) return right
-    const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
-    return typeof constructing.getUnionType === 'function' ? constructing.getUnionType([left, right]) : null
+    return checkerUnionOf(checker, [left, right])
   }
   if (!ts.isCallExpression(node) || node.questionDotToken || !ts.isPropertyAccessExpression(node.expression)) return null
   const receiver = statedCollectionTypeAt(checker, node.expression.expression)
@@ -632,7 +632,7 @@ const statedContextOf = (checker: ts.TypeChecker, node: ts.Expression): ts.Type 
 const genericTargetOf = (type: ts.Type): ts.Type | null => {
   if ((type.flags & ts.TypeFlags.Object) === 0) return null
   if (((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) === 0) return null
-  return (type as ts.TypeReference).target
+  return (type as ts.TypeReference).target ?? null
 }
 
 /**

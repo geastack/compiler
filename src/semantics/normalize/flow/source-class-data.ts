@@ -3,7 +3,7 @@ import { isClassSpelledSourceClass, isConstructorFunction, type SourceClass, typ
 import { ownedClassReceiverInventoryOf } from './owned-class-receivers.js'
 import { isSourceInstanceMethod } from './source-prototype-method-identity.js'
 import type { ExactClassAllocationOrigins } from './member-call-forwarding.js'
-import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from '../deferred-intrinsic-protocols.js'
+import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement, captureAnswer } from '../deferred-intrinsic-protocols.js'
 import { objectPrototypeMemberNames } from '../../../representation/record-fields.js'
 import { accessorPassthroughAliasOf } from '../structural-declarations.js'
 import { isGlobalObjectConstructor, isStandardGlobalValue, isUnusableEvidence } from '../derived-expression-type.js'
@@ -104,7 +104,7 @@ const accessorPassthroughDataMemberOf = (
     // family. A Source subclass may replace data with an accessor too.
     const source = receiverType.getSymbol()?.valueDeclaration
     if (!source || (!ts.isClassDeclaration(source) && !ts.isClassExpression(source))) return null
-    const inventory = ownedClassReceiverInventoryOf(checker, flow, new Set([source]))
+    const inventory = ownedClassReceiverInventoryOf(checker, flow, new Set<SourceClass>([source]))
     if (!inventory) return null
     for (const candidate of inventory.classes) {
       const type = declaredClassTypeOf(checker, candidate)
@@ -229,7 +229,7 @@ const constructorInstalledMemberDeclarationsUncachedOf = (
           (member): member is ts.ConstructorDeclaration => ts.isConstructorDeclaration(member) && member.body !== undefined
         )
       : undefined
-  if (!ownerFrame) return new Map()
+  if (!ownerFrame) return new Map<string, ts.BinaryExpression[]>()
   const found = new Map<string, ts.BinaryExpression[]>()
   for (const write of flow.allWrites) {
     if (write.slot !== 'whole') continue
@@ -278,7 +278,7 @@ const familyRootsOf = (checker: ts.TypeChecker, query: SourceClassFamilyQuery): 
       type.isClassOrInterface() ||
       ((type.flags & ts.TypeFlags.Object) !== 0 &&
         ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) !== 0 &&
-        (type as ts.TypeReference).target.isClassOrInterface())
+        (type as ts.TypeReference).target!.isClassOrInterface())
     if (!classType) return false
     const declaration = type.getSymbol()?.valueDeclaration
     if (
@@ -370,6 +370,13 @@ const classConstructorSlotIsOriginalUncached = (checker: ts.TypeChecker, flow: V
   )
 }
 
+// The first root by a loop rather than `values().next().value`: a native build
+// has no view over an iterator's result record.
+const firstRootOf = (roots: ReadonlySet<SourceClass>): SourceClass | undefined => {
+  for (const root of roots) return root
+  return undefined
+}
+
 /** Only checker-stable queries may outlive a receiver proof. Injected caller
  * and receiver-family queries can depend on that proof's active assumptions,
  * so their answers must settle in its coinductive memo, not a global cache.
@@ -379,10 +386,26 @@ interface CachedPlan<R> {
   readonly value: R
   readonly requirements: readonly IntrinsicProtocolRequirement[]
 }
-type AnchorCache<R> = WeakMap<ValueFlowIndex, WeakMap<object, WeakMap<ts.Type, Map<string, CachedPlan<R>>>>>
-const dataMemberPlans: AnchorCache<{ readonly declarations: readonly ts.Declaration[] } | null> = new WeakMap()
-const callableMemberPlans: AnchorCache<{ readonly declarations: readonly ts.Declaration[] } | null> = new WeakMap()
-const keyReadPlans: AnchorCache<SourceClassKeyReadPlan | null> = new WeakMap()
+// Each level named and every table built with its type arguments: inside the
+// generic reader below, an unannotated `new WeakMap()` is an untyped table in a
+// native build, with no conversion to the instantiated level it is stored as.
+type PlansByKey<R> = Map<string, CachedPlan<R>>
+type PlansByReceiver<R> = WeakMap<ts.Type, PlansByKey<R>>
+type PlansByAnchor<R> = WeakMap<object, PlansByReceiver<R>>
+type AnchorCache<R> = WeakMap<ValueFlowIndex, PlansByAnchor<R>>
+/** One shape for both member plans, so their caches and their readers share one record type. */
+export interface SourceClassMemberPlan {
+  readonly declarations: readonly ts.Declaration[]
+}
+const dataMemberPlans: AnchorCache<SourceClassMemberPlan | null> = new WeakMap<
+  ValueFlowIndex,
+  PlansByAnchor<SourceClassMemberPlan | null>
+>()
+const callableMemberPlans: AnchorCache<SourceClassMemberPlan | null> = new WeakMap<
+  ValueFlowIndex,
+  PlansByAnchor<SourceClassMemberPlan | null>
+>()
+const keyReadPlans: AnchorCache<SourceClassKeyReadPlan | null> = new WeakMap<ValueFlowIndex, PlansByAnchor<SourceClassKeyReadPlan | null>>()
 // Read once at load: `process.env` is a native interceptor, and the member
 // plan below runs once per uncached (anchor, receiver, key) question -- and
 // once per VALUE query outright, since those are proof-local -- so a per-call
@@ -400,16 +423,19 @@ const cachedByAnchorAndKey = <R>(
   compute: () => R
 ): R => {
   if (proofLocal) return compute()
-  let byAnchor = store.get(flow)
-  if (!byAnchor) store.set(flow, (byAnchor = new WeakMap()))
-  let byType = byAnchor.get(anchor)
-  if (!byType) byAnchor.set(anchor, (byType = new WeakMap()))
-  let byKey = byType.get(receiver)
-  if (!byKey) byType.set(receiver, (byKey = new Map()))
+  let byAnchor: PlansByAnchor<R> | undefined = store.get(flow)
+  if (!byAnchor) store.set(flow, (byAnchor = new WeakMap<object, PlansByReceiver<R>>()))
+  let byType: PlansByReceiver<R> | undefined = byAnchor.get(anchor)
+  if (!byType) byAnchor.set(anchor, (byType = new WeakMap<ts.Type, PlansByKey<R>>()))
+  let byKey: PlansByKey<R> | undefined = byType.get(receiver)
+  if (!byKey) byType.set(receiver, (byKey = new Map<string, CachedPlan<R>>()))
   const ledger = deferredIntrinsicProtocolLedgerOf(flow)
   let answer = byKey.get(key)
   if (!answer) {
-    answer = ledger ? ledger.capture(compute) : { value: compute(), requirements: [] }
+    // Copied field by field: the ledger's result is a record type of its own,
+    // which a native build does not convert into `CachedPlan`.
+    const captured = ledger ? captureAnswer(ledger, compute) : null
+    answer = captured ? { value: captured.value, requirements: captured.requirements } : { value: compute(), requirements: [] }
     byKey.set(key, answer)
   }
   // A cache hit owes exactly the obligations that justified the first read.
@@ -429,7 +455,7 @@ export const sourceClassDataMemberPlanOf = (
   flow: ValueFlowIndex,
   query: SourceClassFamilyQuery,
   key: string
-): { readonly declarations: readonly ts.Declaration[] } | null =>
+): SourceClassMemberPlan | null =>
   cachedByAnchorAndKey(
     dataMemberPlans,
     flow,
@@ -445,7 +471,7 @@ const sourceClassDataMemberPlanUncached = (
   flow: ValueFlowIndex,
   query: SourceClassFamilyQuery,
   key: string
-): { readonly declarations: readonly ts.Declaration[] } | null => {
+): SourceClassMemberPlan | null => {
   if (key === '__proto__' || key === 'constructor') return null
   const roots = familyRootsOf(checker, query)
   if (!roots) return null
@@ -509,7 +535,7 @@ export const sourceClassCallableMemberPlanOf = (
   flow: ValueFlowIndex,
   query: SourceClassFamilyQuery,
   key: string
-): { readonly declarations: readonly ts.Declaration[] } | null =>
+): SourceClassMemberPlan | null =>
   cachedByAnchorAndKey(
     callableMemberPlans,
     flow,
@@ -525,7 +551,7 @@ const sourceClassCallableMemberPlanUncached = (
   flow: ValueFlowIndex,
   query: SourceClassFamilyQuery,
   key: string
-): { readonly declarations: readonly ts.Declaration[] } | null => {
+): SourceClassMemberPlan | null => {
   if (key === '__proto__' || key === 'constructor') return null
   const roots = familyRootsOf(checker, query)
   if (!roots || roots.size === 0) return null
@@ -636,7 +662,7 @@ const sourceClassKeyReadPlanUncached = (
   const interfaceOf = (type: ts.Type): ts.InterfaceType | null => {
     if (type.isClassOrInterface()) return type
     if ((type.flags & ts.TypeFlags.Object) !== 0 && ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) !== 0) {
-      const target = (type as ts.TypeReference).target
+      const target = (type as ts.TypeReference).target!
       return target.isClassOrInterface() ? target : null
     }
     return null
@@ -765,7 +791,7 @@ const sourceClassKeyReadPlanUncached = (
   }
   if (absent) {
     if (objectPrototypeMemberNames.has(key)) return null
-    const location = query.kind === 'value' ? query.expression : roots.values().next().value!
+    const location = query.kind === 'value' ? query.expression : firstRootOf(roots)!
     // The read falls through to Object.prototype for exactly this key, so the
     // obligation is that key's absence there -- not the whole prototype, which
     // any unattributed write anywhere in the program fails.

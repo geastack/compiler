@@ -129,16 +129,16 @@ export interface IntegerNarrowing {
 export const emptyIntegerNarrowing: IntegerNarrowing = {
   values: new Set(),
   bindings: new Set(),
-  magnitudes: new Map(),
+  magnitudes: new Map<IrValueId, IntegerMagnitude>(),
   integral: new Set(),
   integralRemainders: new Set(),
   dynamicRemainders: new Set(),
   roundingArithmetic: new Set(),
   integerDivisions: new Set(),
   nonZeroDivisors: new Set(),
-  declaredWidths: new Map(),
+  declaredWidths: new Map<IrValueId, DeclaredIntegerWidth>(),
   exactNumericConversions: new Set(),
-  declaredBindings: new Map()
+  declaredBindings: new Map<DeclarationId, DeclaredIntegerWidth>()
 }
 
 /**
@@ -289,7 +289,11 @@ export const programCellIntegersOf = (
   return cells
 }
 
-const noStorageFacts: IntegerStorageFacts = { reads: new Map(), integral: new Set(), magnitudes: new Map() }
+const noStorageFacts: IntegerStorageFacts = {
+  reads: new Map<IrValueId, string>(),
+  integral: new Set<string>(),
+  magnitudes: new Map<string, IntegerMagnitude>()
+}
 
 /** 2^53: the last integer a double can hold with every integer below it. */
 const exactIntegerLimit = 9007199254740992
@@ -1107,7 +1111,7 @@ const declaredIntegerValuesOf = (
       for (const operand of operandsOfIrOperation(operation)) consumed(operand.value, { phi: null, store: null })
     }
   }
-  const landsOnlyInDeclared = (value: IrValueId, seen: Set<IrValueId> = new Set()): boolean => {
+  const landsOnlyInDeclared = (value: IrValueId, seen: Set<IrValueId> = new Set<IrValueId>()): boolean => {
     if (seen.has(value)) return true
     seen.add(value)
     const uses = consumers.get(value) ?? []
@@ -1468,7 +1472,7 @@ const oddValuesOf = (
     const constant = constants.get(value)
     return constant !== undefined && constant % 2 === 0
   }
-  const odd = (value: IrValueId, seen: Set<IrValueId> = new Set()): boolean => {
+  const odd = (value: IrValueId, seen: Set<IrValueId> = new Set<IrValueId>()): boolean => {
     if (seen.has(value)) return false
     seen.add(value)
     const constant = constants.get(value)

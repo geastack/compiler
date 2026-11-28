@@ -406,7 +406,11 @@ const indexResults = (
 ): readonly (readonly (readonly [SemanticResultId, OperationId])[])[] => {
   const componentOf = new Map<OperationId, number>()
   for (const [index, members] of partition.entries()) for (const member of members) componentOf.set(member, index)
-  const results: (readonly [SemanticResultId, OperationId])[][] = partition.map(() => [])
+  // The callback states its element type: an untyped `() => []` is `never[]`,
+  // which a natively built compiler stores as one shared empty-array sentinel,
+  // so every component's push landed in a single array and each component then
+  // walked every result of the program.
+  const results = partition.map((): (readonly [SemanticResultId, OperationId])[] => [])
   for (const entry of graph.results) {
     const index = componentOf.get(entry[1])
     if (index !== undefined) results[index]?.push(entry)

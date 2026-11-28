@@ -1,5 +1,13 @@
 import type { DeclarationId, FunctionId, StructuralTypeId } from '../identity/ids.js'
-import type { CallableAbi, Ownership, RecordField, Representation, TypedArrayElementDomain, RecordAccessor } from './model.js'
+import type {
+  CallableAbi,
+  Ownership,
+  RecordField,
+  RecordIndexSidecar,
+  Representation,
+  TypedArrayElementDomain,
+  RecordAccessor
+} from './model.js'
 import type { StructuralShape } from '../semantics/model/structural-types.js'
 
 /**
@@ -676,7 +684,7 @@ export const defaultHostNamespaceRootPolicy: HostNamespaceRootPolicy = {
  */
 export interface RecordLayoutPolicy {
   readonly forShape: (shapeId: string) => readonly RecordField[] | null
-  readonly indexesForShape: (shapeId: string) => readonly { readonly value: Representation; readonly key: 'string' | 'number' | 'symbol' }[]
+  readonly indexesForShape: (shapeId: string) => readonly RecordIndexSidecar[]
   /** Data-only layouts, excluding accessors and open property sidecars. */
   readonly plainFieldsForShape?: (shapeId: string) => readonly RecordField[] | null
   /** The accessors a shape declares; `null` for a shape with no record layout. */
@@ -757,12 +765,14 @@ export interface RecordLayoutPolicy {
   /**
    * Every class in the program's class table that is this class or extends
    * it and can have an instance -- the classes a `constructor-identity` of
-   * this class can be -- each with the convention `new` invokes, or `null`
-   * when the class is not in the table.
+   * this class can be -- each with the convention `new` invokes and the
+   * carrier its instances have, or `null` when the class is not in the table.
    */
   readonly classSubtreeOf?: (
     declaration: DeclarationId
-  ) => readonly { readonly declaration: DeclarationId; readonly construct: CallableAbi | null }[] | null
+  ) =>
+    | readonly { readonly declaration: DeclarationId; readonly construct: CallableAbi | null; readonly instance: Representation | null }[]
+    | null
 }
 
 export const defaultRecordLayoutPolicy: RecordLayoutPolicy = {

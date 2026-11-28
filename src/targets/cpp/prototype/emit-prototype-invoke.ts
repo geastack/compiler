@@ -486,9 +486,12 @@ const promiseReactionText = (
    * takes no argument.
    */
   const settledText = (abi: NonNullable<ReturnType<typeof callableObjectAbi>>, handlerName: string, argument: string): string => {
+    // Narrowed through a local: a narrowed property path (`abi.result`) passed on
+    // as a whole `Representation` has no native widening.
+    const handlerResult = abi.result
     const handled = `${handlerName}.call(${argument})`
     if (discarded) return `${handled}; ${catchResultName}.resolve();`
-    if (abi.result.kind === 'void') {
+    if (handlerResult.kind === 'void') {
       if (carrier.value.kind === 'void') return `${handled}; ${catchResultName}.resolve();`
       // A function that falls off its end produced `undefined` (ECMA-262
       // 10.2.1.4: an implicit return completion carries it), and the result
@@ -524,16 +527,16 @@ const promiseReactionText = (
     // and with it the whole rest of the pump. Resolving instead of adopting
     // would be the quieter version of the same loss: the returned promise's
     // rejection is the only part of that chain still observable from here.
-    if (abi.result.kind === 'optional' && abi.result.payload.kind === 'promise') {
-      const adopted = operationConversionText(ctx, operation, 'promise-reaction', abi.result.payload, carrier, `(*${settledResultName})`)
+    if (handlerResult.kind === 'optional' && handlerResult.payload.kind === 'promise') {
+      const adopted = operationConversionText(ctx, operation, 'promise-reaction', handlerResult.payload, carrier, `(*${settledResultName})`)
       const absent =
         carrier.value.kind === 'void'
           ? ''
           : operationConversionText(ctx, operation, 'promise-reaction', { kind: 'undefined' }, carrier.value, cppUndefinedValue)
       if (adopted === null || absent === null) {
         throw createCppEmitBlockedError(
-          `conversion:${representationKey(abi.result)}->${representationKey(carrier)}`,
-          `a "${label}" handler returns "${representationKey(abi.result)}" -- a thenable that may be absent -- and no conversion is ` +
+          `conversion:${representationKey(handlerResult)}->${representationKey(carrier)}`,
+          `a "${label}" handler returns "${representationKey(handlerResult)}" -- a thenable that may be absent -- and no conversion is ` +
             `installed from ${adopted === null ? 'its payload' : 'the absence it stands for'} into this call's own result ` +
             `"${representationKey(carrier)}"`
         )
@@ -559,17 +562,17 @@ const promiseReactionText = (
     // 27.2.5.4.1 ADOPTS it, so the result settles when that promise settles and
     // rejects if it rejects -- dropping it here would resolve the result early
     // and swallow the rejection.
-    if (carrier.value.kind === 'void' && abi.result.kind !== 'promise') return `${handled}; ${catchResultName}.resolve();`
+    if (carrier.value.kind === 'void' && handlerResult.kind !== 'promise') return `${handled}; ${catchResultName}.resolve();`
     const arm =
-      abi.result.kind === 'promise'
-        ? operationConversionText(ctx, operation, 'promise-reaction', abi.result, carrier, handled)
+      handlerResult.kind === 'promise'
+        ? operationConversionText(ctx, operation, 'promise-reaction', handlerResult, carrier, handled)
         : ((payload) => (payload === null ? null : `${resultType}(${payload})`))(
-            operationConversionText(ctx, operation, 'promise-reaction', abi.result, carrier.value, handled)
+            operationConversionText(ctx, operation, 'promise-reaction', handlerResult, carrier.value, handled)
           )
     if (arm === null) {
       throw createCppEmitBlockedError(
-        `conversion:${representationKey(abi.result)}->${representationKey(carrier)}`,
-        `a "${label}" handler returns "${representationKey(abi.result)}" and no conversion is installed into this call's own ` +
+        `conversion:${representationKey(handlerResult)}->${representationKey(carrier)}`,
+        `a "${label}" handler returns "${representationKey(handlerResult)}" and no conversion is installed into this call's own ` +
           `result "${representationKey(carrier)}"`
       )
     }
@@ -721,10 +724,11 @@ const promiseFinallyText = (
         'callable; 27.2.5.3 calls it with no arguments at all -- no reason, no value, no receiver'
     )
   }
-  if (abi.result.kind === 'promise') {
+  const handlerResult = abi.result
+  if (handlerResult.kind === 'promise') {
     throw createCppEmitBlockedError(
       'host-invocation:Promise.prototype.finally',
-      `a "Promise.prototype.finally" handler returns "${representationKey(abi.result)}"; 27.2.5.3 step 5 resolves that thenable and waits ` +
+      `a "Promise.prototype.finally" handler returns "${representationKey(handlerResult)}"; 27.2.5.3 step 5 resolves that thenable and waits ` +
         'for it before passing the settlement on, and running the continuation without that wait would be a different program'
     )
   }
@@ -1534,12 +1538,30 @@ const renderPrototypeMethodCall = (
         'that no longer has the receiver'
     )
   }
-  const rendered = render(ctx, receiverText, read.arrayCarrier.element, operation.arguments, operation.result, operation)
+  // A recursive array alias (`type X = { arms: X[] } | ...`) is carried as its
+  // own wrapper class deriving from `ArrayObject<E>` (`recursive-containers.ts`).
+  // Every runtime helper deduces `E` from `Ref<ArrayObject<E>>`, and template
+  // deduction never looks through a base, so the receiver is handed over as
+  // its base handle: the same object, so mutating members still mutate it.
+  const carrier = read.arrayCarrier
+  const receiver =
+    carrier.recursive && carrier.ownership === 'shared-refcount'
+      ? `static_cast<gea::Ref<gea::ArrayObject<${cppTypeOf(carrier.element)}>>>(${receiverText})`
+      : receiverText
+  const produced = render(ctx, receiver, carrier.element, operation.arguments, operation.result, operation)
   // `join` and `toString` answer a fresh string whatever holds it. A borrowed
   // call -- `Array.prototype.join.call(arguments, ':')` -- is typed by
   // `Function.prototype.call`'s own `any` result, so the call's result is
   // dynamic and the string must cross into it like any other written value.
   const held = operation.result?.representation
+  // The mirror case: a fresh array stored where a recursive alias is carried.
+  // The runtime builds a plain `ArrayObject<E>` no conversion turns into the
+  // wrapper; the array is unobservable until returned, so it is adopted into
+  // one (`adoptFresh`). Never for members that answer the receiver itself.
+  const rendered =
+    held?.kind === 'array-object' && held.recursive && held.ownership === 'shared-refcount' && arrayCreatingMembers.has(read.member)
+      ? `gea::runtime::array::adoptFresh<${cppTypeOf(held)}>(${produced})`
+      : produced
   if (!stringResultMembers.has(read.member) || held === undefined || held.kind === 'string') return rendered
   const aligned = alignedValueText(ctx, `prototype/emit-prototype-invoke.ts:array-${read.member}`, { kind: 'string' }, held, rendered)
   if (aligned === null) {
@@ -1552,3 +1574,6 @@ const renderPrototypeMethodCall = (
 }
 
 const stringResultMembers: ReadonlySet<string> = new Set(['join', 'toString'])
+
+/** The members whose result is a new array, never the receiver (ECMA-262 23.1.3: each creates it with ArraySpeciesCreate or ArrayCreate). */
+const arrayCreatingMembers: ReadonlySet<string> = new Set(['map', 'filter', 'flatMap', 'slice', 'concat', 'flat', 'splice'])

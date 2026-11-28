@@ -2,7 +2,7 @@ import type { DeclarationId, FunctionId } from '../identity/ids.js'
 import type { ClassAccessor, ClassField, ClassLayout, ClassMethod } from './classes.js'
 import type { ConversionCensus } from '../conversion/nodes.js'
 import type { CallableAbi, Representation } from '../representation/model.js'
-import { abiKey, representationKey } from '../representation/model.js'
+import { absenceCarrier, abiKey, representationKey } from '../representation/model.js'
 import { classMemberOf } from './fields.js'
 
 /** Exact allocation identities and the method each prototype lookup selects.
@@ -381,6 +381,24 @@ export interface VirtualFieldImplementor {
   readonly field: ClassField
 }
 
+/**
+ * `{ ...family, implementors, copy, abstractRoot }`, field by field: a native
+ * build has no spread of a record with optional members into a declared type.
+ */
+const copyFamilyOf = (
+  family: VirtualMethodFamily,
+  implementors: readonly VirtualMethodImplementor[],
+  copy: string,
+  abstractRoot: boolean
+): VirtualMethodFamily => {
+  const { key, role, root, copyAbsentFrom, fieldImplementors } = family
+  if (copyAbsentFrom !== undefined && fieldImplementors !== undefined)
+    return { key, role, root, implementors, abstractRoot, copy, copyAbsentFrom, fieldImplementors }
+  if (copyAbsentFrom !== undefined) return { key, role, root, implementors, abstractRoot, copy, copyAbsentFrom }
+  if (fieldImplementors !== undefined) return { key, role, root, implementors, abstractRoot, copy, fieldImplementors }
+  return { key, role, root, implementors, abstractRoot, copy }
+}
+
 /** The topmost class along `declaration`'s chain that declares `key` as a method. */
 const rootDeclaring = (classes: ReadonlyMap<DeclarationId, ClassLayout>, declaration: DeclarationId, key: string): DeclarationId => {
   const walked = new Set<DeclarationId>()
@@ -441,22 +459,25 @@ export const virtualMethodFamiliesOf = (classes: ReadonlyMap<DeclarationId, Clas
     }
     return found.sort((left, right) => (left.declaration < right.declaration ? -1 : 1))
   }
-  return [...byRoot.values()]
-    .map((entry) => ({ entry, fieldImplementors: fieldImplementorsOf(entry) }))
-    .filter(
-      ({ entry, fieldImplementors }) =>
-        fieldImplementors.length > 0 || entry.implementors.some((implementor) => implementor.declaration !== entry.root)
-    )
-    .filter(({ entry }) => entry.rootDeclares)
-    .map(({ entry, fieldImplementors }) => ({
-      key: entry.key,
-      role: entry.role,
-      root: entry.root,
-      abstractRoot: !entry.implementors.some((implementor) => implementor.declaration === entry.root),
-      implementors: [...entry.implementors].sort((left, right) => (left.declaration < right.declaration ? -1 : 1)),
-      ...(fieldImplementors.length > 0 ? { fieldImplementors } : {})
-    }))
-    .sort((left, right) => (`${left.root} ${left.key} ${left.role}` < `${right.root} ${right.key} ${right.role}` ? -1 : 1))
+  return (
+    [...byRoot.values()]
+      .map((entry) => ({ entry, fieldImplementors: fieldImplementorsOf(entry) }))
+      .filter(
+        ({ entry, fieldImplementors }) =>
+          fieldImplementors.length > 0 || entry.implementors.some((implementor) => implementor.declaration !== entry.root)
+      )
+      .filter(({ entry }) => entry.rootDeclares)
+      // Each family spelled whole, with and without its field implementors: a
+      // conditional spread has no native layout to land in `VirtualMethodFamily`.
+      .map(({ entry, fieldImplementors }): VirtualMethodFamily => {
+        const abstractRoot = !entry.implementors.some((implementor) => implementor.declaration === entry.root)
+        const implementors = [...entry.implementors].sort((left, right) => (left.declaration < right.declaration ? -1 : 1))
+        return fieldImplementors.length > 0
+          ? { key: entry.key, role: entry.role, root: entry.root, abstractRoot, implementors, fieldImplementors }
+          : { key: entry.key, role: entry.role, root: entry.root, abstractRoot, implementors }
+      })
+      .sort((left, right) => (`${left.root} ${left.key} ${left.role}` < `${right.root} ${right.key} ${right.role}` ? -1 : 1))
+  )
 }
 
 /** The key a call site looks up: the class it resolved the member ON, plus the member. Moved here from `targets/cpp/virtual-methods.ts` (which still re-exports it) so `ir/call-dispatch.ts` can ask the identical question without importing a target module. */
@@ -539,7 +560,7 @@ const resultArmsOf = (value: Representation): readonly Representation[] =>
   value.kind === 'tagged-union'
     ? value.arms.flatMap((arm) => resultArmsOf(arm.value))
     : value.kind === 'optional'
-      ? [...resultArmsOf(value.payload), { kind: value.absence }]
+      ? [...resultArmsOf(value.payload), absenceCarrier(value.absence)]
       : [value]
 
 // The read may add only the optional chain's `undefined`: any other extra arm
@@ -716,12 +737,9 @@ const classCopyFamiliesOf = (
   }
   return [...byConvention]
     .sort(([left], [right]) => (left < right ? -1 : 1))
-    .map(([copy, implementors]) => ({
-      ...family,
-      implementors,
-      copy,
-      abstractRoot: !implementors.some((implementor) => implementor.declaration === family.root)
-    }))
+    .map(([copy, implementors]) =>
+      copyFamilyOf(family, implementors, copy, !implementors.some((implementor) => implementor.declaration === family.root))
+    )
 }
 
 /** One family `virtualDispatchVerdictOf` proved dispatchable: the topology (`virtualMethodFamiliesOf`'s answer) plus the ABI every implementor was proven to convert to. */
@@ -931,7 +949,8 @@ export const virtualDispatchVerdictOf = (
     // classes, and the whole family was refused. The slot answers the classes'
     // join -- every implementor's result upcasts to it.
     const borrowedResult = borrowed === null ? null : joinedClassResultOf(classes, family.implementors, abiOf)
-    const inheritedAbi =
+    // Typed as `CallableAbi`: see `constructAbi` in `representation/derive.ts`.
+    const inheritedAbi: CallableAbi | null =
       borrowed === null || rootInstance === null
         ? null
         : { ...borrowed, receiver: rootInstance, ...(borrowedResult ? { result: borrowedResult } : {}) }

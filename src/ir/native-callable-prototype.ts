@@ -11,6 +11,7 @@ import type { SemanticOperation } from '../semantics/model/operations.js'
 import { nativeCallableSourceAliasesOf } from './native-callable-argument.js'
 import { authenticatedNativeHostMethodReadOf, intrinsicCallArgumentMatches } from './intrinsic-call-facts.js'
 import { allOperationsOf, type CallOperation, type IrBody, type IrOperand, type IrOperation } from './model.js'
+import { bodyOperationIndexOf } from './body-operation-index.js'
 import type { NativeCallableDataSlotInput } from './native-callable-data-slots.js'
 import { resultOfIrOperation } from './queries.js'
 
@@ -28,10 +29,8 @@ export interface NativeCallablePrototype {
   readonly materialization: ConversionNodeId | null
 }
 
-export const nativeCallablePrototypeSourceAuthorityOf = (input: NativeCallableDataSlotInput) => {
-  const definitions = new Map<IrValueId, IrOperation>()
-  const positions = new Map<IrOperation, { readonly block: object; readonly index: number }>()
-  const writes = new Map<DeclarationId, Extract<IrOperation, { kind: 'binding-write' }>[]>()
+const buildSourceAuthority = (input: NativeCallableDataSlotInput) => {
+  const { definitions, positions, writes } = bodyOperationIndexOf(input.bodies)
   const allocations = new Map<SemanticResultId, Extract<IrOperation, { kind: 'allocate-callable' }> | null>()
   const initializers = new Map<DeclarationId, Extract<SemanticOperation, { family: 'binding' }> | null>()
   const sourceBodies = new Map<FunctionId, IrBody | null>()
@@ -46,18 +45,9 @@ export const nativeCallablePrototypeSourceAuthorityOf = (input: NativeCallableDa
     const source = body.sourceOwner as FunctionId
     sourceBodies.set(source, sourceBodies.has(source) ? null : body)
     for (const block of body.blocks.values())
-      for (const [index, operation] of allOperationsOf(block).entries()) {
-        positions.set(operation, { block, index })
-        const result = resultOfIrOperation(operation)
-        if (result) definitions.set(result.id, operation)
+      for (const operation of allOperationsOf(block))
         if (operation.kind === 'allocate-callable' && operation.lineage !== null)
           allocations.set(operation.lineage, allocations.has(operation.lineage) ? null : operation)
-        if (operation.kind === 'binding-write') {
-          const rows = writes.get(operation.declaration) ?? []
-          rows.push(operation)
-          writes.set(operation.declaration, rows)
-        }
-      }
   }
   const semanticOf = (operation: IrOperation): SemanticOperation | undefined => {
     const id = operation.lineage === null ? undefined : input.graph.results.get(operation.lineage)
@@ -156,6 +146,18 @@ export const nativeCallablePrototypeSourceAuthorityOf = (input: NativeCallableDa
       materialization: null
     }
   }
+}
+
+// Each receipt family asks for this authority over the same input, and the
+// index under it covers every operation of every body; build it once per input.
+const sourceAuthorities = new WeakMap<NativeCallableDataSlotInput, ReturnType<typeof buildSourceAuthority>>()
+
+export const nativeCallablePrototypeSourceAuthorityOf = (input: NativeCallableDataSlotInput): ReturnType<typeof buildSourceAuthority> => {
+  const remembered = sourceAuthorities.get(input)
+  if (remembered !== undefined) return remembered
+  const built = buildSourceAuthority(input)
+  sourceAuthorities.set(input, built)
+  return built
 }
 
 export const nativeCallablePrototypeReadsOf = (input: NativeCallableDataSlotInput) => {

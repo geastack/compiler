@@ -29,7 +29,6 @@ import { borrowedWindowCellsOf } from '../../ir/borrowed-window-cells.js'
 import { borrowedFieldReadsOf } from '../../ir/borrowed-field-reads.js'
 import type { CodeFreeFieldRead } from '../../ir/field-read-reuse.js'
 import {
-  DyingArgumentSet,
   dyingTransferUsesOf,
   receiverRenamesOf,
   ownedDyingMergeInputsOf,
@@ -129,6 +128,7 @@ import { type ConversionCensus } from '../../conversion/nodes.js'
 import {
   type PrinterDrift,
   alignedValueText,
+  emptyArraySentinelText,
   unsharedArrayRebuildText,
   unsharedDictionaryRebuildText,
   documentViewable,
@@ -148,7 +148,7 @@ import {
   emitFillLoop,
   isConstantExpression
 } from './emit-arrays.js'
-import type { IntegerStorageFacts } from '../../ir/integers.js'
+import type { IntegerMagnitude, IntegerStorageFacts } from '../../ir/integers.js'
 import { noInstantiationFacts, type InstantiationFacts } from '../../ir/instantiation.js'
 import { observesEveryCallableIdentity, type CallableIdentityDemand } from '../../ir/callable-identity-demand.js'
 import { stringConstantsOf } from '../../ir/dead-values.js'
@@ -224,6 +224,7 @@ import { isAsyncCoroutineBody } from './coroutine-bodies.js'
 import { classTableRootsOf, emitElement, emitElementChild, emitElementProp } from './emit-jsx.js'
 import { emitDeleteOperation, emitUnaryDelete } from './emit-dynamic-properties.js'
 import type { HostMethodAlias } from './host/host-method-aliases.js'
+import { setValues } from '../../collection-lists.js'
 
 /**
  * The execution region this section belongs to.
@@ -529,8 +530,22 @@ const dynamicComparisonText = (ctx: EmitContext, operation: ComputeOperation, fi
 }
 
 const dynamicUnaryText = (ctx: EmitContext, operation: ComputeOperation, operand: IrOperand): string | null => {
-  if (operand.representation.kind !== 'dynamic') return null
-  const number = `gea::dynamicToNumber(${operandText(ctx, operand)})`
+  const carrier = operand.representation
+  // An optional Number is ToNumber of its payload when present; absent, it is
+  // ToNumber(undefined) = NaN or ToNumber(null) = +0 (ECMA-262 7.1.4), which
+  // the carrier's own absence states statically.
+  const optionalNumber =
+    carrier.kind === 'optional' &&
+    carrier.payload.kind === 'scalar' &&
+    carrier.payload.domain !== 'boolean' &&
+    carrier.payload.domain !== 'bigint'
+  if (carrier.kind !== 'dynamic' && !optionalNumber) return null
+  const number =
+    carrier.kind === 'optional'
+      ? `([](const auto& gea_operand) -> double { return gea_operand.has_value() ? static_cast<double>(*gea_operand) : ${
+          carrier.absence === 'null' ? '0.0' : 'std::numeric_limits<double>::quiet_NaN()'
+        }; })(${operandText(ctx, operand)})`
+      : `gea::dynamicToNumber(${operandText(ctx, operand)})`
   const applied =
     operation.operator === '-'
       ? `(-${number})`
@@ -594,6 +609,30 @@ const binaryOperatorFor = (operator: string, carrier: Representation): CppOperat
   // int32/uint32/bigint have exact range semantics that a bare C++ operator does
   // not reproduce (wrapping, promotion, arbitrary precision); no spelling here.
   return null
+}
+
+/** The infix operators whose C++ meaning between two `int` literals can leave the Number's answer (`/` is widened separately). */
+const literalIntegerArithmetic = new Set(['+', '-', '*'])
+
+/**
+ * Whether an operand is spelled as C++ text of an integer type that is not the
+ * Number's storage: a constant whose digits print bare (`cppConstantLiteral`),
+ * or a negation of one (`-(5)`, still an `int`). A constant zero's negation is
+ * spelled `-0.0` and a declared `int`/`i32` result is its own width, so
+ * neither counts. Anything else is a cell of `double` or `long long` already.
+ */
+const rendersAsIntLiteral = (ctx: EmitContext, operand: IrOperand): boolean => {
+  if (operand.representation.kind !== 'scalar' || operand.representation.domain !== 'number') return false
+  const text = ctx.constantTexts.get(operand.value)
+  if (text !== undefined) {
+    const digits = text.startsWith('-') ? text.slice(1) : text
+    return digits.length > 0 && [...digits].every((digit) => digit >= '0' && digit <= '9') && Number.isSafeInteger(Number(text))
+  }
+  const origin = ctx.computeOrigins.get(operand.value)
+  if (origin === undefined || origin.form !== 'unary' || origin.operator !== '-' || ctx.declaredWidths.has(origin.result.id)) return false
+  const negated = origin.operands[0]
+  if (negated === undefined || Number(ctx.constantTexts.get(negated.value)) === 0) return false
+  return rendersAsIntLiteral(ctx, negated)
 }
 
 const declaredWrappingHelpers: ReadonlyMap<string, string> = new Map([
@@ -793,7 +832,7 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
       return
     }
     if (operation.operator === 'ToNumeric') return emitToNumericCoercion(ctx, lines, first, operation.result)
-    // `-x`, `+x` and `~x` over a dynamic operand: ToNumber (ToPrimitive
+    // `-x`, `+x` and `~x` over a dynamic or optional Number operand: ToNumber (ToPrimitive
     // first) and the Number operator, as the binary operators above do.
     const dynamicUnary = dynamicUnaryText(ctx, operation, first)
     if (dynamicUnary !== null) {
@@ -1137,7 +1176,9 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
   // no conversion of one into the other could preserve: a view is a second
   // allocation over the same source. `gea::Ref<Map>`'s own `operator==` looks
   // through the view (`Map::identity`), so the comparison names the one object
-  // both hold, exactly as `===` on two references does.
+  // both hold, exactly as `===` on two references does. Two Sets are the same
+  // case: a `Set<unknown>` read out of a box is a view of the typed Set
+  // (`Set::identity`).
   const firstCarrier = first.representation
   const secondCarrier = second.representation
   if (
@@ -1145,8 +1186,8 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
     representationKey(firstCarrier) !== representationKey(secondCarrier) &&
     firstCarrier.kind === 'keyed-collection' &&
     secondCarrier.kind === 'keyed-collection' &&
-    firstCarrier.family === 'map' &&
-    secondCarrier.family === 'map' &&
+    (firstCarrier.family === 'map' || firstCarrier.family === 'set') &&
+    secondCarrier.family === firstCarrier.family &&
     firstCarrier.ownership === 'shared-refcount' &&
     secondCarrier.ownership === 'shared-refcount' &&
     firstCarrier.recursive === undefined &&
@@ -1369,7 +1410,16 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
     lines.push(`${name} = ${rounding}(${left}, ${right});`)
     return
   }
-  const expression = spelling.kind === 'infix' ? `${left} ${spelling.text} ${right}` : `${spelling.text}(${left}, ${right})`
+  // Two operands that are both bare C++ integer literals (`3 * 1024`) would
+  // otherwise compute in `int`: past 2^31 that is undefined behaviour and a
+  // wrong Number, and `0 * -1` loses ECMA-262's -0. Widening one side to the
+  // result's own storage makes C++ compute at the Number's width instead.
+  const literalOnly =
+    literalIntegerArithmetic.has(operation.operator) && rendersAsIntLiteral(ctx, first) && rendersAsIntLiteral(ctx, second)
+  const widenedLeft = literalOnly
+    ? `static_cast<${isIntegerStorageValue(ctx, operation.result.id) ? 'long long' : 'double'}>(${left})`
+    : left
+  const expression = spelling.kind === 'infix' ? `${widenedLeft} ${spelling.text} ${right}` : `${spelling.text}(${widenedLeft}, ${right})`
   // Coerced operands compute the operator's own result -- a Number, a String
   // for `+` over strings, a Boolean for a relational -- but the CELL is what
   // the checker published for the expression, which is `dynamic` whenever it
@@ -1634,7 +1684,13 @@ const emitConvert = (ctx: EmitContext, lines: string[], operation: ConvertOperat
   // An instruction cites one recipe, including contextual reads and native
   // method views; re-looking up its pair would discard that authority.
   const named = ctx.conversions.nodeById(operation.conversionUse)
+  // A consumed empty literal (`releasesSource` off a plain conversion): its own fresh array when nothing else holds it.
+  const consumedEmpty =
+    operation.releasesSource === true
+      ? emptyArraySentinelText(operation.source.representation, operation.result.representation, sourceText, true)
+      : null
   const text =
+    consumedEmpty ??
     (named === null ? null : namedConversionText(ctx, 'emit.ts:conversion', named, sourceText)) ??
     unallocatedClassViewText(ctx, operation.source.representation, operation.result.representation, sourceText)
   if (text === null) {
@@ -1777,16 +1833,17 @@ const emitYield = (ctx: EmitContext, lines: string[], operation: YieldOperation,
   // generator that yields nothing else, an optional or a sum carrying the
   // absence otherwise), never as a default-constructed element the program
   // did not write.
-  const bareUndefined = operation.operand
-    ? null
-    : alignedValueText(ctx, 'emit.ts:1128', { kind: 'undefined' }, cursor.element, cppUndefinedValue)
-  if (!operation.operand && bareUndefined === null) {
+  // A `void` operand (`yield step` relaying a `Generator<void>`) has no
+  // storage to read; what it yields is the same `undefined` a bare `yield` does.
+  const operand = operation.operand?.representation.kind === 'void' ? null : operation.operand
+  const bareUndefined = operand ? null : alignedValueText(ctx, 'emit.ts:1128', { kind: 'undefined' }, cursor.element, cppUndefinedValue)
+  if (!operand && bareUndefined === null) {
     throw createCppEmitBlockedError(
       'abrupt-edge:suspend',
       `yields no value; a bare \`yield\` yields \`undefined\`, which this cursor's "${representationKey(cursor.element)}" element carrier cannot hold`
     )
   }
-  const yielded = operation.operand ? alignedText(ctx, cursor.element, operation.operand, 'yield') : bareUndefined
+  const yielded = operand ? alignedText(ctx, cursor.element, operand, 'yield') : bareUndefined
   // 27.6.3.8 AsyncGeneratorYield AWAITS the value before settling the pending
   // `next()` with it; `gea::AsyncGenerator` adds no Await of its own, so the
   // tick is written here.
@@ -2337,9 +2394,8 @@ const bindPastedOperandsOnce = (ctx: EmitContext, lines: string[], lineMark: num
 }
 
 /** The stores `buildDyingArgumentIndex` moved to follow the reads of their formal (`SunkStore`). */
-const sunkStoresOf = (ctx: EmitContext): ReadonlyMap<IrValueId, SunkStore> =>
-  ctx.dyingArguments instanceof DyingArgumentSet ? ctx.dyingArguments.sunkStores : noSunkStores
-const noSunkStores: ReadonlyMap<IrValueId, SunkStore> = new Map()
+const sunkStoresOf = (ctx: EmitContext): ReadonlyMap<IrValueId, SunkStore> => ctx.sunkStores
+const noSunkStores: ReadonlyMap<IrValueId, SunkStore> = new Map<IrValueId, SunkStore>()
 /** Sunk stores the block loop is emitting at their new position right now. */
 const emittingSunkStore = new WeakSet<object>()
 
@@ -2520,19 +2576,21 @@ const layoutOf = (
   return { nextLabel, labeled }
 }
 
-const threadedFlowOf = (
+// Generic in the write so the caller's typed map flows in as it is: an
+// `unknown[]` element type has no native conversion from a record array.
+const threadedFlowOf = <W>(
   ctx: EmitContext,
   body: IrBody,
   labels: ReadonlyMap<IrBlockId, string>,
   hoists: HoistPlan,
-  mergeWrites: ReadonlyMap<IrBlockId, readonly unknown[]>
+  mergeWrites: ReadonlyMap<IrBlockId, readonly W[]>
 ): ThreadedFlow => {
   if (body.tryRegions.length > 0 || (body.iteratorCloseRegions?.length ?? 0) > 0 || body.blockOrder.length === 1) {
     return {
       labels,
-      skipped: new Set(),
+      skipped: new Set<IrBlockId>(),
       labeled: new Set(labels.values()),
-      nextLabel: new Map(),
+      nextLabel: new Map<IrBlockId, string>(),
       rendered: body.blockOrder,
       successors: null
     }
@@ -2649,9 +2707,12 @@ const nestedBlocksOf = (
   declarations: readonly { readonly name: string; readonly type: string }[],
   rootText: string,
   facts: CppFacts,
-  internalLabels: ReadonlyMap<IrBlockId, ReadonlySet<string>> = new Map(),
-  restricted: ReadonlyMap<IrBlockId, readonly { readonly name: string; readonly type: string }[]> = new Map(),
-  lifetimeOrigins: ReadonlyMap<string, IrBlockId> = new Map()
+  internalLabels: ReadonlyMap<IrBlockId, ReadonlySet<string>> = new Map<IrBlockId, ReadonlySet<string>>(),
+  restricted: ReadonlyMap<IrBlockId, readonly { readonly name: string; readonly type: string }[]> = new Map<
+    IrBlockId,
+    readonly { readonly name: string; readonly type: string }[]
+  >(),
+  lifetimeOrigins: ReadonlyMap<string, IrBlockId> = new Map<string, IrBlockId>()
 ): { readonly top: readonly { readonly name: string; readonly type: string }[]; readonly artifacts: readonly CppArtifact[] } => {
   const flat = (): { readonly top: typeof declarations; readonly artifacts: readonly CppArtifact[] } => ({
     top: declarations,
@@ -2667,7 +2728,7 @@ const nestedBlocksOf = (
     if (!block) return flat()
     const allowed = new Set([
       ...(successors.get(id) ?? []).map((next) => requireBlockLabel(labels, next)),
-      ...(internalLabels.get(id) ?? [])
+      ...setValues(internalLabels.get(id))
     ])
     if (gotoTargetsOf(block.artifact.text).some((target) => !allowed.has(target))) return flat()
     mentions.set(
@@ -2856,7 +2917,7 @@ const regionScopedBlocksOf = (
   declarations: readonly { readonly name: string; readonly type: string }[],
   rootText: string,
   facts: CppFacts,
-  lifetimeOrigins: ReadonlyMap<string, IrBlockId> = new Map()
+  lifetimeOrigins: ReadonlyMap<string, IrBlockId> = new Map<string, IrBlockId>()
 ): { readonly top: readonly { readonly name: string; readonly type: string }[]; readonly artifacts: readonly CppArtifact[] } | null => {
   if (chunkIds.length !== chunks.length) return null
   const allLabels = new Set(labels.values())
@@ -2922,7 +2983,7 @@ const regionScopedBlocksOf = (
     [rootText, ...atRoot].join('\n'),
     facts,
     internal,
-    new Map(),
+    new Map<IrBlockId, readonly { readonly name: string; readonly type: string }[]>(),
     chunkOrigins
   )
 }
@@ -2975,7 +3036,7 @@ export const emitBody = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   hosts: HostSpellings,
   deriver: RepresentationDeriver,
-  wellKnownSymbols: ReadonlyMap<DeclarationId, string> = new Map(),
+  wellKnownSymbols: ReadonlyMap<DeclarationId, string> = new Map<DeclarationId, string>(),
   captures: CaptureIndex = emptyCaptureIndex,
   // No default: `symbolKeys`/`templateObjects` are ONE table for the whole
   // program (`translation-unit.ts`'s own comment on its `templateObjects`
@@ -2988,42 +3049,48 @@ export const emitBody = (
   // shared one (scripts/architecture.mjs's EmitContext Map/Set check).
   symbolKeys: Map<string, string>,
   templateObjects: Map<string, TemplateObjectDefinition>,
-  directCallableBindings: ReadonlyMap<DeclarationId, FunctionId> = new Map(),
+  directCallableBindings: ReadonlyMap<DeclarationId, FunctionId> = new Map<DeclarationId, FunctionId>(),
   // `virtualDispatch` is every `class key` with a dispatch member (`virtual-methods.ts`);
   // `narrowedStorage`/`narrowedFormals` are what the integer census settled here.
-  virtualDispatch: ReadonlyMap<string, CallableAbi> = new Map(),
-  narrowedStorage: IntegerStorageFacts = { reads: new Map(), integral: new Set(), magnitudes: new Map() },
-  narrowedFormals: ReadonlySet<number> = new Set(),
-  repeatedConstructors: ReadonlyMap<DeclarationId, DeclarationId> = new Map(),
-  dyingArguments: ReadonlySet<IrValueId> = new Set(),
+  virtualDispatch: ReadonlyMap<string, CallableAbi> = new Map<string, CallableAbi>(),
+  narrowedStorage: IntegerStorageFacts = {
+    reads: new Map<IrValueId, string>(),
+    integral: new Set<string>(),
+    magnitudes: new Map<string, IntegerMagnitude>()
+  },
+  narrowedFormals: ReadonlySet<number> = new Set<number>(),
+  repeatedConstructors: ReadonlyMap<DeclarationId, DeclarationId> = new Map<DeclarationId, DeclarationId>(),
+  dyingArguments: ReadonlySet<IrValueId> = new Set<IrValueId>(),
   instantiation: InstantiationFacts = noInstantiationFacts,
   abiOfCallable: (callable: FunctionId) => IrBody['abi'] = () => null,
-  functionFacts: ReadonlyMap<FunctionId, CallableFactsSpelling> = new Map(),
-  constructEntries: ReadonlySet<FunctionId> = new Set(),
-  hostMethodAliases: ReadonlyMap<DeclarationId, HostMethodAlias> = new Map(),
-  callableMemberCandidates: ReadonlyMap<string, FunctionId> = new Map(),
-  callableFlowCandidates: ReadonlyMap<IrValueId, CallableFlowCandidate> = new Map(),
-  borrowableMemberBodies: ReadonlySet<FunctionId> = new Set(),
-  stableBorrowEntries: ReadonlyMap<string, StableBorrowEntry> = new Map(),
+  functionFacts: ReadonlyMap<FunctionId, CallableFactsSpelling> = new Map<FunctionId, CallableFactsSpelling>(),
+  constructEntries: ReadonlySet<FunctionId> = new Set<FunctionId>(),
+  hostMethodAliases: ReadonlyMap<DeclarationId, HostMethodAlias> = new Map<DeclarationId, HostMethodAlias>(),
+  callableMemberCandidates: ReadonlyMap<string, FunctionId> = new Map<string, FunctionId>(),
+  callableFlowCandidates: ReadonlyMap<IrValueId, CallableFlowCandidate> = new Map<IrValueId, CallableFlowCandidate>(),
+  borrowableMemberBodies: ReadonlySet<FunctionId> = new Set<FunctionId>(),
+  stableBorrowEntries: ReadonlyMap<string, StableBorrowEntry> = new Map<string, StableBorrowEntry>(),
   printerDrift: PrinterDrift[] = [],
   conversions: ConversionCensus | null = null,
   nativeSelections: ReadonlyMap<string, NativeSelectionHelper> | undefined = undefined,
   callableIdentityDemand: CallableIdentityDemand = observesEveryCallableIdentity,
   nativeIntegrityRestricted: IntegrityRestrictions = restrictsEveryCarrier,
   fixedFieldStateConstant = false,
-  definitionCells: ReadonlySet<DeclarationId> = new Set(),
+  definitionCells: ReadonlySet<DeclarationId> = new Set<DeclarationId>(),
   constructionOnlyFields: ConstructionOnlyFields = noConstructionOnlyFields,
-  keyOrderUnobserved: ReadonlySet<string> = new Set(),
+  keyOrderUnobserved: ReadonlySet<string> = new Set<string>(),
   debugSource?: NativeDebugSource,
-  borrowedFormals: ReadonlySet<number> = new Set(),
-  taskResults: ReadonlySet<IrValueId> = new Set(),
+  borrowedFormals: ReadonlySet<number> = new Set<number>(),
+  taskResults: ReadonlySet<IrValueId> = new Set<IrValueId>(),
   conversionIsCertified?: (id: string) => boolean,
   programConversionRecipes?: readonly ProgramConversionRecipe[],
   physicalIndexProtocols?: ReadonlyMap<DeclarationId, boolean>,
   writeEffects: WriteEffects = everyStoreEffects,
   returnsOwnReceiver = false,
-  allocationCells: ReadonlyMap<DeclarationId, AllocationCell> = new Map(),
-  codeFreeFieldRead: CodeFreeFieldRead = () => false
+  allocationCells: ReadonlyMap<DeclarationId, AllocationCell> = new Map<DeclarationId, AllocationCell>(),
+  codeFreeFieldRead: CodeFreeFieldRead = () => false,
+  // The stores moved behind the reads of `dyingArguments` (`EmitContext.sunkStores`).
+  sunkStores: ReadonlyMap<IrValueId, SunkStore> = noSunkStores
 ): readonly CppArtifact[] => {
   // Every fact this body settles before a single line renders, computed here
   // -- from `body` and the plain, already-available inputs above -- and
@@ -3064,13 +3131,13 @@ export const emitBody = (
         ].filter(([later, earlier]) => !borrowedArmProjections.has(later) && !borrowedArmProjections.has(earlier))
   )
   const pinnedConversions = new Set([...repeatedConversions.keys(), ...repeatedConversions.values()])
-  const pinnedOut = <T extends IrValueId>(values: Iterable<T>): T[] => [...values].filter((value) => !pinnedConversions.has(value))
+  const pinnedOut = <T extends IrValueId>(values: readonly T[]): T[] => values.filter((value) => !pinnedConversions.has(value))
+  // The sunk stores stay whole: a pinned read stops moving, but its store has
+  // already been placed behind it.
   const bodyDyingArguments = (() => {
     if (![...pinnedConversions].some((value) => dyingArguments.has(value))) return dyingArguments
-    const kept = new DyingArgumentSet()
+    const kept = new Set<IrValueId>()
     for (const value of dyingArguments) if (!pinnedConversions.has(value)) kept.add(value)
-    if (dyingArguments instanceof DyingArgumentSet)
-      for (const [value, store] of dyingArguments.sunkStores) kept.sunkStores.set(value, store)
     return kept
   })()
   // A read has to know what the REST of the body does to the cell it reads.
@@ -3180,6 +3247,7 @@ export const emitBody = (
     ownedDyingValues,
     transferDyingValues,
     receiverRenames: receiverRenamesOf(body),
+    sunkStores,
     consumingFormalConversions: formalInputs.conversions,
     classTableRoots: classTableRootsOf(body),
     stableBorrowActuals: stableWithProjections,
@@ -3583,7 +3651,9 @@ export const emitBody = (
       for (const [value, width] of settled.declaredWidths) prepass.declaredWidths.set(value, width)
       for (const value of settled.exactNumericConversions) prepass.exactNumericConversions.add(value)
       for (const [cell, width] of settled.declaredIntegerCells) prepass.declaredIntegerCells.set(cell, width)
-      for (const [value, limit] of narrowedStorage.guarded ?? []) prepass.integerCallChecks.set(value, limit)
+      // Guarded, not `?? []`: a map-or-array union has no native iterator.
+      if (narrowedStorage.guarded !== undefined)
+        for (const [value, limit] of narrowedStorage.guarded) prepass.integerCallChecks.set(value, limit)
       for (const [call, intrinsic] of settled.numericCalls) prepass.numericCalls.set(call, intrinsic)
       for (const value of settled.numericCallOnly) prepass.numericCallOnly.add(value)
       collectFormalCells(ctx, prepass, body)
@@ -3909,13 +3979,15 @@ export const emitBody = (
   let topDeclarations: readonly { readonly name: string; readonly type: string }[] = ctx.declarations
   const lifetimeOrigins = new Map<string, IrBlockId>()
   const atEntry: string[] = []
-  for (const [declaration, origin] of body.bindingLifetimeOrigins ?? []) {
-    const name = ctx.bindingNames.get(declaration)
-    if (name === undefined) continue
-    const rendered = flow.rendered.find((id) => id === origin || labels.get(id) === labels.get(origin))
-    if (origin === body.entry || rendered === undefined || rendered === body.entry) atEntry.push(name)
-    else lifetimeOrigins.set(name, rendered)
-  }
+  // Guarded, not `?? []`: a map-or-array union has no native iterator.
+  if (body.bindingLifetimeOrigins !== undefined)
+    for (const [declaration, origin] of body.bindingLifetimeOrigins) {
+      const name = ctx.bindingNames.get(declaration)
+      if (name === undefined) continue
+      const rendered = flow.rendered.find((id) => id === origin || labels.get(id) === labels.get(origin))
+      if (origin === body.entry || rendered === undefined || rendered === body.entry) atEntry.push(name)
+      else lifetimeOrigins.set(name, rendered)
+    }
   const lifetimeRootText = [...entryPrologue, ...atEntry].join('\n')
   if (plan !== null && flow.successors !== null) {
     const nested = nestedBlocksOf(
@@ -3926,7 +3998,7 @@ export const emitBody = (
       ctx.declarations,
       lifetimeRootText,
       declarationFacts,
-      new Map(),
+      new Map<IrBlockId, ReadonlySet<string>>(),
       restrictedParametersOf(ctx),
       lifetimeOrigins
     )
@@ -3977,8 +4049,17 @@ export const emitBody = (
   // function as an exception, and a caller that only chained `.then(ok, err)`
   // died of it. The guard encloses every block, so no `goto` crosses into it;
   // the declarations stay outside, where they already are.
-  if (!ctx.asyncCoroutineBody && body.async === true && body.generator !== true && body.abi?.result.kind === 'promise') {
-    const result = cppTypeOf(body.abi.result)
+  // Read once into a local: the optional chain's `undefined` otherwise stays on
+  // the narrowed result, and no native conversion drops it at the call.
+  const abiResult = body.abi?.result
+  if (
+    !ctx.asyncCoroutineBody &&
+    body.async === true &&
+    body.generator !== true &&
+    abiResult !== undefined &&
+    abiResult.kind === 'promise'
+  ) {
+    const result = cppTypeOf(abiResult)
     return [
       declarations,
       ...prologue,

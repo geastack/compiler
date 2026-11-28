@@ -320,7 +320,7 @@ const copyTextOf = (
   const enclosing = enclosingDeclarationsOf(receiverClass)
   if (free.some((name) => enclosing.has(name))) return null
   // `NodeArray.pos` sits just past the `<` or `(` that opens it.
-  const signatureStart = (method.typeParameters ?? method.parameters).pos - 1
+  const signatureStart = (method.typeParameters?.pos ?? method.parameters.pos) - 1
   if (signatureStart < method.getStart(file)) return null
   const edits: { start: number; end: number; text: string }[] = []
   const visit = (node: ts.Node): void => {

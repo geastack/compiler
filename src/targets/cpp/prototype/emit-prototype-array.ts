@@ -4,7 +4,7 @@ import type { CallOperation, IrOperand, IrResult } from '../../../ir/model.js'
 import { operationConversionText } from '../emit-certified-conversion.js'
 import type { Representation } from '../../../representation/model.js'
 import { storedCarrier } from '../../../representation/primitives.js'
-import { representationKey } from '../../../representation/model.js'
+import { absenceCarrier, representationKey } from '../../../representation/model.js'
 import { createCppEmitBlockedError, cppThunkName, operandText, type EmitContext } from '../emit-context.js'
 import { alignedValueText, type ConversionSite } from '../emit-narrowing.js'
 import { toStringRefusal, toStringText } from '../emit-tostring.js'
@@ -12,7 +12,9 @@ import { cppConstantLiteral, cppRecordFieldName, cppRecordStructName, cppTypeOf 
 import { memberAccessOperator } from '../emit-carrier-members.js'
 import type { StructuralTypeId } from '../../../identity/ids.js'
 import { booleanTestText } from '../emit-presence.js'
+import { strictEqualityText } from '../emit-equality.js'
 import { armAt, armIs } from '../emit-union-properties.js'
+import { flatMapFlatteningOf } from '../../../ir/flat-map-flattening.js'
 
 /**
  * `Array.prototype`, as this backend renders it.
@@ -182,10 +184,18 @@ const bulkInsertText =
     // withheld pack, whose elements are still separate expressions, has
     // anything to convert. `convertedValueText` is the one authority for
     // whether a pair converts at all; a pair it refuses still refuses here.
-    const converted =
-      withheld?.elements.map((text) => alignedValueText(ctx, 'prototype/emit-prototype-array.ts:174', packedElement, element, text)) ?? null
-    if (converted !== null && converted.every((text) => text !== null)) {
-      return `gea::runtime::array::${member}(${[receiverText, ...converted].join(', ')})`
+    // Collected into a `string[]` while every element is still converted: an
+    // `every`-narrowed `(string | null)[]` has no native conversion to the
+    // array of strings joined below.
+    if (withheld) {
+      const converted: string[] = [receiverText]
+      let complete = true
+      for (const text of withheld.elements) {
+        const aligned = alignedValueText(ctx, 'prototype/emit-prototype-array.ts:174', packedElement, element, text)
+        if (aligned === null) complete = false
+        else converted.push(aligned)
+      }
+      if (complete) return `gea::runtime::array::${member}(${converted.join(', ')})`
     }
     throw createCppEmitBlockedError(
       `runtime-helper:element:${member}:${elementKey(element)}`,
@@ -223,8 +233,63 @@ const callbackMethodText =
           (args.length > 1 ? `, and ECMA-262 ${clause}'s second parameter is a thisArg a CallableObject has nothing to bind` : '')
       )
     }
-    return `gea::runtime::array::${member}(${receiverText}, ${elementAdaptedCallbackText(ctx, member, clause, _element, callback, result, operation)})`
+    const stated = member === 'flatMap' ? (flatMapResultCarrier(callback, result) ?? flatMapConvertedCarrier(callback, result)) : null
+    return `gea::runtime::array::${member}${stated === null ? '' : `<${stated}>`}(${receiverText}, ${elementAdaptedCallbackText(ctx, member, clause, _element, callback, result, operation)})`
   }
+
+/**
+ * The result carrier `flatMap` is told to build, when the callback's C++
+ * return type cannot name it: a callback returning "element or array"
+ * (`f(x) ?? []`) is a `TaggedUnion` whose flattened element only the checker
+ * knows, and a result carried as a recursive wrapper is a type no deduction
+ * reaches. Stated only when every value the callback can return stores into
+ * the result's element as-is (the same carrier, one of its union arms, or an
+ * optional's payload) or is the checker's empty `never[]`, which is what the
+ * runtime's `flatMapAppend` performs; anything that would need a conversion
+ * keeps the deduced spelling and its refusal.
+ */
+/**
+ * The callback operand as the callable the runtime template invokes.
+ *
+ * A binding the checker types as a function can still be carried in an
+ * `optional` cell: `let render: (v: T) => U` declared before its assignment,
+ * read from a closure the checker accepts as definitely assigned. Handing the
+ * cell itself to `gea::runtime::array::<member>` names a callable that is not
+ * one -- the template has no call shape for an `Optional`. ECMA-262 checks
+ * IsCallable(callbackfn) before the first element is visited (23.1.3.21 step
+ * 3, and the same step in every sibling), so the presence test belongs at
+ * argument evaluation, before the receiver is walked: an absent cell raises a
+ * TypeError even over an empty array. A present one is unwrapped and adapted
+ * exactly as a callback that was never optional.
+ */
+const presentCallback = (ctx: EmitContext, callback: IrOperand): { readonly text: string; readonly carrier: Representation } => {
+  const carrier = callback.representation
+  if (carrier.kind !== 'optional' || carrier.payload.kind !== 'function-value-dispatch') {
+    return { text: operandText(ctx, callback), carrier }
+  }
+  return { text: `(*gea::host::presentOrThrow(${operandText(ctx, callback)}))`, carrier: carrier.payload }
+}
+
+const flatMapFlatteningAt = (callback: IrOperand, result: IrResult | null | undefined) => {
+  const held = result?.representation
+  const carrier = callback.representation.kind === 'optional' ? callback.representation.payload : callback.representation
+  if (held === undefined || carrier.kind !== 'function-value-dispatch') return null
+  return flatMapFlatteningOf(carrier.abi.result, held)
+}
+
+const flatMapResultCarrier = (callback: IrOperand, result: IrResult | null | undefined): string | null =>
+  flatMapFlatteningAt(callback, result)?.stated ? cppTypeOf(result!.representation) : null
+
+/**
+ * The result carrier a converting `flatMap` states: its callback is wrapped
+ * (`elementAdaptedCallbackText`) to return one fresh array of exactly this
+ * carrier per call, so the runtime appends it as-is -- stated rather than
+ * deduced so a recursive wrapper result is named, not re-derived.
+ */
+const flatMapConvertedCarrier = (callback: IrOperand, result: IrResult | null | undefined): string | null => {
+  const flattening = flatMapFlatteningAt(callback, result)
+  return flattening !== null && !flattening.stated && !flattening.deduced ? cppTypeOf(result!.representation) : null
+}
 
 /**
  * The callback, as the runtime's per-element call can invoke it.
@@ -277,15 +342,20 @@ export const elementAdaptedCallbackText = (
   operation?: CallOperation,
   handsArray = true
 ): string => {
-  const text = operandText(ctx, callback)
-  const carrier = callback.representation
+  const { text, carrier } = presentCallback(ctx, callback)
   if (carrier.kind !== 'function-value-dispatch' || carrier.abi.receiver !== null) return text
   const [first, index, array, ...beyond] = carrier.abi.parameters
   const adaptsElement = first !== undefined && representationKey(first.value) !== representationKey(element)
   const produced = storedCarrier(carrier.abi.result)
   const minted = member === 'map' && result?.representation.kind === 'array-object' ? result.representation.element : null
   const mapped = minted !== null && representationKey(minted) !== representationKey(produced) ? minted : null
-  const adaptsResult = (predicateMembers.has(member) && representationKey(carrier.abi.result) !== 'scalar(boolean)') || mapped !== null
+  // `flatMap` whose flattened values the runtime cannot store as-is
+  // (`flat-map-flattening.ts`): the wrapper flattens one callback result
+  // into a fresh array of the result's carrier, converting each value.
+  const flattening = member === 'flatMap' && result ? flatMapFlatteningOf(carrier.abi.result, result.representation) : null
+  const flattens = flattening !== null && !flattening.stated && !flattening.deduced ? flattening : null
+  const adaptsResult =
+    (predicateMembers.has(member) && representationKey(carrier.abi.result) !== 'scalar(boolean)') || mapped !== null || flattens !== null
   if (!adaptsElement && !adaptsResult) return text
   const refuse = (detail: string): never => {
     throw createCppEmitBlockedError(
@@ -335,6 +405,45 @@ export const elementAdaptedCallbackText = (
           `"${representationKey(mapped)}", and the call cites no conversion between them`
       )
     return `[__gea_fn = ${text}](${formals.join(', ')}) -> ${cppTypeOf(mapped)} { auto __gea_mapped = ${stored}; return ${converted}; }`
+  }
+  if (flattens !== null && result) {
+    // FlattenIntoArray at depth 1 (23.1.3.13.1) for one callback result:
+    // an Array arm's present elements (a hole is skipped, step 3.b), any
+    // other arm as one element, each converted into the result's element.
+    // An arm that contributes nothing is the checker's empty `never[]`.
+    const held = result.representation as Extract<Representation, { kind: 'array-object' }>
+    const contributes = new Set(flattens.flattened.map((value) => representationKey(value)))
+    const into = (valueText: string, from: Representation): string => {
+      if (representationKey(from) === representationKey(held.element)) return valueText
+      const converted = operation ? operationConversionText(ctx, operation, 'prototype-result', from, held.element, valueText) : null
+      if (converted === null)
+        throw createCppEmitBlockedError(
+          `runtime-helper:callback:${member}:${elementKey(element)}`,
+          `"Array.prototype.${member}" (ECMA-262 ${clause}) flattens its callback's "${representationKey(from)}" into an array of ` +
+            `"${representationKey(held.element)}", and the call cites no conversion between them`
+        )
+      return converted
+    }
+    const append = (valueText: string, from: Representation): string => {
+      if (from.kind !== 'array-object') return `gea_flat->push(${into(valueText, from)});`
+      if (!contributes.has(representationKey(from.element))) return ''
+      return (
+        `{ const auto& gea_spread = ${valueText}; if (gea_spread) for (std::size_t gea_index = 0, gea_length = gea_spread->size(); ` +
+        `gea_index < gea_length; ++gea_index) if (gea_spread->present(gea_index)) ` +
+        `gea_flat->push(${into('gea_spread->readElement(gea_index)', from.element)}); }`
+      )
+    }
+    const produced = carrier.abi.result
+    const body =
+      produced.kind === 'tagged-union'
+        ? produced.arms
+            .map((arm, index) => `if (${armIs('__gea_mapped', index)}) { ${append(armAt('__gea_mapped', index), arm.value)} }`)
+            .join(' else ')
+        : append('__gea_mapped', produced)
+    return (
+      `[__gea_fn = ${text}](${formals.join(', ')}) -> ${cppTypeOf(held)} { const auto __gea_mapped = ${call}; ` +
+      `auto gea_flat = gea::makeRef<${cppTypeOf(held, 'owned')}>(); ${body} return gea_flat; }`
+    )
   }
   // A predicate member's step "If ToBoolean(testResult) is true" (23.1.3.8
   // step 5.c.iii and its siblings): the callback may return anything --
@@ -479,7 +588,10 @@ const sortText: ArrayCallRenderer = (ctx, receiverText, element, args) => {
     }
   }
   if (args.length === 1) return call(ctx, 'sort', receiverText, args)
-  if (element.kind !== 'string' && element.kind !== 'scalar') {
+  // A dynamic element's ToString is the tag dispatch the runtime already owns
+  // (`gea::host::detail::toString(const gea::Value&)`), the same one `String(e)`
+  // over a caught value renders.
+  if (element.kind !== 'string' && element.kind !== 'scalar' && element.kind !== 'dynamic') {
     throw createCppEmitBlockedError(
       `runtime-helper:element:sort:${elementKey(element)}`,
       `"Array.prototype.sort" with no comparator uses ECMA-262 23.1.3.30 step 3's default, which compares ToString(x) against ToString(y); this ` +
@@ -794,6 +906,34 @@ const rangedMethodText =
   }
 
 /**
+ * ECMA-262 23.1.3.28 `slice(start, end)`, whose positions may arrive as
+ * `number | undefined`: `lib.es5.d.ts` declares both optional, so a call that
+ * forwards an optional local is present-or-absent at RUNTIME, which no arity
+ * can express. ToIntegerOrInfinity(undefined) is 0 for `start`; an undefined
+ * `end` is the length (step 4), spelled `+Infinity` exactly as the runtime's
+ * one-argument overload clamps it.
+ */
+const sliceText: ArrayCallRenderer = (ctx, receiverText, element, args, result, operation): string => {
+  const optional = (operand: IrOperand): boolean =>
+    operand.representation.kind === 'optional' &&
+    operand.representation.absence === 'undefined' &&
+    operand.representation.payload.kind === 'scalar' &&
+    operand.representation.payload.domain === 'number'
+  if (!args.some(optional))
+    return rangedMethodText('slice', '23.1.3.28', [0, 1, 2], null)(ctx, receiverText, element, args, result, operation)
+  requireArity('slice', '23.1.3.28', [1, 2], args)
+  const texts = args.map((argument, ordinal) => {
+    if (!optional(argument)) {
+      requireNumber('slice', ordinal, args)
+      return operandText(ctx, argument)
+    }
+    const fallback = ordinal === 0 ? '0.0' : 'std::numeric_limits<double>::infinity()'
+    return `([&](const auto& gea_slice_position) { return gea_slice_position.has_value() ? *gea_slice_position : ${fallback}; }(${operandText(ctx, argument)}))`
+  })
+  return `gea::runtime::array::slice(${[receiverText, ...texts].join(', ')})`
+}
+
+/**
  * ECMA-262 23.1.3.16 `includes(searchElement[, fromIndex])` -- SameValueZero
  * against every element, which is a comparison between two VALUES and never a
  * store: the search value is not written into the array, so it need not carry
@@ -941,44 +1081,219 @@ const includesText: ArrayCallRenderer = (ctx, receiverText, element, args, resul
       return `gea::runtime::array::includes(${receiverText}, ${adapted}${from})`
     }
   }
+  const crossCarrier = crossCarrierSearchText(ctx, 'includes', receiverText, element, args)
+  if (crossCarrier !== null) return crossCarrier
   return rangedMethodText('includes', '23.1.3.16', [1, 2], 0)(ctx, receiverText, element, args, result)
 }
 
-/** The reducers: `reduce(cb)` and `reduce(cb, initialValue)` are two physical arities and two runtime overloads; the no-initial form's empty-array TypeError lives in the runtime. */
+/**
+ * Carriers on which SameValueZero (7.2.11) and IsStrictlyEqual (7.2.15) give
+ * the same answer for every pair of values: the two differ only on NaN, so
+ * this is "can never hold a Number". Anything this list does not name is
+ * treated as possibly numeric.
+ */
+const nanFreeCarrier = (representation: Representation): boolean => {
+  switch (representation.kind) {
+    case 'string':
+    case 'null':
+    case 'undefined':
+    case 'class-ref':
+    case 'record':
+    case 'record-with-index':
+    case 'native-record-ref':
+    case 'array-object':
+    case 'keyed-collection':
+      return true
+    case 'scalar':
+      return representation.domain !== 'number'
+    case 'optional':
+      return nanFreeCarrier(representation.payload)
+    case 'tagged-union':
+      return representation.arms.every((arm) => nanFreeCarrier(arm.value))
+    default:
+      return false
+  }
+}
+
+/**
+ * `indexOf`/`includes` whose search value carries something other than the
+ * element's own carrier -- a subclass instance searched for among base-class
+ * elements, the base searched for among a union of subclasses, one arm of a
+ * union element, `null` among optional elements. The search value is compared,
+ * never stored, so no conversion into the element carrier is owed: each
+ * element is compared against it by the one strict-equality authority
+ * (`strictEqualityText`), which answers class references by allocation
+ * identity across layouts and a sum by its live arm. Where that authority has
+ * no answer for the pair, the call stays refused.
+ *
+ * `indexOf` IS IsStrictlyEqual and skips holes (23.1.3.17 step 9.b).
+ * `includes` is SameValueZero and reads a hole as `undefined` (23.1.3.16 step
+ * 6.b); it is rendered only over carriers that can never hold a Number, where
+ * the two comparisons coincide.
+ */
+const crossCarrierSearchText = (
+  ctx: EmitContext,
+  member: 'indexOf' | 'includes',
+  receiverText: string,
+  element: Representation,
+  args: readonly IrOperand[]
+): string | null => {
+  const search = args[0]
+  if (search === undefined || elementKey(search.representation) === elementKey(element)) return null
+  if (args.length !== 1 && args.length !== 2) return null
+  if (member === 'includes' && !(nanFreeCarrier(element) && nanFreeCarrier(search.representation))) return null
+  const searchValue = { text: 'gea_search', representation: search.representation }
+  const compared = strictEqualityText('===', { text: 'gea_element', representation: element }, searchValue)
+  if (compared === null) return null
+  const hole =
+    member === 'includes'
+      ? strictEqualityText('===', { text: 'undefined', representation: absenceCarrier('undefined') }, searchValue)
+      : 'false'
+  if (hole === null) return null
+  const clause = member === 'includes' ? '23.1.3.16' : '23.1.3.17'
+  if (args[1] !== undefined) requireNumber(member, 1, args)
+  requireArity(member, clause, [1, 2], args)
+  const from = args[1] === undefined ? '0.0' : operandText(ctx, args[1])
+  const found = member === 'includes' ? 'true' : 'static_cast<double>(gea_index)'
+  const missed = member === 'includes' ? 'false' : '-1.0'
+  const holeTest = hole === 'false' ? 'continue;' : `{ if (${hole}) return ${found}; continue; }`
+  return (
+    `([&]() -> ${member === 'includes' ? 'bool' : 'double'} { const auto gea_array = ${receiverText}; ` +
+    `const auto& gea_search = ${operandText(ctx, search)}; const double gea_from = ${from}; if (!gea_array) return ${missed}; ` +
+    `const std::size_t gea_length = gea_array->size(); ` +
+    `for (std::size_t gea_index = gea::runtime::array::relativeIndex(gea_from, gea_length); gea_index < gea_length; ++gea_index) { ` +
+    `if (!gea_array->present(gea_index)) ${holeTest} const auto& gea_element = gea_array->readElement(gea_index); ` +
+    `if (${compared}) return ${found}; } return ${missed}; }())`
+  )
+}
+
+/** `indexOf` over its own element carrier, or over a search value only strict equality relates to it (`crossCarrierSearchText`). */
+const indexOfText: ArrayCallRenderer = (ctx, receiverText, element, args, result): string =>
+  crossCarrierSearchText(ctx, 'indexOf', receiverText, element, args) ??
+  rangedMethodText('indexOf', '23.1.3.17', [1, 2], 0)(ctx, receiverText, element, args, result)
+
+/**
+ * The reducer's callback, adapted to the accumulator carrier `accumulator`
+ * when its own ABI disagrees with it: the accumulator is converted into the
+ * callback's first parameter, the element into its second, and its result
+ * back into the accumulator -- each through `alignedValueText`, the one
+ * conversion authority. Untouched (the plain operand text) when nothing
+ * differs or when the callable is not a receiver-less `function-value-dispatch`.
+ *
+ * Like `elementAdaptedCallbackText`'s lambda, the wrapper has EXACTLY the
+ * callback's arity (at least the two the runtime's last-resort call hands
+ * over), so `reduceCall`'s `is_invocable` ladder selects the same call shape
+ * it would have selected for the callback itself.
+ */
+const reducerCallbackText = (
+  ctx: EmitContext,
+  member: 'reduce' | 'reduceRight',
+  clause: string,
+  element: Representation,
+  accumulator: Representation,
+  callback: IrOperand
+): string => {
+  const text = operandText(ctx, callback)
+  const carrier = callback.representation
+  if (carrier.kind !== 'function-value-dispatch' || carrier.abi.receiver !== null) return text
+  if (carrier.abi.result.kind === 'void') return text
+  const [previous, current, index, array, ...beyond] = carrier.abi.parameters
+  const produced = carrier.abi.result
+  const differs = (left: Representation | undefined, right: Representation): boolean =>
+    left !== undefined && representationKey(left) !== representationKey(right)
+  if (!differs(previous?.value, accumulator) && !differs(current?.value, element) && !differs(produced, accumulator)) return text
+  const refuse = (detail: string): never => {
+    throw createCppEmitBlockedError(
+      `runtime-helper:callback:${member}:${elementKey(element)}`,
+      `"Array.prototype.${member}" (ECMA-262 ${clause}) threads a "${representationKey(accumulator)}" accumulator through a callback ` +
+        `whose ABI is (${carrier.abi.parameters.map((parameter) => representationKey(parameter.value)).join(', ')}) => ` +
+        `"${representationKey(produced)}"; ${detail}`
+    )
+  }
+  if (carrier.abi.restFrom !== null || beyond.length > 0)
+    refuse('a callback with more parameters than accumulator, element, index and array has no runtime call shape')
+  const site = 'prototype/emit-prototype-array.ts:reducerCallbackText'
+  const previousText = previous ? alignedValueText(ctx, site, accumulator, previous.value, '__gea_accumulator') : null
+  if (previous && previousText === null) refuse('no installed conversion carries the accumulator into its first parameter')
+  const currentText = current ? alignedValueText(ctx, site, element, current.value, '__gea_element') : null
+  if (current && currentText === null) refuse('no installed conversion carries the element into its second parameter')
+  if (index && representationKey(index.value) !== 'scalar(number)')
+    refuse(`its index parameter carries "${representationKey(index.value)}", and the runtime passes a number`)
+  if (array && (array.value.kind !== 'array-object' || representationKey(array.value.element) !== representationKey(element)))
+    refuse(`its array parameter carries "${representationKey(array.value)}", and the runtime passes the receiver itself`)
+  const resultText = alignedValueText(ctx, site, produced, accumulator, '__gea_step')
+  if (resultText === null) refuse('no installed conversion carries its result back into the accumulator')
+  const formals = [`const ${cppTypeOf(accumulator)}& __gea_accumulator`, `const ${cppTypeOf(element)}& __gea_element`]
+  const actuals: string[] = []
+  if (previous) actuals.push(previousText as string)
+  if (current) actuals.push(currentText as string)
+  if (index) {
+    formals.push('double __gea_index')
+    actuals.push('__gea_index')
+  }
+  if (array) {
+    formals.push(`const ${cppTypeOf(array.value)}& __gea_array`)
+    actuals.push('__gea_array')
+  }
+  return (
+    `[__gea_fn = ${text}](${formals.join(', ')}) -> ${cppTypeOf(accumulator)} { ` +
+    `auto __gea_step = __gea_fn(${actuals.join(', ')}); return ${resultText}; }`
+  )
+}
+
+/**
+ * The reducers: `reduce(cb)` and `reduce(cb, initialValue)` are two physical
+ * arities and two runtime overloads; the no-initial form's empty-array
+ * TypeError lives in the runtime.
+ *
+ * With an initial value the runtime's accumulator type is the C++ type of the
+ * initial argument, so that argument must already BE the accumulator carrier
+ * -- the TS type of the call's result (`reduce<U>(cb, initial: U): U`), not
+ * the literal's own: an integer-spelled Number literal must not deduce an
+ * integer accumulator, a `""` literal must not deduce `const char[1]`, and a
+ * `null`/`undefined` literal must not deduce `std::nullptr_t` when the
+ * callback answers an optional or a handle. The initial value is converted
+ * into that carrier and cast to it, and the callback adapted to it
+ * (`reducerCallbackText`).
+ */
 const reduceText =
   (member: 'reduce' | 'reduceRight', clause: string): ArrayCallRenderer =>
-  (ctx, receiverText, _element, args, _result, operation): string => {
+  (ctx, receiverText, element, args, result, operation): string => {
     requireArity(member, clause, [1, 2], args)
-    // An integer-spelled Number literal must not let C++ deduce an integer
-    // accumulator: JavaScript Number reducers retain fractional results.
     const initial = args[1]
-    // The seed in the callback's accumulator carrier, when the two differ
-    // (`host-template-conversions.ts` certifies that one conversion).
-    const callback = args[0]?.representation
+    if (initial === undefined) return call(ctx, member, receiverText, args)
+    const callback = args[0]!
+    const callbackCarrier = callback.representation
     const accumulator =
-      callback?.kind === 'function-value-dispatch' && callback.abi.receiver === null ? callback.abi.parameters[0]?.value : undefined
-    if (initial && accumulator && operation && representationKey(accumulator) !== representationKey(initial.representation)) {
-      const seeded = operationConversionText(
-        ctx,
-        operation,
-        'prototype-argument',
-        initial.representation,
-        accumulator,
-        operandText(ctx, initial)
+      result?.representation ??
+      (callbackCarrier.kind === 'function-value-dispatch' && callbackCarrier.abi.receiver === null && callbackCarrier.abi.parameters[0]
+        ? callbackCarrier.abi.parameters[0].value
+        : initial.representation)
+    // The seed's certified conversion first (`host-template-conversions.ts`
+    // certifies `prototype-argument` into the accumulator), then an
+    // installed one between the two carriers.
+    const certified =
+      operation && representationKey(accumulator) !== representationKey(initial.representation)
+        ? operationConversionText(ctx, operation, 'prototype-argument', initial.representation, accumulator, operandText(ctx, initial))
+        : null
+    const initialText =
+      certified ??
+      alignedValueText(ctx, 'prototype/emit-prototype-array.ts:reduceText', initial.representation, accumulator, operandText(ctx, initial))
+    if (initialText === null) {
+      throw createCppEmitBlockedError(
+        `runtime-helper:element:${member}:seed`,
+        `"Array.prototype.${member}" (ECMA-262 ${clause}) seeds a "${representationKey(accumulator)}" accumulator with ` +
+          `"${representationKey(initial.representation)}", and no certified conversion carries one into the other`
       )
-      if (seeded === null) {
-        throw createCppEmitBlockedError(
-          `runtime-helper:element:${member}:seed`,
-          `"Array.prototype.${member}" (ECMA-262 ${clause}) seeds a "${representationKey(accumulator)}" accumulator with ` +
-            `"${representationKey(initial.representation)}", and no certified conversion carries one into the other`
-        )
-      }
-      return `gea::runtime::array::${member}(${receiverText}, ${operandText(ctx, args[0]!)}, ${seeded})`
     }
-    if (initial?.representation.kind === 'scalar' && initial.representation.domain === 'number') {
-      return `gea::runtime::array::${member}(${receiverText}, ${operandText(ctx, args[0]!)}, static_cast<${cppTypeOf(initial.representation)}>(${operandText(ctx, initial)}))`
-    }
-    return call(ctx, member, receiverText, args)
+    const pinned =
+      accumulator.kind === 'scalar' ||
+      accumulator.kind === 'string' ||
+      representationKey(accumulator) !== representationKey(initial.representation)
+        ? `static_cast<${cppTypeOf(accumulator)}>(${initialText})`
+        : initialText
+    const callbackText = reducerCallbackText(ctx, member, clause, element, accumulator, callback)
+    return `gea::runtime::array::${member}(${receiverText}, ${callbackText}, ${pinned})`
   }
 
 /** `pop`/`shift`: no arguments at all, and an optional element for a result -- the receiver is the whole call. */
@@ -1085,8 +1400,8 @@ export const arrayMethods: ReadonlyMap<string, ArrayCallRenderer> = new Map<stri
   ['entries', arrayIteratorText('entries', '23.1.3.5')],
   ['keys', arrayIteratorText('keys', '23.1.3.19')],
   ['values', arrayIteratorText('values', '23.1.3.38')],
-  ['slice', rangedMethodText('slice', '23.1.3.28', [0, 1, 2], null)],
-  ['indexOf', rangedMethodText('indexOf', '23.1.3.17', [1, 2], 0)],
+  ['slice', sliceText],
+  ['indexOf', indexOfText],
   ['lastIndexOf', rangedMethodText('lastIndexOf', '23.1.3.20', [1, 2], 0)],
   ['includes', includesText],
   ['fill', rangedMethodText('fill', '23.1.3.7', [1, 2, 3], 0)],

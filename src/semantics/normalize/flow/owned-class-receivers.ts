@@ -1,5 +1,6 @@
 import ts from '#typescript'
 import {
+  firstMemberOf,
   heritageClassOrInterfaceOf,
   isClassSpelledSourceClass,
   isConstructorFunction,
@@ -102,11 +103,19 @@ export const sourceClassFamilyOf = (
   roots: ReadonlySet<SourceClass>
 ): ReadonlyMap<SourceClass, ts.InterfaceType> | null => {
   if (roots.size !== 1) return sourceClassFamilyWalk(checker, flow, roots)
-  const [root] = roots as ReadonlySet<SourceClass> & Iterable<SourceClass>
+  let root: SourceClass | undefined
+  for (const only of roots) {
+    root = only
+    break
+  }
   let byChecker = singleRootFamilies.get(flow)
-  if (!byChecker) singleRootFamilies.set(flow, (byChecker = new WeakMap()))
+  if (!byChecker)
+    singleRootFamilies.set(
+      flow,
+      (byChecker = new WeakMap<ts.TypeChecker, Map<SourceClass, ReadonlyMap<SourceClass, ts.InterfaceType> | null>>())
+    )
   let byRoot = byChecker.get(checker)
-  if (!byRoot) byChecker.set(checker, (byRoot = new Map()))
+  if (!byRoot) byChecker.set(checker, (byRoot = new Map<SourceClass, ReadonlyMap<SourceClass, ts.InterfaceType> | null>()))
   const held = byRoot.get(root!)
   if (held !== undefined) return held
   const walked = sourceClassFamilyWalk(checker, flow, roots)
@@ -261,16 +270,16 @@ export const ownedClassReceiverInventoryOf = (
   // a new inference round and cannot reuse facts from the previous one.
   if (roots.size === 0) return collectOwnedClassReceiverInventory(checker, flow, roots)
   if (roots.size === 1) {
-    const root = roots.values().next().value!
+    const root = firstMemberOf(roots)!
     let entries = inventories.get(flow)
-    if (!entries) inventories.set(flow, (entries = new Map()))
+    if (!entries) inventories.set(flow, (entries = new Map<SourceClass, OwnedClassReceiverInventory | null>()))
     if (entries.has(root)) return entries.get(root)!
     const inventory = collectOwnedClassReceiverInventory(checker, flow, roots)
     entries.set(root, inventory)
     return inventory
   }
   let held = multiRootInventories.get(flow)
-  if (!held) multiRootInventories.set(flow, (held = new Map()))
+  if (!held) multiRootInventories.set(flow, (held = new Map<string, OwnedClassReceiverInventory | null>()))
   const key = rootsKey(roots)
   if (held.has(key)) return held.get(key)!
   const inventory = collectOwnedClassReceiverInventory(checker, flow, roots)

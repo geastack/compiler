@@ -1,5 +1,5 @@
 import type { DeclarationId } from '../identity/ids.js'
-import type { Representation } from './model.js'
+import { standardBufferCarrier, type Representation } from './model.js'
 import { wellKnownSymbolMemberOfKey } from './well-known-symbols.js'
 
 const number: Representation = { kind: 'scalar', domain: 'number' }
@@ -34,7 +34,7 @@ export type NativeDataProperty =
 export const nativeDataPropertyOf = (
   value: Representation,
   key: string,
-  wellKnownSymbols: ReadonlyMap<DeclarationId, string> = new Map()
+  wellKnownSymbols: ReadonlyMap<DeclarationId, string> = new Map<DeclarationId, string>()
 ): NativeDataProperty | null => {
   if (wellKnownSymbolMemberOfKey(wellKnownSymbols, key) === 'toStringTag') {
     const tag = binaryToStringTagOf(value)
@@ -50,7 +50,7 @@ export const nativeDataPropertyOf = (
     if (key === 'buffer')
       return {
         kind: 'buffer',
-        result: { kind: value.kind === 'typed-array' ? value.buffer : 'array-buffer', ownership: 'shared-refcount' }
+        result: standardBufferCarrier(value.kind === 'typed-array' ? value.buffer : 'array-buffer', 'shared-refcount')
       }
     if (value.kind === 'typed-array' && key === 'BYTES_PER_ELEMENT') return { kind: 'element-width', result: number }
   }

@@ -1,4 +1,5 @@
-import type { SemanticResultId, StructuralTypeId } from '../identity/ids.js'
+import { operationOfResult, type SemanticResultId, type StructuralTypeId } from '../identity/ids.js'
+import { isArrayConstantOf } from '../representation/host-templates.js'
 import type { StructuralType } from '../semantics/model/structural-types.js'
 import {
   carriesMergeAbsence,
@@ -14,7 +15,7 @@ import {
   representationKey,
   type Representation
 } from '../representation/model.js'
-import { mergeFalsyAbsence, mergeMaterialization, mergeTaggedAbsence } from '../representation/merge.js'
+import { mergeFalsyAbsence, mergeMaterialization, mergeTaggedAbsence, soleArrayArmOf } from '../representation/merge.js'
 import { operandOf, type SemanticOperand } from '../semantics/model/operands.js'
 import type { SemanticOperation } from '../semantics/model/operations.js'
 import { IrLoweringBlockedError } from './lower-graph.js'
@@ -34,8 +35,34 @@ import { nativeCallableSourceOf } from './native-callable-argument.js'
 const blockedMergeArm = (operation: SemanticOperation, role: string, from: Representation, to: Representation): IrLoweringBlockedError =>
   new IrLoweringBlockedError(
     `merge arm "${role}" of ${operation.family === 'computation' ? `${operation.form} ${'operator' in operation ? operation.operator : ''}`.trim() : operation.family}: ` +
-      `no conversion is installed from ${representationKey(from)} into ${representationKey(to)}`
+      `no conversion is installed from ${representationKey(from)} into ${representationKey(to)} (at ${String(operation.id)})`
   )
+
+/**
+ * What a conditional's own test answers when it is `Array.isArray(v)` decided
+ * by `v`'s selected carrier: `true` for an Array carrier, `false` for one that
+ * can hold no Array (every arm, through an optional's payload), `null` when the
+ * test is anything else or the carrier leaves it to run time.
+ */
+const carrierAnsweredIsArray = (ctx: LoweringContext, operation: SemanticOperation): boolean | null => {
+  const condition = operandOf(operation, 'condition', 0)
+  if (condition?.source.kind !== 'result') return null
+  const test = ctx.graph.operations.get(operationOfResult(condition.source.result))
+  if (test?.family !== 'invocation' || test.intrinsicCarrierPredicate !== true) return null
+  const argument = operandOf(test, 'argument', 0)
+  if (argument?.source.kind !== 'result') return null
+  const carrier = ctx.plan.selected.get(argument.source.result)
+  if (carrier === undefined) return null
+  const answerOf = (value: Representation): boolean | null =>
+    value.kind === 'optional'
+      ? answerOf(value.payload)
+      : value.kind === 'tagged-union'
+        ? value.arms.length > 0 && value.arms.every((arm) => answerOf(arm.value) === false)
+          ? false
+          : null
+        : isArrayConstantOf(value.kind)
+  return answerOf(carrier)
+}
 
 /**
  * Every live arm of a rebuilt union must have somewhere to go: the merge's
@@ -195,6 +222,14 @@ export const mergeIncoming = (
   // primitive is the record allocation an object/array literal with the same
   // carrier already lowers through (`ir/lower-allocation.ts`), with no fields,
   // because an empty array has none to install.
+  // Into a union with one Array arm (`cond ? [] : keys` over `K | K[]`): the
+  // empty array is built in that arm's carrier and entered into the union the
+  // way any value of that arm is.
+  const arrayArm = materialization === 'empty-array' ? soleArrayArmOf(representation) : null
+  if (arrayArm !== null) {
+    const empty = { value: ctx.builder.allocateArrayObject(block, lineage, [], arrayArm), representation: arrayArm }
+    return convertOrDrift(ctx, block, lineage, operation.id, role, operand.ordinal, empty, representation)
+  }
   if (representation.kind === 'native-record-ref' && materialization === 'empty-array') {
     return { value: ctx.builder.allocateRecord(block, lineage, [], representation), representation }
   }
@@ -289,6 +324,23 @@ export const mergeIncoming = (
       (incoming.representation.kind === 'optional' && presentValuesAreTruthy(ctx.graph.structuralTypes, operand.type)))
   ) {
     return { value: ctx.builder.constant(block, lineage, 'undefined', 'undefined', representation), representation }
+  }
+  // The same kept arm where the merge is a union that spells each absence as
+  // its own arm: `mutator && target` with `mutator: Path | null` and `target:
+  // Node | undefined` keeps `mutator` only as its `null`, which lands in the
+  // union's `null` arm.
+  if (
+    role === 'kept' &&
+    operation.family === 'computation' &&
+    operation.form === 'logical' &&
+    operation.operator === '&&' &&
+    incoming.representation.kind === 'optional' &&
+    representation.kind === 'tagged-union' &&
+    presentValuesAreTruthy(ctx.graph.structuralTypes, operand.type)
+  ) {
+    const absence = incoming.representation.absence
+    if (representation.arms.some((arm) => arm.value.kind === absence))
+      return { value: ctx.builder.constant(block, lineage, absence, absence, representation), representation }
   }
   // The kept operand has NO falsy state and the merge carries no absence for
   // one to land in: `previousSibling && format & Flag` on a present `Node`.
@@ -494,6 +546,37 @@ export const mergeIncoming = (
       const dead = { value: ctx.builder.constant(block, lineage, 'undefined', 'undefined', absent), representation: absent }
       return convertOrDrift(ctx, block, lineage, operation.id, role, operand.ordinal, dead, representation)
     }
+  }
+  // `Array.isArray(v) ? v as T[] : [v as T]` -- the compact `T | T[]`
+  // encoding -- in a copy where `v`'s carrier can never hold an array: the
+  // authenticated predicate (`intrinsicCarrierPredicate`) is answered by that
+  // carrier alone (`call-entry.ts`'s `isArrayAnsweredByCarrier`), so the
+  // consequent never runs, and the reverse for a carrier that is always one.
+  // Proved by the operation's own condition, not by the checker's types.
+  if (operation.family === 'computation' && operation.form === 'conditional' && (role === 'consequent' || role === 'alternate')) {
+    const answer = carrierAnsweredIsArray(ctx, operation)
+    if (answer !== null && (role === 'consequent') !== answer) {
+      const absent: Representation = { kind: 'undefined' }
+      const dead = { value: ctx.builder.constant(block, lineage, 'undefined', 'undefined', absent), representation: absent }
+      return convertOrDrift(ctx, block, lineage, operation.id, role, operand.ordinal, dead, representation)
+    }
+  }
+  // The kept side of the same operator: `a ?? b` keeps `a` only where it was
+  // NOT nullish, and a kept operand whose whole carrier is `null`/`undefined`
+  // (a cell no writer ever filled, `let copy = null` read after a loop that
+  // never assigned it) is nullish on every path, so this arm never runs. The
+  // `contributesNoTruthiness` mirror for `||` above, asked last for the same
+  // reason the taken-side bypass is.
+  if (
+    role === 'kept' &&
+    operation.family === 'computation' &&
+    operation.form === 'logical' &&
+    operation.operator === '??' &&
+    contributesNoTruthiness(incoming.representation)
+  ) {
+    const absent: Representation = { kind: 'undefined' }
+    const dead = { value: ctx.builder.constant(block, lineage, 'undefined', 'undefined', absent), representation: absent }
+    return convertOrDrift(ctx, block, lineage, operation.id, role, operand.ordinal, dead, representation)
   }
   // The `&&` left is an Object carrier whose only falsy state is the native
   // undefined lane (a shared record reference), and the merge has nowhere to

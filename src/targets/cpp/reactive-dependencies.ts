@@ -427,7 +427,7 @@ export const reactiveDependenciesOfBodies = (
 ): ReactiveDependencyCensus => {
   const empty = new Map<FunctionId | RegionId, readonly ReactiveDependency[]>()
   if (reactive.cell === null || (reactive.celled.size === 0 && reactive.revisions.size === 0))
-    return { all: empty, node: empty, projections: new Map() }
+    return { all: empty, node: empty, projections: new Map<FunctionId | RegionId, ReactiveDependency>() }
 
   const captures = new Map<FunctionId | RegionId, Set<DeclarationId>>()
   for (const body of bodies) {

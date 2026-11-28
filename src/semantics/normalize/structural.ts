@@ -831,11 +831,14 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
       ts.SyntaxKind.TypeAssertionExpression
     ],
     resolve(node) {
+      // Bound once: an arrow below reads it, and an arrow closes over a
+      // local but not over this method's `this`.
+      const view = this
       const choice = genericFunctionChoiceMembersOf(this.checker, node)
       if (choice) {
         return this.table.intern({
           kind: 'union',
-          members: choice.map((member) => this.typeOf(this.checker.getTypeAtLocation(member.name ?? member)))
+          members: choice.map((member) => view.typeOf(view.checker.getTypeAtLocation(member.name ?? member)))
         })
       }
       return null
@@ -969,6 +972,9 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
     name: 'builtin-bind-signature',
     forms: [ts.SyntaxKind.PropertyAccessExpression],
     resolve(node) {
+      // Bound once: an arrow below reads it, and an arrow closes over a
+      // local but not over this method's `this`.
+      const view = this
       const boundBuiltin = this.builtinBindSignatureAt(node)
       if (boundBuiltin) {
         // The overload's result is the bound callable, receiver-less -- the
@@ -986,7 +992,7 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
         )
         return absences.length === 0
           ? bound
-          : this.table.intern({ kind: 'union', members: [bound, ...absences.map((a0) => this.typeOf(a0))] })
+          : this.table.intern({ kind: 'union', members: [bound, ...absences.map((a0) => view.typeOf(a0))] })
       }
       return null
     }
@@ -1290,6 +1296,9 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
     name: 'narrowed-family-property',
     forms: [ts.SyntaxKind.PropertyAccessExpression],
     resolve(node) {
+      // Bound once: an arrow below reads it, and an arrow closes over a
+      // local but not over this method's `this`.
+      const view = this
       if (ts.isPropertyAccessExpression(node)) {
         const receiver = this.checker.getTypeAtLocation(node.expression)
         const narrowedMember = receiver.isIntersection() ? this.narrowedFamilyMemberOf(receiver) : null
@@ -1302,7 +1311,7 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
         const restated =
           narrowedMember !== null &&
           receiver.isIntersection() &&
-          receiver.types.some((part) => part !== narrowedMember && this.checker.getPropertyOfType(part, node.name.text) !== undefined)
+          receiver.types.some((part) => part !== narrowedMember && view.checker.getPropertyOfType(part, node.name.text) !== undefined)
         const property = restated ? this.checker.getPropertyOfType(narrowedMember, node.name.text) : undefined
         if (property) return this.typeOf(this.checker.getTypeOfSymbolAtLocation(property, node))
       }
@@ -1318,6 +1327,9 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
     name: 'dynamic-property-of-shaped-receiver',
     forms: [ts.SyntaxKind.PropertyAccessExpression],
     resolve(node) {
+      // Bound once: an arrow below reads it, and an arrow closes over a
+      // local but not over this method's `this`.
+      const view = this
       if (
         ts.isPropertyAccessExpression(node) &&
         (this.checker.getTypeAtLocation(node).flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0
@@ -1327,7 +1339,7 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
         const presentShapes =
           receiverShape.kind === 'union'
             ? receiverShape.members
-                .map((member) => this.table.get(member).shape)
+                .map((member) => view.table.get(member).shape)
                 .filter((shape) => !(shape.kind === 'primitive' && (shape.primitive === 'undefined' || shape.primitive === 'null')))
             : [receiverShape]
         // A nullable record has one present shape. A choice of records does
@@ -1352,6 +1364,9 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
     name: 'object-literal-spreading-an-open-source',
     forms: [ts.SyntaxKind.ObjectLiteralExpression, ts.SyntaxKind.VariableDeclaration, ts.SyntaxKind.Identifier],
     resolve(node) {
+      // Bound once: an arrow below reads it, and an arrow closes over a
+      // local but not over this method's `this`.
+      const view = this
       const open = this.openSpreadResolutionOf(node)
       if (open !== null || !ts.isObjectLiteralExpression(node) || node.properties.some(ts.isSpreadAssignment)) return open
       // A literal holding such an object as a member value -- a function
@@ -1368,7 +1383,7 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
         if (value === null) return false
         let unwrapped: ts.Expression = value
         while (ts.isParenthesizedExpression(unwrapped)) unwrapped = unwrapped.expression
-        return this.openSpreadResolutionOf(unwrapped) !== null
+        return view.openSpreadResolutionOf(unwrapped) !== null
       })
       if (!holdsOpen || (this.checker.getTypeAtLocation(node).flags & ts.TypeFlags.Any) !== 0) return null
       return this.spreadLiteralShapeOf(node)
@@ -1403,13 +1418,16 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
     name: 'object-literal-spreading-a-deferred-source',
     forms: [ts.SyntaxKind.ObjectLiteralExpression],
     resolve(node) {
+      // Bound once: an arrow below reads it, and an arrow closes over a
+      // local but not over this method's `this`.
+      const view = this
       return ts.isObjectLiteralExpression(node) &&
         node.properties.some(ts.isSpreadAssignment) &&
         ((this.checker.getTypeAtLocation(node).flags & ts.TypeFlags.Any) !== 0 ||
           node.properties.some((property) => {
             if (!ts.isSpreadAssignment(property)) return false
-            const source = this.checker.getNonNullableType(this.checker.getTypeAtLocation(property.expression))
-            return isGlobalObjectInterface(this.checker, property.expression, source)
+            const source = view.checker.getNonNullableType(view.checker.getTypeAtLocation(property.expression))
+            return isGlobalObjectInterface(view.checker, property.expression, source)
           }))
         ? this.spreadLiteralShapeOf(node)
         : null
@@ -1539,12 +1557,15 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
     name: 'computed-read-of-unjoined-array-member',
     forms: [ts.SyntaxKind.ElementAccessExpression],
     resolve(node) {
+      // Bound once: an arrow below reads it, and an arrow closes over a
+      // local but not over this method's `this`.
+      const view = this
       if (!ts.isElementAccessExpression(node)) return null
       const read = this.layoutTypeAt(node)
       const arms = read.isUnion() ? read.types : [read]
       const isNeverArray = (arm: ts.Type): boolean =>
-        this.checker.isArrayType(arm) &&
-        ((this.checker.getTypeArguments(arm as ts.TypeReference)[0]?.flags ?? 0) & ts.TypeFlags.Never) !== 0
+        view.checker.isArrayType(arm) &&
+        ((view.checker.getTypeArguments(arm as ts.TypeReference)[0]?.flags ?? 0) & ts.TypeFlags.Never) !== 0
       if (!arms.some(isNeverArray) || !readsUnjoinedArrayMember(this.checker, this.collections, this.layoutTypeAt, node)) return null
       const box = this.table.intern({
         kind: 'array',
@@ -1552,7 +1573,7 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
         readonly: false,
         extension: []
       })
-      const members = [...new Set(arms.map((arm) => (isNeverArray(arm) ? box : this.typeOf(arm))))]
+      const members = [...new Set(arms.map((arm) => (isNeverArray(arm) ? box : view.typeOf(arm))))]
       return members.length === 1 ? members[0]! : this.table.intern({ kind: 'union', members })
     }
   },
@@ -1598,10 +1619,13 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
       ts.SyntaxKind.CallExpression
     ],
     resolve(node) {
+      // Bound once: an arrow below reads it, and an arrow closes over a
+      // local but not over this method's `this`.
+      const view = this
       const inferredCollection = inferredCollectionTypeArgumentsAt(
         this.collections,
         this.table,
-        (a0) => this.typeOf(a0),
+        (a0) => view.typeOf(a0),
         this.bags,
         this.layoutTypeAt(node),
         node
@@ -1651,10 +1675,13 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
     name: 'collection-member-result',
     forms: [ts.SyntaxKind.CallExpression],
     resolve(node) {
+      // Bound once: an arrow below reads it, and an arrow closes over a
+      // local but not over this method's `this`.
+      const view = this
       const collectionMember = collectionMemberResultTypeAt(
         this.collections,
         this.table,
-        (a0) => this.typeOf(a0),
+        (a0) => view.typeOf(a0),
         this.bags,
         this.layoutTypeAt,
         node
@@ -1682,7 +1709,10 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
       ts.SyntaxKind.ObjectLiteralExpression
     ],
     resolve(node) {
-      const inferredBag = bagShapeTypeAt(this.table, (a0) => this.typeOf(a0), this.bags, node)
+      // Bound once: an arrow below reads it, and an arrow closes over a
+      // local but not over this method's `this`.
+      const view = this
+      const inferredBag = bagShapeTypeAt(this.table, (a0) => view.typeOf(a0), this.bags, node)
       if (inferredBag) return inferredBag
       return null
     }
@@ -1811,11 +1841,14 @@ const structuralRules: readonly StructuralRule<StructuralView>[] = [
       ts.SyntaxKind.NewExpression
     ],
     resolve(node) {
+      // Bound once: an arrow below reads it, and an arrow closes over a
+      // local but not over this method's `this`.
+      const view = this
       const unionArms = this.parameters.unionArmsAt(node)
       // A map arm the collection census bound for this cell is that map, not
       // the checker's `Map<any, any>` (`inferredCollectionTypeArgumentsAt`).
       const armType = (arm: ts.Type): StructuralTypeId =>
-        inferredCollectionTypeArgumentsAt(this.collections, this.table, (a0) => this.typeOf(a0), this.bags, arm, node) ?? this.typeOf(arm)
+        inferredCollectionTypeArgumentsAt(view.collections, view.table, (a0) => view.typeOf(a0), view.bags, arm, node) ?? view.typeOf(arm)
       // One arm is a read the checker's flow narrowed to that arm of the
       // cell (`parameter-bindings.ts`'s `flowArmOf`): the arm, not a union.
       if (unionArms && unionArms.length === 1) return armType(unionArms[0]!)
@@ -1998,7 +2031,7 @@ class StructuralView extends StructuralViewInputs {
   restatedDeclaredOf(type: ts.IntersectionType): ts.Type | null {
     for (const part of type.types) {
       const source = part.aliasTypeArguments?.[0]
-      if (source === undefined || !source.isClassOrInterface() || (source.symbol.flags & ts.SymbolFlags.Interface) === 0) continue
+      if (source === undefined || !source.isClassOrInterface() || ((source.symbol?.flags ?? 0) & ts.SymbolFlags.Interface) === 0) continue
       const wanted = this.checker.getPropertiesOfType(source)
       const have = this.checker.getPropertiesOfType(type)
       if (wanted.length === 0 || wanted.length !== have.length || this.checker.getIndexInfosOfType(type).length !== 0) continue
@@ -2390,7 +2423,7 @@ class StructuralView extends StructuralViewInputs {
   arrayHeritageShapeOf(type: ts.Type, location: ts.Node): StructuralShape | null {
     if (!(type.flags & ts.TypeFlags.Object)) return null
     const object = type as ts.ObjectType
-    const target = object.objectFlags & ts.ObjectFlags.Reference ? (type as ts.TypeReference).target : object
+    const target = object.objectFlags & ts.ObjectFlags.Reference ? (type as ts.TypeReference).target! : object
     if (!(target.objectFlags & ts.ObjectFlags.Interface)) return null
     // `ConcatArray<T>` is the one standard array interface that reaches
     // neither `Array` nor `ReadonlyArray` through heritage: `lib.es5.d.ts`
@@ -2472,7 +2505,12 @@ class StructuralView extends StructuralViewInputs {
           return keyDeclaration !== null && this.identities.declarationIdOf(keyDeclaration) === keyDeclarationId
         })
         const declarations = property?.declarations
-        return !!declarations?.length && declarations.every(ts.isPropertyAssignment) && !declarations[0]!.getSourceFile().isDeclarationFile
+        // A `: boolean` lambda, not the guard itself: `every` with a type guard would retype the declarations as a narrower array.
+        return (
+          !!declarations?.length &&
+          declarations.every((declaration): boolean => ts.isPropertyAssignment(declaration)) &&
+          !declarations[0]!.getSourceFile().isDeclarationFile
+        )
       })
       if (runtimeMembers.length) {
         const existing = indexes.findIndex((index) => index.key === 'symbol')
@@ -2594,7 +2632,7 @@ class StructuralView extends StructuralViewInputs {
     table: this.table,
     typeOf: (a0) => this.typeOf(a0),
     signatureOf: this.signatureOf,
-    objectShapeOf: (...args) => this.objectShapeOf(...args),
+    objectShapeOf: (type, location, members) => this.objectShapeOf(type, location, members),
     arrayHeritageShapeOf: (a0, a1) => this.arrayHeritageShapeOf(a0, a1)
   })
   readonly declaredBodyOf = this.declaredBodyResolver.declaredBodyOf
@@ -2831,6 +2869,10 @@ class StructuralView extends StructuralViewInputs {
   narrowedFamilyMemberOf(type: ts.IntersectionType): ts.Type | null {
     let family: InterfaceFamily | null = null
     let member: ts.Type | null = null
+    // Family parts beyond the first: two names with no narrowing literal are
+    // an intersection of members (`interface-families.ts`'s `viewMemberOf`
+    // takes a most-derived one), which `derive.ts` answers, not the first name.
+    let members = 0
     const narrowings: ts.Type[] = []
     for (const part of type.types) {
       const anchor = this.declaredAnchorOf(part)
@@ -2839,6 +2881,7 @@ class StructuralView extends StructuralViewInputs {
       if (own) {
         if (family !== null && own !== family) return null
         family = own
+        if (member !== null && member !== part) members++
         member ??= part
         continue
       }
@@ -2847,6 +2890,7 @@ class StructuralView extends StructuralViewInputs {
       narrowings.push(part)
     }
     if (family === null || member === null) return null
+    if (members > 0 && narrowings.length === 0) return null
     let names = this.familyFieldNames?.get(family.key)
     if (!names) {
       const collected = new Set(this.familyMemberFieldNames(family))
@@ -2902,7 +2946,7 @@ class StructuralView extends StructuralViewInputs {
     // Types stored under a key beyond what any view declares for it
     // (`interface-families.ts`'s `widenBySpreadExcess`), joined to that
     // key's union.
-    excess: ReadonlyMap<string, readonly ts.Type[]> = new Map()
+    excess: ReadonlyMap<string, readonly ts.Type[]> = new Map<string, readonly ts.Type[]>()
   ): StructuralShape {
     interface MergedField {
       readonly key: StructuralMember['key']
@@ -3035,8 +3079,9 @@ class StructuralView extends StructuralViewInputs {
    * field), and the keys are all the answer needs.
    */
   familyMemberKeysOf(declared: DeclaredAnchor): readonly PropertyKeyShape[] | null {
-    if (!ts.isInterfaceDeclaration(declared.declarationNode)) return null
-    const symbol = this.checker.getSymbolAtLocation(declared.declarationNode.name)
+    const interfaceDeclaration = declared.declarationNode
+    if (!ts.isInterfaceDeclaration(interfaceDeclaration)) return null
+    const symbol = this.checker.getSymbolAtLocation(interfaceDeclaration.name)
     if (!symbol) return null
     const keys: PropertyKeyShape[] = []
     for (const property of this.checker.getPropertiesOfType(this.checker.getDeclaredTypeOfSymbol(symbol))) {
@@ -3146,7 +3191,7 @@ class StructuralView extends StructuralViewInputs {
       }
       return null
     }
-    const reference = (type as ts.TypeReference).target !== undefined ? (type as ts.TypeReference).target : type
+    const reference = (type as ts.TypeReference).target ?? type
     return walk(reference, 0)
   }
 
@@ -3233,7 +3278,7 @@ class StructuralView extends StructuralViewInputs {
       }
       return null
     }
-    const target = reference ? reference.target : type
+    const target = reference ? reference.target! : type
     if (!target.isClassOrInterface()) return null
     return walk(target, reference ? this.checker.getTypeArguments(reference) : (target.typeParameters ?? []), 0)
   }
@@ -3341,10 +3386,8 @@ class StructuralView extends StructuralViewInputs {
         // declared name whose arguments that path would key unchanged --
         // every parameter layout-relevant -- so the key is exactly its own.
         if (declared?.kind === 'declared' && declaredArguments) {
-          const owner =
-            ts.isClassLike(declared.declarationNode) || ts.isInterfaceDeclaration(declared.declarationNode)
-              ? declared.declarationNode
-              : null
+          const anchorNode = declared.declarationNode
+          const owner = ts.isClassLike(anchorNode) || ts.isInterfaceDeclaration(anchorNode) ? anchorNode : null
           const relevant = owner ? layoutRelevantParameterIndices(this.checker, owner) : null
           if (!relevant || declaredArguments.every((_, index) => relevant.has(index))) {
             this.table.bindAnchorKey(`${declared.kind}:${declared.declaration}:${declaredArguments.join(',')}`, anchor)
@@ -3396,6 +3439,7 @@ class StructuralView extends StructuralViewInputs {
     const attempt: ts.Type[] = this.journal ?? []
     this.journal = attempt
     const mark = attempt.length
+    const tableMark = this.table.watermark()
     try {
       return this.translate(type)
     } catch (error) {
@@ -3420,8 +3464,14 @@ class StructuralView extends StructuralViewInputs {
       for (const remembered of attempt.slice(mark)) {
         const rememberedId = this.completed.get(remembered)
         this.completed.delete(remembered)
-        if (rememberedId && this.table.citesAbandoned(rememberedId)) this.table.releaseKey(rememberedId)
+        if (rememberedId !== undefined && this.table.citesAbandoned(rememberedId)) this.table.releaseKey(rememberedId)
       }
+      // And whatever the attempt minted that no checker type is remembered
+      // under -- an interface family's shared layout above all. Left keyed, the
+      // retry completes each released family member with that same layout
+      // again: an identical shape under a second id (see the table's
+      // `releaseCitingAbandonedSince`).
+      this.table.releaseCitingAbandonedSince(tableMark)
       attempt.length = mark
       ;(this.selfReferential ??= new Set()).add(type)
     } finally {
@@ -3477,7 +3527,9 @@ class StructuralView extends StructuralViewInputs {
     }
     const reference = type as ts.TypeReference
     const args = this.checker.getTypeArguments(reference) ?? []
-    const declared = reference.target?.typeParameters?.length
+    // `target` read as possibly absent, as the `?.` already treats it: the API
+    // types it present, and a typescript-go reference can answer none.
+    const declared = (reference as { readonly target?: ts.GenericType }).target?.typeParameters?.length
     return declared !== undefined && args.length > declared ? args.slice(0, declared) : args
   }
 
@@ -3496,7 +3548,7 @@ class StructuralView extends StructuralViewInputs {
   // Created on first use (see `selfReferential`).
   globalAliases: Map<string, ts.Symbol | null> | undefined
   isGlobalAlias(name: string, symbol: ts.Symbol, at: ts.Node): boolean {
-    const aliases = (this.globalAliases ??= new Map())
+    const aliases = (this.globalAliases ??= new Map<string, ts.Symbol | null>())
     if (!aliases.has(name)) aliases.set(name, this.checker.resolveName(name, at, ts.SymbolFlags.TypeAlias, false) ?? null)
     const resolved = aliases.get(name) ?? null
     return resolved !== null && resolved === symbol
@@ -4060,6 +4112,15 @@ class StructuralView extends StructuralViewInputs {
       // untouched: this removes a REDUNDANT arm, it does not decide that an
       // empty array is some other type.
       const numericElementOf = (arm: ts.Type): ts.Type | undefined => this.checker.getIndexTypeOfType(arm, ts.IndexKind.Number)
+      // A string answers a numeric index too -- its apparent `String` declares
+      // `[index: number]: string` -- but an empty Array is no value of it:
+      // `(x) => f(x) ?? []` with `f` returning `string | null` types `string |
+      // never[]`, and absorbing the `never[]` arm left the callback's result
+      // carrier a bare `std::string` its own `[]` has no arm in.
+      const stringValued = (arm: ts.Type): boolean =>
+        (arm.flags & ts.TypeFlags.StringLike) !== 0 ||
+        (arm.isIntersection() && arm.types.some((part) => (part.flags & ts.TypeFlags.StringLike) !== 0))
+      const absorbsEmptyArray = (arm: ts.Type): boolean => !stringValued(arm) && numericElementOf(arm) !== undefined
       // Contentless means EMPTY, not merely tuple-shaped: a tuple's numeric
       // index type is the union of its own elements, so a `[T, Params]` arm
       // answers a real element type and is a distinct shape this must not
@@ -4081,9 +4142,7 @@ class StructuralView extends StructuralViewInputs {
       }
       const withoutEmptyArrays = type.types.filter((arm) => !isEmptyArrayArm(arm))
       const arms =
-        withoutEmptyArrays.length === type.types.length ||
-        withoutEmptyArrays.length === 0 ||
-        !withoutEmptyArrays.some((arm) => numericElementOf(arm) !== undefined)
+        withoutEmptyArrays.length === type.types.length || withoutEmptyArrays.length === 0 || !withoutEmptyArrays.some(absorbsEmptyArray)
           ? type.types
           : withoutEmptyArrays
       const sole = arms.length === 1 ? arms[0] : undefined
@@ -4218,8 +4277,8 @@ class StructuralView extends StructuralViewInputs {
       // off. An `App<E,...>`'s `env: E['Bindings']` keeps `E` unerased: an
       // unproven position is never folded, only one the field walk actually
       // proved irrelevant.
-      const genericOwner =
-        ts.isClassLike(declared.declarationNode) || ts.isInterfaceDeclaration(declared.declarationNode) ? declared.declarationNode : null
+      const ownerNode = declared.declarationNode
+      const genericOwner = ts.isClassLike(ownerNode) || ts.isInterfaceDeclaration(ownerNode) ? ownerNode : null
       const layoutRelevant = genericOwner ? layoutRelevantParameterIndices(this.checker, genericOwner) : null
       //
       // A class's CONSTRUCTOR type (`typeof Box`) carries no type arguments,
@@ -4238,10 +4297,8 @@ class StructuralView extends StructuralViewInputs {
       // copy the arguments stay empty, which is the root's own constructor
       // object.
       const copy =
-        declared.kind === 'class-constructor' &&
-        ts.isClassLike(declared.declarationNode) &&
-        this.specializations.copiesMayDifferInLayout(declared.declarationNode)
-          ? this.foldedCopyOf(declared.declarationNode, layoutRelevant)
+        declared.kind === 'class-constructor' && ts.isClassLike(ownerNode) && this.specializations.copiesMayDifferInLayout(ownerNode)
+          ? this.foldedCopyOf(ownerNode, layoutRelevant)
           : null
       // A class whose copies must not split has ONE struct. Keying each
       // instantiation's anchor on its own written fillings gives that one
@@ -4276,7 +4333,7 @@ class StructuralView extends StructuralViewInputs {
           ? this.specializations.reinterpretedCopyOf(genericOwner)
           : null
       if (reinterpretedOrdinal !== null && genericOwner) {
-        const ownerSymbol = (type as ts.TypeReference).target?.getSymbol() ?? type.getSymbol()
+        const ownerSymbol = (type as { readonly target?: ts.GenericType }).target?.getSymbol() ?? type.getSymbol()
         const generic = ownerSymbol ? this.checker.getDeclaredTypeOfSymbol(ownerSymbol) : null
         if (generic && generic !== type) {
           const folded = this.mapperFor(this.copyPathOf({ declaration: genericOwner, ordinal: reinterpretedOrdinal })).typeOf(generic)
@@ -5548,7 +5605,10 @@ class StructuralView extends StructuralViewInputs {
   // `obj.getTime` where `obj` is the prototype through a parameter) is the
   // prototype's own copy of it -- the receiver-taking signature above -- not
   // the instance's, which is what the checker answers for the access.
-  prototypeObjectMemberTypeAt(node: ts.Node, visiting: Set<ts.ParameterDeclaration> = new Set()): StructuralTypeId | null {
+  prototypeObjectMemberTypeAt(
+    node: ts.Node,
+    visiting: Set<ts.ParameterDeclaration> = new Set<ts.ParameterDeclaration>()
+  ): StructuralTypeId | null {
     if (!ts.isPropertyAccessExpression(node)) return null
     const receiver = this.prototypeObjectTypeAt(node.expression) ?? this.prototypeObjectParameterTypeAt(node.expression, visiting)
     if (receiver === null) return null
@@ -5634,7 +5694,10 @@ class StructuralView extends StructuralViewInputs {
   // type), so it is re-asked here from the argument expressions themselves.
   // Disagreeing callers retain every source arm: a checker join cannot erase
   // one prototype handle or a method's physical receiver from that union.
-  prototypeObjectParameterTypeAt(node: ts.Node, visiting: Set<ts.ParameterDeclaration> = new Set()): StructuralTypeId | null {
+  prototypeObjectParameterTypeAt(
+    node: ts.Node,
+    visiting: Set<ts.ParameterDeclaration> = new Set<ts.ParameterDeclaration>()
+  ): StructuralTypeId | null {
     const parameter = ts.isParameter(node)
       ? node
       : ts.isIdentifier(node) && !ts.isParameter(node.parent)
@@ -6014,10 +6077,10 @@ class StructuralView extends StructuralViewInputs {
   }
 
   sameKey(left: StructuralMember['key'], right: StructuralMember['key']): boolean {
-    return (
-      left.kind === right.kind &&
-      (left.kind === 'symbol' ? left.declaration === (right as typeof left).declaration : left.value === (right as typeof left).value)
-    )
+    // Each kind narrowed on both sides: a cast of one key to the other's kind is no read a native build can make.
+    if (left.kind === 'symbol') return right.kind === 'symbol' && left.declaration === right.declaration
+    if (left.kind === 'string') return right.kind === 'string' && left.value === right.value
+    return right.kind === 'number' && left.value === right.value
   }
 
   spreadMembersOf(source: StructuralTypeId): readonly StructuralMember[] | null {
@@ -6029,7 +6092,7 @@ class StructuralView extends StructuralViewInputs {
       })
       if (present.length !== 1) return null
       const members = this.spreadMembersOf(present[0]!)
-      return members === null ? null : members.map((member) => ({ ...member, optional: true }))
+      return members === null ? null : members.map((member): StructuralMember => ({ ...member, optional: true }))
     }
     const classInstance = shape.kind === 'class-instance'
     const body = shape.kind === 'class-instance' || shape.kind === 'declared' ? shape.body : source
@@ -6044,7 +6107,7 @@ class StructuralView extends StructuralViewInputs {
       .filter(
         (member) => !classInstance || (member.accessor === null && !(member.key.kind === 'string' && isPrivateNameKey(member.key.value)))
       )
-      .map((member) => ({ ...member, readonly: false, accessor: null }))
+      .map((member): StructuralMember => ({ ...member, readonly: false, accessor: null }))
   }
 
   /**
@@ -6218,9 +6281,7 @@ class StructuralView extends StructuralViewInputs {
     return this.absentSubstitutedTypeAt(node)
   }
 
-  resolvedSignatureTypeOf(
-    ...[signature, kind, resultOverride]: Parameters<StructuralMapper['resolvedSignatureTypeOf']>
-  ): ReturnType<StructuralMapper['resolvedSignatureTypeOf']> {
+  resolvedSignatureTypeOf(signature: ts.Signature, kind: 'call' | 'construct', resultOverride?: ts.Type): StructuralTypeId {
     return this.table.intern({
       kind: 'signature',
       call: kind === 'call' ? [this.signatureOf(signature, resultOverride)] : [],
@@ -6361,7 +6422,7 @@ class StructuralView extends StructuralViewInputs {
         }
         return this.typeOf(layout)
       },
-      resolvedSignatureTypeOf: (...args) => this.resolvedSignatureTypeOf(...args),
+      resolvedSignatureTypeOf: (signature, kind, resultOverride) => this.resolvedSignatureTypeOf(signature, kind, resultOverride),
       rawTypeAt: (a0) => this.rawTypeAt(a0),
       patternReadTypeAt: (element) => this.parameters.patternReadTypeAt?.(element) ?? null,
       structuralDisagreements: this.disagreements,

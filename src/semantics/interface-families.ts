@@ -324,7 +324,11 @@ const collectInterfaceFamilyGroups = (checker: ts.TypeChecker, files: readonly t
   const familyOfDeclaration = new Map<ts.InterfaceDeclaration, InterfaceFamilyGroup>()
   for (const group of groups.values()) {
     if (group.length < 2) continue
-    const family: InterfaceFamilyGroup = { members: [...group].sort(byPosition), absorbed: [], excess: new Map() }
+    const family: InterfaceFamilyGroup = {
+      members: [...group].sort(byPosition),
+      absorbed: [],
+      excess: new Map<string, readonly ts.Type[]>()
+    }
     families.push(family)
     for (const member of group) familyOfDeclaration.set(member, family)
   }
@@ -351,7 +355,7 @@ const collectInterfaceFamilyGroups = (checker: ts.TypeChecker, files: readonly t
     if (canonical.typeParameters !== undefined || type.isClassOrInterface() === false) return null
     let family = loneFamilies.get(canonical)
     if (family === undefined) {
-      family = { members: [canonical], absorbed: [], excess: new Map() }
+      family = { members: [canonical], absorbed: [], excess: new Map<string, readonly ts.Type[]>() }
       loneFamilies.set(canonical, family)
     }
     return family
@@ -487,6 +491,34 @@ const collectInterfaceFamilyGroups = (checker: ts.TypeChecker, files: readonly t
     const symbol = objectLiteralSymbolOf(checker, type)
     return symbol ? (adopted.get(symbol) ?? null) : null
   }
+  // The member part every other member part of the intersection inherits
+  // from, by declared `extends` -- nominal, as a family is; `null` when no
+  // member part is named, `unrelated` when two are. Only an intersection of
+  // members alone: a literal part (a guard's `Declaration & { typeParameters?:
+  // ... }`) names fields the member's own carrier may not hold, and keeps the
+  // family's one layout.
+  const ancestorsOf = (type: ts.Type, into: Set<ts.Type>): Set<ts.Type> => {
+    for (const base of type.isClassOrInterface() ? checker.getBaseTypes(type) : []) {
+      // A generic base (`ObjectLiteralExpression extends
+      // ObjectLiteralExpressionBase<ObjectLiteralElementLike>`) is a reference;
+      // its own bases are its declaration's.
+      const declared = (base as ts.TypeReference).target ?? base
+      if (into.has(declared)) continue
+      into.add(declared)
+      ancestorsOf(declared, into)
+    }
+    return into
+  }
+  const mostDerivedMemberOf = (type: ts.IntersectionType, family: InterfaceFamilyGroup): ts.Type | 'unrelated' | null => {
+    const members = type.types.filter((part) => familyOfType(part) === family && part.isClassOrInterface())
+    if (members.length === 0 || members.length !== type.types.length) return null
+    return (
+      members.find((candidate) => {
+        const ancestors = ancestorsOf(candidate, new Set())
+        return members.every((other) => other === candidate || ancestors.has(other))
+      }) ?? 'unrelated'
+    )
+  }
   const layoutMember = new Map<InterfaceFamilyGroup, ts.Type | null>()
   const viewMemberOf = (type: ts.Type): ts.Type | null => {
     // An intersection view (`ServerOptions = Omit<RequestOptions, ...> &
@@ -499,6 +531,20 @@ const collectInterfaceFamilyGroups = (checker: ts.TypeChecker, files: readonly t
       remappedViewOf(type) ??
       (viewed !== null && type.isIntersection() && intersectionViewHeld(type, viewed) ? viewed : null)
     if (family === null) return null
+    // An intersection that NAMES members is the most derived of them, not the
+    // family's first member: `CallExpression & Expression` (a narrowed
+    // `QueryShape & QueryState` read) is a value of `CallExpression`. The family's one layout is the same either way; the
+    // member is not, once a class implements it -- laid out as the first
+    // member, the view carried the family record where the value was a class
+    // instance, and the union reading it back took the record arm for a class.
+    // Two members neither inherits from (`CallExpression & NewExpression`,
+    // which the checker reduces to `never`) stay an intersection, for
+    // `derive.ts` to answer from the classes implementing them.
+    if (viewed !== null && type.isIntersection()) {
+      const named = mostDerivedMemberOf(type, viewed)
+      if (named === 'unrelated') return null
+      if (named !== null) return named
+    }
     if (!layoutMember.has(family)) {
       const member = family.members.find((declaration) => declaration.typeParameters === undefined)
       const symbol = member ? checker.getSymbolAtLocation(member.name) : undefined
@@ -518,7 +564,7 @@ const collectInterfaceFamilyGroups = (checker: ts.TypeChecker, files: readonly t
 const isSourceObjectLiteral = (checker: ts.TypeChecker, type: ts.Type): boolean => {
   if ((type.flags & ts.TypeFlags.Object) === 0 || ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Anonymous) === 0) return false
   const declarations = type.getSymbol()?.declarations ?? []
-  if (declarations.length === 0 || !declarations.every(ts.isTypeLiteralNode)) return false
+  if (declarations.length === 0 || !declarations.every((declaration): boolean => ts.isTypeLiteralNode(declaration))) return false
   if (declarations.some((declaration) => declaration.getSourceFile().isDeclarationFile)) return false
   return (
     checker.getIndexInfosOfType(type).length === 0 && type.getCallSignatures().length === 0 && type.getConstructSignatures().length === 0

@@ -1,5 +1,5 @@
 import type { Representation } from '../representation/model.js'
-import { representationKey } from '../representation/model.js'
+import { absenceCarrier, representationKey } from '../representation/model.js'
 import { numberStorageTarget, type NumberScalar } from './number-storage.js'
 import type { ConversionCapability } from './algebra.js'
 
@@ -43,7 +43,11 @@ const isSum = (value: Representation): value is Sum => value.kind === 'optional'
 // a large app asks under a million that may widen and repeats 3% of them, so a
 // cache keyed by carrier pair held nearly a million entries to save almost
 // nothing.
-const absences: Readonly<Record<'null' | 'undefined', Representation>> = { null: { kind: 'null' }, undefined: { kind: 'undefined' } }
+// Two typed constants rather than a record indexed by the absence name: a
+// native build reads a record's fields statically and has no keyed lookup.
+const nullCarrier = absenceCarrier('null')
+const undefinedCarrier = absenceCarrier('undefined')
+const absenceOf = (absence: 'null' | 'undefined'): Representation => (absence === 'null' ? nullCarrier : undefinedCarrier)
 const plan = (source: Representation, target: Representation, sourcePresent = false): NativeSumPlan | null => {
   if (representationKey(source) === representationKey(target)) return { kind: 'identity' }
   // Ref<T> carries distinct null and native undefined states. A destination
@@ -52,9 +56,9 @@ const plan = (source: Representation, target: Representation, sourcePresent = fa
   // native reference payload home still retains the source's sentinel.
   if (!sourcePresent && source.kind === 'class-ref' && source.ownership === 'shared-refcount' && isSum(target)) {
     const present = plan(source, target, true)
-    const absent = present ? plan(absences.null, target, true) : null
+    const absent = present ? plan(nullCarrier, target, true) : null
     if (present && absent) {
-      const undefinedHome = plan(absences.undefined, target, true)
+      const undefinedHome = plan(undefinedCarrier, target, true)
       return {
         kind: 'nullable-reference',
         present,
@@ -66,7 +70,7 @@ const plan = (source: Representation, target: Representation, sourcePresent = fa
   if (source.kind === 'optional') {
     const present = plan(source.payload, target)
     if (!present) return null
-    const absent = plan(absences[source.absence], target)
+    const absent = plan(absenceOf(source.absence), target)
     return present && absent ? { kind: 'optional', target, absence: source.absence, present, absent } : null
   }
   if (source.kind === 'tagged-union') {
@@ -251,7 +255,7 @@ const sumLeavesOf = (source: Representation): readonly Representation[] => {
   const visit = (value: Representation): void => {
     if (value.kind === 'optional') {
       visit(value.payload)
-      leaves.push(absences[value.absence])
+      leaves.push(absenceOf(value.absence))
     } else if (value.kind === 'tagged-union') for (const arm of value.arms) visit(arm.value)
     else leaves.push(value)
   }
@@ -287,6 +291,22 @@ export const nativeSumPlan = (source: Representation, target: Representation): N
   }
   return plan(source, target)
 }
+
+/**
+ * The leaf test alone: whether every leaf of `source` names a home in the sum
+ * `target`. A selection into a sum is total only when each leaf transfers into
+ * it, and a transfer passes exactly this test, so a pair failing it can have
+ * neither (`native-selection.ts`'s `nativeTotalSelectionRecipeOf`).
+ */
+export const nativeSumHousesLeaves = (source: Representation, target: Representation): boolean => {
+  if (!isSum(target)) return false
+  if (representationKey(source) === representationKey(target)) return true
+  const homes = sumHomesOf(target)
+  return sumLeavesOf(source).every((leaf) => mayHouse(homes, leaf))
+}
+
+/** What a sum splits into, its absences as their bare carriers; any other carrier is its own one leaf. */
+export const nativeSumLeavesOf = (source: Representation): readonly Representation[] => sumLeavesOf(source)
 
 export const nativeSumWidenable = (source: Representation, target: Representation): boolean => nativeSumPlan(source, target) !== null
 

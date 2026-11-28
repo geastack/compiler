@@ -1,6 +1,6 @@
 import type { DeclarationId, FunctionId, OperationId, SemanticResultId, StructuralTypeId } from '../identity/ids.js'
 import type { RepresentationDeriver } from './derive.js'
-import { representationKey, type Representation, type TaggedUnionArm } from './model.js'
+import { absenceCarrier, representationKey, type Representation, type TaggedUnionArm } from './model.js'
 import { isNativeCallableCarrier } from './callable-object.js'
 import {
   callableOwnDataSlotSchemasOf,
@@ -79,7 +79,7 @@ const heldWriterCarrier = (writers: NativeCallableDataStorage['writers']): Repre
       for (const arm of value.arms) add(arm.value, arm.semanticType)
     } else if (value.kind === 'optional') {
       add(value.payload, semanticType)
-      add({ kind: value.absence }, semanticType)
+      add(absenceCarrier(value.absence), semanticType)
     } else {
       const key = representationKey(value)
       if (!arms.has(key)) arms.set(key, { tag: '', value, semanticType, runtimeDiscriminator: { kind: 'carrier' } })

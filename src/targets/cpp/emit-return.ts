@@ -264,10 +264,13 @@ export const emitReturn = (ctx: EmitContext, lines: string[], terminator: Extrac
     lines.push(completion === null ? 'co_return;' : `co_return ${returnedCellText(ctx, completion.text)};`)
     return
   }
-  if (ctx.returnsOwnReceiver && terminator.value) {
+  if (ctx.returnsOwnReceiver && terminator.value != null) {
     lines.push(`return ${cppReceiverName};`)
     return
   }
+  // Narrowed through a local: a narrowed property path (`ctx.abi.result`)
+  // passed on as a whole `Representation` has no native widening.
+  const declaredResult = ctx.abi ? ctx.abi.result : null
   if (!terminator.value) {
     // `Promise<void>` is a real class type, not the literal `void` -- a
     // bare `return;` inside a function whose ABI result is
@@ -276,11 +279,11 @@ export const emitReturn = (ctx: EmitContext, lines: string[], terminator: Extrac
     // payload for which a `return` terminator carries no value operand
     // at all here, so this is reached exactly once per such function, at
     // its implicit or explicit valueless return.
-    if (ctx.abi?.result.kind === 'promise' && ctx.abi.result.value.kind === 'void') {
-      lines.push(`return ${cppTypeOf(ctx.abi.result)}::settled_value();`)
+    if (declaredResult?.kind === 'promise' && declaredResult.value.kind === 'void') {
+      lines.push(`return ${cppTypeOf(declaredResult)}::settled_value();`)
       return
     }
-    if (ctx.abi && ctx.abi.result.kind !== 'void') {
+    if (ctx.abi != null && ctx.abi.result.kind !== 'void') {
       const result = ctx.abi.result
       const payload = result.kind === 'promise' ? result.value : result
       const absent = cppUndefinedIn(payload)
@@ -341,10 +344,10 @@ export const emitReturn = (ctx: EmitContext, lines: string[], terminator: Extrac
   // operand is the convert's source.
   const dynamicSource =
     terminator.value.representation.kind === 'dynamic' ? terminator.value : (ctx.conversionSources.get(terminator.value.value) ?? null)
-  if (ctx.abi?.result.kind === 'promise' && dynamicSource?.representation.kind === 'dynamic') {
+  if (declaredResult?.kind === 'promise' && dynamicSource?.representation.kind === 'dynamic') {
     const adopted =
-      (terminator.value ? certifiedDynamicAdoptionText(ctx, terminator.value, ctx.abi.result, dynamicSource) : null) ??
-      dynamicPromiseAdoptionText(ctx.abi.result, operandText(ctx, dynamicSource), ctx.layouts)
+      (terminator.value ? certifiedDynamicAdoptionText(ctx, terminator.value, declaredResult, dynamicSource) : null) ??
+      dynamicPromiseAdoptionText(declaredResult, operandText(ctx, dynamicSource), ctx.layouts)
     if (adopted !== null) {
       lines.push(`return ${adopted};`)
       return
@@ -361,8 +364,8 @@ export const emitReturn = (ctx: EmitContext, lines: string[], terminator: Extrac
   // (`runtime/gea_runtime.h`, the same one `return_value` calls) is invoked
   // directly instead, over a fresh `Promise` this expression settles and hands
   // back.
-  if (ctx.abi?.result.kind === 'promise' && settlesOverPayloadOrPromise(terminator.value.representation, ctx.abi.result.value)) {
-    const resultType = cppTypeOf(ctx.abi.result)
+  if (declaredResult?.kind === 'promise' && settlesOverPayloadOrPromise(terminator.value.representation, declaredResult.value)) {
+    const resultType = cppTypeOf(declaredResult)
     // A `const&` parameter, not a forwarding `&&` moved into: the operand's
     // text may itself be a borrowed formal already carried by `const&` (the
     // `_stable_borrow` entry, `borrowed-call-entry.ts`), which cannot bind to
@@ -375,16 +378,16 @@ export const emitReturn = (ctx: EmitContext, lines: string[], terminator: Extrac
     return
   }
   const settlesIntoPromise = ctx.abi !== null && ctx.abi.result.kind === 'promise' && terminator.value.representation.kind !== 'promise'
-  const abiResult = settlesIntoPromise && ctx.abi ? ctx.abi.result.value : (ctx.abi?.result ?? null)
+  const abiResult = settlesIntoPromise && ctx.abi != null ? ctx.abi.result.value : (ctx.abi?.result ?? null)
   // `Promise<void>` carries no payload at all (`cppResultTypeOf` elides
   // `void`), so a valued return whose value is itself `void` -- `return f()`
   // where `f` completes without producing one -- has nothing to settle WITH.
   // The evaluation still has to happen for its effects, so it is discarded
   // explicitly and the settled promise minted by the same named factory the
   // valueless return above uses.
-  if (ctx.abi && ctx.abi.result.kind === 'promise' && abiResult && abiResult.kind === 'void') {
+  if (declaredResult !== null && declaredResult.kind === 'promise' && abiResult != null && abiResult.kind === 'void') {
     lines.push(`(void)(${text});`)
-    lines.push(`return ${cppTypeOf(ctx.abi.result)}::settled_value();`)
+    lines.push(`return ${cppTypeOf(declaredResult)}::settled_value();`)
     return
   }
   // A value-returning source statement may still implement a `void` ABI:
@@ -416,7 +419,7 @@ export const emitReturn = (ctx: EmitContext, lines: string[], terminator: Extrac
   // returned from a function declared `gea::TaggedUnion<std::string, double>`:
   // certified, preflight-clean, and rejected by clang. A missing conversion is
   // a refusal, not a silently unconverted store.
-  if (abiResult && converted === null) {
+  if (abiResult != null && converted === null) {
     throw createCppEmitBlockedError(
       `conversion:${representationKey(terminator.value.representation)}->${representationKey(abiResult)}`,
       `returns a ${terminator.value.representation.kind} where this body's ABI result is ${abiResult.kind}, ` +
@@ -443,8 +446,8 @@ export const emitReturn = (ctx: EmitContext, lines: string[], terminator: Extrac
   // payload widening instead, which is the step that actually needs it. The
   // file's own optional-target comment makes the same argument at the other
   // end of the same pair.
-  if (settlesIntoPromise && ctx.abi) {
-    lines.push(`return ${cppTypeOf(ctx.abi.result)}(${converted ?? text});`)
+  if (settlesIntoPromise && declaredResult !== null) {
+    lines.push(`return ${cppTypeOf(declaredResult)}(${converted ?? text});`)
     return
   }
   lines.push(`return ${returnedCellText(ctx, converted ?? text)};`)

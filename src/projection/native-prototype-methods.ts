@@ -29,9 +29,9 @@ import { hostMemberOf, type HostMemberTable } from '../targets/cpp/host/host-mem
 export const objectShapePrototypeMethods: ReadonlySet<string> = new Set(['hasOwnProperty', 'propertyIsEnumerable'])
 
 /** An inherited reflection algorithm never preempts an authenticated host-owned member of the same name. */
-export const nativeHostReflectionMemberOf = (
+export const nativeHostReflectionMemberOf = <Protocols extends { has(protocol: string): boolean }>(
   members: HostMemberTable,
-  intrinsicProtocols: Pick<ReadonlySet<string>, 'has'> | undefined,
+  intrinsicProtocols: Protocols | undefined,
   protocol: string,
   member: string
 ): boolean =>

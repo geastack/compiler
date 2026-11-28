@@ -35,9 +35,10 @@ export const createDynamicLanguageProducer = (context: ProducerContext): FamilyP
       if (cited.kind === 'unmodelled') {
         return asBlocked(candidate.id, 'dynamic-language', `dynamic import specifier ${cited.reason}`, 'H0')
       }
-      operands.push(operand('specifier', 0, cited.source, stringType))
-      if (cited.source.kind === 'result') {
-        edges.push({ kind: 'value', result: cited.source.result, to: id, role: 'specifier', ordinal: 0 })
+      const specifierSource = cited.source
+      operands.push(operand('specifier', 0, specifierSource, stringType))
+      if (specifierSource.kind === 'result') {
+        edges.push({ kind: 'value', result: specifierSource.result, to: id, role: 'specifier', ordinal: 0 })
       }
     }
 

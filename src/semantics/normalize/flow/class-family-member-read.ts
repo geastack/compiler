@@ -1,4 +1,5 @@
 import ts from '#typescript'
+import { checkerHasUnion, checkerUnionOf } from '../../checker-union.js'
 import { heritageClassOrInterfaceOf, type SourceClass, type ValueFlowIndex, type ValueWrite } from './model.js'
 import { sourceClassKeyReadPlanOf } from './source-class-data.js'
 import { classConstructorKeepsInstanceOf } from './member-call-forwarding.js'
@@ -15,7 +16,8 @@ import {
   deferredIntrinsicProtocolLedgerOf,
   intrinsicProtocolRequirementKind,
   type DeferredIntrinsicProtocolLedger,
-  type IntrinsicProtocolRequirement
+  type IntrinsicProtocolRequirement,
+  captureAnswer
 } from '../deferred-intrinsic-protocols.js'
 import { computedKeySetOf, type ComputedKeySetAuthority } from './computed-key-set.js'
 import { closedCallableAuthorityOf } from './callable-reach.js'
@@ -275,7 +277,7 @@ const describeAt = (at: ts.Node | undefined): string => {
 const instanceClassOf = (type: ts.Type): SourceClass | null => {
   if ((type.flags & ts.TypeFlags.Object) === 0) return null
   const objectFlags = (type as ts.ObjectType).objectFlags
-  const target = (objectFlags & ts.ObjectFlags.Reference) !== 0 ? (type as ts.TypeReference).target : type
+  const target = (objectFlags & ts.ObjectFlags.Reference) !== 0 ? (type as ts.TypeReference).target! : type
   if (!target.isClassOrInterface() || (target.objectFlags & ts.ObjectFlags.Class) === 0) return null
   const declaration = target.getSymbol()?.valueDeclaration
   if (!declaration || (!ts.isClassDeclaration(declaration) && !ts.isClassExpression(declaration))) return null
@@ -306,7 +308,11 @@ interface ClosureProof {
   readonly refusal: ClosureRefusal | null
   readonly requirements: readonly IntrinsicProtocolRequirement[]
 }
-const closures = new WeakMap<ValueFlowIndex, WeakMap<object, Map<string, ClosureProof>>>()
+// The inner level named so its tables are built with their type arguments: an
+// unannotated `new Map()` assigned into a held variable is an untyped table in
+// a native build, with no conversion to the level it is stored as.
+type ClosuresByCensus = WeakMap<object, Map<string, ClosureProof>>
+const closures = new WeakMap<ValueFlowIndex, ClosuresByCensus>()
 const NO_CENSUS: object = {}
 
 /**
@@ -528,14 +534,18 @@ const guardedAbsentKeyStore = (checker: ts.TypeChecker, write: ValueWrite, acces
   if (!ts.isIdentifier(key)) return false
   const keySymbol = checker.getSymbolAtLocation(key)
   if (!keySymbol || !isConstVariable(keySymbol.valueDeclaration)) return false
-  const owner = ts.findAncestor(access, ts.isFunctionLike)
+  // A boolean callback, not the guard itself: a native build has no conversion
+  // from a type-guard function value to `findAncestor`'s callback.
+  const owner = ts.findAncestor(access, (node) => ts.isFunctionLike(node))
   if (!owner) return false
   const readsSlotDirectly = (expression: ts.Expression): boolean => {
     const read = skipParentheses(expression)
     if (!ts.isElementAccessExpression(read) || skipParentheses(read.expression).kind !== ts.SyntaxKind.ThisKeyword) return false
     const readKey = skipParentheses(read.argumentExpression)
     return (
-      ts.isIdentifier(readKey) && checker.getSymbolAtLocation(readKey) === keySymbol && ts.findAncestor(read, ts.isFunctionLike) === owner
+      ts.isIdentifier(readKey) &&
+      checker.getSymbolAtLocation(readKey) === keySymbol &&
+      ts.findAncestor(read, (node) => ts.isFunctionLike(node)) === owner
     )
   }
   const readsSlot = (expression: ts.Expression): boolean => {
@@ -594,8 +604,8 @@ const guardedAbsentKeyStore = (checker: ts.TypeChecker, write: ValueWrite, acces
   return false
 }
 
-const familyKeyOf = (classes: Iterable<SourceClass>): string =>
-  [...classes]
+const familyKeyOf = (classes: readonly SourceClass[]): string =>
+  classes
     .map((owner) => `${owner.getSourceFile().fileName}:${owner.pos}`)
     .sort()
     .join(',')
@@ -616,11 +626,11 @@ const closureRefusalOf = (
   name: string,
   census: FamilyReceiverCensus | null
 ): ClosureProof => {
-  let byCensus = closures.get(flow)
-  if (!byCensus) closures.set(flow, (byCensus = new WeakMap()))
-  let byKey = byCensus.get(census ?? NO_CENSUS)
-  if (!byKey) byCensus.set(census ?? NO_CENSUS, (byKey = new Map()))
-  const key = `${name}|${familyKeyOf(instances.keys())}|${familyKeyOf(lacking)}`
+  let byCensus: ClosuresByCensus | undefined = closures.get(flow)
+  if (!byCensus) closures.set(flow, (byCensus = new WeakMap<object, Map<string, ClosureProof>>()))
+  let byKey: Map<string, ClosureProof> | undefined = byCensus.get(census ?? NO_CENSUS)
+  if (!byKey) byCensus.set(census ?? NO_CENSUS, (byKey = new Map<string, ClosureProof>()))
+  const key = `${name}|${familyKeyOf([...instances.keys()])}|${familyKeyOf([...lacking])}`
   const held = byKey.get(key)
   if (held) return held
   // The finite-key-set consultation `computeClosureRefusal` may now make
@@ -633,10 +643,12 @@ const closureRefusalOf = (
   // beside the verdict and replayed by the caller on every hit, never
   // re-derived and never dropped.
   const ledger = deferredIntrinsicProtocolLedgerOf(flow)
-  const proof: ClosureProof = ledger
-    ? (({ value, requirements }) => ({ refusal: value, requirements }))(
-        ledger.capture(() => computeClosureRefusal(checker, flow, instances, lacking, name, census))
-      )
+  // Fields read off the capture rather than destructured in a parameter list:
+  // a native build reads a destructured parameter through a view it cannot
+  // convert from the ledger's own result record.
+  const captured = ledger ? captureAnswer(ledger, () => computeClosureRefusal(checker, flow, instances, lacking, name, census)) : null
+  const proof: ClosureProof = captured
+    ? { refusal: captured.value, requirements: captured.requirements }
     : { refusal: computeClosureRefusal(checker, flow, instances, lacking, name, census), requirements: [] }
   byKey.set(key, proof)
   return proof
@@ -1024,7 +1036,7 @@ export const classFamilyMemberReadTypeOf = (
     if (watching) console.error(`[FAMILY-MEMBER] ${checker.typeToString(wholeReceiver)}.${name} ${reason}${describeAt(at)}`)
     return null
   }
-  const union = (checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }).getUnionType
+  const union = checkerHasUnion(checker)
   // A receiver flowing through a guarded reassignment -- `if (
   // node.isNode !== true ) node = _emptyNode` -- holds a union of real
   // class instances AND a sentinel object literal. `familyRootsOf` (below,
@@ -1046,17 +1058,23 @@ export const classFamilyMemberReadTypeOf = (
   // through exactly as before, over the WHOLE receiver, so a program with no
   // literal-sentinel arm is untouched and a disqualified one still refuses.
   const present =
-    literalCarriers && classParts.length < parts.length ? (classParts.length > 0 ? union!.call(checker, classParts) : null) : wholeReceiver
+    literalCarriers && classParts.length < parts.length
+      ? classParts.length > 0
+        ? checkerUnionOf(checker, classParts)
+        : null
+      : wholeReceiver
   if (present === null) {
     // Every union member was a closed literal -- there is no class family to
     // ask at all, and the literals' own members are the whole answer.
-    return literalCarriers && literalCarriers.length > 0 ? union!.call(checker, literalCarriers) : refuse('no-declarer')
+    return literalCarriers && literalCarriers.length > 0 ? checkerUnionOf(checker, literalCarriers) : refuse('no-declarer')
   }
   const ledger = deferredIntrinsicProtocolLedgerOf(flow)
   if (!ledger) return refuse('no-intrinsic-ledger')
-  const { value: plan, requirements } = ledger.capture(() =>
-    sourceClassKeyReadPlanOf(checker, flow, { kind: 'declared', receiver: present }, name)
-  )
+  // Read field by field, not destructured: a native build has no view over the
+  // ledger's result record for a binding pattern.
+  const captured = captureAnswer(ledger, () => sourceClassKeyReadPlanOf(checker, flow, { kind: 'declared', receiver: present }, name))
+  const plan = captured.value
+  const requirements = captured.requirements
   if (!plan) return refuse('no-key-read-plan')
   if (!plan.codeFree) return refuse('member-runs-code')
   if (plan.carriers.length === 0) return refuse('no-declarer')
@@ -1110,7 +1128,7 @@ export const classFamilyMemberReadTypeOf = (
   if (!union) return null
   publish(ledger, closure.requirements.length > 0 ? [...requirements, ...closure.requirements] : requirements)
   const familyCarriers = plan.needsDefaultPrototype ? [...carriers, checker.getUndefinedType()] : carriers
-  return union.call(checker, literalCarriers ? [...familyCarriers, ...literalCarriers] : familyCarriers)
+  return checkerUnionOf(checker, literalCarriers ? [...familyCarriers, ...literalCarriers] : familyCarriers)
 }
 
 const isWholeObjectPrototypeRequirement = (requirement: IntrinsicProtocolRequirement): boolean =>
@@ -1136,7 +1154,7 @@ const publish = (ledger: DeferredIntrinsicProtocolLedger, requirements: readonly
   let added = false
   for (const requirement of requirements) {
     let kinds = held.seen.get(requirement.location)
-    if (!kinds) held.seen.set(requirement.location, (kinds = new Set()))
+    if (!kinds) held.seen.set(requirement.location, (kinds = new Set<string>()))
     const kind = `${requirement.intrinsic}.${intrinsicProtocolRequirementKind(requirement) ?? ''}`
     if (kinds.has(kind)) continue
     kinds.add(kind)

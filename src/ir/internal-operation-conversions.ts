@@ -2,7 +2,7 @@ import type { FunctionId, IrValueId } from '../identity/ids.js'
 import { abiOfCallee } from '../projection/callee.js'
 import { recordAccessorsOfShape, recordFieldsOfShape } from '../projection/fields.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
-import { representationKey, type CallableAbi, type Representation } from '../representation/model.js'
+import { absenceCarrier, representationKey, type CallableAbi, type Representation } from '../representation/model.js'
 import { holdsThenable } from '../representation/promise-resolution.js'
 import type { IrBody, IrOperation } from './model.js'
 import type { OperationConversionInput } from './operation-conversions.js'
@@ -10,6 +10,8 @@ import { thrownValueCarrier } from './lower-exceptions.js'
 
 const undefinedValue: Representation = { kind: 'undefined' }
 const booleanValue: Representation = { kind: 'scalar', domain: 'boolean' }
+const stringValue: Representation = { kind: 'string' }
+const numberValue: Representation = { kind: 'scalar', domain: 'number' }
 const dynamic: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
 const dynamicResult: Representation = { kind: 'dynamic', reason: 'opt-in-fallback' }
 
@@ -30,7 +32,7 @@ export const internalOperationConversionInputsOf = (
     if (target.kind === 'void') return
     if (source.kind === 'optional' && holdsThenable(source.payload)) {
       awaitValue(source.payload, target)
-      add('await-result', { kind: source.absence }, target)
+      add('await-result', absenceCarrier(source.absence), target)
     } else if (source.kind === 'tagged-union' && holdsThenable(source)) {
       for (const arm of source.arms) awaitValue(arm.value, target)
     } else if (source.kind === 'promise') add('await-result', source.value.kind === 'void' ? undefinedValue : source.value, target)
@@ -177,11 +179,7 @@ export const internalOperationConversionInputsOf = (
     if (operation.form === 'binary' && first && target.kind !== 'scalar' && target.kind !== 'string') {
       const relational = ['<', '<=', '>', '>='].includes(operation.operator)
       if (!operation.operands.some((operand) => operand.representation.kind === 'dynamic'))
-        add(
-          'compute-result',
-          relational ? booleanValue : first.representation.kind === 'string' ? { kind: 'string' } : { kind: 'scalar', domain: 'number' },
-          target
-        )
+        add('compute-result', relational ? booleanValue : first.representation.kind === 'string' ? stringValue : numberValue, target)
     }
   }
   return [...inputs.values()]

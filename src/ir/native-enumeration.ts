@@ -17,8 +17,14 @@ export const nativeEnumerationPlanOf = (source: Representation): NativeEnumerati
       return present ? { kind: 'optional', present } : null
     }
     case 'tagged-union': {
-      const arms = source.arms.map((arm) => nativeEnumerationPlanOf(arm.value))
-      return arms.length > 0 && arms.every((arm): arm is NativeEnumerationPlan => arm !== null) ? { kind: 'union', arms } : null
+      // Built element by element: an `every` type predicate does not retype the array natively.
+      const arms: NativeEnumerationPlan[] = []
+      for (const arm of source.arms) {
+        const plan = nativeEnumerationPlanOf(arm.value)
+        if (plan === null) return null
+        arms.push(plan)
+      }
+      return arms.length > 0 ? { kind: 'union', arms } : null
     }
     // Compiler-rendered records and classes share the native field-key protocol.
     case 'native-record-ref':

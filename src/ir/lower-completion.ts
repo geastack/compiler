@@ -1,5 +1,5 @@
 import type { OperationId } from '../identity/ids.js'
-import { edgesOfKind } from '../semantics/model/edges.js'
+import { completionEdgesOf } from '../semantics/model/edges.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import { IrLoweringBlockedError } from './lower-graph.js'
 import type { IrBlockId } from './model.js'
@@ -21,7 +21,7 @@ import type { IrBlockId } from './model.js'
  */
 
 const transferEdgeOf = (graph: SemanticGraph, from: OperationId, completion: 'break' | 'continue') => {
-  for (const candidate of edgesOfKind(graph.edges, 'completion')) {
+  for (const candidate of completionEdgesOf(graph.edges)) {
     if (candidate.from !== from || candidate.completion !== completion) continue
     const target = graph.operations.get(candidate.to)
     if (!(target?.family === 'boundary' && target.boundary === 'finally-region')) return candidate

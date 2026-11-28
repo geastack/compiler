@@ -155,11 +155,18 @@ export const sourceCallableReadonlySetOf = (access: Access, flow: ValueFlowIndex
     return [...new Set(result)]
   }
   const keySources = ts.isPropertyAccessExpression(access) ? null : sources(access.argumentExpression)
-  const keys = ts.isPropertyAccessExpression(access)
-    ? [access.name.text]
-    : keySources?.every(ts.isStringLiteralLike)
-      ? [...new Set(keySources.map((one) => (one as ts.StringLiteralLike).text))]
-      : []
+  // Spelled keys collected one by one rather than through an `every`
+  // predicate, which a native build cannot narrow the source list by.
+  const spelledKeys = (): readonly string[] => {
+    if (!keySources) return []
+    const texts = new Set<string>()
+    for (const one of keySources) {
+      if (!ts.isStringLiteralLike(one)) return []
+      texts.add(one.text)
+    }
+    return [...texts]
+  }
+  const keys = ts.isPropertyAccessExpression(access) ? [access.name.text] : spelledKeys()
   if (!keys.length || keys.some((key) => key !== 'name' && key !== 'length')) return null
   const incoming = sources(access.expression)
   if (!incoming?.length) return null

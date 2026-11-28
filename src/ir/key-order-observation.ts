@@ -76,6 +76,7 @@ const collectShapes = (representation: Representation, out: Set<string>, indexed
     case 'promise':
       return !containers || collectShapes(representation.value, out, indexed, containers)
     case 'native-sequence':
+      return !containers || collectShapes(representation.element, out, indexed, containers)
     case 'dense-buffer':
       return !containers || collectShapes(representation.element, out, indexed, containers)
     case 'scalar':

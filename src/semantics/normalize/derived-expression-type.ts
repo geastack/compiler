@@ -1,4 +1,5 @@
 import ts from '#typescript'
+import { checkerUnionOf } from '../checker-union.js'
 import { isAmbientDeclaration, isAmbientSymbol } from '../ambient.js'
 import { logicalResultTypeOf } from './logical-result-type.js'
 export { isOpenTypeForm } from './open-type-form.js'
@@ -21,7 +22,8 @@ import {
   deferredIntrinsicProtocolLedgerOf,
   intrinsicProtocolRequirementKind,
   type DeferredIntrinsicProtocolLedger,
-  type IntrinsicProtocolRequirement
+  type IntrinsicProtocolRequirement,
+  captureAnswer
 } from './deferred-intrinsic-protocols.js'
 import { createPropertyKeyDomains, everyWriteReachable, domainMayNameNumeric } from './property-key-domain.js'
 import { unwrapErasedExpression } from './producers/erasure.js'
@@ -467,7 +469,7 @@ const closedObjectLiteralIndexTypeOf = (checker: ts.TypeChecker, receiver: ts.Ty
 /** The source class an INSTANCE type is an instance of -- never `typeof C`, and never a library class whose instances the host shapes. */
 const sourceClassOfInstance = (type: ts.Type): SourceClass | null => {
   if ((type.flags & ts.TypeFlags.Object) === 0) return null
-  const target = ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) !== 0 ? (type as ts.TypeReference).target : type
+  const target = ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) !== 0 ? (type as ts.TypeReference).target! : type
   if (!target.isClassOrInterface() || (target.objectFlags & ts.ObjectFlags.Class) === 0) return null
   const declaration = target.getSymbol()?.valueDeclaration
   if (!declaration || (!ts.isClassDeclaration(declaration) && !ts.isClassExpression(declaration))) return null
@@ -613,16 +615,16 @@ const absentNumericIndexTypeOf = (
     const root = sourceClassOfInstance(arm)
     if (!root) return null
     let proofsByCensus = numericAbsenceProofs.get(flow)
-    if (!proofsByCensus) numericAbsenceProofs.set(flow, (proofsByCensus = new WeakMap()))
+    if (!proofsByCensus) numericAbsenceProofs.set(flow, (proofsByCensus = new WeakMap<object, Map<SourceClass, NumericAbsenceProof>>()))
     let proofs = proofsByCensus.get(censusKey)
-    if (!proofs) proofsByCensus.set(censusKey, (proofs = new Map()))
+    if (!proofs) proofsByCensus.set(censusKey, (proofs = new Map<SourceClass, NumericAbsenceProof>()))
     const ledger = deferredIntrinsicProtocolLedgerOf(flow)
     let proved = proofs.get(root)
     if (proved === undefined) {
       let activeByCensus = activeNumericAbsenceProofs.get(flow)
-      if (!activeByCensus) activeNumericAbsenceProofs.set(flow, (activeByCensus = new WeakMap()))
+      if (!activeByCensus) activeNumericAbsenceProofs.set(flow, (activeByCensus = new WeakMap<object, Set<SourceClass>>()))
       let active = activeByCensus.get(censusKey)
-      if (!active) activeByCensus.set(censusKey, (active = new Set()))
+      if (!active) activeByCensus.set(censusKey, (active = new Set<SourceClass>()))
       if (active.has(root)) return null
       active.add(root)
       try {
@@ -644,7 +646,12 @@ const absentNumericIndexTypeOf = (
           if (ledger?.requirePrototypeKeys('Object', { numeric: true }, root) !== true) return false
           return numericNamesAbsentFrom(checker, flow, root, census)
         }
-        proved = ledger ? ledger.capture(compute) : { value: compute(), requirements: [] }
+        // The answer travels in a field, not as `capture`'s value: a native
+        // build lays `capture` out once for every caller in the program, so
+        // its value is no boolean here.
+        const held = { value: false }
+        const captured = ledger ? captureAnswer(ledger, () => (held.value = compute())) : null
+        proved = captured ? { value: held.value, requirements: captured.requirements } : { value: compute(), requirements: [] }
         proofs.set(root, proved)
       } finally {
         active.delete(root)
@@ -753,23 +760,26 @@ const numericNamesAbsentFrom = (
       continue
     }
     const ancestors = new Set<SourceClass>()
-    let libraryBase: ts.Node | null = null
+    // A field, not a local: `visit` sets it, and a local assigned only inside a
+    // closure reads back as its initial `null` to the checker, so the test below
+    // would narrow it to `never`.
+    const library: { base: ts.Node | null } = { base: null }
     const visit = (type: ts.InterfaceType): void => {
       for (const base of checker.getBaseTypes(type)) {
         const declaration = sourceClassOfInstance(base)
         if (!declaration) {
-          libraryBase ??= member
+          library.base ??= member
           return
         }
         if (ancestors.has(declaration)) continue
         ancestors.add(declaration)
-        const target = ((base as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) !== 0 ? (base as ts.TypeReference).target : base
+        const target = ((base as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) !== 0 ? (base as ts.TypeReference).target! : base
         if (target.isClassOrInterface()) visit(target)
       }
     }
     visit(instance)
-    if (libraryBase) {
-      refuse('library-base', libraryBase)
+    if (library.base) {
+      refuse('library-base', library.base)
       if (!enumerating) return summarize()
       continue
     }
@@ -1117,8 +1127,16 @@ const closedLiteralMemberAbsent = (
   }
   // Only a class instance or a declared interface can grow members this
   // reading never sees; a literal's own declaration(s) are the whole story.
+  // Collected element by element: `every` with a type guard narrows the
+  // declaration list to a literal list, an array type a native build has no
+  // conversion into.
   const declarations = record.getSymbol()?.declarations
-  if (!declarations || declarations.length === 0 || !declarations.every(ts.isObjectLiteralExpression)) return refuse('not-a-closed-literal')
+  if (!declarations || declarations.length === 0) return refuse('not-a-closed-literal')
+  const literals: ts.ObjectLiteralExpression[] = []
+  for (const declaration of declarations) {
+    if (!ts.isObjectLiteralExpression(declaration)) return refuse('not-a-closed-literal')
+    literals.push(declaration)
+  }
   // An index signature already answers every named key through `indexedTypeOf`;
   // reaching here at all means none was stated, but a defensive check keeps
   // this proof correct even if that changes upstream.
@@ -1129,7 +1147,7 @@ const closedLiteralMemberAbsent = (
   // holds whatever `x` holds. The checker's member list for such a literal is
   // the source's declared list, so a key missing from it proves nothing.
   if (depth > 8) return refuse('spread-depth')
-  for (const declaration of declarations)
+  for (const declaration of literals)
     for (const property of declaration.properties) {
       if (!ts.isSpreadAssignment(property)) continue
       if (!closedLiteralMemberAbsent(checker, flow, checker.getTypeAtLocation(property.expression), name, at, census, depth + 1))
@@ -1301,11 +1319,11 @@ const publishClosedLiteralAbsenceRequirements = (
   if (requirements.length === 0) return
   ledger.include(requirements)
   let held = publishedClosedLiteralAbsenceRequirements.get(ledger)
-  if (!held) publishedClosedLiteralAbsenceRequirements.set(ledger, (held = { all: [], seen: new Map() }))
+  if (!held) publishedClosedLiteralAbsenceRequirements.set(ledger, (held = { all: [], seen: new Map<ts.Node, Set<string>>() }))
   let added = false
   for (const requirement of requirements) {
     let kinds = held.seen.get(requirement.location)
-    if (!kinds) held.seen.set(requirement.location, (kinds = new Set()))
+    if (!kinds) held.seen.set(requirement.location, (kinds = new Set<string>()))
     const kind = `${requirement.intrinsic}.${intrinsicProtocolRequirementKind(requirement) ?? ''}`
     if (kinds.has(kind)) continue
     kinds.add(kind)
@@ -1358,7 +1376,7 @@ const literalOriginsOfReceiver = (
 } | null => {
   if (receiver === null) return null
   let byReceiver = literalReceiverOrigins.get(flow)
-  if (!byReceiver) literalReceiverOrigins.set(flow, (byReceiver = new WeakMap()))
+  if (!byReceiver) literalReceiverOrigins.set(flow, (byReceiver = new WeakMap<ts.Expression, LiteralReceiverOrigins>()))
   let origins = byReceiver.get(receiver)
   if (origins === undefined) {
     // The origin authority states the obligations its caller inventory leans
@@ -1366,8 +1384,15 @@ const literalOriginsOfReceiver = (
     // capture frame and refuses without one. A binding census asks this
     // outside any frame, so the walk opens its own and hands the obligations
     // back to be published with the answer they license.
-    const captured = ledger.capture(() => literalsHeldBy(checker, flow, receiver))
-    origins = { literals: captured.value, requirements: captured.requirements }
+    // The set travels in a field rather than as `capture`'s value: a native
+    // build lays `capture` out once for every caller, and the other callers'
+    // values are booleans.
+    const held: { literals: ReadonlySet<ts.ObjectLiteralExpression> | null } = { literals: null }
+    const captured = captureAnswer(ledger, () => {
+      held.literals = literalsHeldBy(checker, flow, receiver)
+      return held.literals !== null
+    })
+    origins = { literals: held.literals, requirements: captured.requirements }
     byReceiver.set(receiver, origins)
   }
   const { literals, requirements } = origins
@@ -1492,14 +1517,20 @@ const absentClosedObjectLiteralMemberTypeOf = (
   }
   const proofOf = (record: ts.Type): ClosedLiteralAbsenceProof => {
     let proofsByCensus = closedLiteralAbsenceProofs.get(flow)
-    if (!proofsByCensus) closedLiteralAbsenceProofs.set(flow, (proofsByCensus = new WeakMap()))
+    if (!proofsByCensus)
+      closedLiteralAbsenceProofs.set(
+        flow,
+        (proofsByCensus = new WeakMap<object, WeakMap<ts.Type, Map<string, ClosedLiteralAbsenceProof>>>())
+      )
     let proofsByType = proofsByCensus.get(census ?? NO_SETTLED_CENSUS)
-    if (!proofsByType) proofsByCensus.set(census ?? NO_SETTLED_CENSUS, (proofsByType = new WeakMap()))
+    if (!proofsByType)
+      proofsByCensus.set(census ?? NO_SETTLED_CENSUS, (proofsByType = new WeakMap<ts.Type, Map<string, ClosedLiteralAbsenceProof>>()))
     let proofs = proofsByType.get(record)
-    if (!proofs) proofsByType.set(record, (proofs = new Map()))
+    if (!proofs) proofsByType.set(record, (proofs = new Map<string, ClosedLiteralAbsenceProof>()))
     let proved = proofs.get(name)
     if (!proved) {
-      proved = ledger.capture(() => {
+      // The answer travels in a field, as in `absentNumericIndexTypeOf`.
+      const prove = (): boolean => {
         // The prototype obligation is recorded HERE, not inside the write
         // scan: the scan can refuse for reasons that have nothing to do with
         // `Object.prototype` (a keyed write it cannot rule out), and a
@@ -1510,7 +1541,10 @@ const absentClosedObjectLiteralMemberTypeOf = (
           return false
         }
         return closedLiteralMemberAbsent(checker, flow, record, name, at, census)
-      })
+      }
+      const held = { value: false }
+      const captured = captureAnswer(ledger, () => (held.value = prove()))
+      proved = { value: held.value, requirements: captured.requirements }
       proofs.set(name, proved)
     }
     return proved
@@ -2065,7 +2099,7 @@ const standardInterfaceSymbolCache = new WeakMap<ts.TypeChecker, Map<string, ts.
 const standardInterfaceSymbol = (checker: ts.TypeChecker, anchor: ts.Node, name: string): ts.Symbol | null => {
   let cache = standardInterfaceSymbolCache.get(checker)
   if (!cache) {
-    cache = new Map()
+    cache = new Map<string, ts.Symbol | null>()
     standardInterfaceSymbolCache.set(checker, cache)
   }
   const cached = cache.get(name)
@@ -2452,8 +2486,7 @@ export const withoutVacuousMembers = (checker: ts.TypeChecker, anchor: ts.Node |
   if (kept.length === parts.length) return type
   if (kept.length === 0) return null
   if (kept.length === 1) return kept[0]!
-  const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
-  return typeof constructing.getUnionType === 'function' ? constructing.getUnionType(kept) : null
+  return checkerUnionOf(checker, kept)
 }
 
 export const annotationStatesNothing = (checker: ts.TypeChecker, anchor: ts.Node, type: ts.Type): boolean => {
@@ -2704,8 +2737,7 @@ export const withoutUndefinedMember = (checker: ts.TypeChecker, type: ts.Type): 
   if (kept.length === type.types.length || kept.length === 0) return type
   const sole = kept.length === 1 ? kept[0] : undefined
   if (sole) return sole
-  const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
-  return typeof constructing.getUnionType === 'function' ? constructing.getUnionType(kept) : type
+  return checkerUnionOf(checker, kept) ?? type
 }
 
 /** The class a constructor-object type (`typeof C`) belongs to, or `null` for any other type. */
@@ -2896,8 +2928,7 @@ export const nominalConstructorChoiceTypeAt = (
     distinct.some((arm) => classOfConstructorType(arm) !== null) &&
     distinct.every((arm) => classOfConstructorType(arm) !== null || isStructuralConstructorType(arm))
   ) {
-    const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
-    return typeof constructing.getUnionType === 'function' ? constructing.getUnionType(distinct) : null
+    return checkerUnionOf(checker, distinct)
   }
   return null
 }
@@ -3633,8 +3664,7 @@ export const disjointUnionTypeOf = (checker: ts.TypeChecker, types: readonly ts.
     types.map((type) => widenLiteralForm(checker, type))
   )
   if (!members) return null
-  const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
-  return typeof constructing.getUnionType === 'function' ? constructing.getUnionType(members) : null
+  return checkerUnionOf(checker, members)
 }
 
 // -----------------------------------------------------------------------
@@ -4034,9 +4064,12 @@ export interface AliasEvidence {
   readonly returnedFrom: ReadonlyMap<ts.SignatureDeclaration, ReadonlySet<ts.SignatureDeclaration>>
 }
 
-export const emptyAliasEvidence: AliasEvidence = { publishedUnderMember: new Map(), returnedFrom: new Map() }
+export const emptyAliasEvidence: AliasEvidence = {
+  publishedUnderMember: new Map<ts.Symbol, ReadonlySet<ts.SignatureDeclaration>>(),
+  returnedFrom: new Map<ts.SignatureDeclaration, ReadonlySet<ts.SignatureDeclaration>>()
+}
 
-const EMPTY_CALLABLES: ReadonlySet<ts.SignatureDeclaration> = new Set()
+const EMPTY_CALLABLES: ReadonlySet<ts.SignatureDeclaration> = new Set<ts.SignatureDeclaration>()
 
 export const indexAliasEvidence = (
   checker: ts.TypeChecker,
@@ -4086,7 +4119,7 @@ export const indexAliasEvidence = (
     // declaration, just as a named callable assigned there is. Omitting
     // these values loses every later member-call argument from their
     // parameter census despite knowing the member's publication identity.
-    if (ts.isFunctionExpression(expression) || ts.isArrowFunction(expression)) return new Set([expression])
+    if (ts.isFunctionExpression(expression) || ts.isArrowFunction(expression)) return new Set<ts.SignatureDeclaration>().add(expression)
     const named = namedCallableOf(expression)
     if (named) return new Set([named])
     if (ts.isCallExpression(expression)) {
@@ -4105,8 +4138,12 @@ export const indexAliasEvidence = (
       // construction -- syntax cannot let it skip over a nested one -- so
       // this is exactly the declaration the reference above is binding-only
       // FOR, no separate containment walk needed.
-      const enclosing = ts.findAncestor(node, isTrackedCallable)
-      if (callable && enclosing) record(returnedFrom, enclosing as ts.SignatureDeclaration, new Set([callable]))
+      // Walked here rather than through `ts.findAncestor`: its callback type
+      // (a guard or a `'quit'` sentinel) is a union a native build cannot pass.
+      let enclosing: ts.SignatureDeclaration | undefined
+      for (let at: ts.Node | undefined = node; at !== undefined && enclosing === undefined; at = at.parent)
+        if (isTrackedCallable(at)) enclosing = at
+      if (callable && enclosing) record(returnedFrom, enclosing, new Set([callable]))
     }
     ts.forEachChild(node, visitReturns)
   }

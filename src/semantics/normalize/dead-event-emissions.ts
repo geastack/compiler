@@ -134,7 +134,7 @@ const solve = (
   identities: IdentityTable,
   heritage: ReadonlyMap<DeclarationId, readonly DeclarationId[]>
 ): ReadonlyMap<ts.CallExpression, DeadEventCall> => {
-  const none: ReadonlyMap<ts.CallExpression, DeadEventCall> = new Map()
+  const none: ReadonlyMap<ts.CallExpression, DeadEventCall> = new Map<ts.CallExpression, DeadEventCall>()
   const classes = new Map<DeclarationId, ts.ClassLikeDeclaration>()
   const protocolOfMember = new Map<ts.Node, Protocol>()
   const protocolOfName = new Map<string, Protocol>()
@@ -662,7 +662,7 @@ const solve = (
   // class declaration, a function-valued variable, or a static method of a
   // class whose constructor never escapes as a value -- because an instance
   // method can be reached through a computed key the checker never resolves.
-  const isStaticNamedMethod = (node: ts.Node): node is ts.MethodDeclaration & { readonly name: ts.Identifier } =>
+  const isStaticNamedMethod = (node: ts.Node): node is ts.MethodDeclaration =>
     ts.isMethodDeclaration(node) &&
     ts.isIdentifier(node.name) &&
     (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Static) !== 0 &&
@@ -756,10 +756,10 @@ const solve = (
   // A declaration's own name, or an import binding: an import that nothing
   // then reads calls nothing.
   const isDeclarationName = (node: ts.Identifier): boolean => {
-    const parent = node.parent as ts.Node & { name?: ts.Node }
+    const parent = node.parent
     if (ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isNamespaceImport(parent) || ts.isImportEqualsDeclaration(parent))
       return true
-    return parent.name === node && (ts.isDeclarationStatement(parent) || ts.isVariableDeclaration(parent) || ts.isParameter(parent))
+    return (ts.isDeclarationStatement(parent) || ts.isVariableDeclaration(parent) || ts.isParameter(parent)) && parent.name === node
   }
   for (const file of files) scanReferences(file)
   const reachable = (registration: Registration): boolean => {

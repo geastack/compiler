@@ -43,13 +43,13 @@ export const createIntersectionFlattener = (
 ): ((members: readonly StructuralTypeId[], seen?: Set<StructuralTypeId>) => readonly StructuralTypeId[]) => {
   const flattenedIntersectionMembers = (
     members: readonly StructuralTypeId[],
-    seen: Set<StructuralTypeId> = new Set()
+    seen: Set<StructuralTypeId> = new Set<StructuralTypeId>()
   ): readonly StructuralTypeId[] =>
     members.flatMap((member) => {
       if (seen.has(member)) return []
       const shape = shapeOf(member)
       const declaration = shape?.kind === 'intersection' || shape?.kind === 'declared' ? shape.declaration : null
-      if (declaration && isNativeBound(declaration)) return [member]
+      if (declaration !== null && isNativeBound(declaration)) return [member]
       const nested = shape?.kind === 'intersection' ? shape : shape?.kind === 'declared' && shape.body !== null ? shapeOf(shape.body) : null
       if (nested?.kind !== 'intersection') return [member]
       seen.add(member)

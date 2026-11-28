@@ -15,7 +15,15 @@ import {
   nativeRecordBaseTransportKind,
   nativePromiseBaseOf
 } from './class-ref-transport.js'
-import type { AbiParameter, CallableAbi, Ownership, RecordField, Representation, TaggedUnionArm } from '../../representation/model.js'
+import type {
+  AbiParameter,
+  CallableAbi,
+  Ownership,
+  RecordField,
+  RecordIndexSidecar,
+  Representation,
+  TaggedUnionArm
+} from '../../representation/model.js'
 import {
   abiKey,
   arrayExtensionKey,
@@ -30,7 +38,7 @@ import {
 } from '../../representation/model.js'
 import type { IrOperand, MergeLiveArmRebuildOperation } from '../../ir/model.js'
 import { programConversionKey, type ProgramConversionRecipe, type ProgramConversionRole } from '../../ir/program-conversions.js'
-import { transferOf } from '../../ir/transfer.js'
+import { transferWhere } from '../../ir/transfer.js'
 import type { DeclarationId, FunctionId } from '../../identity/ids.js'
 import type { ConversionNode } from '../../conversion/algebra.js'
 import { coercionText } from './emit-coercion.js'
@@ -110,7 +118,7 @@ import { integerStorageSlot } from '../../ir/integer-storage.js'
 import { cppRegExpNativeTypes, cppStringObjectNativeType } from './regexp-types.js'
 import { widenedNativeSumText } from './emit-sum-widening.js'
 import { nativeSelectionText } from './emit-native-selection.js'
-import { narrowingReachesTarget } from '../../conversion/build.js'
+import { descendantClassLeavesOf, narrowingReachesTarget, type DescendantClassStep } from '../../conversion/build.js'
 import { evaluatedOnceText } from './evaluated-once.js'
 import { nativeCallReceiverText, nativeUnboundMethodText } from './emit-native-method.js'
 import type { PromiseAdoptionRecipe } from '../../conversion/promise-adoption.js'
@@ -238,17 +246,17 @@ export const classFamilyLoadText = (ctx: ConversionSite, held: Representation, r
   })()
   if (heldClass === null) return null
   const { source, value } = heldClass
-  const arms = targetUnion.arms.map((arm) => arm.value)
-  if (!arms.every((arm) => arm.kind === 'class-ref' && arm.ownership === source.ownership && arm.ancestors.includes(source.declaration)))
-    return null
-  const classes = arms as readonly Extract<Representation, { kind: 'class-ref' }>[]
+  // An arm may itself be a union of descendants; each leaf is rebuilt through
+  // every union on its path, so the cascade below spans the nested arms too.
+  const leaves = descendantClassLeavesOf(source, targetUnion)
+  if (leaves === null) return null
   // A target may retain both an ancestor and one of its descendants (a
   // `Base | Derived` union where `Derived extends Base`). JS unions do not
   // preserve which syntactic arm produced an object, so allocation identity
   // supplies the canonical answer: test the most-specific family first and
   // retain each arm's original target-union index when rebuilding it.
-  const ordered = classes
-    .map((arm, index) => ({ arm, index }))
+  const ordered = leaves
+    .map((leaf, index) => ({ arm: leaf.arm, path: leaf.path, index }))
     .sort((left, right) => {
       const leftBelowRight = isOrDescendsFrom(ctx, left.arm.declaration, right.arm.declaration)
       const rightBelowLeft = isOrDescendsFrom(ctx, right.arm.declaration, left.arm.declaration)
@@ -256,11 +264,20 @@ export const classFamilyLoadText = (ctx: ConversionSite, held: Representation, r
       return left.index - right.index
     })
 
-  const unionType = cppTypeOf(targetUnion)
-  const armText = (arm: Extract<Representation, { kind: 'class-ref' }>, index: number): string =>
-    `${unionType}::ofArm<${index}>(gea::host::downcastClassRef<${cppClassName(arm.declaration)}>(${value}))`
+  const armText = (arm: Extract<Representation, { kind: 'class-ref' }>, path: readonly DescendantClassStep[], checked: boolean): string => {
+    const downcast = checked ? 'assertedDowncastClassRef' : 'downcastClassRef'
+    let built = `gea::host::${downcast}<${cppClassName(arm.declaration)}>(${value})`
+    for (let depth = path.length - 1; depth >= 0; depth -= 1) {
+      const step = path[depth]!
+      built = `${cppTypeOf(step.union)}::ofArm<${step.index}>(${built})`
+    }
+    return built
+  }
+  // The fallback is the one leaf no layout test guards: an object of a class
+  // outside the target (a value an assertion, not a guard, put here) would be
+  // read through the wrong class's layout, so it is the checked downcast.
   const fallback = ordered[ordered.length - 1]!
-  let projected = armText(fallback.arm, fallback.index)
+  let projected = armText(fallback.arm, fallback.path, true)
   for (let index = ordered.length - 2; index >= 0; index -= 1) {
     const candidate = ordered[index]!
     const arm = candidate.arm
@@ -269,9 +286,9 @@ export const classFamilyLoadText = (ctx: ConversionSite, held: Representation, r
     )
     if (descendants.length === 0) return null
     const test = `gea::host::hasNativeClassLayoutRef<${descendants.map(cppClassName).join(', ')}>(${value})`
-    projected = `${test} ? ${armText(arm, candidate.index)} : (${projected})`
+    projected = `${test} ? ${armText(arm, candidate.path, false)} : (${projected})`
   }
-  if (classes.length > 1) projected = `(${projected})`
+  if (leaves.length > 1) projected = `(${projected})`
   if (read.kind !== 'optional') return projected
 
   const targetType = cppTypeOf(read)
@@ -344,6 +361,18 @@ const taggedUnionArmText = (
     target.kind === 'tagged-union' &&
     candidates.some((candidate) => !exact.includes(candidate)) &&
     union.arms.some((_, index) => !candidates.some((candidate) => candidate.index === index))
+  // A class read from a union with a record arm no conversion brings into
+  // the class: a record view can hold an instance of a class the union's
+  // class arms do not name, so the arm is not excluded by the narrowing, and
+  // folding it into the last candidate read a record's bytes as that class.
+  const unhomedRecordArm =
+    target.kind === 'class-ref' &&
+    union.arms.some((arm, index) => arm.value.kind === 'native-record-ref' && !candidates.some((candidate) => candidate.index === index))
+  if (last && unhomedRecordArm) {
+    let result = `gea::host::unhomedUnionArm<${cppTypeOf(target)}>(${text}.index())`
+    for (const entry of [...candidates].reverse()) result = `${text}.is<${entry.index}>() ? ${entry.text} : (${result})`
+    return `(${result})`
+  }
   if (unhomed === 'throw' && last && partialWidening) {
     // `CHECKED_ARM_NARROWING`: every arm without a home throws, checked by
     // its own discriminant, so none is ever read as another.
@@ -389,6 +418,190 @@ const taggedUnionArmText = (
  * over the WIDER union's own discriminant instead of over a single known
  * value.
  */
+const classRefsWithin = (representation: Representation): readonly Extract<Representation, { kind: 'class-ref' }>[] => {
+  if (representation.kind === 'class-ref') return [representation]
+  if (representation.kind === 'optional') return classRefsWithin(representation.payload)
+  if (representation.kind === 'tagged-union') return representation.arms.flatMap((arm) => classRefsWithin(arm.value))
+  return []
+}
+
+const isOrExtendsClass = (derived: Extract<Representation, { kind: 'class-ref' }>, base: DeclarationId): boolean =>
+  derived.declaration === base || derived.ancestors.includes(base)
+
+/**
+ * A union of classes read out of the one held arm that is their common base:
+ * `node.parent` stores `NodeObject | Declaration | {...}`, and a guarded
+ * `VariableDeclaration` reads it as `VariableDeclarationList | CatchClause`,
+ * both of which the `NodeObject` arm alone can hold. Several target arms then
+ * share that held arm, so the discriminant cannot pick between them; the
+ * object's own class chain does, tested most-specific first. Taken only when no
+ * other held arm can hold any target class, so the held discriminant has
+ * nothing left to decide. The last arm is the checked downcast: no test guards
+ * it, and a foreign class there must throw rather than be read through the
+ * wrong layout. The class chain is the allocation's, so no class table is
+ * needed to enumerate descendants.
+ */
+const classFamilyArmText = (
+  inner: Extract<Representation, { kind: 'tagged-union' }>,
+  read: Extract<Representation, { kind: 'tagged-union' }>,
+  text: string
+): string | null => {
+  const classTargets: { readonly arm: Extract<Representation, { kind: 'class-ref' }>; readonly index: number }[] = []
+  for (const [index, arm] of read.arms.entries()) {
+    if (arm.value.kind !== 'class-ref') return null
+    classTargets.push({ arm: arm.value, index })
+  }
+  const homes: { readonly arm: Extract<Representation, { kind: 'class-ref' }>; readonly index: number }[] = []
+  for (const [index, arm] of inner.arms.entries()) {
+    const held = arm.value
+    if (held.kind !== 'class-ref') continue
+    if (classTargets.every((target) => target.arm.ownership === held.ownership && isOrExtendsClass(target.arm, held.declaration)))
+      homes.push({ arm: held, index })
+  }
+  if (homes.length !== 1) return null
+  const home = homes[0]!
+  const rivals = inner.arms.some(
+    (arm, index) =>
+      index !== home.index &&
+      classRefsWithin(arm.value).some((held) =>
+        classTargets.some((target) => isOrExtendsClass(target.arm, held.declaration) || isOrExtendsClass(held, target.arm.declaration))
+      )
+  )
+  if (rivals) return null
+  const ordered = [...classTargets].sort((left, right) => {
+    const leftBelowRight = isOrExtendsClass(left.arm, right.arm.declaration)
+    const rightBelowLeft = isOrExtendsClass(right.arm, left.arm.declaration)
+    if (leftBelowRight !== rightBelowLeft) return leftBelowRight ? -1 : 1
+    return left.index - right.index
+  })
+  const source = 'gea_family_source'
+  const targetType = cppTypeOf(read)
+  const armText = (target: (typeof ordered)[number], checked: boolean): string =>
+    `${targetType}::ofArm<${target.index}>(gea::host::${checked ? 'assertedDowncastClassRef' : 'downcastClassRef'}<${cppClassName(target.arm.declaration)}>(${source}))`
+  const fallback = ordered[ordered.length - 1]!
+  let result = armText(fallback, true)
+  for (const target of ordered.slice(0, -1).reverse()) {
+    const test = `gea::detail::classIdentityExtends(gea::detail::refPayloadIdentity(${source}), &gea::detail::RefOperationsFor<${cppClassName(target.arm.declaration)}>::table)`
+    result = `${test} ? ${armText(target, false)} : (${result})`
+  }
+  return `([&](const ${cppTypeOf(home.arm)}& ${source}) -> ${targetType} { return ${result}; }(${text}.get<${home.index}>()))`
+}
+
+type ClassTarget = { readonly arm: Extract<Representation, { kind: 'class-ref' }>; readonly index: number }
+
+/**
+ * One class-ref value rebuilt as whichever of `targets` (all descendants of its
+ * class) its allocation is: most-specific first, the last a checked downcast so
+ * a foreign class throws rather than being read through the wrong layout.
+ */
+const classFamilyChainText = (targets: readonly ClassTarget[], targetType: string, slot: string): string => {
+  const ordered = [...targets].sort((left, right) => {
+    const leftBelowRight = isOrExtendsClass(left.arm, right.arm.declaration)
+    const rightBelowLeft = isOrExtendsClass(right.arm, left.arm.declaration)
+    if (leftBelowRight !== rightBelowLeft) return leftBelowRight ? -1 : 1
+    return left.index - right.index
+  })
+  const armText = (target: ClassTarget, checked: boolean): string =>
+    `${targetType}::ofArm<${target.index}>(gea::host::${checked ? 'assertedDowncastClassRef' : 'downcastClassRef'}<${cppClassName(target.arm.declaration)}>(${slot}))`
+  let chain = armText(ordered[ordered.length - 1]!, true)
+  for (const target of ordered.slice(0, -1).reverse()) {
+    const test = `gea::detail::classIdentityExtends(gea::detail::refPayloadIdentity(${slot}), &gea::detail::RefOperationsFor<${cppClassName(target.arm.declaration)}>::table)`
+    chain = `${test} ? ${armText(target, false)} : (${chain})`
+  }
+  return ordered.length > 1 ? `(${chain})` : chain
+}
+
+/**
+ * Whether a held arm can hold a value some arm of `read` names: an equal leaf,
+ * a class related to a target class either way, or a nested carrier holding
+ * one. A collision answer that reads one arm is sound only while no OTHER arm
+ * passes this; otherwise that arm's live values would be dropped or misread.
+ */
+const carriesReadValue = (held: Representation, read: Representation): boolean => {
+  const leafKeys = new Set<string>()
+  const collect = (value: Representation): void => {
+    if (value.kind === 'tagged-union') value.arms.forEach((arm) => collect(arm.value))
+    else if (value.kind === 'optional') {
+      collect(value.payload)
+      leafKeys.add(representationKey(absenceRepresentationOf(value.absence)))
+    } else leafKeys.add(representationKey(value))
+  }
+  collect(read)
+  const classes = classRefsWithin(read)
+  const carries = (value: Representation): boolean => {
+    if (leafKeys.has(representationKey(value))) return true
+    if (value.kind === 'class-ref')
+      return classes.some((target) => isOrExtendsClass(target, value.declaration) || isOrExtendsClass(value, target.declaration))
+    if (value.kind === 'optional') return leafKeys.has(representationKey(absenceRepresentationOf(value.absence))) || carries(value.payload)
+    if (value.kind === 'tagged-union') return value.arms.some((arm) => carries(arm.value))
+    return false
+  }
+  return carries(held)
+}
+
+/**
+ * `classFamilyArmText` for a held union whose arms are not all class homes:
+ * `node.parent` stores `NodeObject | (A | B) | {record}` and a guarded
+ * `BindingElement` reads it as `ObjectBindingPattern | ArrayBindingPattern |
+ * {record}`. The held discriminant picks the arm first; inside a class arm
+ * that is a common base, the object's class chain picks the target class; an
+ * arm equal to a target arm passes through; a nested carrier is narrowed one
+ * level down. An arm that carries nothing the read names is proven dead by the
+ * narrowing and throws, checked by its own discriminant; an arm that does carry
+ * something but has no recipe refuses the whole load. `requireFamily` keeps
+ * plain sub-unions on their own recipes unless the caller already knows a
+ * single-arm answer would drop live arms.
+ */
+const classFamilyDispatchText = (
+  inner: Extract<Representation, { kind: 'tagged-union' }>,
+  read: Extract<Representation, { kind: 'tagged-union' }>,
+  text: string,
+  requireFamily = true
+): string | null => {
+  const source = 'gea_family_union'
+  const targetType = cppTypeOf(read)
+  const classTargets = read.arms.flatMap((arm, index) => (arm.value.kind === 'class-ref' ? [{ arm: arm.value, index }] : []))
+  const loads: { readonly index: number; readonly text: string }[] = []
+  let family = false
+  for (const [index, arm] of inner.arms.entries()) {
+    const held = arm.value
+    const slot = `${source}.get<${index}>()`
+    const load = ((): string | null => {
+      if (held.kind === 'class-ref') {
+        // A target class ABOVE the held one would need an upcast beside the
+        // downcast chain; not modelled here, so the arm stays unhomed (refused).
+        if (classTargets.some((target) => target.arm.declaration !== held.declaration && isOrExtendsClass(held, target.arm.declaration)))
+          return null
+        const candidates = classTargets.filter(
+          (target) => target.arm.ownership === held.ownership && isOrExtendsClass(target.arm, held.declaration)
+        )
+        if (candidates.length === 0) return null
+        if (candidates.length === 1 && candidates[0]!.arm.declaration === held.declaration)
+          return `${targetType}::ofArm<${candidates[0]!.index}>(${slot})`
+        family = true
+        return classFamilyChainText(candidates, targetType, slot)
+      }
+      const exact = read.arms.findIndex((target) => representationKey(target.value) === representationKey(held))
+      if (exact >= 0) return `${targetType}::ofArm<${exact}>(${slot})`
+      if (held.kind !== 'tagged-union' && held.kind !== 'optional') return null
+      return (
+        tryCandidateText(() => narrowedLoadText(held, read, slot)) ??
+        (held.kind === 'tagged-union' ? tryCandidateText(() => classFamilyDispatchText(held, read, slot, false)) : null)
+      )
+    })()
+    if (load !== null) loads.push({ index, text: load })
+    else if (carriesReadValue(held, read)) return null
+  }
+  if ((requireFamily && !family) || loads.length === 0) return null
+  let result =
+    loads.length === inner.arms.length ? loads[loads.length - 1]!.text : `gea::host::unhomedUnionArm<${targetType}>(${source}.index())`
+  const tested = loads.length === inner.arms.length ? loads.slice(0, -1) : loads
+  for (const entry of [...tested].reverse()) result = `${source}.is<${entry.index}>() ? ${entry.text} : (${result})`
+  // The source is the lambda's parameter, never a body local: a nested call's
+  // `text` is the outer `gea_family_union.get<k>()`, evaluated in the caller.
+  return `([&](const ${cppTypeOf(inner)}& ${source}) -> ${targetType} { return ${result}; }(${text}))`
+}
+
 const narrowedUnionSubsetText = (
   inner: Extract<Representation, { kind: 'tagged-union' }>,
   read: Extract<Representation, { kind: 'tagged-union' }>,
@@ -439,23 +652,44 @@ const narrowedUnionSubsetText = (
   // decide.
   const collides = new Set(pairs.map((pair) => pair.heldIndex)).size !== pairs.length
   if (collides) {
+    // A one-arm answer below drops every OTHER arm, so it stands only while no
+    // other arm can hold a value the read names: `NodeObject | (A | B) | {r}`
+    // read as `A | B | {r}` answered with the nested arm alone and lost every
+    // pattern held in the class arm and the record arm.
+    const othersDead = (index: number): boolean =>
+      inner.arms.every((other, otherIndex) => otherIndex === index || !carriesReadValue(other.value, read))
+    let dropsLiveArms = false
     for (const [index, candidate] of inner.arms.entries()) {
       const slot = `${text}.get<${index}>()`
       // `narrowedLoadText` answers `null` for "nothing to load", which for an
       // arm that already carries exactly the read IS the answer: the arm's own
       // value. Asked as an equality first so that `null` is never mistaken for
       // "this arm cannot".
-      if (representationKey(candidate.value) === representationKey(read)) return slot
+      if (representationKey(candidate.value) === representationKey(read)) {
+        if (othersDead(index)) return slot
+        dropsLiveArms = true
+        break
+      }
       // Only an arm that is itself a sum can hold the whole read. A plain
       // member "loads" into the read by widening, and taking it would rebuild
       // every live arm as that one: `Promise<{done: true} | {done: false,
       // value: Uint8Array}>` into its `value: unknown` twin read `.get<0>()`
       // with the chunk arm live.
       if (candidate.value.kind !== 'tagged-union' && candidate.value.kind !== 'optional') continue
-      const load = narrowedLoadText(candidate.value, read, slot)
-      if (load !== null) return load
+      const load = tryCandidateText(() => narrowedLoadText(candidate.value, read, slot))
+      if (load === null) continue
+      if (othersDead(index)) return load
+      dropsLiveArms = true
+      break
     }
-    return null
+    const dispatched = classFamilyArmText(inner, read, text) ?? classFamilyDispatchText(inner, read, text, !dropsLiveArms)
+    if (dispatched !== null || !dropsLiveArms) return dispatched
+    // Refused rather than handed to the recast below, which would choose one
+    // home per arm without the discriminant this collision needs.
+    throw createCppEmitBlockedError(
+      `conversion:${representationKey(inner)}->${representationKey(read)}`,
+      `narrows tagged union "${representationKey(inner)}" to "${representationKey(read)}", whose live arms no dispatch covers`
+    )
   }
   // The same one-time binding `recastedUnionText` makes, for the same reason:
   // this chain is what a NESTED union arm reaches through (`homeOf` there
@@ -739,6 +973,18 @@ export const narrowedLoadText = (held: Representation, read: Representation, tex
  */
 const nestedArmLoadText = (inner: Extract<Representation, { kind: 'tagged-union' }>, read: Representation, text: string): string | null => {
   const readKey = representationKey(read)
+  // The chain below reads only the arms that found a load and trusts the
+  // narrowing to have killed the rest. That trust holds for an arm that cannot
+  // hold anything the read names, never for one that can: a `declare readonly
+  // parent: JsxElement | JsxAttributeLike` narrows the READ, while every write
+  // goes through the base's `parent: Node`, so a `NodeObject | (A | B | ...) |
+  // {record}` cell holds a `JsxElement` in its wide `NodeObject` arm. Taking the
+  // one nested class arm that converts read `.get<1>().get<k>()` unchecked and
+  // got an empty handle. Such a load is left to the class-family dispatch.
+  // Takes the candidates' arm indexes, not the candidates: the two callers'
+  // candidate records differ in shape, and one array parameter cannot view both.
+  const dropsLiveArm = (held: Extract<Representation, { kind: 'tagged-union' }>, taken: readonly number[]): boolean =>
+    held.arms.some((arm, index) => !taken.includes(index) && carriesReadValue(arm.value, read))
   const nestedLoad = (held: Representation, at: string): string | null => {
     if (representationKey(held) === readKey) return at
     // A leaf can satisfy a wider nested read through a real carrier
@@ -772,6 +1018,13 @@ const nestedArmLoadText = (inner: Extract<Representation, { kind: 'tagged-union'
     })
     const last = candidates[candidates.length - 1]
     if (!last) return null
+    if (
+      dropsLiveArm(
+        held,
+        candidates.map((candidate) => candidate.index)
+      )
+    )
+      return null
     let dispatched = last.loaded
     for (const candidate of candidates.slice(0, -1).reverse()) {
       dispatched = `${at}.is<${candidate.index}>() ? ${candidate.loaded} : (${dispatched})`
@@ -795,6 +1048,13 @@ const nestedArmLoadText = (inner: Extract<Representation, { kind: 'tagged-union'
   // `value: unknown` twin found a home for the first arm alone and read it
   // unconditionally, with the chunk arm live.
   if (converted && candidates.length !== inner.arms.length) return null
+  if (
+    dropsLiveArm(
+      inner,
+      candidates.map((candidate) => candidate.index)
+    )
+  )
+    return null
   let result = last.text
   for (const candidate of candidates.slice(0, -1).reverse()) {
     result = `${text}.is<${candidate.index}>() ? ${candidate.text} : (${result})`
@@ -1239,7 +1499,7 @@ const renderedWidenedStoreText = (held: Representation, written: Representation,
     // widening already renders. Present recurses one payload down, which
     // reaches the tagged-union case just above when the payload is one.
     if (written.kind === 'optional') {
-      const absentRepresentation: Representation = { kind: written.absence }
+      const absentRepresentation = absenceRepresentationOf(written.absence)
       const absentText = cppConstantLiteral(written.absence, written.absence, absentRepresentation)
       const boxedAbsent = widenedStoreText(held, absentRepresentation, absentText)
       const boxedPresent = widenedStoreText(held, written.payload, `(*${text})`)
@@ -1567,6 +1827,29 @@ export const recastedUnionText = (
       const whole = tryCandidateText(() => narrowedLoadText(inner, target, armText)) ?? recastedUnionText(inner, target, armText, viaLayout)
       return whole === null ? null : { index: -1, text: whole, whole: true }
     }
+    // A base-class arm reaching SEVERAL descendant target classes: each is a
+    // downcast home, and taking the first read every `NodeObject` as the first
+    // target class unchecked. The allocation's class chain picks the arm; a
+    // target class above the held one as well would need an upcast beside the
+    // chain, so that refuses.
+    const held = arm.value
+    if (held.kind === 'class-ref') {
+      const below = target.arms.flatMap((candidate, index) =>
+        candidate.value.kind === 'class-ref' &&
+        candidate.value.declaration !== held.declaration &&
+        candidate.value.ownership === held.ownership &&
+        isOrExtendsClass(candidate.value, held.declaration)
+          ? [{ arm: candidate.value, index }]
+          : []
+      )
+      if (below.length > 1) {
+        const above = target.arms.some(
+          (candidate) => candidate.value.kind === 'class-ref' && isOrExtendsClass(held, candidate.value.declaration)
+        )
+        if (above) return null
+        return { index: -1, text: classFamilyChainText(below, cppTypeOf(target), armText), whole: true }
+      }
+    }
     const homes: RecastUnionHome[] = []
     for (const [candidateIndex, candidate] of target.arms.entries()) {
       // An absence arm is never the home of a live value: the chain's
@@ -1584,7 +1867,10 @@ export const recastedUnionText = (
       const home = stored ?? viaLayout?.(arm.value, candidate.value, armText) ?? null
       if (home !== null) homes.push({ index: candidateIndex, text: home })
     }
-    return homes.length > 1 ? (undefinedFieldChoice(arm.value, target, homes, armText) ?? homes[0]!) : (homes[0] ?? null)
+    if (homes.length <= 1) return homes[0] ?? null
+    const literal = literalDiscriminatorChoice(arm, target, homes, armText)
+    if (literal !== 'unresolved') return literal
+    return undefinedFieldChoice(arm.value, target, homes, armText) ?? homes[0]!
   })
   if (homeOf.some((home) => home === null)) return null
   return recastedUnionFromHomes(source, target, text, homeOf as readonly RecastUnionHome[])
@@ -1606,7 +1892,6 @@ const undefinedFieldChoice = (
   armText: string
 ): RecastUnionHome | null => {
   if (source.kind !== 'record' || homes.length !== 2) return null
-  const arrow = source.ownership === 'shared-refcount' ? '->' : '.'
   for (const field of source.fields) {
     if (field.value.kind !== 'dynamic' || !field.required) continue
     const fieldKinds = homes.map((home) => {
@@ -1618,7 +1903,7 @@ const undefinedFieldChoice = (
     if (absent < 0 || present < 0) continue
     const type = cppTypeOf(target)
     const wrap = (home: RecastUnionHome): string => `${type}::ofArm<${home.index}>(${home.text})`
-    const test = `${armText}${arrow}${cppRecordFieldName(field.key)}.tag() == gea::Value::Tag::Undefined`
+    const test = `(${sourceFieldReadText(source, field, `(${armText})`)}).tag() == gea::Value::Tag::Undefined`
     return { index: -1, whole: true, text: `(${test} ? ${wrap(homes[absent]!)} : ${wrap(homes[present]!)})` }
   }
   return null
@@ -1858,11 +2143,20 @@ const fieldIndexOf = (record: Extract<Representation, { kind: 'record' }>): Read
   return built
 }
 
+// Spelled per arm (as `representation/union.ts` does): a literal whose `kind` is a
+// variable is one record natively, with no conversion into `Representation`.
+const absenceRepresentationOf = (absence: 'null' | 'undefined'): Representation =>
+  absence === 'null' ? { kind: 'null' } : { kind: 'undefined' }
+
+// Keyed by the record variant, not `Representation`: only narrowed records
+// reach these tables, and natively a record-keyed table is not a union-keyed one.
+type RecastRecord = Extract<Representation, { kind: 'record' }>
+
 /** The top-level pairs whose answer is being computed. */
-const recordRecastPending = new WeakMap<Representation, WeakSet<Representation>>()
+const recordRecastPending = new WeakMap<RecastRecord, WeakSet<RecastRecord>>()
 
 /** Top-level `recordsRecastable` answers, per (source, target) carrier pair. */
-let recordRecastAnswers = new WeakMap<Representation, WeakMap<Representation, boolean>>()
+let recordRecastAnswers = new WeakMap<RecastRecord, WeakMap<RecastRecord, boolean>>()
 
 /**
  * Drops every remembered top-level answer. Called once lowering is done: the
@@ -1872,7 +2166,7 @@ let recordRecastAnswers = new WeakMap<Representation, WeakMap<Representation, bo
  * graph kept, each of which it answers again from the same carriers.
  */
 export const forgetRecordRecastAnswers = (): void => {
-  recordRecastAnswers = new WeakMap()
+  recordRecastAnswers = new WeakMap<RecastRecord, WeakMap<RecastRecord, boolean>>()
 }
 
 /**
@@ -1910,7 +2204,7 @@ const recordsRecastableIn = (source: Representation, target: Representation, see
   // coinductive assumption.
   const pending = recordRecastPending.get(source)
   if (pending?.has(target)) return true
-  if (pending === undefined) recordRecastPending.set(source, new WeakSet([target]))
+  if (pending === undefined) recordRecastPending.set(source, new WeakSet<RecastRecord>([target]))
   else pending.add(target)
   let answer: boolean
   try {
@@ -1920,7 +2214,7 @@ const recordsRecastableIn = (source: Representation, target: Representation, see
   }
   let byTarget = recordRecastAnswers.get(source)
   if (byTarget === undefined) {
-    byTarget = new WeakMap()
+    byTarget = new WeakMap<RecastRecord, boolean>()
     recordRecastAnswers.set(source, byTarget)
   }
   byTarget.set(target, answer)
@@ -1995,6 +2289,95 @@ const recastFieldCrossesDynamic = (from: Representation, to: Representation, see
   return recastCrossesDynamicIn(source, target, seen)
 }
 
+/**
+ * One source field as a record recast reads it. A shared record handle can be
+ * a live view, whose own struct slots are inert defaults -- its properties
+ * live behind its routes -- so a slot copy of one rebuilt a record of empty
+ * fields: a conditional literal union's twin `static` layout, wrapped as a
+ * view on its way into the declared union, came out with `kind` read as ''.
+ * `readDeclaredField` answers through the view's route in the field's own
+ * carrier, and with the slot itself for a plain allocation, the same read a
+ * spread of a view makes (`emit-allocation.ts`).
+ */
+const sourceFieldReadText = (source: Extract<Representation, { kind: 'record' }>, field: RecordField, holder: string): string => {
+  if (source.ownership !== 'shared-refcount') return tailAwareFieldReadText(source.fields, field.key, `${holder}.`)
+  const type = cppTypeOf(field.value)
+  return (
+    `gea::record::readDeclaredField<${type}, ${nativeFieldPolicyType(field.value)}>(${holder}, ${cppStringLiteral(field.key)}, ` +
+    `[&]() -> ${type} { return ${tailAwareFieldReadText(source.fields, field.key, `${holder}->`)}; })`
+  )
+}
+
+/** An optional source field's presence: a live view answers through its own-presence route, never its inert bit. */
+const sourceFieldPresenceText = (source: Extract<Representation, { kind: 'record' }>, key: string, holder: string): string => {
+  if (source.ownership !== 'shared-refcount') return `${holder}.${cppRecordFieldPresenceName(key)}`
+  return (
+    `(gea::detail::copiesThroughNativeView(${holder}) ? ` +
+    `gea::record::hasOwnFieldView(gea::Ref<void>(${holder}), gea::PropertyKey::string(${cppStringLiteral(key)})) : ` +
+    `${holder}->${cppRecordFieldPresenceName(key)})`
+  )
+}
+
+/**
+ * Several target arms a record arm recasts into, told apart by the literal
+ * discriminator each declares. A field subset admits a record into every arm
+ * whose fields it covers -- `{ kind, materializer }` into both `{ kind:
+ * 'identity' }` and `{ kind: 'static', materializer }` -- and taking the
+ * first home put a `static` capability on the `identity` arm. A source arm
+ * that declares its own literal keeps only the arms that agree with it; one
+ * that does not is dispatched on the discriminator field's run-time value.
+ */
+const literalDiscriminatorChoice = (
+  sourceArm: Extract<Representation, { kind: 'tagged-union' }>['arms'][number],
+  target: Extract<Representation, { kind: 'tagged-union' }>,
+  homes: readonly RecastUnionHome[],
+  armText: string
+): RecastUnionHome | null | 'unresolved' => {
+  const own = sourceArm.runtimeDiscriminator
+  const literals = homes.map((home) => target.arms[home.index]?.runtimeDiscriminator)
+  const agreeing = homes.filter((_, index) => {
+    const theirs = literals[index]
+    return !(
+      own.kind === 'record-literal' &&
+      theirs?.kind === 'record-literal' &&
+      own.key === theirs.key &&
+      (own.primitive !== theirs.primitive || own.text !== theirs.text)
+    )
+  })
+  if (agreeing.length === 1) return agreeing[0]!
+  if (agreeing.length === 0) return null
+  const source = sourceArm.value
+  const first = literals[homes.indexOf(agreeing[0]!)]
+  if (source.kind !== 'record' || first?.kind !== 'record-literal') return 'unresolved'
+  const texts: string[] = []
+  for (const home of agreeing) {
+    const literal = target.arms[home.index]?.runtimeDiscriminator
+    if (literal === undefined || literal.kind !== 'record-literal' || literal.key !== first.key || literal.primitive !== first.primitive)
+      return 'unresolved'
+    texts.push(literal.text)
+  }
+  if (new Set(texts).size !== texts.length) return 'unresolved'
+  const field = source.fields.find((candidate) => candidate.key === first.key)
+  const fitting =
+    field !== undefined &&
+    field.required &&
+    (first.primitive === 'string' ? field.value.kind === 'string' : field.value.kind === 'scalar' && field.value.domain === first.primitive)
+  if (!fitting) return 'unresolved'
+  const type = cppTypeOf(target)
+  const literalText = (text: string): string => (first.primitive === 'string' ? cppStringLiteral(text) : text)
+  let chain = `[]() -> ${type} { gea::detail::refusePayloadMismatch("a record admitted by no union arm's discriminator"); }()`
+  for (let index = agreeing.length - 1; index >= 0; index--) {
+    const home = agreeing[index]!
+    chain = `gea_discriminant == ${literalText(texts[index]!)} ? ${type}::ofArm<${home.index}>(${home.text}) : (${chain})`
+  }
+  const read = sourceFieldReadText(source, field, '(gea_discriminated)')
+  return {
+    index: -1,
+    whole: true,
+    text: `[&](const ${cppTypeOf(source)}& gea_discriminated) -> ${type} { const auto gea_discriminant = ${read}; return ${chain}; }(${armText})`
+  }
+}
+
 const recastedRecordText = (
   source: Extract<Representation, { kind: 'record' }>,
   target: Extract<Representation, { kind: 'record' }>,
@@ -2002,7 +2385,6 @@ const recastedRecordText = (
   depth = 0
 ): string | null => {
   if (!recordsRecastable(source, target)) return null
-  const arrow = source.ownership === 'shared-refcount' ? '->' : '.'
   const holder = `gea_from${depth === 0 ? '' : `_${depth}`}`
   const recastFieldText = (from: Representation, to: Representation, read: string, nestedDepth: number): string | null => {
     if (representationKey(from) === representationKey(to)) {
@@ -2038,8 +2420,8 @@ const recastedRecordText = (
     return recastedRecordText(from, to, read, nestedDepth + 1)
   }
   const reads = target.fields.map((field) => {
-    const read = tailAwareFieldReadText(source.fields, field.key, `${holder}${arrow}`)
     const match = source.fields.find((candidate) => candidate.key === field.key)
+    const read = match === undefined ? '' : sourceFieldReadText(source, match, holder)
     // A field the target declares and the source does not: the carrier's own
     // absent value, which `recordsRecastable` already proved exists.
     if (match === undefined) return absentFieldText(field.value)
@@ -2075,7 +2457,7 @@ const recastedRecordText = (
     if (field.required) return []
     const match = source.fields.find((candidate) => candidate.key === field.key)
     if (match === undefined) return []
-    const present = match.required ? 'true' : `${holder}${arrow}${cppRecordFieldPresenceName(field.key)}`
+    const present = match.required ? 'true' : sourceFieldPresenceText(source, field.key, holder)
     return [`gea_recast${target_}${cppRecordFieldPresenceName(field.key)} = ${present};`]
   })
   // A target whose layout moved fields behind its `RecordTail` has no
@@ -2088,7 +2470,7 @@ const recastedRecordText = (
       if (match === undefined) return []
       const store = `gea_recast${target_}${tailAwareFieldWriteText(target.fields, field.key)} = ${reads[index]!};`
       if (field.required) return [store]
-      const present = match.required ? 'true' : `${holder}${arrow}${cppRecordFieldPresenceName(field.key)}`
+      const present = match.required ? 'true' : sourceFieldPresenceText(source, field.key, holder)
       return [`if (${present}) { ${store} gea_recast${target_}${cppRecordFieldPresenceName(field.key)} = true; }`]
     })
     const declared =
@@ -2270,6 +2652,18 @@ const creationOrderedDictionaryCopyText = (
 }
 
 /**
+ * A shape's index sidecars as the model's own `RecordIndexSidecar`s. The
+ * policy spells the element structurally, and an array of that record standing
+ * in for the model's array is a carrier change no native conversion makes, so
+ * the entries are rebuilt one by one.
+ */
+const recordIndexSidecarsOf = (layouts: RecordLayoutPolicy, shapeId: string): readonly RecordIndexSidecar[] => {
+  const indexes: RecordIndexSidecar[] = []
+  for (const index of layouts.indexesForShape(shapeId)) indexes.push({ key: index.key, value: index.value })
+  return indexes
+}
+
+/**
  * The indexed record a carrier holds: itself, or the layout a named interface
  * resolves to when that layout declares an index -- a mapped alias like
  * `WithoutId<TSchema>` is a name. A named layout with NO index is the plain record recast's.
@@ -2281,7 +2675,7 @@ export const indexedRecordViewOf = (
   if (source.kind === 'record-with-index') return source
   if (source.kind !== 'native-record-ref' || source.native !== null || source.recursive) return null
   const fields = layouts.forShape(source.shapeId)
-  const indexes = layouts.indexesForShape(source.shapeId)
+  const indexes = recordIndexSidecarsOf(layouts, source.shapeId)
   if (fields === null || indexes.length === 0) return null
   return { kind: 'record-with-index', shapeId: source.shapeId, fields, indexes, ownership: source.ownership }
 }
@@ -2446,7 +2840,7 @@ export const constructorStaticViewText = (source: Representation, target: Repres
   return `gea::constructorStaticView<${cppRecordStructName(target.shapeId)}>(${state})`
 }
 
-type NamedRecordIndexes = readonly { readonly value: Representation; readonly key: 'string' | 'number' | 'symbol' }[]
+type NamedRecordIndexes = readonly RecordIndexSidecar[]
 
 /**
  * Whether an open `{ [key: string]: any }` document rebuilds as a named
@@ -2896,6 +3290,17 @@ const resultAdapterOf = (
     }
     converted ??= viaView?.(slot.value, parameter.value, formal) ?? null
     if (converted === null) return null
+    // A class handle in its `undefined` state is the language's `undefined`
+    // (a field nothing assigned, such as a typescript-go node's absent
+    // `parent`), and a callee taking `T | undefined` must receive the absence,
+    // not a present optional wrapped around the empty handle.
+    if (
+      parameter.value.kind === 'optional' &&
+      parameter.value.absence === 'undefined' &&
+      slot.value.kind === 'class-ref' &&
+      slot.value.ownership === 'shared-refcount'
+    )
+      converted = `(${formal}.isUndefined() ? ${cppTypeOf(parameter.value)}{} : ${cppTypeOf(parameter.value)}(${converted}))`
     actuals.push(converted)
   }
 
@@ -3121,7 +3526,11 @@ export const assertedUnionText = (
     return tryCandidateText(() =>
       evaluatedOnceText(text, (operand) => {
         const present = assertedUnionText(payload, target, `(*${operand})`, copyAllowed, frameArgument)
-        const absent = convertedValueText({ kind: source.absence }, target, source.absence === 'null' ? 'nullptr' : 'gea::Undefined{}')
+        const absent = convertedValueText(
+          absenceRepresentationOf(source.absence),
+          target,
+          source.absence === 'null' ? 'nullptr' : 'gea::Undefined{}'
+        )
         return present === null || absent === null ? null : `(${operand}.has_value() ? ${present} : ${absent})`
       })
     )
@@ -3604,8 +4013,13 @@ const callableMembershipOf = (carrier: Representation): readonly FunctionId[] | 
 
 export const boxDiscriminantsOf = (carrier: Representation): BoxDiscriminant[] | null => {
   if (carrier.kind === 'tagged-union') {
-    const parts = carrier.arms.map(boxDiscriminantsOfArm)
-    return parts.some((part) => part === null) ? null : (parts.flat() as BoxDiscriminant[])
+    const flattened: BoxDiscriminant[] = []
+    for (const arm of carrier.arms) {
+      const part = boxDiscriminantsOfArm(arm)
+      if (part === null) return null
+      flattened.push(...part)
+    }
+    return flattened
   }
   if (carrier.kind === 'optional') {
     const payload = boxDiscriminantsOf(carrier.payload)
@@ -4036,6 +4450,18 @@ const unboxedLoadTextAt = (target: Representation, text: string, receiverFactory
   ) {
     return `gea::detail::unboxDynamicMap(${text}, ${cppStringLiteral(assertionSite(target))})`
   }
+  // The same materializer's Set arm: any boxed Set, read through a view of the same object.
+  if (
+    target.kind === 'keyed-collection' &&
+    target.family === 'set' &&
+    target.ownership === 'shared-refcount' &&
+    target.recursive === undefined &&
+    target.readOnlyView !== true &&
+    target.key.kind === 'dynamic' &&
+    target.value === null
+  ) {
+    return `gea::detail::unboxDynamicSet(${text}, ${cppStringLiteral(assertionSite(target))})`
+  }
   if (target.kind === 'dictionary' && target.key === 'string' && target.ownership === 'shared-refcount') {
     return `gea::detail::unboxDynamicDictionary<${cppTypeOf(target.value)}>(${text}, ${cppStringLiteral(assertionSite(target))})`
   }
@@ -4426,7 +4852,7 @@ export const conversionChain: readonly ConversionStep[] = [
     id: 'declared-integer-scalar',
     apply: (source, target, text) => {
       const numberTarget = numberStorageTarget(source, target)
-      return numberTarget === null ? undefined : numberStorageText(numberTarget, text, cppTypeOf)
+      return numberTarget === null ? undefined : numberStorageText(numberTarget, text, (spelled) => cppTypeOf(spelled))
     }
   },
   {
@@ -5042,10 +5468,10 @@ export interface PrinterDrift {
  * `translation-unit.ts`) build one over the same census.
  */
 export interface ConversionSite {
-  readonly programConversionRecipes?: readonly ProgramConversionRecipe[]
-  readonly conversionIsCertified?: (id: string) => boolean
+  readonly programConversionRecipes?: readonly ProgramConversionRecipe[] | undefined
+  readonly conversionIsCertified?: ((id: string) => boolean) | undefined
   readonly conversions: ConversionCensus
-  readonly nativeSelectionHelpers?: ReadonlyMap<string, NativeSelectionHelper>
+  readonly nativeSelectionHelpers?: ReadonlyMap<string, NativeSelectionHelper> | undefined
   readonly printerDrift: PrinterDrift[]
   readonly owner: string
   readonly layouts: RecordLayoutPolicy
@@ -5191,6 +5617,21 @@ export const dynamicValueLoadText = (
  * field checks and all, `unboxedLoadText`); anything else is the TypeError a
  * program may catch. The union is never boxed.
  */
+type FieldedRecord = Extract<Representation, { readonly kind: 'record' | 'record-with-index' }>
+
+/**
+ * `record` with `fields` in place of its own. Each arm is rebuilt member by
+ * member: spreading a two-armed union into a new object has no native
+ * lowering, while a literal per arm is an ordinary record allocation.
+ */
+const recordWithFields = (record: FieldedRecord, fields: readonly RecordField[]): FieldedRecord => {
+  if (record.kind === 'record-with-index')
+    return { kind: 'record-with-index', shapeId: record.shapeId, fields, indexes: record.indexes, ownership: record.ownership }
+  return record.standIn === true
+    ? { kind: 'record', shapeId: record.shapeId, fields, accessors: record.accessors, ownership: record.ownership, standIn: true }
+    : { kind: 'record', shapeId: record.shapeId, fields, accessors: record.accessors, ownership: record.ownership }
+}
+
 const dynamicIntoProxyArmUnionText = (
   layouts: RecordLayoutPolicy,
   source: Representation,
@@ -5219,13 +5660,13 @@ const dynamicIntoProxyArmUnionText = (
     // rather than demanded by identity (`dynamicFieldAdmissionText`).
     const record =
       named !== null && (named.kind === 'record' || named.kind === 'record-with-index')
-        ? {
-            ...named,
-            fields: named.fields.map((field) => {
+        ? recordWithFields(
+            named,
+            named.fields.map((field) => {
               const value = expandedNamedRecords(layouts, field.value, new Set([named.shapeId]))
               return value === null ? field : { ...field, value }
             })
-          }
+          )
         : named
     if (record === null || !adoptsDynamicRecord(record) || (record.kind !== 'record' && record.kind !== 'record-with-index')) return null
     if (record.fields.some((field) => field.required && cppRecordFieldKeyIsSymbol(field.key))) return null
@@ -5281,7 +5722,7 @@ const expandedNamedRecords = (layouts: RecordLayoutPolicy, target: Representatio
     return value === null ? field : { ...field, value }
   })
   open.delete(target.shapeId)
-  const indexes = layouts.indexesForShape(target.shapeId)
+  const indexes = recordIndexSidecarsOf(layouts, target.shapeId)
   return indexes.length === 0
     ? { kind: 'record', shapeId: target.shapeId, fields: expandedFields, accessors: [], ownership: target.ownership }
     : { kind: 'record-with-index', shapeId: target.shapeId, fields: expandedFields, indexes, ownership: target.ownership }
@@ -5312,6 +5753,12 @@ const dynamicWrapperText = (ctx: ConversionSite, plan: DynamicWrapperPlan, node:
   const named = unitFunctionName('gea_dynamic_union', signature, `return ${body};`)
   return named === null ? dynamicWrapperTextAt(ctx, plan, node, text) : `${named}(${text})`
 }
+
+/** Whether a sum, through nested sums and optionals, has an Array arm. */
+const holdsArrayArm = (value: Representation): boolean =>
+  value.kind === 'array-object' ||
+  (value.kind === 'optional' && holdsArrayArm(value.payload)) ||
+  (value.kind === 'tagged-union' && value.arms.some((arm) => holdsArrayArm(arm.value)))
 
 const dynamicWrapperTextAt = (ctx: ConversionSite, plan: DynamicWrapperPlan, node: ConversionNode, text: string): string | null => {
   if (!dynamicWrapperPlanMatches(plan, node.source, node.target, ctx.conversions.nodeById)) return null
@@ -5360,7 +5807,17 @@ const dynamicWrapperTextAt = (ctx: ConversionSite, plan: DynamicWrapperPlan, nod
     }
     const discriminants = boxDiscriminantsOfArm(arm)
     if (!discriminants?.length) return null
-    const tagCondition = discriminants.map(test).join(' || ')
+    // A nested sum's flattened discriminants are its arms' EXACT payloads, but
+    // its own classifier also tells a dynamic Array (`ArrayObject<Value>`, as
+    // JSON decodes one) apart by its elements. Without letting that Array
+    // through here, `["node"]` read as `undefined | null | (string | string[])`
+    // was refused before the inner classifier could look at it.
+    const nestedArrays = arm.value.kind === 'tagged-union' && holdsArrayArm(arm.value)
+    const tagCondition =
+      discriminants.map(test).join(' || ') +
+      (nestedArrays
+        ? ` || (${text}.tag() == gea::Value::Tag::Object && ${text}.payloadType() == gea::detail::payloadTypeTagFor<gea::Ref<gea::ArrayObject<gea::Value>>>())`
+        : '')
     let condition: string
     if (entry.classifier.id === 'gea::detail::dynamicRecordDiscriminator') {
       const discriminator = arm.runtimeDiscriminator
@@ -5907,7 +6364,16 @@ const ownsItsStorage = (carrier: Representation): boolean => {
  * make cheaper.
  */
 export const movedValueText = (ctx: EmitContext, value: IrOperand, held: Representation | null, text: string): string => {
-  if (transferOf(ctx.dyingArguments, ctx.ownedValues, ctx.transferDyingValues, value.value, ctx.receiverRenames) !== 'move') return text
+  // A loop invariant the hoist plan relocated is computed once and read on
+  // every iteration. The move analyses ran on the unhoisted body, where its
+  // definition shared the use's block and re-ran each trip; after the hoist,
+  // moving at the use empties it for every iteration after the first.
+  if (ctx.hoistedResults.has(value.value)) return text
+  if (
+    transferWhere(ctx.dyingArguments, (owned) => ctx.ownedValues.has(owned), ctx.transferDyingValues, value.value, ctx.receiverRenames) !==
+    'move'
+  )
+    return text
   // A value the emitter withheld renders as its own expression, not as a cell:
   // `f(std::move((a->elementAtIndex(i))))` moves a prvalue, which gcc rejects
   // as a pessimizing move under -Werror, and there is nothing to gain -- the
@@ -6017,7 +6483,11 @@ export const emitMergeLiveArmRebuild = (ctx: EmitContext, lines: string[], opera
           ctx,
           'emit-narrowing.ts:merge-native-absence',
           node,
-          cppConstantLiteral(sourceRepresentation.absence, sourceRepresentation.absence, { kind: sourceRepresentation.absence })
+          cppConstantLiteral(
+            sourceRepresentation.absence,
+            sourceRepresentation.absence,
+            absenceRepresentationOf(sourceRepresentation.absence)
+          )
         )
       : null
     if (text !== null) return text

@@ -424,7 +424,7 @@ const compoundAppendLines = (ctx: EmitContext, operation: BindingWriteOperation,
   // A call between the read and write forces the old value into a snapshot.
   // Grow a final-use snapshot and move it home, preserving the observable
   // pre-call read without copying the whole prefix again in concatStrings.
-  if (!ctx.ownedValues.has(left.value) || !ctx.ownedDyingValues.has(left.value)) return null
+  if (!ctx.ownedValues.has(left.value) || !ctx.ownedDyingValues.has(left.value) || ctx.hoistedResults.has(left.value)) return null
   const snapshot = operandText(ctx, left)
   return [stringAppendStatement(ctx, snapshot, suffix), `${target} = std::move(${snapshot});`]
 }

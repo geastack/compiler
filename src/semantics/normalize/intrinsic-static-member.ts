@@ -30,7 +30,7 @@ export const intrinsicStaticMemberIsIntact = (
   return (
     ownerId !== null &&
     memberId !== null &&
-    !taint.has(memberId) &&
+    !taint.hasEntry(memberId) &&
     intrinsicObjectKeysIntact(taint, ownerId, { names: [member.getName()] })
   )
 }

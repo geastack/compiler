@@ -279,6 +279,20 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
                     : source.representation.kind === 'iterator'
                       ? source.representation.element
                       : null
+          // A tagged union whose every arm is itself range-copyable into this
+          // literal's element -- `producers/shared.ts`'s
+          // `hasNativeIterationCursor` admits an all-array or array-and-Set
+          // union, and this is that admission's lowering: one range copy per
+          // live arm, chosen at run time (`emit-arrays.ts`).
+          if (spreadElement === null && source.representation.kind === 'tagged-union' && tuple.kind === 'array-object') {
+            const element = representationKey(tuple.element)
+            const armsCopy = source.representation.arms.every(({ value }) =>
+              value.kind === 'array-object'
+                ? representationKey(value.element) === element
+                : value.kind === 'keyed-collection' && value.family === 'set' && representationKey(value.key) === element
+            )
+            if (armsCopy) return { kind: 'spread', value: source, from: 0 }
+          }
           if (spreadElement === null) {
             throw new IrLoweringBlockedError(
               `an array literal spreads a "${representationKey(source.representation)}" source; the native range copy only covers an ` +

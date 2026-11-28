@@ -112,7 +112,7 @@ export const constructorSlotSubclassesOf = (
     while (frontier.length > 0) {
       const next: ts.BaseType[] = []
       for (const base of frontier) {
-        const target = (base as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference ? (base as ts.TypeReference).target : base
+        const target = (base as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference ? (base as ts.TypeReference).target! : base
         if (seen.has(target)) continue
         seen.add(target)
         const baseSymbol = target.getSymbol()
@@ -149,7 +149,16 @@ export const constructorSlotSubclassesOf = (
 
   const recordDefinedValue = (call: ts.CallExpression): void => {
     const [holder, key, descriptor] = call.arguments
-    if (!holder || !key || !descriptor || !ts.isStringLiteralLike(key) || !ts.isObjectLiteralExpression(descriptor)) return
+    // The two node tests rather than `isStringLiteralLike`, whose parameter
+    // also admits a FileReference: a union the native build cannot convert into.
+    if (
+      !holder ||
+      !key ||
+      !descriptor ||
+      !(ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key)) ||
+      !ts.isObjectLiteralExpression(descriptor)
+    )
+      return
     const value = descriptor.properties.find(
       (property): property is ts.PropertyAssignment =>
         ts.isPropertyAssignment(property) && ts.isIdentifier(property.name) && property.name.text === 'value'

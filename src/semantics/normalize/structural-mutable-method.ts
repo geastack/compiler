@@ -1,9 +1,33 @@
 import ts from '#typescript'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import type { StructuralTypeTable } from '../model/structural-type-table.js'
-import type { SignatureShape } from '../model/structural-types.js'
+import type { SignatureParameter, SignatureShape } from '../model/structural-types.js'
 import type { ValueFlowIndex } from './flow/model.js'
 import { structuralCallSignatures } from './structural-callable.js'
+
+// The two helpers below copy a parameter or signature field by field, never
+// by spread: a native build allocates no object literal from a spread, and
+// each optional field is spelled only when the source has it, as a spread
+// would carry it.
+const retypedParameter = (parameter: SignatureParameter, type: StructuralTypeId, slot: StructuralTypeId): SignatureParameter => {
+  const { optional, rest, hasInitializer, argumentsFrame, nullBlind } = parameter
+  if (argumentsFrame !== undefined) {
+    if (nullBlind !== undefined) return { type, argumentsFrame, slot, optional, rest, hasInitializer, nullBlind }
+    return { type, argumentsFrame, slot, optional, rest, hasInitializer }
+  }
+  if (nullBlind !== undefined) return { type, slot, optional, rest, hasInitializer, nullBlind }
+  return { type, slot, optional, rest, hasInitializer }
+}
+const signatureWith = (
+  signature: SignatureShape,
+  parameters: readonly SignatureParameter[],
+  thisParameter: StructuralTypeId | null,
+  result: StructuralTypeId
+): SignatureShape => {
+  const { minimumArity, implicitReceiver } = signature
+  if (implicitReceiver !== undefined) return { parameters, minimumArity, thisParameter, implicitReceiver, result }
+  return { parameters, minimumArity, thisParameter, result }
+}
 
 /** A mutable method is a storage cell, not its initial function body. Its
  * public frame must transport the arguments consumed by every published
@@ -134,38 +158,31 @@ export const createMutableMethodResolver = (
       const supplied = suppliedArity(symbol)
       if (supplied === null) return null
       const anyType = table.intern({ kind: 'primitive', primitive: 'any' })
-      const surplus = Array.from({ length: Math.max(0, supplied - longest.parameters.length) }, () => ({
-        type: anyType,
-        slot: anyType,
-        optional: true,
-        rest: false,
-        hasInitializer: false
-      }))
-      if (surplus.length === 0 && !replaced) return null
-      const widest = surplus.length === 0 ? longest : { ...longest, parameters: [...longest.parameters, ...surplus] }
-      if (surplus.length > 0) signatures.push(widest)
+      const surplus = Math.max(0, supplied - longest.parameters.length)
+      if (surplus === 0 && !replaced) return null
+      let widest = longest
+      if (surplus > 0) {
+        const parameters: SignatureParameter[] = longest.parameters.slice()
+        for (let index = 0; index < surplus; index++)
+          parameters.push({ type: anyType, slot: anyType, optional: true, rest: false, hasInitializer: false })
+        widest = signatureWith(longest, parameters, longest.thisParameter, longest.result)
+        signatures.push(widest)
+      }
       const join = (values: readonly StructuralTypeId[]): StructuralTypeId => {
         const members = [...new Set(values)]
         return members.length === 1 ? members[0]! : table.intern({ kind: 'union', members })
       }
+      // The result is joined before the parameters, as the literal this
+      // replaced did: a join may intern a union, and interning order is id order.
+      const joinedResult = join(signatures.map((signature) => signature.result))
+      const parameters = widest.parameters.map((parameter, ordinal) => {
+        const present = signatures.flatMap((signature) => (signature.parameters[ordinal] ? [signature.parameters[ordinal]!] : []))
+        return retypedParameter(parameter, join(present.map((entry) => entry.type)), join(present.map((entry) => entry.slot)))
+      })
       const result = table.intern({
         kind: 'signature',
         construct: [],
-        call: [
-          {
-            ...widest,
-            thisParameter: initial.thisParameter,
-            result: join(signatures.map((signature) => signature.result)),
-            parameters: widest.parameters.map((parameter, ordinal) => {
-              const present = signatures.flatMap((signature) => (signature.parameters[ordinal] ? [signature.parameters[ordinal]!] : []))
-              return {
-                ...parameter,
-                type: join(present.map((entry) => entry.type)),
-                slot: join(present.map((entry) => entry.slot))
-              }
-            })
-          }
-        ]
+        call: [signatureWith(widest, parameters, initial.thisParameter, joinedResult)]
       })
       cache.set(symbol, result)
       return result

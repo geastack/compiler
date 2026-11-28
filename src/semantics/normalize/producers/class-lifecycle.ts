@@ -32,13 +32,17 @@ import {
   staticClassLengthOf,
   expectedParameterCountOf,
   ownPrototypePropertyOf,
-  isAsyncCallableNode
+  isAsyncCallableNode,
+  hasAsteriskToken
 } from './shared.js'
 import { citeExpressionResult } from './references.js'
 import { physicalInitializerTypeOf } from '../structural-declarations.js'
-import { privateNameKeyText } from '../../model/structural-types.js'
+import { privateNameKeyText, type SignatureParameter } from '../../model/structural-types.js'
 import { evaluatedClassHeritage } from '../../class-alias.js'
 import { inheritedAccessorOfAssignment } from '../../inherited-accessor.js'
+
+/** `isParameterProperty` as a plain test: its narrowed type is an intersection the native build cannot view. */
+const declaresParameterProperty = (parameter: ts.ParameterDeclaration): boolean => isParameterProperty(parameter)
 
 const isStaticMember = (node: ts.ClassElement): boolean =>
   ts.canHaveModifiers(node) && (ts.getModifiers(node) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword)
@@ -264,7 +268,7 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
       ...(callable
         ? {
             functionSource: callable.getText(),
-            generatorFunction: 'asteriskToken' in callable && callable.asteriskToken !== undefined,
+            generatorFunction: hasAsteriskToken(callable),
             ...(isAsyncCallableNode(callable) ? { asyncFunction: true as const } : {}),
             ...(declaresExactArms(callable) ? { exactArms: true } : {}),
             ...(ownPrototypePropertyOf(callable) === null ? {} : { ownPrototypeProperty: ownPrototypePropertyOf(callable) === true }),
@@ -324,7 +328,7 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
         kind: 'signature',
         call: [
           {
-            parameters: written.parameters.map((parameter) => {
+            parameters: written.parameters.map((parameter): SignatureParameter => {
               const flags = {
                 optional: parameter.questionToken !== undefined || isOverloadOmissibleParameter(parameter),
                 rest: parameter.dotDotDotToken !== undefined,
@@ -347,7 +351,11 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
                   flags,
                   type
                 ),
-                ...flags
+                // Field by field, not spread: a spread builds a record of its
+                // own type, which the native build cannot hand out as a parameter.
+                optional: flags.optional,
+                rest: flags.rest,
+                hasInitializer: flags.hasInitializer
               }
             }),
             minimumArity: written.parameters.filter((parameter) => !parameter.questionToken && !parameter.initializer).length,
@@ -367,7 +375,7 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
         callable: context.identities.functionIdOf(written),
         classConstructorBodyOf: context.identities.declarationIdOf(node),
         functionSource: written.getText(),
-        generatorFunction: 'asteriskToken' in written && written.asteriskToken !== undefined,
+        generatorFunction: hasAsteriskToken(written),
         ...(isAsyncCallableNode(written) ? { asyncFunction: true as const } : {}),
         ...(declaresExactArms(written) ? { exactArms: true } : {}),
         ...(ownPrototypePropertyOf(written) === null ? {} : { ownPrototypeProperty: ownPrototypePropertyOf(written) === true }),
@@ -516,8 +524,11 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
     // `projection/classes.ts` reads it into the layout every construction and
     // every `this.name` lookup consults.
     for (const parameter of written?.parameters ?? []) {
-      if (!isParameterProperty(parameter)) continue
-      if (!ts.isIdentifier(parameter.name)) {
+      // Tested, not narrowed: the narrowed type is an intersection the native
+      // build has no view of, and the name below is read through a local.
+      if (!declaresParameterProperty(parameter)) continue
+      const parameterName = parameter.name
+      if (!ts.isIdentifier(parameterName)) {
         return asBlocked(
           candidate.id,
           'class-lifecycle',
@@ -536,7 +547,7 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
           declaration,
           { writable: true, enumerable: true, configurable: true },
           'own',
-          [operand('key', 0, { kind: 'constant', text: parameter.name.text, literal: 'string' }, staticKeyType)],
+          [operand('key', 0, { kind: 'constant', text: parameterName.text, literal: 'string' }, staticKeyType)],
           normalCompletion,
           { readsMutableState: false, writesMutableState: true, allocates: false, callsUserCode: false }
         )
@@ -795,10 +806,11 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
     }
     if (ts.isClassDeclaration(classNode)) return { classNode, ready: bindClassValueOperationId(context.identities, classNode) }
     const constructor = citeExpressionResult(classNode, context)
-    if (constructor.kind === 'unmodelled' || constructor.source.kind !== 'result') {
+    const constructorSource = constructor.kind === 'unmodelled' ? null : constructor.source
+    if (constructorSource === null || constructorSource.kind !== 'result') {
       return asBlocked(candidate.id, 'class-lifecycle', 'class member definition has no evaluated constructor object', 'P6')
     }
-    return { classNode, ready: operationOfResult(constructor.source.result) }
+    return { classNode, ready: operationOfResult(constructorSource.result) }
   }
 
   const contributeMethodOrAccessor = (
@@ -1183,13 +1195,14 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
     )
     const edge = resultEdge(cited.source, id, 'heritage', 0)
     const constructor = citeExpressionResult(node, context)
-    if (constructor.kind === 'unmodelled' || constructor.source.kind !== 'result') {
+    const constructorSource = constructor.kind === 'unmodelled' ? null : constructor.source
+    if (constructorSource === null || constructorSource.kind !== 'result') {
       return asBlocked(candidate.id, 'class-lifecycle', 'class heritage has no evaluated constructor object', 'P6')
     }
     return {
       kind: 'operations',
       operations: writtenConstructor ? [writtenConstructor, operation] : [operation],
-      edges: [...(edge ? [edge] : []), { kind: 'evaluation', from: id, to: operationOfResult(constructor.source.result) }]
+      edges: [...(edge ? [edge] : []), { kind: 'evaluation', from: id, to: operationOfResult(constructorSource.result) }]
     }
   }
 

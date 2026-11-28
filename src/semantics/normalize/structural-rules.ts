@@ -155,7 +155,7 @@ export const prepareStructuralRules = <View>(declared: readonly StructuralRule<V
     const known = layout.servingByKind.get(kind)
     if (known) return known
     const serving = layout.all.filter((index) => {
-      const forms = layout.forms[index]!
+      const forms = layout.forms[index] ?? null
       return forms === null || forms.includes(kind)
     })
     layout.servingByKind.set(kind, serving)
@@ -175,7 +175,7 @@ export const prepareStructuralRules = <View>(declared: readonly StructuralRule<V
         // Recorded whether or not this rule WON: a rule that answers outside
         // its forms is a false claim even when an earlier rule would have
         // shadowed it today, because the next reordering makes it the answer.
-        const forms = layout.forms[index]!
+        const forms = layout.forms[index] ?? null
         if (auditing && forms !== null && !forms.includes(node.kind)) {
           formViolations.push({ rule: layout.names[index]!, kind: node.kind })
         }

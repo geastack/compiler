@@ -16,6 +16,7 @@ import {
 } from './proof-hypotheses.js'
 import { unwrapErasedExpression } from '../producers/erasure.js'
 import ts from '#typescript'
+import { voidZeroAt } from '../../node-parent.js'
 import { isGlobalObjectAssign } from '../derived-expression-type.js'
 import {
   heritageClassOrInterfaceOf,
@@ -48,7 +49,12 @@ import { objectBindingReadsOf } from './object-binding-continuation.js'
 import { callableArrayTargetsOf, closedCallableTargetsOf, type CallableArrayOriginAuthority } from './callable-array-origins.js'
 import { arrayStoredValuesOf } from './array-element-continuation.js'
 import { nativeArrayProtocolPlanOf, type NativeCollectionProtocolPlan } from './native-collection-protocol.js'
-import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from '../deferred-intrinsic-protocols.js'
+import {
+  deferredIntrinsicProtocolLedgerOf,
+  type DeferredIntrinsicProtocolLedger,
+  type IntrinsicProtocolRequirement,
+  captureAnswer
+} from '../deferred-intrinsic-protocols.js'
 import { sourceGlobalCallableBindingIsClosed } from './source-global-binding.js'
 import { recordMethodCallTargetsOf, sourceRecordDataWritePlanOf } from './source-record-data.js'
 import { nodePathToken, nodeSetToken } from './node-path-token.js'
@@ -84,6 +90,19 @@ import { sourceValueSessionOf } from './source-value-session.js'
 import type { SharedProvenanceAnswer } from './origin-authority.js'
 import { settleProofMemoClaims, type ProvisionalProofMemo } from './proof-memo-settlement.js'
 import { KeySet } from '../nullable-memo.js'
+
+/**
+ * Whether a frame is a static class member. Only a method, an accessor or a
+ * property can be: those are tested first, so the modifier flags are asked of
+ * a member alone -- asked of any function-like frame, a native build converts
+ * it to a `Declaration` union that holds no function expression.
+ */
+const isStaticClassMember = (node: ts.Node): boolean =>
+  (ts.isMethodDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node) ||
+    ts.isPropertyDeclaration(node)) &&
+  (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Static) !== 0
 
 interface JointSourceInvocationReceipt {
   readonly call: ts.CallExpression
@@ -186,7 +205,7 @@ const instanceMemberWritesOf = (flow: ValueFlowIndex): ReadonlyMap<SourceClass, 
     if (!owner || (!ts.isClassDeclaration(owner) && !ts.isClassExpression(owner) && !isConstructorFunction(owner))) continue
     if (ts.isClassElement(frame) && (ts.getCombinedModifierFlags(frame) & ts.ModifierFlags.Static) !== 0) continue
     let keys = owners.get(owner)
-    if (!keys) owners.set(owner, (keys = new Map()))
+    if (!keys) owners.set(owner, (keys = new Map<string, ValueWrite[]>()))
     let writes = keys.get(key)
     if (!writes) keys.set(key, (writes = []))
     writes.push(write)
@@ -195,15 +214,31 @@ const instanceMemberWritesOf = (flow: ValueFlowIndex): ReadonlyMap<SourceClass, 
   return owners
 }
 
-const activeRecordProofs = new WeakMap<
-  ValueFlowIndex,
-  Set<{
-    readonly roots: readonly ts.ObjectLiteralExpression[]
-    readonly key: string
-    readonly purpose: 'data-descriptor' | 'stable-callable-slot'
-    readonly receiverTypeAt: (expression: ts.Expression) => ts.Type | null
-  }>
->()
+interface ActiveRecordProof {
+  readonly roots: readonly ts.ObjectLiteralExpression[]
+  readonly key: string
+  readonly purpose: 'data-descriptor' | 'stable-callable-slot'
+  readonly receiverTypeAt: (expression: ts.Expression) => ts.Type | null
+}
+const activeRecordProofs = new WeakMap<ValueFlowIndex, Set<ActiveRecordProof>>()
+/** The same proofs as objects, for membership asked about a key of any kind (`parked`). */
+const activeRecordProofKeys = new WeakMap<ValueFlowIndex, Set<object>>()
+/**
+ * One `ts.Expression[]` copy per record-root array, made once: a native build
+ * has no conversion between arrays of different element types, and the set
+ * token memo and the active value-proof table both key on array identity, so
+ * a fresh copy per ask would defeat them.
+ */
+const recordRootExpressions = new WeakMap<readonly ts.ObjectLiteralExpression[], readonly ts.Expression[]>()
+const recordRootExpressionsOf = (roots: readonly ts.ObjectLiteralExpression[]): readonly ts.Expression[] => {
+  let held = recordRootExpressions.get(roots)
+  if (!held) {
+    const copy: ts.Expression[] = []
+    for (const root of roots) copy.push(root)
+    recordRootExpressions.set(roots, (held = copy))
+  }
+  return held
+}
 type ReceiverTypeAt = (expression: ts.Expression) => ts.Type | null
 const ownedConstructionReceiverTypes = new WeakMap<ReceiverTypeAt, ReceiverTypeAt>()
 const ownedConstructionReceiverWrappers = new WeakSet<ReceiverTypeAt>()
@@ -219,7 +254,7 @@ const ownedConstructionReceiverWrappers = new WeakSet<ReceiverTypeAt>()
 const ownedConstructionDeclaredTypes = new WeakMap<ValueFlowIndex, Map<ts.Expression, ts.Type | null>>()
 const ownedConstructionDeclaredTypeOf = (checker: ts.TypeChecker, flow: ValueFlowIndex, expression: ts.Expression): ts.Type | null => {
   let byExpression = ownedConstructionDeclaredTypes.get(flow)
-  if (!byExpression) ownedConstructionDeclaredTypes.set(flow, (byExpression = new Map()))
+  if (!byExpression) ownedConstructionDeclaredTypes.set(flow, (byExpression = new Map<ts.Expression, ts.Type | null>()))
   const known = byExpression.get(expression)
   if (known !== undefined) return known
   const value = unwrapErasedExpression(expression)
@@ -287,6 +322,12 @@ const withCallSite = <K>(table: Map<K, CallSiteEntry>, key: K, site: FlowCallSit
   else if (Array.isArray(entry)) entry.push(site)
   else table.set(key, [entry, site])
 }
+// Generic in the key rather than one loop over both tables as
+// `Map<unknown, ...>[]`: the tables differ in key type, and a native build
+// has no conversion between two maps of different key types.
+const compactCallSites = <K>(table: Map<K, CallSiteEntry>): void => {
+  for (const [key, entry] of table) if (Array.isArray(entry) && entry.length > 2) table.set(key, entry.slice())
+}
 /** Calls whose callee is a named member access, by key: record method calls
  * the checker cannot attribute are found here and authenticated per proof. */
 const callsByMemberName = new WeakMap<ValueFlowIndex, ReadonlyMap<string, readonly FlowCallSite[]>>()
@@ -302,6 +343,26 @@ const statedTypeAdmissions = new WeakMap<ts.Type, WeakMap<ts.Type, boolean>>()
 /** `GEA_ALLOCATION_CALLERS_SHARE_OFF=1` re-derives the allocation caller inventory in every proof, as before it was shared. */
 const allocationCallersShared = process.env['GEA_ALLOCATION_CALLERS_SHARE_OFF'] === undefined
 const NO_PROTOCOL_REQUIREMENTS: readonly IntrinsicProtocolRequirement[] = []
+interface CapturedProof<T> {
+  readonly value: T
+  readonly requirements: readonly IntrinsicProtocolRequirement[]
+}
+/**
+ * `work()` with the obligations it raised, or none without a ledger.
+ * `ledger.capture` is a generic function value (an interface member), so a
+ * native build holds the `value` it returns as the erased type parameter and
+ * cannot hand it back as the proof's own type. Only its `requirements` are
+ * read here; the work's result comes back through this function's own,
+ * instantiated, `T`.
+ */
+const captureProof = <T>(ledger: DeferredIntrinsicProtocolLedger | null, work: () => T): CapturedProof<T> => {
+  if (!ledger) return { value: work(), requirements: [] }
+  let value!: T
+  const { requirements } = captureAnswer(ledger, () => {
+    value = work()
+  })
+  return { value, requirements }
+}
 
 const omittedArguments = new WeakMap<ts.Node, Map<number, ts.Expression>>()
 /**
@@ -313,14 +374,10 @@ const omittedArguments = new WeakMap<ts.Node, Map<number, ts.Expression>>()
  */
 const omittedArgumentOf = (call: ts.Node, position: number): ts.Expression => {
   let held = omittedArguments.get(call)
-  if (!held) omittedArguments.set(call, (held = new Map()))
+  if (!held) omittedArguments.set(call, (held = new Map<number, ts.Expression>()))
   const known = held.get(position)
   if (known) return known
-  const value = ts.factory.createVoidZero()
-  ts.setTextRange(value.expression, { pos: call.end, end: call.end })
-  ts.setTextRange(value, { pos: call.end, end: call.end })
-  ;(value.expression as { parent: ts.Node }).parent = value
-  ;(value as { parent: ts.Node }).parent = call
+  const value = voidZeroAt(call)
   held.set(position, value)
   return value
 }
@@ -342,8 +399,8 @@ const callsOf = (flow: ValueFlowIndex) => {
   }
   // Each list copied to its exact length: a `push` past the second entry
   // reserves spare slots, and these tables stay alive with the index.
-  for (const table of [declarations, callees] as Map<unknown, CallSiteEntry>[])
-    for (const [key, entry] of table) if (Array.isArray(entry) && entry.length > 2) table.set(key, entry.slice())
+  compactCallSites(declarations)
+  compactCallSites(callees)
   const result = {
     declarationSites: (declaration: ts.SignatureDeclaration | ts.JSDocSignature) =>
       callSitesIn(declarations.get(declaration)) ?? NO_CALL_SITES,
@@ -499,7 +556,7 @@ export const emptyCallableReachIndex: CallableReachIndex = {
   enumeratedCallSitesOf: () => null,
   calleesOf: () => NO_CALLABLES,
   closedCount: 0,
-  refusals: new Map()
+  refusals: new Map<string, number>()
 }
 
 /** A newly inferred inline member callback needs every value use accounted
@@ -527,8 +584,11 @@ interface ClosedValueMode {
    * it instead of recording it as an assumption -- and that distinction is
    * the whole value of the memo, because every one of these parks is a
    * freshly allocated object that no later call can ever present again.
+   *
+   * `null` for none, not an optional field: a native build lowered every read
+   * of the optional `object` field to a presence assertion.
    */
-  readonly ownPark?: object
+  readonly ownPark: object | null
   /** Where mentions are anchored when there are no roots (`closedCallableAuthorityOf`). */
   readonly anchor?: ts.Node
   /** A consumer with finalized intrinsic identities may discharge this directly. */
@@ -603,6 +663,7 @@ export const closedValueOriginAuthorityOf = (
     {
       roots: [],
       terminalUse: () => null,
+      ownPark: null,
       anchor,
       exposeOrigins: (answer) => {
         authority = answer
@@ -670,6 +731,7 @@ export const closedCallableAuthorityOf = (
     closedMemberCallableUses(checker, flow, null, new Set(), receiverTypeAt, argumentsUsesAt, undefined, new Set(), new Set(), {
       roots: [],
       terminalUse: () => null,
+      ownPark: null,
       anchor,
       ...(explicitInvocationIsIntact ? { explicitInvocationIsIntact } : {}),
       expose: (authority) => {
@@ -788,7 +850,7 @@ interface SlotWriteInventory {
   readonly intrinsicMutators: readonly { readonly call: ts.CallExpression; readonly name: string }[]
 }
 const slotWriteInventories = new WeakMap<ValueFlowIndex, SlotWriteInventory>()
-const INTRINSIC_PROPERTY_MUTATORS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+const INTRINSIC_PROPERTY_MUTATORS: ReadonlyMap<string, ReadonlySet<string>> = new Map<string, ReadonlySet<string>>([
   ['Object', new Set(['assign', 'defineProperty', 'defineProperties', 'setPrototypeOf'])],
   ['Reflect', new Set(['set', 'defineProperty', 'setPrototypeOf'])]
 ])
@@ -801,7 +863,7 @@ const INTRINSIC_PROPERTY_MUTATORS: ReadonlyMap<string, ReadonlySet<string>> = ne
  * instance handed to one of these as having left the program; every other
  * library callee only stores or reads what it is given.
  */
-const LIBRARY_ARGUMENT_EVALUATORS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+const LIBRARY_ARGUMENT_EVALUATORS: ReadonlyMap<string, ReadonlySet<string>> = new Map<string, ReadonlySet<string>>([
   ['Object', new Set(['values', 'entries', 'fromEntries', 'groupBy'])],
   ['JSON', new Set(['stringify'])],
   ['Array', new Set(['from', 'fromAsync'])],
@@ -890,9 +952,24 @@ const slotWriteInventoryOf = (checker: ts.TypeChecker, flow: ValueFlowIndex): Sl
   return built
 }
 
-const activeValueProofs = new WeakMap<ValueFlowIndex, Map<readonly ts.Expression[], Set<ClosedValueMode['terminalUse']>>>()
-/** The same terminals, flat, so the proof memo can ask whether an assumed one is still in force. */
-const activeValueTerminals = new WeakMap<ValueFlowIndex, Set<ClosedValueMode['terminalUse']>>()
+/**
+ * Hypothesis keys are objects, and a terminal-use closure is parked through
+ * one stable token per closure rather than as itself: the park sets and the
+ * proof memo then hold plain objects only, which a native build can compare
+ * without converting a function value to `object` and back.
+ */
+interface TerminalToken {
+  readonly terminalUse: ClosedValueMode['terminalUse']
+}
+const terminalTokens = new WeakMap<ClosedValueMode['terminalUse'], TerminalToken>()
+const terminalTokenOf = (terminalUse: ClosedValueMode['terminalUse']): TerminalToken => {
+  let token = terminalTokens.get(terminalUse)
+  if (!token) terminalTokens.set(terminalUse, (token = { terminalUse }))
+  return token
+}
+const activeValueProofs = new WeakMap<ValueFlowIndex, Map<readonly ts.Expression[], Set<object>>>()
+/** The same terminal tokens, flat, so the proof memo can ask whether an assumed one is still in force. */
+const activeValueTerminals = new WeakMap<ValueFlowIndex, Set<object>>()
 
 /** Follow every use of an explicit value family using the same publication
  * graph as member closure, with protocol-specific terminal observations. */
@@ -910,28 +987,29 @@ export const hasClosedValueUses = (
   identity?: string,
   ownPark?: object
 ): boolean => {
+  const token = terminalTokenOf(terminalUse)
   let active = activeValueProofs.get(flow)
-  if (!active) activeValueProofs.set(flow, (active = new Map()))
+  if (!active) activeValueProofs.set(flow, (active = new Map<readonly ts.Expression[], Set<object>>()))
   let terminals = active.get(roots)
-  if (!terminals) active.set(roots, (terminals = new Set()))
-  if (terminals.has(terminalUse)) {
-    noteAssumption(terminalUse)
+  if (!terminals) active.set(roots, (terminals = new Set<object>()))
+  if (terminals.has(token)) {
+    noteAssumption(token)
     return true
   }
   let flat = activeValueTerminals.get(flow)
-  if (!flat) activeValueTerminals.set(flow, (flat = new Set()))
-  terminals.add(terminalUse)
-  flat.add(terminalUse)
+  if (!flat) activeValueTerminals.set(flow, (flat = new Set<object>()))
+  terminals.add(token)
+  flat.add(token)
   try {
     return hasClosedMemberCallableUses(checker, flow, null, new Set(), receiverTypeAt, argumentsUsesAt, onOpenUse, new Set(), new Set(), {
       roots,
       terminalUse,
       ...(identity === undefined ? {} : { identity }),
-      ...(ownPark === undefined ? {} : { ownPark })
+      ownPark: ownPark ?? null
     })
   } finally {
-    terminals.delete(terminalUse)
-    flat.delete(terminalUse)
+    terminals.delete(token)
+    flat.delete(token)
     if (terminals.size === 0) active.delete(roots)
   }
 }
@@ -1033,7 +1111,9 @@ const sameCountedCalls = (
   return true
 }
 
-const activeFieldReadsByFlow = new WeakMap<ValueFlowIndex, Set<ts.Expression>>()
+// Asked about a key of any kind (`parked`), so held as objects: a typed set
+// would need the key cast to its element class, which a native build checks.
+const activeFieldReadsByFlow = new WeakMap<ValueFlowIndex, Set<object>>()
 
 /**
  * Shared answers to `fieldValuesOf`'s class-instance walk, by content.
@@ -1096,9 +1176,15 @@ const refusalMemoEnabled = process.env['GEA_REFUSAL_MEMO'] !== '0'
 
 const sharedStats = { asks: 0, hits: 0, stores: 0, refusals: 0, ungrounded: 0 }
 const wipEscapes = new Map<string, number>() // WIP-SOLVER-TIMING
-const intactCheckIds = new WeakMap<object, number>()
+// A hypothesis key is any object (a node, a symbol, a guard token); nothing
+// typed tells them apart, so the dump names each by first-seen ordinal.
+const wipEscapeKeyIds = new WeakMap<object, number>() // WIP-SOLVER-TIMING
+let wipEscapeKeysSeen = 0 // WIP-SOLVER-TIMING
+// Keyed by the check's own function type, not `object`: a native build has
+// no conversion from a function value to `object`.
+const intactCheckIds = new WeakMap<NonNullable<ClosedValueMode['explicitInvocationIsIntact']>, number>()
 let intactChecksSeen = 0
-const intactCheckIdOf = (check: object | undefined): string => {
+const intactCheckIdOf = (check: ClosedValueMode['explicitInvocationIsIntact']): string => {
   if (!check) return 'ledger'
   let id = intactCheckIds.get(check)
   if (id === undefined) intactCheckIds.set(check, (id = ++intactChecksSeen))
@@ -1197,7 +1283,8 @@ const topQuestions = (): string => {
   const ranked = [...askQuestions.entries()].sort((a, b) => b[1] - a[1])
   const lines = ranked.slice(0, 8).map(([question, count]) => `\n    ${count}  ${question.slice(0, 120)}`)
   const hottest = ranked[0]
-  const chains = hottest ? [...(askChains.get(hottest[0]) ?? new Map()).entries()].sort((a, b) => b[1] - a[1]) : []
+  const hottestChains = hottest ? askChains.get(hottest[0]) : undefined
+  const chains = hottestChains === undefined ? [] : [...hottestChains.entries()].sort((a, b) => b[1] - a[1])
   const shown = chains.slice(0, 3).map(([chain, count]) => `\n      x${count} ${chain}`)
   return `${askQuestions.size} distinct${lines.join('')}\n    [CHAINS of hottest]${shown.join('')}`
 }
@@ -1214,7 +1301,22 @@ export const memberProofStats = (): string =>
   `\n  [ASK-SITES]${topAskSites()}` +
   `\n  [QUESTIONS] ${topQuestions()}`
 
-const EMPTY_KEYS: ReadonlySet<never> = new Set()
+// One empty per element type: a native layout has no `ReadonlySet<never>` to share.
+const EMPTY_MEMBERS: ReadonlySet<ts.Symbol> = new Set<ts.Symbol>()
+const EMPTY_FAMILIES: ReadonlySet<SourceClass> = new Set<SourceClass>()
+// Park keys are arbitrary objects (symbols, class nodes, proof tokens), so
+// family membership is asked of an object-typed copy instead of by casting a
+// key to the `SourceClass` node union, which a native build has no checked
+// narrowing for. A family set is never mutated once a proof holds it
+// (`nestedFamilies` arms before its first return), so the copy answers
+// exactly what the original would.
+const EMPTY_FAMILY_KEYS: ReadonlySet<object> = new Set<object>()
+const familyKeysOf = (families: ReadonlySet<SourceClass>): ReadonlySet<object> => {
+  if (families.size === 0) return EMPTY_FAMILY_KEYS
+  const keys = new Set<object>()
+  for (const family of families) keys.add(family)
+  return keys
+}
 
 /**
  * The class (or constructor function) a member declaration belongs to.
@@ -1247,13 +1349,30 @@ const memberOwnerClassIn = (flow: ValueFlowIndex, declaration: ts.Node): SourceC
   return owner && (ts.isClassDeclaration(owner) || ts.isClassExpression(owner)) ? owner : null
 }
 
-export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof closedMemberCallableUses>): boolean => {
-  const checker = parameters[0]
-  const flow = parameters[1]
+// Named parameters rather than `...parameters: Parameters<...>`: a rest
+// tuple re-spread into the proof is a fixed-arity record a native call cannot
+// range-copy.
+export const hasClosedMemberCallableUses = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  member: ts.Symbol | null,
+  counted: ReadonlySet<ts.CallExpression | ts.NewExpression>,
+  givenReceiverTypeAt: (expression: ts.Expression) => ts.Type | null,
+  argumentsUsesAt: (declaration: ts.SignatureDeclaration) => readonly ts.Identifier[] | undefined,
+  onOpenUse?: (
+    reference: ts.Expression,
+    kind: 'receiver' | 'containing-object' | 'member-reference-inventory' | 'member-receiver-inventory'
+  ) => void,
+  activeMembers?: ReadonlySet<ts.Symbol>,
+  activeFamilies?: ReadonlySet<SourceClass>,
+  valueMode?: ClosedValueMode
+): boolean => {
   const ledger = deferredIntrinsicProtocolLedgerOf(flow)
-  const [, , member, counted, givenReceiverTypeAt, argumentsUsesAt, onOpenUse, activeMembers, activeFamilies, valueMode] = parameters
-  const inheritedMembers: ReadonlySet<ts.Symbol> = activeMembers ?? EMPTY_KEYS
-  const inheritedFamilies: ReadonlySet<SourceClass> = activeFamilies ?? EMPTY_KEYS
+  const inheritedMembers: ReadonlySet<ts.Symbol> = activeMembers ?? EMPTY_MEMBERS
+  const inheritedMemberKeys = new Set<object>()
+  for (const symbol of inheritedMembers) inheritedMemberKeys.add(symbol)
+  const inheritedFamilies: ReadonlySet<SourceClass> = activeFamilies ?? EMPTY_FAMILIES
+  const inheritedFamilyKeys = familyKeysOf(inheritedFamilies)
   // Key on the one wrapper per given authority, so a nested proof (handed the
   // wrapper) and a top-level one (handed the raw function) share answers.
   const receiverTypeAt = ownedConstructionReceiverTypeAt(checker, flow, givenReceiverTypeAt)
@@ -1272,28 +1391,33 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
   if (nested) proofStats.nested++
   if (proofStatsEvery > 0 && proofStats.entries % proofStatsEvery === 0) console.error(memberProofStats())
   let byMember = proofAnswers.get(flow)
-  if (!byMember) proofAnswers.set(flow, (byMember = new Map()))
+  if (!byMember)
+    proofAnswers.set(
+      flow,
+      (byMember = new Map<ts.Symbol | null, WeakMap<ReceiverTypeAtFn, WeakMap<ArgumentsUsesAtFn, ValueModeBuckets>>>())
+    )
   let byReceiverTypeAt = byMember.get(member)
   if (!byReceiverTypeAt) {
     proofStats.members++
-    byMember.set(member, (byReceiverTypeAt = new WeakMap()))
+    byMember.set(member, (byReceiverTypeAt = new WeakMap<ReceiverTypeAtFn, WeakMap<ArgumentsUsesAtFn, ValueModeBuckets>>()))
   }
   let byArgumentsUsesAt = byReceiverTypeAt.get(receiverTypeAt)
   if (!byArgumentsUsesAt) {
     proofStats.receiverFns++
-    byReceiverTypeAt.set(receiverTypeAt, (byArgumentsUsesAt = new WeakMap()))
+    byReceiverTypeAt.set(receiverTypeAt, (byArgumentsUsesAt = new WeakMap<ArgumentsUsesAtFn, ValueModeBuckets>()))
   }
   let byValueMode = byArgumentsUsesAt.get(argumentsUsesAt)
   if (!byValueMode) {
     proofStats.argumentFns++
-    byArgumentsUsesAt.set(argumentsUsesAt, (byValueMode = { named: new Map(), fresh: undefined }))
+    byArgumentsUsesAt.set(argumentsUsesAt, (byValueMode = { named: new Map<string | undefined, ProofAnswer[]>(), fresh: undefined }))
   }
   const modeKey = valueMode?.identity
   let answers = valueMode !== undefined && modeKey === undefined ? byValueMode.fresh?.get(valueMode) : byValueMode.named.get(modeKey)
   if (!answers) {
     proofStats.valueModes++
     answers = []
-    if (valueMode !== undefined && modeKey === undefined) (byValueMode.fresh ??= new WeakMap()).set(valueMode, answers)
+    if (valueMode !== undefined && modeKey === undefined)
+      (byValueMode.fresh ??= new WeakMap<ClosedValueMode, ProofAnswer[]>()).set(valueMode, answers)
     else byValueMode.named.set(modeKey, answers)
   }
   if (!nested) proofStats.topLevelEntries++
@@ -1325,10 +1449,10 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
   // exactly that reason -- not a correctness fix, a population-growth one;
   // recomputing on the rare re-ask is always safe.
   const inheritedPark = (key: object): boolean =>
-    inheritedMembers.has(key as ts.Symbol) ||
-    inheritedFamilies.has(key as SourceClass) ||
-    (activeRecordProofs.get(flow)?.has(key as never) ?? false) ||
-    (activeValueTerminals.get(flow)?.has(key as ClosedValueMode['terminalUse']) ?? false)
+    inheritedMemberKeys.has(key) ||
+    inheritedFamilyKeys.has(key) ||
+    (activeRecordProofKeys.get(flow)?.has(key) ?? false) ||
+    (activeValueTerminals.get(flow)?.has(key) ?? false)
   const inherited = (key: object): boolean => inheritedPark(key) || hypothesisGuardIsOpen(key)
   // The three per-`flow` park sets are read once for the whole scan instead of
   // three WeakMap lookups per assumed key per stored answer. Nothing between
@@ -1342,15 +1466,15 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
   // of a large library compile put `inheritedPark` at 14.3% of all samples on its
   // own (`measurements/live-baseline.cpuprofile`), reached
   // `answers.length` x `assumed.size` times per question.
-  const scanRecordProofs = activeRecordProofs.get(flow)
+  const scanRecordProofs = activeRecordProofKeys.get(flow)
   const scanValueTerminals = activeValueTerminals.get(flow)
   const scanFieldReads = activeFieldReadsByFlow.get(flow)
   const scanInherited = (key: object): boolean =>
-    inheritedMembers.has(key as ts.Symbol) ||
-    inheritedFamilies.has(key as SourceClass) ||
-    (scanRecordProofs?.has(key as never) ?? false) ||
-    (scanValueTerminals?.has(key as ClosedValueMode['terminalUse']) ?? false) ||
-    (scanFieldReads?.has(key as ts.Expression) ?? false) ||
+    inheritedMemberKeys.has(key) ||
+    inheritedFamilyKeys.has(key) ||
+    (scanRecordProofs?.has(key) ?? false) ||
+    (scanValueTerminals?.has(key) ?? false) ||
+    (scanFieldReads?.has(key) ?? false) ||
     hypothesisGuardIsOpen(key)
   for (const answer of answers) {
     proofStats.scanned++
@@ -1377,20 +1501,18 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
   const opens = new Map<ts.Expression, Set<OpenUseKind>>()
   const record = (reference: ts.Expression, kind: OpenUseKind): void => {
     let kinds = opens.get(reference)
-    if (!kinds) opens.set(reference, (kinds = new Set()))
+    if (!kinds) opens.set(reference, (kinds = new Set<OpenUseKind>()))
     if (kinds.has(kind)) return
     kinds.add(kind)
     onOpenUse?.(reference, kind)
   }
-  const observed = [...parameters] as Parameters<typeof closedMemberCallableUses>
-  observed[6] = record
   // The families this proof parks on its own behalf, read lazily: the answer
   // for `member` is a greatest fixpoint over them, so leaning on them is a
   // discharge, not an open assumption.
-  let ownFamilies: Set<SourceClass> | null = null
-  const ownCoinduction = (): ReadonlySet<SourceClass> => {
+  let ownFamilies: Set<object> | null = null
+  const ownCoinduction = (): ReadonlySet<object> => {
     if (ownFamilies === null) {
-      ownFamilies = new Set()
+      ownFamilies = new Set<object>()
       for (const declaration of member?.declarations ?? []) {
         const owner = memberOwnerClassIn(flow, declaration)
         if (owner !== null) ownFamilies.add(owner)
@@ -1416,7 +1538,18 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
   const trail = pushHypothesisTrail()
   const work = (): boolean => {
     try {
-      return closedMemberCallableUses(...observed)
+      return closedMemberCallableUses(
+        checker,
+        flow,
+        member,
+        counted,
+        givenReceiverTypeAt,
+        argumentsUsesAt,
+        record,
+        activeMembers,
+        activeFamilies,
+        valueMode
+      )
     } finally {
       popHypothesisTrail()
     }
@@ -1445,7 +1578,11 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
       // so the memo held nothing and the same question was re-proven millions
       // of times. A park an ENCLOSING proof established is untouched by this:
       // it is not this mode's own, so it still lands in `assumed`.
-      if (valueMode !== undefined && (key === valueMode.terminalUse || key === valueMode.ownPark)) continue
+      if (
+        valueMode !== undefined &&
+        (key === terminalTokens.get(valueMode.terminalUse) || (valueMode.ownPark !== null && key === valueMode.ownPark))
+      )
+        continue
       // See `hypothesisIsPessimistic`: a closed answer owes a pessimistic
       // hypothesis nothing, so it is neither a condition of the answer nor
       // something an enclosing proof has to hear about.
@@ -1454,7 +1591,7 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
         assumed.add(key)
         noteAssumption(key)
         if (!inheritedPark(key)) leansOnReentryGuard = true
-      } else if (key !== member && !ownCoinduction().has(key as SourceClass)) {
+      } else if (key !== member && !ownCoinduction().has(key)) {
         escaped.add(key)
         noteAssumption(key)
       }
@@ -1468,10 +1605,10 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
       let fieldRead = false
       let memberFamily = false
       for (const key of assumed) {
-        if (inheritedMembers.has(key as ts.Symbol) || inheritedFamilies.has(key as SourceClass)) memberFamily = true
-        else if (activeRecordProofs.get(flow)?.has(key as never)) recordProof = true
-        else if (activeValueTerminals.get(flow)?.has(key as ClosedValueMode['terminalUse'])) valueTerminal = true
-        else if (activeFieldReadsByFlow.get(flow)?.has(key as ts.Expression)) fieldRead = true
+        if (inheritedMemberKeys.has(key) || inheritedFamilyKeys.has(key)) memberFamily = true
+        else if (activeRecordProofKeys.get(flow)?.has(key)) recordProof = true
+        else if (activeValueTerminals.get(flow)?.has(key)) valueTerminal = true
+        else if (activeFieldReadsByFlow.get(flow)?.has(key)) fieldRead = true
       }
       if (recordProof) proofStats.assumedRecordProof++
       if (valueTerminal) proofStats.assumedValueTerminal++
@@ -1539,7 +1676,7 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
     share(closed, [])
     return closed
   }
-  const captured = ledger.capture(work)
+  const captured = captureProof(ledger, work)
   if (captured.value) ledger.include(captured.requirements)
   share(captured.value, captured.requirements)
   return captured.value
@@ -1609,7 +1746,7 @@ const recordLeafSummary = (arm: string, ownerMember: string, site: string): void
     })
   }
   let byOwner = leafSummary.get(arm)
-  if (!byOwner) leafSummary.set(arm, (byOwner = new Map()))
+  if (!byOwner) leafSummary.set(arm, (byOwner = new Map<string, { count: number; readonly sites: string[] }>()))
   let entry = byOwner.get(ownerMember)
   if (!entry) byOwner.set(ownerMember, (entry = { count: 0, sites: [] }))
   entry.count += 1
@@ -1648,7 +1785,7 @@ const describeNode = (node: ts.Node): string => {
 const descendsFromCache = new WeakMap<ts.Type, Map<ts.Symbol, boolean>>()
 const descendsFromNominal = (checker: ts.TypeChecker, type: ts.Type, baseSymbol: ts.Symbol): boolean => {
   let byBase = descendsFromCache.get(type)
-  if (!byBase) descendsFromCache.set(type, (byBase = new Map()))
+  if (!byBase) descendsFromCache.set(type, (byBase = new Map<ts.Symbol, boolean>()))
   const known = byBase.get(baseSymbol)
   if (known !== undefined) return known
   const seen = new Set<ts.Type>()
@@ -1694,9 +1831,13 @@ const virtualAccessorsFor = (
   descendsFrom: (type: ts.Type, baseSymbol: ts.Symbol) => boolean
 ): ReadonlyMap<ts.SyntaxKind, readonly ts.AccessorDeclaration[]> => {
   let byType = virtualAccessorsByType.get(flow)
-  if (!byType) virtualAccessorsByType.set(flow, (byType = new WeakMap()))
+  if (!byType)
+    virtualAccessorsByType.set(
+      flow,
+      (byType = new WeakMap<ts.Type, Map<string, ReadonlyMap<ts.SyntaxKind, readonly ts.AccessorDeclaration[]>>>())
+    )
   let byKey = byType.get(stated)
-  if (!byKey) byType.set(stated, (byKey = new Map()))
+  if (!byKey) byType.set(stated, (byKey = new Map<string, ReadonlyMap<ts.SyntaxKind, readonly ts.AccessorDeclaration[]>>()))
   const known = byKey.get(key)
   if (known) return known
   const baseSymbol = stated.getSymbol()
@@ -1827,7 +1968,12 @@ const pathInterningOf = (flow: ValueFlowIndex): PathInterning => {
   if (!held)
     pathInternings.set(
       flow,
-      (held = { declarationIds: new Map(), propertyPaths: new Map(), elementPaths: new Map(), summaryPaths: new Map() })
+      (held = {
+        declarationIds: new Map<ts.Declaration, number>(),
+        propertyPaths: new Map<ts.Declaration | null, Map<string | null, Map<boolean, Map<MemberPath | null, MemberPath>>>>(),
+        elementPaths: new Map<boolean, Map<MemberPath | null, MemberPath>>(),
+        summaryPaths: new Map<MemberPath, Map<string, MemberPath>>()
+      })
     )
   return held
 }
@@ -1843,7 +1989,11 @@ const allocationCallerInventoryGuards = new WeakMap<
 >()
 const allocationCallerInventoryGuardOf = (flow: ValueFlowIndex, declaration: ts.Declaration, family: boolean): object => {
   let declarations = allocationCallerInventoryGuards.get(flow)
-  if (!declarations) allocationCallerInventoryGuards.set(flow, (declarations = new WeakMap()))
+  if (!declarations)
+    allocationCallerInventoryGuards.set(
+      flow,
+      (declarations = new WeakMap<ts.Declaration, { readonly exact: object; readonly family: object }>())
+    )
   let guards = declarations.get(declaration)
   if (!guards) declarations.set(declaration, (guards = { exact: {}, family: {} }))
   return family ? guards.family : guards.exact
@@ -1860,8 +2010,8 @@ const closedMemberCallableUses = (
     reference: ts.Expression,
     kind: 'receiver' | 'containing-object' | 'member-reference-inventory' | 'member-receiver-inventory'
   ) => void,
-  activeMembers: ReadonlySet<ts.Symbol> = new Set(),
-  activeFamilies: ReadonlySet<SourceClass> = new Set(),
+  activeMembers: ReadonlySet<ts.Symbol> = new Set<ts.Symbol>(),
+  activeFamilies: ReadonlySet<SourceClass> = new Set<SourceClass>(),
   valueMode?: ClosedValueMode
 ): boolean => {
   if (member && activeMembers.has(member)) {
@@ -1889,6 +2039,8 @@ const closedMemberCallableUses = (
   const receiverTypeAt = ownedConstructionReceiverTypeAt(checker, flow, givenReceiverTypeAt)
   const nestedMembers = new Set(activeMembers)
   if (member) nestedMembers.add(member)
+  const nestedMemberKeys = new Set<object>()
+  for (const symbol of nestedMembers) nestedMemberKeys.add(symbol)
   /**
    * The class families whose ORIGIN proof is already open somewhere up the
    * stack, parked exactly as `activeMembers` parks a member.
@@ -1914,6 +2066,9 @@ const closedMemberCallableUses = (
    * Filled lazily because `memberOwnerClassOf` is declared below this point.
    */
   const openFamilies = new Set(activeFamilies)
+  // `parked`'s object-typed view of `openFamilies`, kept in step with it (see `familyKeysOf`).
+  const openFamilyKeys = new Set<object>()
+  for (const family of openFamilies) openFamilyKeys.add(family)
   let ownFamiliesArmed = false
   // The parks this instance can lean on: everything it hands its nested
   // proofs (its own member and families included -- from a sub-question's
@@ -1921,11 +2076,11 @@ const closedMemberCallableUses = (
   // module-level ones. A shared answer is valid exactly where its assumed
   // parks are all in force.
   const parked = (key: object): boolean =>
-    nestedMembers.has(key as ts.Symbol) ||
-    openFamilies.has(key as SourceClass) ||
-    (activeRecordProofs.get(flow)?.has(key as never) ?? false) ||
-    (activeValueTerminals.get(flow)?.has(key as ClosedValueMode['terminalUse']) ?? false) ||
-    (activeFieldReadsByFlow.get(flow)?.has(key as ts.Expression) ?? false) ||
+    nestedMemberKeys.has(key) ||
+    openFamilyKeys.has(key) ||
+    (activeRecordProofKeys.get(flow)?.has(key) ?? false) ||
+    (activeValueTerminals.get(flow)?.has(key) ?? false) ||
+    (activeFieldReadsByFlow.get(flow)?.has(key) ?? false) ||
     hypothesisGuardIsOpen(key)
   const sharedAnswerOf = <T>(
     identity: string,
@@ -1935,11 +2090,13 @@ const closedMemberCallableUses = (
     sharedStats.asks++
     if (process.env['GEA_WIP_PROOF_STATS'] && sharedStats.asks % 500000 === 0) console.error(memberProofStats()) // WIP-SOLVER-TIMING
     let byReceiverTypeAt = sharedAnswers.get(flow)
-    if (!byReceiverTypeAt) sharedAnswers.set(flow, (byReceiverTypeAt = new WeakMap()))
+    if (!byReceiverTypeAt)
+      sharedAnswers.set(flow, (byReceiverTypeAt = new WeakMap<ReceiverTypeAtFn, WeakMap<ArgumentsUsesAtFn, Map<string, SharedAnswer[]>>>()))
     let byArgumentsUsesAt = byReceiverTypeAt.get(receiverTypeAt)
-    if (!byArgumentsUsesAt) byReceiverTypeAt.set(receiverTypeAt, (byArgumentsUsesAt = new WeakMap()))
+    if (!byArgumentsUsesAt)
+      byReceiverTypeAt.set(receiverTypeAt, (byArgumentsUsesAt = new WeakMap<ArgumentsUsesAtFn, Map<string, SharedAnswer[]>>()))
     let byIdentity = byArgumentsUsesAt.get(argumentsUsesAt)
-    if (!byIdentity) byArgumentsUsesAt.set(argumentsUsesAt, (byIdentity = new Map()))
+    if (!byIdentity) byArgumentsUsesAt.set(argumentsUsesAt, (byIdentity = new Map<string, SharedAnswer[]>()))
     const keyed = `${intactCheckIdOf(valueMode?.explicitInvocationIsIntact)}:${identity}`
     let answers = byIdentity.get(keyed)
     if (!answers) byIdentity.set(keyed, (answers = []))
@@ -1962,15 +2119,24 @@ const closedMemberCallableUses = (
     const outerSink = openSink
     openSink = (reference, kind) => {
       let kinds = opens.get(reference)
-      if (!kinds) opens.set(reference, (kinds = new Set()))
+      if (!kinds) opens.set(reference, (kinds = new Set<OpenUseKind>()))
       if (kinds.has(kind)) return
       kinds.add(kind)
       outerSink?.(reference, kind)
     }
     const ledger = deferredIntrinsicProtocolLedgerOf(flow)
-    let computed: SharedProvenanceAnswer<T>
+    let computed: CapturedProof<T | null>
     try {
-      computed = ledger ? ledger.capture(compute) : { value: compute(), requirements: [] }
+      // `captureProof` spelled out: its specialization at this enclosing
+      // generic's `T | null` has no native binding to read.
+      if (!ledger) computed = { value: compute(), requirements: [] }
+      else {
+        let value!: T | null
+        const { requirements } = captureAnswer(ledger, () => {
+          value = compute()
+        })
+        computed = { value, requirements }
+      }
     } finally {
       popHypothesisTrail()
       openSink = outerSink
@@ -2019,14 +2185,12 @@ const closedMemberCallableUses = (
     if (computed.value === null && !grounded && process.env['GEA_WIP_PROOF_STATS']) {
       // WIP-SOLVER-TIMING: which escaped hypotheses keep refusals out of the memo
       const describe = (key: object): string => {
-        const node = key as Partial<ts.Node>
-        if (typeof node.kind === 'number' && typeof node.getSourceFile === 'function') {
-          const file = node.getSourceFile()
-          const line = file.getLineAndCharacterOfPosition((key as ts.Node).getStart(file)).line + 1
-          return `${ts.SyntaxKind[node.kind]} ${file.fileName.split('/').pop()}:${line} ${(key as ts.Node).getText(file).replace(/\s+/g, ' ').slice(0, 50)}`
+        let id = wipEscapeKeyIds.get(key)
+        if (id === undefined) {
+          id = wipEscapeKeysSeen++
+          wipEscapeKeyIds.set(key, id)
         }
-        const named = key as { name?: unknown; escapedName?: unknown; kind?: unknown }
-        return `${key.constructor?.name ?? 'object'} ${String(named.escapedName ?? named.name ?? named.kind ?? '')}`
+        return `key#${id}`
       }
       for (const key of escaped) {
         const label = `${identity.split(':')[0]} <- ${describe(key)}`
@@ -2063,14 +2227,17 @@ const closedMemberCallableUses = (
         for (const key of assumed) if (hypothesisGuardIsOpen(key)) whenHypothesisSettles(key, () => assumed.delete(key))
       return { value: computed.value, requirements: stored.requirements }
     }
-    return computed
+    return { value: computed.value, requirements: computed.requirements }
   }
   const nestedFamilies = (): ReadonlySet<SourceClass> => {
     if (!ownFamiliesArmed) {
       ownFamiliesArmed = true
       for (const declaration of member?.declarations ?? []) {
         const owner = memberOwnerClassOf(declaration)
-        if (owner !== null) openFamilies.add(owner)
+        if (owner !== null) {
+          openFamilies.add(owner)
+          openFamilyKeys.add(owner)
+        }
       }
     }
     return openFamilies
@@ -2321,10 +2488,8 @@ const closedMemberCallableUses = (
     if (!answer) {
       const trail = pushHypothesisTrail()
       try {
-        const captured = ledger
-          ? ledger.capture(() => closedCallerSitesUncached(declaration))
-          : { value: closedCallerSitesUncached(declaration), requirements: [] }
-        answer = { ...captured, assumed: trail }
+        const captured = captureProof(ledger, () => closedCallerSitesUncached(declaration))
+        answer = { value: captured.value, requirements: captured.requirements, assumed: trail }
       } finally {
         popHypothesisTrail()
       }
@@ -2454,7 +2619,7 @@ const closedMemberCallableUses = (
       }
     }
     const calls = [...own, ...inherited.filter((site) => !own.includes(site))]
-    const counted = new Set(own.map((site) => site.call))
+    const counted = new Set<ts.Node>(own.map((site) => site.call))
     // `this.setSize = function ( width, height ) { ... }` is a method slot
     // written the other way round. A pre-ES6 constructor-function module can
     // publish its whole API that way, and `closedCallerSitesOf` was the one place still
@@ -2607,7 +2772,7 @@ const closedMemberCallableUses = (
     if (stated.isUnion()) return stated.types.some((member) => statedTypeMayHold(member, instance))
     if ((stated.flags & ts.TypeFlags.Object) === 0) return false
     let byStated = statedTypeAdmissions.get(instance)
-    if (byStated === undefined) statedTypeAdmissions.set(instance, (byStated = new WeakMap()))
+    if (byStated === undefined) statedTypeAdmissions.set(instance, (byStated = new WeakMap<ts.Type, boolean>()))
     let admitted = byStated.get(stated)
     if (admitted === undefined) byStated.set(stated, (admitted = checker.isTypeAssignableTo(instance, stated)))
     return admitted
@@ -2794,9 +2959,14 @@ const closedMemberCallableUses = (
   const thisFamilyAt = (expression: ts.Expression): ExactClassAllocationOrigins | null => {
     const frame = flow.receiverOwnerOf(expression)
     if (frame === null || !ts.isFunctionLike(frame)) return null
+    // Read through a plain node where `ownFrame` is false: that answer does not
+    // mean the frame is no function declaration or expression (most of them are
+    // not constructors), yet the predicate's false branch narrows it as if it
+    // did, and a native build checks that narrowing.
+    const frameNode: ts.Node = frame
     const ownFrame = isConstructorFunction(frame)
-    if (!ownFrame && (ts.getCombinedModifierFlags(frame as ts.Declaration) & ts.ModifierFlags.Static) !== 0) return null
-    const holder = ownFrame ? frame : frame.parent
+    if (!ownFrame && isStaticClassMember(frameNode)) return null
+    const holder = ownFrame ? frame : frameNode.parent
     if (!ts.isClassDeclaration(holder) && !ts.isClassExpression(holder) && !isConstructorFunction(holder)) return null
     const inventory = ownedClassReceiverInventoryOf(checker, flow, new Set([holder as SourceClass]))
     return inventory === null
@@ -2865,9 +3035,8 @@ const closedMemberCallableUses = (
     if (!answer) {
       const trail = pushHypothesisTrail()
       try {
-        answer = ledger
-          ? ledger.capture(() => parameterValuesUncached(parameter))
-          : { value: parameterValuesUncached(parameter), requirements: [] }
+        const captured = captureProof(ledger, () => parameterValuesUncached(parameter))
+        answer = { value: captured.value, requirements: captured.requirements }
       } finally {
         popHypothesisTrail()
       }
@@ -3158,7 +3327,7 @@ const closedMemberCallableUses = (
         noteAssumption(owner)
         return true
       }
-      return familyReceiversClosed(new Set([owner]), use)
+      return familyReceiversClosed(new Set<SourceClass>([owner]), use)
     }
     const calls = closedCallerSitesOf(declaration)
     const watchedNull = process.env['GEA_FACTORY_RESULT_DEBUG']
@@ -3240,14 +3409,14 @@ const closedMemberCallableUses = (
     let byTail: Map<MemberPath | null, MemberPath> | undefined
     if (hop.kind === 'element') {
       byTail = elementPaths.get(hop.owesStores)
-      if (!byTail) elementPaths.set(hop.owesStores, (byTail = new Map()))
+      if (!byTail) elementPaths.set(hop.owesStores, (byTail = new Map<MemberPath | null, MemberPath>()))
     } else {
       let names = propertyPaths.get(hop.member)
-      if (!names) propertyPaths.set(hop.member, (names = new Map()))
+      if (!names) propertyPaths.set(hop.member, (names = new Map<string | null, Map<boolean, Map<MemberPath | null, MemberPath>>>()))
       let owes = names.get(hop.key)
-      if (!owes) names.set(hop.key, (owes = new Map()))
+      if (!owes) names.set(hop.key, (owes = new Map<boolean, Map<MemberPath | null, MemberPath>>()))
       byTail = owes.get(hop.owesStores)
-      if (!byTail) owes.set(hop.owesStores, (byTail = new Map()))
+      if (!byTail) owes.set(hop.owesStores, (byTail = new Map<MemberPath | null, MemberPath>()))
     }
     let path = byTail.get(tail)
     if (!path) byTail.set(tail, (path = { ...hop, tail, hops: NO_HOPS, owing: NO_HOPS }))
@@ -3256,7 +3425,7 @@ const closedMemberCallableUses = (
   const summaryPath = (hops: ReadonlySet<HopId>, owing: ReadonlySet<HopId>, exit: MemberPath): MemberPath => {
     const signature = `${[...hops].sort().join(' ')}|${[...owing].sort().join(' ')}`
     let bySignature = summaryPaths.get(exit)
-    if (!bySignature) summaryPaths.set(exit, (bySignature = new Map()))
+    if (!bySignature) summaryPaths.set(exit, (bySignature = new Map<string, MemberPath>()))
     let path = bySignature.get(signature)
     if (!path) bySignature.set(signature, (path = { kind: 'summary', member: null, key: null, owesStores: false, tail: exit, hops, owing }))
     return path
@@ -3392,8 +3561,11 @@ const closedMemberCallableUses = (
    * `parked` settlement turns it into a permanent `true`.
    */
   interface Tentative {
-    readonly table: Map<unknown, Answer>
-    readonly key: unknown
+    // Withdraws this entry from its table's tentative bucket. A closure over
+    // the bucket rather than the table and key themselves: `coinduct` is
+    // generic in the key, and a native build has no conversion from a
+    // `Map<K, Answer>` to the `Map<unknown, Answer>` a stored field would need.
+    readonly withdraw: () => void
     lowest: number
     owner: ProofFrame
   }
@@ -3404,9 +3576,7 @@ const closedMemberCallableUses = (
   const tentativeAnswers = new WeakMap<Map<unknown, Answer>, Map<unknown, Tentative>>()
   const withdrawTentatives = (from: number): void => {
     for (let at = from; at < tentativeLog.length; at++) {
-      const tentative = tentativeLog[at]!
-      const held = tentativeAnswers.get(tentative.table)
-      if (held?.get(tentative.key) === tentative) held.delete(tentative.key)
+      tentativeLog[at]!.withdraw()
     }
     tentativeLog.length = from
   }
@@ -3462,8 +3632,15 @@ const closedMemberCallableUses = (
             }
           }
           let byKey = tentativeAnswers.get(table as Map<unknown, Answer>)
-          if (!byKey) tentativeAnswers.set(table as Map<unknown, Answer>, (byKey = new Map()))
-          const own: Tentative = { table: table as Map<unknown, Answer>, key, lowest: frame.lowest, owner }
+          if (!byKey) tentativeAnswers.set(table as Map<unknown, Answer>, (byKey = new Map<unknown, Tentative>()))
+          const bucket = byKey
+          const own: Tentative = {
+            withdraw: () => {
+              if (bucket.get(key) === own) bucket.delete(key)
+            },
+            lowest: frame.lowest,
+            owner
+          }
           byKey.set(key, own)
           tentativeLog.push(own)
         } else withdrawTentatives(frame.tentativeStart)
@@ -3677,7 +3854,7 @@ const closedMemberCallableUses = (
     purpose: 'data-descriptor' | 'stable-callable-slot'
   ): boolean => {
     let active = activeRecordProofs.get(flow)
-    if (!active) activeRecordProofs.set(flow, (active = new Set()))
+    if (!active) activeRecordProofs.set(flow, (active = new Set<ActiveRecordProof>()))
     // One closure for the whole scan, not one per stored proof: `roots` is
     // fixed for this call, and this loop is walked for every record question
     // the proof asks. A live allocation profile charged `recordRootsClosed`
@@ -3696,8 +3873,13 @@ const closedMemberCallableUses = (
         noteAssumption(proof)
         return true
       }
-    const proof = { roots, key, receiverTypeAt, purpose }
+    // Stated as the set's element type: the literal's own inferred shape is a
+    // second record type a native build would have to convert.
+    const proof: ActiveRecordProof = { roots, key, purpose, receiverTypeAt }
     active.add(proof)
+    let proofKeys = activeRecordProofKeys.get(flow)
+    if (!proofKeys) activeRecordProofKeys.set(flow, (proofKeys = new Set<object>()))
+    proofKeys.add(proof)
     try {
       const ledger = deferredIntrinsicProtocolLedgerOf(flow)
       // A root lacking the slot reads exactly `key` through `Object.prototype`.
@@ -3765,10 +3947,12 @@ const closedMemberCallableUses = (
       // same key for the same purpose is the same proof whichever member
       // proof instance asks it, and each instance mints its own `roots`
       // array and `terminalUse` closure.
-      const identity = `record:${purpose}:${key}:${nodeSetToken(roots)}`
-      return hasClosedValueUses(checker, flow, roots, terminalUse, receiverTypeAt, argumentsUsesAt, onOpenUse, identity, proof)
+      const rootExpressions = recordRootExpressionsOf(roots)
+      const identity = `record:${purpose}:${key}:${nodeSetToken(rootExpressions)}`
+      return hasClosedValueUses(checker, flow, rootExpressions, terminalUse, receiverTypeAt, argumentsUsesAt, onOpenUse, identity, proof)
     } finally {
       active.delete(proof)
+      activeRecordProofKeys.get(flow)?.delete(proof)
     }
   }
   const constructionDataMemberOf = (expression: ts.Expression, key: string | null): boolean => {
@@ -3778,7 +3962,7 @@ const closedMemberCallableUses = (
     // `sourceRecordDataWritePlanOf` first meant the memo below saved only the
     // last of the three costs, on a predicate the walk asks constantly.
     let entries = constructedData.get(expression)
-    if (!entries) constructedData.set(expression, (entries = new Map()))
+    if (!entries) constructedData.set(expression, (entries = new Map<string, boolean>()))
     const held = entries.get(key)
     if (held !== undefined) return held
     if (sourceRecordDataWritePlanOf(flow, expression, key, computedKeyAuthority)) {
@@ -3916,13 +4100,7 @@ const closedMemberCallableUses = (
    * stated once here and asked by both the receiver walk and the argument
    * walk below.
    */
-  const resolvedImplementations = new Map<
-    ts.Declaration,
-    {
-      readonly value: readonly ts.SignatureDeclaration[] | null
-      readonly requirements: readonly IntrinsicProtocolRequirement[]
-    }
-  >()
+  const resolvedImplementations = new Map<ts.Declaration, CapturedProof<readonly ts.SignatureDeclaration[] | null>>()
   const resolvingImplementations = new Set<ts.Declaration>()
   const memberImplementationsOf = (declaration: ts.Declaration): readonly ts.SignatureDeclaration[] | null => {
     if (resolvingImplementations.has(declaration)) {
@@ -3935,7 +4113,8 @@ const closedMemberCallableUses = (
     if (known?.value === null) return null
     if (known && (known.requirements.length === 0 || ledger?.include(known.requirements) === true)) return known.value
     let inventories = memberImplementationInventories.get(flow)
-    if (!inventories) memberImplementationInventories.set(flow, (inventories = new Map()))
+    if (!inventories)
+      memberImplementationInventories.set(flow, (inventories = new Map<ts.Declaration, MemberImplementationInventory | null>()))
     let inventory = inventories.get(declaration)
     if (inventory === undefined) {
       inventory = memberImplementationsUncached(declaration)
@@ -3967,7 +4146,7 @@ const closedMemberCallableUses = (
     // their buckets -- which is why the buckets never filled and the same
     // questions kept missing.
     try {
-      const answer = ledger ? ledger.capture(compute) : { value: compute(), requirements: [] }
+      const answer = captureProof(ledger, compute)
       // A failed walk may have proved earlier alternatives before meeting an
       // unknown callable. Those partial obligations support no accepted result.
       if (answer.value === null) return null
@@ -4112,7 +4291,8 @@ const closedMemberCallableUses = (
   // all reaching one `Node.prototype.add` -- can share one answer instead
   // of each re-walking `flow.classDeclarations` from zero.
   let slotDeclarationsCache = slotDeclarationsCaches.get(flow)
-  if (!slotDeclarationsCache) slotDeclarationsCaches.set(flow, (slotDeclarationsCache = new Map()))
+  if (!slotDeclarationsCache)
+    slotDeclarationsCaches.set(flow, (slotDeclarationsCache = new Map<ts.Declaration, readonly ts.Declaration[]>()))
   const slotDeclarationsOf = (declared: ts.Declaration): readonly ts.Declaration[] => {
     const cached = slotDeclarationsCache.get(declared)
     if (cached) return cached
@@ -4205,14 +4385,14 @@ const closedMemberCallableUses = (
     const prove = () =>
       hasClosedMemberCallableUses(checker, flow, symbol, calls, receiverTypeAt, argumentsUsesAt, onOpenUse, nestedMembers, nestedFamilies())
     const trail = pushHypothesisTrail()
-    let closed: { readonly value: boolean; readonly requirements: readonly IntrinsicProtocolRequirement[] }
+    let closed: CapturedProof<boolean>
     try {
-      closed = ledger ? ledger.capture(prove) : { value: prove(), requirements: [] }
+      closed = captureProof(ledger, prove)
     } finally {
       popHypothesisTrail()
     }
     for (const key of trail) noteAssumption(key)
-    slotClosures.set(symbol, { ...closed, assumed: trail })
+    slotClosures.set(symbol, { value: closed.value, requirements: closed.requirements, assumed: trail })
     return closed.value && (closed.requirements.length === 0 || ledger?.include(closed.requirements) === true)
   }
 
@@ -4638,7 +4818,7 @@ const closedMemberCallableUses = (
   // overflowed. A re-ask of a read still being answered is the same cycle
   // whichever proof instance asks it, and it already refused within one.
   let activeFieldReads = activeFieldReadsByFlow.get(flow)
-  if (!activeFieldReads) activeFieldReadsByFlow.set(flow, (activeFieldReads = new Set()))
+  if (!activeFieldReads) activeFieldReadsByFlow.set(flow, (activeFieldReads = new Set<object>()))
   const callCompletionValuesAt: CallCompletionValuesAt = (call) => {
     // `options = Object.assign( { ...defaults }, options )` in a class
     // constructor that rebinds its options parameter: the intact intrinsic returns its target. The graph
@@ -4730,11 +4910,16 @@ const closedMemberCallableUses = (
       // hundreds of thousands of times. Memoizing the read itself is what
       // stops the walk from running again at all.
       let byReceiverTypeAt = fieldAnswers.get(flow)
-      if (!byReceiverTypeAt) fieldAnswers.set(flow, (byReceiverTypeAt = new WeakMap()))
+      if (!byReceiverTypeAt)
+        fieldAnswers.set(
+          flow,
+          (byReceiverTypeAt = new WeakMap<ReceiverTypeAtFn, WeakMap<ArgumentsUsesAtFn, WeakMap<ts.Expression, FieldAnswer[]>>>())
+        )
       let byArgumentsUsesAt = byReceiverTypeAt.get(receiverTypeAt)
-      if (!byArgumentsUsesAt) byReceiverTypeAt.set(receiverTypeAt, (byArgumentsUsesAt = new WeakMap()))
+      if (!byArgumentsUsesAt)
+        byReceiverTypeAt.set(receiverTypeAt, (byArgumentsUsesAt = new WeakMap<ArgumentsUsesAtFn, WeakMap<ts.Expression, FieldAnswer[]>>()))
       let byAccess = byArgumentsUsesAt.get(argumentsUsesAt)
-      if (!byAccess) byArgumentsUsesAt.set(argumentsUsesAt, (byAccess = new WeakMap()))
+      if (!byAccess) byArgumentsUsesAt.set(argumentsUsesAt, (byAccess = new WeakMap<ts.Expression, FieldAnswer[]>()))
       let answers = byAccess.get(access)
       if (!answers) byAccess.set(access, (answers = []))
       if (answers.length > fieldStats.longest) fieldStats.longest = answers.length
@@ -4762,15 +4947,15 @@ const closedMemberCallableUses = (
       const outerSink = openSink
       openSink = (reference, kind) => {
         let kinds = opens.get(reference)
-        if (!kinds) opens.set(reference, (kinds = new Set()))
+        if (!kinds) opens.set(reference, (kinds = new Set<OpenUseKind>()))
         if (kinds.has(kind)) return
         kinds.add(kind)
         outerSink?.(reference, kind)
       }
-      let computed: { readonly value: readonly ts.Expression[] | null; readonly requirements: readonly IntrinsicProtocolRequirement[] }
+      let computed: CapturedProof<readonly ts.Expression[] | null>
       try {
         const compute = (): readonly ts.Expression[] | null => readFieldValues(access)
-        computed = ledger ? ledger.capture(compute) : { value: compute(), requirements: [] }
+        computed = captureProof(ledger, compute)
       } finally {
         popHypothesisTrail()
         openSink = outerSink
@@ -4929,7 +5114,7 @@ const closedMemberCallableUses = (
           onOpenUse,
           nestedMembers,
           nestedFamilies(),
-          { roots, terminalUse, field: { owners: origins.classes, key } }
+          { roots, terminalUse, ownPark: null, field: { owners: origins.classes, key } }
         )
       if (!closed) return traceField('field-receiver-closure-open')
       if (values.size === 0) return traceField('field-values-empty')
@@ -5064,7 +5249,7 @@ const closedMemberCallableUses = (
     )
       return familyTraced('this-frame-is-not-a-class-member', () => `frame=${frame ? ts.SyntaxKind[frame.kind] : 'none'}`)
     if (!frame) return familyTraced('this-frame-is-not-a-class-member', () => 'frame=none')
-    if (!ownFrame && (ts.getCombinedModifierFlags(frame) & ts.ModifierFlags.Static) !== 0) return familyTraced('this-frame-is-static')
+    if (!ownFrame && isStaticClassMember(frame)) return familyTraced('this-frame-is-static')
     const holder = ownFrame ? frame : frame.parent
     if (!ts.isClassDeclaration(holder) && !ts.isClassExpression(holder) && !isConstructorFunction(holder))
       return familyTraced('this-frame-has-no-class-holder')
@@ -5073,7 +5258,7 @@ const closedMemberCallableUses = (
     // fake )` and `const f = a.m; f.call( fake )` are both mentions its own
     // slot proof must have counted.
     if (ts.isMethodDeclaration(frame) && !memberSlotClosed(frame)) return familyTraced('this-frame-slot-open')
-    if (ownedClassReceiverInventoryOf(checker, flow, new Set([holder])) === null) return familyTraced('holder-inventory-open')
+    if (ownedClassReceiverInventoryOf(checker, flow, new Set<SourceClass>([holder])) === null) return familyTraced('holder-inventory-open')
     return true
   }
   const methodReceiverUses = (declaration: ts.Declaration, use: (expression: ts.Expression) => boolean): boolean => {
@@ -5330,7 +5515,7 @@ const closedMemberCallableUses = (
    * declaration, or a parameter with a closed frame. A for-of, catch,
    * destructured or redeclared `var` binding receives values no write names.
    */
-  const nullishOnly = (expression: ts.Expression, active: Set<ts.Node> = new Set()): boolean => {
+  const nullishOnly = (expression: ts.Expression, active: Set<ts.Node> = new Set<ts.Node>()): boolean => {
     const value = unwrapValue(expression)
     if (nullishValue(value)) return true
     if (ts.isConditionalExpression(value)) return nullishOnly(value.whenTrue, active) && nullishOnly(value.whenFalse, active)
@@ -5608,7 +5793,7 @@ const closedMemberCallableUses = (
    */
   const callableValuesOf = (
     expression: ts.Expression,
-    active: Set<ts.Node> = new Set()
+    active: Set<ts.Node> = new Set<ts.Node>()
   ): { readonly targets: readonly CallbackBody[]; readonly nullish: boolean } | null => {
     const value = unwrapValue(expression)
     if (nullishValue(value)) return { targets: [], nullish: true }
@@ -5701,7 +5886,7 @@ const closedMemberCallableUses = (
    */
   const publishInto = (expression: ts.Expression, path: MemberPath | null): boolean => {
     let table = publishAnswers.get(path)
-    if (!table) publishAnswers.set(path, (table = new Map()))
+    if (!table) publishAnswers.set(path, (table = new Map<ts.Node, Answer>()))
     return coinduct(table, expression, () => {
       const outer = walkFrame
       const reports = leafReports
@@ -5884,7 +6069,7 @@ const closedMemberCallableUses = (
     if (!ts.isNewExpression(value)) return null
     const owner = ownConstructorClassOf(value)
     if (owner === null) return null
-    const inventory = ownedClassReceiverInventoryOf(checker, flow, new Set([owner]))
+    const inventory = ownedClassReceiverInventoryOf(checker, flow, new Set<SourceClass>([owner]))
     const construction = inventory?.constructionFacts.find((fact) => fact.call === value)
     if (
       inventory === null ||
@@ -5995,7 +6180,7 @@ const closedMemberCallableUses = (
    */
   const classInstancesUse = (owner: ts.ClassDeclaration | ts.ClassExpression, path: MemberPath | null): boolean => {
     let table = classAnswers.get(path)
-    if (!table) classAnswers.set(path, (table = new Map()))
+    if (!table) classAnswers.set(path, (table = new Map<ts.Node, Answer>()))
     return coinduct(table, owner, () => {
       const use = (value: ts.Expression): boolean => onward(value, path)
       // TEMPORARY diagnostic for root A's real-library probe -- names
@@ -6014,9 +6199,9 @@ const closedMemberCallableUses = (
         }
         return false
       }
-      if (!familyReceiversClosed(new Set([owner]), use, debugOpen)) return false
+      if (!familyReceiversClosed(new Set<SourceClass>([owner]), use, debugOpen)) return false
       if (path === null || !headsOwe(path)) return true
-      const inventory = ownedClassReceiverInventoryOf(checker, flow, new Set([owner]))
+      const inventory = ownedClassReceiverInventoryOf(checker, flow, new Set<SourceClass>([owner]))
       if (inventory === null) return false
       return inventory.initializers.every(({ member }) => {
         if (!ts.isPropertyDeclaration(member) || !member.initializer) return true
@@ -6127,7 +6312,7 @@ const closedMemberCallableUses = (
         noteAssumption(owner)
         return true
       }
-      const inventory = ownedClassReceiverInventoryOf(checker, flow, new Set([owner]))
+      const inventory = ownedClassReceiverInventoryOf(checker, flow, new Set<SourceClass>([owner]))
       if (inventory === null) return false
       const roots = [
         ...inventory.constructionFacts.map(({ call }) => call),
@@ -6144,7 +6329,7 @@ const closedMemberCallableUses = (
         onOpenUse,
         nestedMembers,
         new Set([...nestedFamilies(), owner]),
-        { roots, terminalUse: () => null }
+        { roots, terminalUse: () => null, ownPark: null }
       )
     })
   /**
@@ -6556,7 +6741,8 @@ const closedMemberCallableUses = (
       }
       if (answer.value.jointSource) {
         let receipts = jointSourceInvocationReceipts.get(flow)
-        if (!receipts) jointSourceInvocationReceipts.set(flow, (receipts = new WeakMap()))
+        if (!receipts)
+          jointSourceInvocationReceipts.set(flow, (receipts = new WeakMap<SourceInvocationFact, JointSourceInvocationReceipt>()))
         receipts.set(fact, {
           call,
           operands: fact.operands,
@@ -6938,7 +7124,7 @@ const closedMemberCallableUses = (
     )
     const family =
       owner && (ts.isClassDeclaration(owner) || ts.isClassExpression(owner) || isConstructorFunction(owner))
-        ? (ownedClassReceiverInventoryOf(checker, flow, new Set([owner]))?.classes ?? null)
+        ? (ownedClassReceiverInventoryOf(checker, flow, new Set<SourceClass>([owner]))?.classes ?? null)
         : null
     containerFamilies.set(member, family)
     return family
@@ -7048,7 +7234,7 @@ const closedMemberCallableUses = (
   }
   const containerUse = (reference: ts.Expression, path: MemberPath): boolean => {
     let table = containerAnswers.get(path)
-    if (!table) containerAnswers.set(path, (table = new Map()))
+    if (!table) containerAnswers.set(path, (table = new Map<ts.Node, Answer>()))
     return coinduct(table, reference, () => {
       const outer = walkFrame
       const reports = leafReports
@@ -7839,11 +8025,14 @@ const closedMemberCallableUses = (
                 const declaration = fieldDeclarationOf(reference, key)
                 return { primitive: declaration !== null && primitive(checker.getTypeAtLocation(declaration)) }
               })
-        if (plans !== null && plans.every((plan) => plan !== null)) {
+        // `includes(null)` rather than a `plan !== null` predicate: the inferred
+        // predicate narrows `plans` to a second array type, which a native
+        // build cannot convert to.
+        if (plans !== null && !plans.includes(null)) {
           if (ts.isBinaryExpression(write) && write.left === parent && write.operatorToken.kind === ts.SyntaxKind.EqualsToken)
             return traceReceiver(reference, 'computed-data-store', true)
           if (!callsOf(flow).writeReceivers.has(reference)) {
-            const primitiveFields = plans.every((plan) => plan.primitive)
+            const primitiveFields = plans.every((plan) => plan !== null && plan.primitive)
             return traceReceiver(reference, 'computed-data-read', primitiveFields || ownerOriginsClosed(originsCarrierOf(reference, null)))
           }
         }
@@ -8162,7 +8351,7 @@ const closedMemberCallableUses = (
 }
 
 /** The binary operators whose RESULT is a boolean, so an operand's value stops there. */
-const COMPARISON_TOKENS: ReadonlySet<ts.SyntaxKind> = new Set([
+const COMPARISON_TOKENS: ReadonlySet<ts.SyntaxKind> = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.EqualsEqualsToken,
   ts.SyntaxKind.EqualsEqualsEqualsToken,
   ts.SyntaxKind.ExclamationEqualsToken,
@@ -8353,7 +8542,7 @@ export const indexCallableReach = (checker: ts.TypeChecker, flow: ValueFlowIndex
     if (!isAnonymousInlineCallable(value)) continue
     const existing = callablesInParameter.get(parameter)
     if (existing) existing.add(value)
-    else callablesInParameter.set(parameter, new Set([value]))
+    else callablesInParameter.set(parameter, new Set<ts.SignatureDeclaration>([value]))
     // One slot per callable, by construction: an inline expression node stands
     // in exactly one argument position. A second sighting would mean the index
     // recorded the same node twice, and taking the FIRST keeps that a

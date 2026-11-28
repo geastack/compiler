@@ -3,7 +3,10 @@ import { cppRecordFieldName, cppRecordStructName, cppTypeOf } from './types.js'
 
 export const ownedRecordMaterializationText = (plan: OwnedRecordPlan, text: string, depth = 0): string => {
   if (plan.kind === 'identity') {
-    return plan.target.kind === 'scalar' && plan.target.domain !== 'bigint' ? `static_cast<${cppTypeOf(plan.target)}>(${text})` : text
+    // Narrowed as a local: a `kind` guard on the field path would read the
+    // stored union through its scalar arm's type.
+    const target = plan.target
+    return target.kind === 'scalar' && target.domain !== 'bigint' ? `static_cast<${cppTypeOf(target)}>(${text})` : text
   }
   if (plan.kind === 'arm') {
     return `${cppTypeOf(plan.target)}::ofArm<${plan.index}>(${ownedRecordMaterializationText(plan.payload, text, depth)})`

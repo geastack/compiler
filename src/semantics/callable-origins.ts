@@ -321,7 +321,10 @@ export const callableWriteTargetsOf = (graph: SemanticGraph): readonly CallableW
       for (const source of operation.nativeOwnAssignment.sources) {
         const operand = operandOf(operation, 'argument', source.ordinal)
         if (operand === undefined) continue
-        const keys = new Set([...source.roots.flatMap((root) => root.slots.map((slot) => slot.key)), ...(source.described?.keys ?? [])])
+        const keys = new Set([
+          ...source.roots.flatMap((root) => root.slots.map((slot) => slot.key)),
+          ...(source.described?.keys == null ? [] : [...source.described?.keys])
+        ])
         for (const key of keys) {
           const values = source.roots.flatMap((root) => root.slots.filter((slot) => slot.key === key).flatMap((slot) => slot.values))
           targets.push({

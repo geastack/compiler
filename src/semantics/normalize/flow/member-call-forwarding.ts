@@ -27,7 +27,7 @@ import {
   pushHypothesisTrail,
   registerGuardedAnswer
 } from './proof-hypotheses.js'
-import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from '../deferred-intrinsic-protocols.js'
+import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement, captureAnswer } from '../deferred-intrinsic-protocols.js'
 import { frameForwardedArgumentOf, frameForwardedParameterOf } from './invocation-facts.js'
 import { exportIsUnimported } from './targets.js'
 import { inProgramImportReferencesOf } from './export-importers.js'
@@ -252,7 +252,7 @@ export const thisConstructorFamilyOf = (
   if (owner.getSourceFile().isDeclarationFile || !sourceBindingIsUnwritten(flow, owner)) return null
   // Heritage alone, never the receiver inventory: that inventory asks every
   // construction's selections, this is one of them, and the two would recurse.
-  const family = sourceClassFamilyOf(checker, flow, new Set([owner]))
+  const family = sourceClassFamilyOf(checker, flow, new Set<SourceClass>([owner]))
   if (!family) return null
   for (const member of family.keys()) if (!classConstructorSlotIsOriginal(checker, flow, member)) return null
   return [...family.keys()]
@@ -391,7 +391,7 @@ export const sourceConstructorReturnValuesOf = (
   owner: SourceClass
 ): readonly ts.Expression[] | null => {
   let held = constructorReturns.get(flow)
-  if (!held) constructorReturns.set(flow, (held = new Map()))
+  if (!held) constructorReturns.set(flow, (held = new Map<SourceClass, readonly ts.Expression[] | null>()))
   if (held.has(owner)) return held.get(owner)!
   held.set(owner, null)
   if (owner.getSourceFile().isDeclarationFile || !sourceBindingIsUnwritten(flow, owner)) return null
@@ -433,7 +433,12 @@ interface AllocationOriginAnswer {
   readonly answer: ExactClassAllocationOrigins | null
   readonly requirements: readonly IntrinsicProtocolRequirement[]
 }
-const allocationOrigins = new WeakMap<ValueFlowIndex, WeakMap<ClassAllocationAuthority, Map<ts.Expression, AllocationOriginAnswer>>>()
+// Each level named so its tables are built with their type arguments: an
+// unannotated `new Map()` assigned into a held variable is an untyped table in
+// a native build, with no conversion to the level it is stored as.
+type AllocationOriginsByExpression = Map<ts.Expression, AllocationOriginAnswer>
+type AllocationOriginsByAuthority = WeakMap<ClassAllocationAuthority, AllocationOriginsByExpression>
+const allocationOrigins = new WeakMap<ValueFlowIndex, AllocationOriginsByAuthority>()
 
 export type ParameterValuesAt = (parameter: ts.ParameterDeclaration) => readonly ts.Expression[] | null
 
@@ -815,10 +820,10 @@ export const exactClassAllocationOriginsOf = (
   expression: ts.Expression,
   authority: ClassAllocationAuthority
 ): ExactClassAllocationOrigins | null => {
-  let held = allocationOrigins.get(flow)
-  if (!held) allocationOrigins.set(flow, (held = new WeakMap()))
-  let entries = held.get(authority)
-  if (!entries) held.set(authority, (entries = new Map()))
+  let held: AllocationOriginsByAuthority | undefined = allocationOrigins.get(flow)
+  if (!held) allocationOrigins.set(flow, (held = new WeakMap<ClassAllocationAuthority, AllocationOriginsByExpression>()))
+  let entries: AllocationOriginsByExpression | undefined = held.get(authority)
+  if (!entries) held.set(authority, (entries = new Map<ts.Expression, AllocationOriginAnswer>()))
   const ledger = deferredIntrinsicProtocolLedgerOf(flow)
   const known = entries.get(expression)
   if (known) return known.requirements.length === 0 || ledger?.include(known.requirements) === true ? known.answer : null
@@ -826,10 +831,10 @@ export const exactClassAllocationOriginsOf = (
   // since been confirmed by the guard that issued it (`proof-hypotheses.ts`).
   // Until such an entry is settled its `assumed` is non-empty and it is not
   // consulted at all.
-  let refused = refusedOrigins.get(flow)
-  if (!refused) refusedOrigins.set(flow, (refused = new WeakMap()))
-  let refusedEntries = refused.get(authority)
-  if (!refusedEntries) refused.set(authority, (refusedEntries = new Map()))
+  let refused: RefusedOriginsByAuthority | undefined = refusedOrigins.get(flow)
+  if (!refused) refusedOrigins.set(flow, (refused = new WeakMap<ClassAllocationAuthority, RefusedOriginsByExpression>()))
+  let refusedEntries: RefusedOriginsByExpression | undefined = refused.get(authority)
+  if (!refusedEntries) refused.set(authority, (refusedEntries = new Map<ts.Expression, RefusedOrigin>()))
   const settled = refusedEntries.get(expression)
   if (settled && settled.assumed.size === 0) return null
   const compute = () => exactClassAllocationOriginsUncached(checker, flow, expression, authority)
@@ -854,7 +859,10 @@ export const exactClassAllocationOriginsOf = (
   const trail = pushHypothesisTrail()
   let result: { readonly value: ExactClassAllocationOrigins | null; readonly requirements: readonly IntrinsicProtocolRequirement[] }
   try {
-    result = ledger ? ledger.capture(compute) : { value: compute(), requirements: [] }
+    // Copied field by field: the ledger's result is a record type of its own,
+    // which a native build does not convert into `result`'s.
+    const captured = ledger ? captureAnswer(ledger, compute) : null
+    result = captured ? { value: captured.value, requirements: captured.requirements } : { value: compute(), requirements: [] }
   } finally {
     popHypothesisTrail()
   }
@@ -880,7 +888,7 @@ export const exactClassAllocationOriginsOf = (
         break
       }
     if (onlyGuards) {
-      const entry = { assumed: new Set(trail) }
+      const entry: RefusedOrigin = { assumed: new Set<object>(trail) }
       refusedEntries.set(expression, entry)
       if (entry.assumed.size !== 0) registerGuardedAnswer(entry, () => refusedEntries.delete(expression))
     }
@@ -893,7 +901,12 @@ export const exactClassAllocationOriginsOf = (
  * the hypotheses it rested on. See the store above for why a refusal is worth
  * keeping at all.
  */
-const refusedOrigins = new WeakMap<ValueFlowIndex, WeakMap<ClassAllocationAuthority, Map<ts.Expression, { assumed: Set<object> }>>>()
+interface RefusedOrigin {
+  assumed: Set<object>
+}
+type RefusedOriginsByExpression = Map<ts.Expression, RefusedOrigin>
+type RefusedOriginsByAuthority = WeakMap<ClassAllocationAuthority, RefusedOriginsByExpression>
+const refusedOrigins = new WeakMap<ValueFlowIndex, RefusedOriginsByAuthority>()
 
 // `GEA_ORIGINS_DEBUG=<text>|'*'` names WHICH arm of the origin walk refuses.
 // `allocations-not-enumerable` is the single most re-investigated refusal in
@@ -1052,8 +1065,10 @@ export const closedConstructorForwardingTargetsOf = (
   let selections: readonly SourceClass[] | null = null
   if (ts.isNewExpression(call)) selections = sourceConstructorSelectionsOf(checker, flow, call.expression)
   else if (call.expression.kind === ts.SyntaxKind.SuperKeyword) {
-    const constructor = ts.findAncestor(call, ts.isConstructorDeclaration)
-    if (!constructor) return null
+    // A boolean callback, then the guard on what it found: a native build has
+    // no conversion from a type-guard function value to `findAncestor`'s callback.
+    const constructor = ts.findAncestor(call, (node) => ts.isConstructorDeclaration(node))
+    if (!constructor || !ts.isConstructorDeclaration(constructor)) return null
     const heritage = constructor.parent.heritageClauses?.find((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword)?.types[0]
     selections = heritage ? sourceConstructorSelectionsOf(checker, flow, heritage.expression) : null
   }

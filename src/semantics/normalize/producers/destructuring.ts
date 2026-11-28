@@ -416,10 +416,9 @@ export const createDestructuringProducer = (context: ProducerContext): FamilyPro
         throwingCompletion,
         { readsMutableState: true, writesMutableState: false, allocates: false, callsUserCode: true }
       )
+      const keySource = key.source
       operations.push(
-        key.source.kind === 'constant' &&
-          key.source.literal === 'string' &&
-          ordinaryObjectDataWriteIsAbsent(key.source.text, element, context)
+        keySource.kind === 'constant' && keySource.literal === 'string' && ordinaryObjectDataWriteIsAbsent(keySource.text, element, context)
           ? { ...getOperation, ordinaryObjectPrototypeKeyAbsent: true }
           : getOperation
       )
@@ -870,7 +869,7 @@ export const createDestructuringProducer = (context: ProducerContext): FamilyPro
    * search below see through that nesting without caring how many levels
    * deep it is.
    */
-  const flattenedUnionMembers = (id: StructuralTypeId, seen: Set<StructuralTypeId> = new Set()): StructuralTypeId[] => {
+  const flattenedUnionMembers = (id: StructuralTypeId, seen: Set<StructuralTypeId> = new Set<StructuralTypeId>()): StructuralTypeId[] => {
     if (seen.has(id)) return []
     seen.add(id)
     const shape = context.table.get(id).shape

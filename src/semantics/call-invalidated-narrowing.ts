@@ -1,4 +1,6 @@
 import ts from '#typescript'
+import { FlowFlags } from './ts-internals.js'
+import { checkerUnionOf } from './checker-union.js'
 import { NullableMemo } from './normalize/nullable-memo.js'
 
 /**
@@ -27,21 +29,16 @@ import { NullableMemo } from './normalize/nullable-memo.js'
  * narrowing the checker made.
  */
 
-// TypeScript exports its flow-graph flags at runtime but not in its
-// declarations; the graph itself (`flowNode`) is likewise internal.
-const FlowFlags = (
-  ts as unknown as {
-    readonly FlowFlags: Readonly<
-      Record<'Unreachable' | 'Start' | 'Label' | 'Assignment' | 'TrueCondition' | 'Condition' | 'SwitchClause', number>
-    >
-  }
-).FlowFlags
+// A switch clause's flow `node` is the clause's data record, not a syntax
+// node. Stated as its own arm so each reader selects the one it expects: a
+// syntax node has no conversion into a record natively.
+type SwitchClauseData = { readonly switchStatement: ts.SwitchStatement }
 
 type Flow = {
   readonly flags: number
   readonly antecedent?: Flow
   readonly antecedents?: readonly Flow[]
-  readonly node?: ts.Node
+  readonly node?: ts.Node | SwitchClauseData
 }
 
 type Target =
@@ -56,6 +53,17 @@ type Contribution =
   | { readonly kind: 'assignment'; readonly target: ts.Node }
 
 const flowOf = (node: ts.Node): Flow | undefined => (node as unknown as { readonly flowNode?: Flow }).flowNode
+
+const switchStatementOf = (flow: Flow): ts.SwitchStatement | undefined => {
+  const data = flow.node
+  return data !== undefined && 'switchStatement' in data ? data.switchStatement : undefined
+}
+
+// No syntax node carries a `switchStatement`, so this never hides one.
+const syntaxOf = (flow: Flow): ts.Node | undefined => {
+  const node = flow.node
+  return node === undefined || 'switchStatement' in node ? undefined : node
+}
 
 const skipOuter = (node: ts.Node): ts.Node => {
   let current = node
@@ -145,11 +153,10 @@ const forEachOwnNode = (container: Container, visit: (node: ts.Node) => void): v
 export type CallInvalidatedNarrowing = (node: ts.Node) => ts.Type | null
 
 export const createCallInvalidatedNarrowing = (program: ts.Program, checker: ts.TypeChecker): CallInvalidatedNarrowing => {
-  const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
   const unionOf = (types: readonly ts.Type[]): ts.Type | null => {
     if (types.length === 0) return checker.getNeverType()
     if (types.length === 1) return types[0]!
-    return typeof constructing.getUnionType === 'function' ? constructing.getUnionType(types) : null
+    return checkerUnionOf(checker, types)
   }
 
   // --- the program's writers, and the bodies a call can run -------------------------------------------------
@@ -257,13 +264,19 @@ export const createCallInvalidatedNarrowing = (program: ts.Program, checker: ts.
     return null
   }
 
-  const instanceInitializers = (owner: ts.ClassLikeDeclaration): ts.Node[] =>
-    owner.members.filter(
-      (member): member is ts.PropertyDeclaration =>
+  // Collected into a `ts.Node[]` directly: a filtered member array is another
+  // array type, which a native build cannot hand out as this one.
+  const instanceInitializers = (owner: ts.ClassLikeDeclaration): ts.Node[] => {
+    const initializers: ts.Node[] = []
+    for (const member of owner.members)
+      if (
         ts.isPropertyDeclaration(member) &&
         member.initializer !== undefined &&
         !member.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword)
-    )
+      )
+        initializers.push(member)
+    return initializers
+  }
 
   const isDefaultLibrary = (node: ts.Node): boolean => program.isSourceFileDefaultLibrary(node.getSourceFile())
 
@@ -286,10 +299,12 @@ export const createCallInvalidatedNarrowing = (program: ts.Program, checker: ts.
       const bodies: ts.Node[] = []
       // `fn.call(...)`, `fn.apply(...)`: the receiver is the callback.
       const callee = ts.isCallExpression(effect) ? skipOuter(effect.expression) : null
-      const handed = [
-        ...(callee && ts.isPropertyAccessExpression(callee) ? [callee.expression] : []),
-        ...((ts.isTaggedTemplateExpression(effect) ? [] : effect.arguments) ?? [])
-      ]
+      // Built by pushes: `never[] | NodeArray` spread together is a sum no
+      // native range copy accepts.
+      const handed: ts.Expression[] = []
+      if (callee && ts.isPropertyAccessExpression(callee)) handed.push(callee.expression)
+      if (!ts.isTaggedTemplateExpression(effect) && effect.arguments !== undefined)
+        for (const argument of effect.arguments) handed.push(argument)
       for (const argument of handed) {
         const value = skipOuter(argument)
         if (isOwnBody(value)) {
@@ -321,7 +336,7 @@ export const createCallInvalidatedNarrowing = (program: ts.Program, checker: ts.
             : undefined
         : undefined
     if (!own && !dispatched?.length) return null
-    return [...(own ?? []), ...(dispatched ?? [])]
+    return [...(own == null ? [] : [...own]), ...(dispatched == null ? [] : [...dispatched])]
   }
 
   const classConstruction = (owner: ts.ClassLikeDeclaration): readonly ts.Node[] | null => {
@@ -643,12 +658,13 @@ export const createCallInvalidatedNarrowing = (program: ts.Program, checker: ts.
         contributions.push({ kind: 'declared' })
         continue
       }
-      if ((flow.flags & FlowFlags.Assignment) !== 0 && flow.node) {
-        const written = ts.isVariableDeclaration(flow.node) ? referenceKey(flow.node.name) : referenceKey(flow.node)
+      const syntax = syntaxOf(flow)
+      if ((flow.flags & FlowFlags.Assignment) !== 0 && syntax) {
+        const written = ts.isVariableDeclaration(syntax) ? referenceKey(syntax.name) : referenceKey(syntax)
         if (written === key) {
-          const invalidated = effect || unplacedBetween(flow.node)
+          const invalidated = effect || unplacedBetween(syntax)
           if (invalidated) tainted = true
-          contributions.push(invalidated ? { kind: 'declared' } : { kind: 'assignment', target: flow.node })
+          contributions.push(invalidated ? { kind: 'declared' } : { kind: 'assignment', target: syntax })
           continue
         }
         if (written !== null && key.startsWith(`${written}.`)) {
@@ -658,26 +674,26 @@ export const createCallInvalidatedNarrowing = (program: ts.Program, checker: ts.
         next(flow.antecedent)
         continue
       }
-      if ((flow.flags & FlowFlags.Condition) !== 0 && flow.node && mentions(flow.node, key)) {
-        if (effect || unplacedBetween(flow.node)) {
+      if ((flow.flags & FlowFlags.Condition) !== 0 && syntax && mentions(syntax, key)) {
+        if (effect || unplacedBetween(syntax)) {
           tainted = true
           contributions.push({ kind: 'declared' })
           continue
         }
-        const inner = occurrenceIn(flow.node, key)
+        const inner = occurrenceIn(syntax, key)
         if (inner && inner !== node && corrected(inner) !== null) tainted = true
         contributions.push({
           kind: 'condition',
-          condition: flow.node as ts.Expression,
+          condition: syntax as ts.Expression,
           assumeTrue: (flow.flags & FlowFlags.TrueCondition) !== 0,
           inner
         })
         continue
       }
-      if ((flow.flags & FlowFlags.SwitchClause) !== 0 && flow.node) {
-        const clause = flow.node as unknown as { readonly switchStatement: ts.SwitchStatement }
-        if (mentions(clause.switchStatement.expression, key)) {
-          if (effect || unplacedBetween(clause.switchStatement.expression)) tainted = true
+      const switchStatement = (flow.flags & FlowFlags.SwitchClause) !== 0 ? switchStatementOf(flow) : undefined
+      if (switchStatement) {
+        if (mentions(switchStatement.expression, key)) {
+          if (effect || unplacedBetween(switchStatement.expression)) tainted = true
           contributions.push({ kind: 'declared' })
           continue
         }

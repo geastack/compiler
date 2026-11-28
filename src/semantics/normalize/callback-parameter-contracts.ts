@@ -63,8 +63,11 @@ const intrinsicFrameArgumentType = (
 ): ts.Type | null => {
   const argument = frame.arguments.find((entry) => entry.position === position)
   if (!argument) return null
-  if (argument.source.kind === 'array-index') return checker.getNumberType()
-  if (argument.source.kind === 'reduce-accumulator') return null
+  // Dispatched on the role, which fixes the source kind one-to-one
+  // (`sourceForRole`): a read of the source union's `kind` is a live-view read
+  // off a value whose allocations the field flow does not see.
+  if (argument.role === 'index') return checker.getNumberType()
+  if (argument.role === 'reduce-accumulator') return null
   const receiver = receiverTypeAt(frame.receiver)
   if (!receiver || (receiver.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return null
   const arrays = (receiver.isUnion() ? receiver.types : [receiver]).filter(
@@ -72,7 +75,7 @@ const intrinsicFrameArgumentType = (
   )
   const array = arrays.length === 1 ? arrays[0]! : null
   if (!array || !checker.isArrayType(array)) return null
-  if (argument.source.kind === 'receiver') return array
+  if (argument.role === 'array') return array
   const element = checker.getTypeArguments(array as ts.TypeReference)[0]
   if (!element) return null
   return HOLE_VISITING_METHODS.has(frame.method) ? checker.getNullableType(element, ts.TypeFlags.Undefined) : element

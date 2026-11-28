@@ -16,6 +16,7 @@ import { symbolPropertyKeyDeclarationOf, type StructuralType } from '../semantic
 import type { NativeClassStorage } from './class-storage.js'
 import { operandOf, resultOf, type SemanticOperand } from '../semantics/model/operands.js'
 import { abiOfCallee } from './callee.js'
+import { setValues } from '../collection-lists.js'
 
 /**
  * What each class is made of, assembled from the events its evaluation
@@ -341,8 +342,12 @@ export interface PhysicalClassLayout {
   readonly declaration: DeclarationId
   /** The nearest authenticated base, or null for a root class. */
   readonly base: DeclarationId | null
-  /** The exact class-ref carrier whose shape supplies this struct's fields. */
-  readonly instance: Extract<Representation, { readonly kind: 'class-ref' }>
+  /**
+   * The exact class-ref carrier whose shape supplies this struct's fields.
+   * Typed as the carrier union it is read as: a native build has no
+   * conversion from the narrowed arm into the union `representationKey` takes.
+   */
+  readonly instance: Representation
   /** Native base facts are preserved for ordinary projected classes. */
   readonly nativeBase: ClassLayout['nativeBase']
 }
@@ -931,13 +936,14 @@ export const projectClasses = (input: ClassProjectionInput): ReadonlyMap<Declara
       // same event, and only the carrier says which class the evaluated value
       // actually constructs. A family naming several classes states no single
       // base, so it is left absent instead of resolved to whichever came first.
-      if (
-        carrier?.kind === 'native-handle' &&
-        nativeErrorConstructors.has(carrier.protocol) &&
-        carrier.construct?.result.kind === 'native-record-ref'
-      ) {
-        nativeBases.set(operation.classDeclaration, { protocol: carrier.protocol, instance: carrier.construct.result })
-        continue
+      if (carrier?.kind === 'native-handle' && nativeErrorConstructors.has(carrier.protocol)) {
+        // Narrowed on a local: a native build reads `carrier.construct.result`
+        // after `carrier.construct?.result.kind` as a still-optional carrier.
+        const instance = carrier.construct ? carrier.construct.result : null
+        if (instance && instance.kind === 'native-record-ref') {
+          nativeBases.set(operation.classDeclaration, { protocol: carrier.protocol, instance })
+          continue
+        }
       }
       // A collection constructor has no single construct convention to read
       // an instance carrier off (`MapConstructor`'s overloads join into none),
@@ -1091,7 +1097,7 @@ const withBaseCopies = (
   const linked = new Map<DeclarationId, ClassLayout>()
   for (const [declaration, layout] of layouts) {
     const own = new Map<DeclarationId, DeclarationId>()
-    for (const id of [declaration, ...(layout.copies ?? [])]) {
+    for (const id of [declaration, ...(layout.copies == null ? [] : [...layout.copies])]) {
       const named = baseCopies.get(id)
       if (named !== undefined) own.set(id, named)
     }
@@ -1137,10 +1143,12 @@ export const publishClassMethodOverrides = (
   const prototypeMutations = new Map<DeclarationId, Set<string>>()
   const prototypes = new Map<SemanticResultId, Set<DeclarationId>>()
   const prototypeBindings = new Map<DeclarationId, Set<DeclarationId>>()
-  const mergeOrigins = <K>(map: Map<K, Set<DeclarationId>>, key: K, origins: Iterable<DeclarationId>): boolean => {
+  // One set type for every origin, not an `Iterable` of sets, arrays and `[]`
+  // fallbacks: a native build has no single iterator over that union.
+  const mergeOrigins = <K>(map: Map<K, Set<DeclarationId>>, key: K, origins: ReadonlySet<DeclarationId> | undefined): boolean => {
     const prior = map.get(key) ?? new Set<DeclarationId>()
     const size = prior.size
-    for (const declaration of origins) prior.add(declaration)
+    if (origins) for (const declaration of origins) prior.add(declaration)
     if (prior.size === size) return false
     map.set(key, prior)
     return true
@@ -1155,21 +1163,21 @@ export const publishClassMethodOverrides = (
         const receiver = operandOf(operation, 'receiver')
         const carrier = receiver?.source.kind === 'result' ? input.plan.selected.get(receiver.source.result) : null
         if (result && key?.source.kind === 'constant' && key.source.text === 'prototype' && carrier?.kind === 'constructor-family')
-          changed = mergeOrigins(prototypes, result.id, carrier.members.map(genericRootOf)) || changed
+          changed = mergeOrigins(prototypes, result.id, new Set<DeclarationId>(carrier.members.map(genericRootOf))) || changed
       } else if (operation.family === 'binding') {
         if (operation.action === 'read' && result)
-          changed = mergeOrigins(prototypes, result.id, prototypeBindings.get(operation.declaration) ?? []) || changed
+          changed = mergeOrigins(prototypes, result.id, prototypeBindings.get(operation.declaration)) || changed
         else if (operation.action === 'write' || operation.action === 'initialize') {
           const source = operandOf(operation, operation.action === 'initialize' ? 'initializer' : 'value')
           if (source?.source.kind === 'result') {
-            changed = mergeOrigins(prototypeBindings, operation.declaration, prototypes.get(source.source.result) ?? []) || changed
-            if (result) changed = mergeOrigins(prototypes, result.id, prototypes.get(source.source.result) ?? []) || changed
+            changed = mergeOrigins(prototypeBindings, operation.declaration, prototypes.get(source.source.result)) || changed
+            if (result) changed = mergeOrigins(prototypes, result.id, prototypes.get(source.source.result)) || changed
           }
         }
       } else if (operation.family === 'computation' && result && (operation.form === 'conditional' || operation.form === 'logical')) {
         for (const operand of operation.operands)
           if (operand.source.kind === 'result')
-            changed = mergeOrigins(prototypes, result.id, prototypes.get(operand.source.result) ?? []) || changed
+            changed = mergeOrigins(prototypes, result.id, prototypes.get(operand.source.result)) || changed
       }
     }
   }
@@ -1436,7 +1444,7 @@ export const publishClassMethodOverrides = (
   return new Map(
     [...layouts].map(([declaration, layout]) => {
       const fields = overrides.get(declaration)
-      const shadows = [...(dynamicShadows.get(declaration) ?? [])].filter((key) => !fields?.has(key))
+      const shadows = [...setValues(dynamicShadows.get(declaration))].filter((key) => !fields?.has(key))
       const prototypeKeys = prototypeMutations.get(declaration)
       const unsupportedUses = unsupportedPrototypes.get(declaration)
       return [

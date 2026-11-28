@@ -1,6 +1,7 @@
 import { isRealCallableDeclaration, isModuleExportedDeclaration, isTypePositionReference, runtimeParametersOf } from './flow/targets.js'
 import { inProgramImportReferencesOf } from './flow/export-importers.js'
 import ts from '#typescript'
+import { checkerUnionOf } from '../checker-union.js'
 import { implicitArgumentsSlotOf } from './implicit-arguments.js'
 import {
   implicitArgumentsReadTypeAt,
@@ -18,7 +19,12 @@ import { omissionStatedTypeOf, statedParameterWithOmission } from './omitted-sta
 import { implementationOfOverload, indexValueFlow } from './flow/value-flow.js'
 import { closedArrayCalleeAuthorityOf, hasClosedMemberCallableUses } from './flow/callable-reach.js'
 import type { CallableArrayOriginAuthority } from './flow/callable-array-origins.js'
-import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
+import {
+  deferredIntrinsicProtocolLedgerOf,
+  type DeferredIntrinsicProtocolLedger,
+  type IntrinsicProtocolRequirement,
+  captureAnswer
+} from './deferred-intrinsic-protocols.js'
 import {
   callbackContractParameterType,
   inlineJsxCallbackParameterType,
@@ -81,7 +87,20 @@ import { overrideFieldArmsOf, overrideRecordStatementOf } from './override-field
 import type { SpecializationCensus } from './specialization.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { KeySet, NullableMemo } from './nullable-memo.js'
-import { createRoundTableSharing } from './round-tables.js'
+import { createListTableSharing, createTableSharing } from './round-tables.js'
+
+/**
+ * Whether a frame is a static class member. Only a method, an accessor or a
+ * property can be: those are tested first, so the modifier flags are asked of
+ * a member alone -- asked of any function-like frame, a native build converts
+ * it to a `Declaration` union that holds no function expression.
+ */
+const isStaticClassMember = (node: ts.Node): boolean =>
+  (ts.isMethodDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node) ||
+    ts.isPropertyDeclaration(node)) &&
+  (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Static) !== 0
 
 /**
  * The type a parameter the program never annotated is actually called with.
@@ -1207,12 +1226,41 @@ const declaredTupleSpreadPositionAt = (checker: ts.TypeChecker, args: readonly t
   return declaredClosedTupleRestElementsOf(checker, declaration)?.[index - spreadAt] ?? null
 }
 
+/**
+ * `ts.findAncestor` with a type-guard test, walked here: the facade's
+ * overloaded generic `findAncestor` is one function value, and reading it
+ * at each call site converts it to that site's instantiation.
+ */
+const ancestorWhere = <T extends ts.Node>(node: ts.Node, test: (node: ts.Node) => node is T): T | undefined => {
+  for (let current: ts.Node | undefined = node; current; current = current.parent) if (test(current)) return current
+  return undefined
+}
+
+/**
+ * `ledger.capture(work)`, with `work`'s answer kept in a list of its own
+ * type: the ledger's `capture` is one generic function value whose `value`
+ * field merges every caller's answer type, so this census reads only the
+ * requirements back from it. `capture` runs `work` exactly once.
+ */
+const capturedBy = <T>(
+  ledger: DeferredIntrinsicProtocolLedger | null,
+  work: () => T
+): { readonly value: T; readonly requirements: readonly IntrinsicProtocolRequirement[] } => {
+  if (!ledger) return { value: work(), requirements: [] }
+  const answers: T[] = []
+  const requirements = captureAnswer(ledger, () => {
+    answers.push(work())
+  }).requirements
+  return { value: answers[0]!, requirements }
+}
+
 /** Every round's parameter census stays alive as the next one's upstream; see `createRoundTableSharing`. */
-const shareCallTables = createRoundTableSharing<{
-  readonly callsByDeclaration: Map<ts.Declaration, (ts.CallExpression | ts.NewExpression)[]>
-  readonly callTargets: Map<ts.CallExpression | ts.NewExpression, ts.SignatureDeclaration[]>
-  readonly resolvedCallDeclarations: Map<ts.CallExpression | ts.NewExpression, ts.SignatureDeclaration | ts.JSDocSignature>
-}>()
+const shareCallsByDeclaration = createListTableSharing<ts.Declaration, ts.CallExpression | ts.NewExpression>()
+const shareCallTargets = createListTableSharing<ts.CallExpression | ts.NewExpression, ts.SignatureDeclaration>()
+const shareResolvedCallDeclarations = createTableSharing<
+  ts.CallExpression | ts.NewExpression,
+  ts.SignatureDeclaration | ts.JSDocSignature
+>()
 
 export const censusParameterBindings = (
   checker: ts.TypeChecker,
@@ -1488,7 +1536,7 @@ export const censusParameterBindings = (
     // factory itself is already held to a few lines above.
     const declaration = symbol.valueDeclaration
     if (declaration && ts.isParameter(declaration)) {
-      const owner = ts.findAncestor(declaration, isTrackedCallable)
+      const owner = ancestorWhere(declaration, isTrackedCallable)
       if (!owner || escapeReason(owner, true) !== null) return false
     }
     for (const write of valueFlow.writesToSymbol(symbol)) {
@@ -1522,7 +1570,7 @@ export const censusParameterBindings = (
     // checker frame is safer than inferring from no calls.
     if (accesses.length === 0) return escapeTrace(member, 'no-accesses')
     const publication = declarations[0]
-    const factory = publication && ts.findAncestor(publication, isTrackedCallable)
+    const factory = publication && ancestorWhere(publication, isTrackedCallable)
     const objectLiteral = publication?.parent
     const directReturn =
       objectLiteral &&
@@ -1619,17 +1667,46 @@ export const censusParameterBindings = (
   }
 
   /** Match an inferred member through its stable declaration, not Symbol identity. */
+  // `publishedUnderMember` is complete before any round asks it, so which
+  // published members share a declaration is indexed once, by declaration,
+  // instead of scanned in full on every miss. A member's answer still joins
+  // the matching members in the map's own order: the ordinals sort it back.
+  let publishedByDeclaration: Map<ts.Declaration, number[]> | null = null
+  let publishedValues: ReadonlySet<ts.SignatureDeclaration>[] = []
+  const publishedDeclarationIndex = (): Map<ts.Declaration, number[]> => {
+    if (publishedByDeclaration !== null) return publishedByDeclaration
+    const byDeclaration = new Map<ts.Declaration, number[]>()
+    const values: ReadonlySet<ts.SignatureDeclaration>[] = []
+    for (const [candidate, published] of aliasEvidence.publishedUnderMember) {
+      const ordinal = values.length
+      values.push(published)
+      for (const declaration of candidate.declarations ?? []) {
+        const ordinals = byDeclaration.get(declaration)
+        if (ordinals === undefined) byDeclaration.set(declaration, [ordinal])
+        else if (ordinals[ordinals.length - 1] !== ordinal) ordinals.push(ordinal)
+      }
+    }
+    publishedValues = values
+    publishedByDeclaration = byDeclaration
+    return byDeclaration
+  }
   const publishedDeclarationsFor = (member: ts.Symbol): ReadonlySet<ts.SignatureDeclaration> | undefined => {
     const direct = aliasEvidence.publishedUnderMember.get(member)
     if (direct) return direct
     const declarations = member.declarations ?? []
     if (declarations.length === 0) return undefined
-    let result: Set<ts.SignatureDeclaration> | undefined
-    for (const [candidate, values] of aliasEvidence.publishedUnderMember) {
-      if (!(candidate.declarations ?? []).some((declaration) => declarations.includes(declaration))) continue
-      if (!result) result = new Set()
-      for (const value of values) result.add(value)
+    const index = publishedDeclarationIndex()
+    let matched: number[] | null = null
+    for (const declaration of declarations) {
+      const ordinals = index.get(declaration)
+      if (ordinals === undefined) continue
+      if (matched === null) matched = []
+      for (const ordinal of ordinals) if (!matched.includes(ordinal)) matched.push(ordinal)
     }
+    if (matched === null) return undefined
+    matched.sort((a, b) => a - b)
+    const result = new Set<ts.SignatureDeclaration>()
+    for (const ordinal of matched) for (const value of publishedValues[ordinal]!) result.add(value)
     return result
   }
 
@@ -1755,7 +1832,7 @@ export const censusParameterBindings = (
           continue
         if (ts.isPropertyAccessExpression(access) && access.name === reference && counted.has(access)) continue
         const publishedMember = publishedMemberOf(reference)
-        const publicationOwner = publishedMember?.declarations?.[0] && ts.findAncestor(publishedMember.declarations[0], isTrackedCallable)
+        const publicationOwner = publishedMember?.declarations?.[0] && ancestorWhere(publishedMember.declarations[0], isTrackedCallable)
         if (publishedMember && publicationOwner === declaration && isDirectReturnedPublication(reference)) continue
         // The record's uses reach past one cell -- a factory's `State` record
         // handed to a `Textures` factory and kept on `renderer.state` -- and the
@@ -1849,9 +1926,9 @@ export const censusParameterBindings = (
     return answer
   }
   const concreteThisTypeUncached = (keyword: ts.Node): ts.Type | null => {
-    const frame = ts.findAncestor(keyword, (node) => ts.isFunctionLike(node) && !ts.isArrowFunction(node))
+    const frame = ancestorWhere(keyword, (node): node is ts.SignatureDeclaration => ts.isFunctionLike(node) && !ts.isArrowFunction(node))
     if (frame === undefined || !ts.isFunctionLike(frame)) return null
-    if ((ts.getCombinedModifierFlags(frame as ts.Declaration) & ts.ModifierFlags.Static) !== 0) return null
+    if (isStaticClassMember(frame)) return null
     const holder = frame.parent
     if (!ts.isClassDeclaration(holder) && !ts.isClassExpression(holder)) return null
     if (!holder.name) return null
@@ -2815,8 +2892,7 @@ export const censusParameterBindings = (
     if (arms.some((arm) => carriesUnsubstitutedGeneric(checker, arm))) return 'stated-parameter-open-generic'
     const stated = instantiatedStatement(candidate.declaration, candidate.parameter, candidate.index, candidate.stated)
     if (stated === null || !arms.every((arm) => checker.isTypeAssignableTo(arm, stated))) return 'stated-parameter-argument-not-assignable'
-    const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
-    const union = typeof constructing.getUnionType === 'function' ? constructing.getUnionType(arms) : null
+    const union = checkerUnionOf(checker, arms)
     if (union === null) return 'stated-parameter-synthesized-union'
     if (!narrowsStatement(checker, candidate.parameter, stated, union)) return 'stated-parameter-narrows-a-stated-position'
     return null
@@ -2977,12 +3053,24 @@ export const censusParameterBindings = (
             : (propagating.known(operand) ?? propagating.resolve(operand))
         )
       })
-      if (tentative.every(numeric)) invariantTypes = tentative
+      // A boolean callback, not the `numeric` predicate itself: narrowing the
+      // array to `ts.Type[]` only to store it back into the wider list would
+      // need a live narrowed view of the same array in a native build.
+      if (tentative.every((type): boolean => numeric(type))) invariantTypes = tentative
     }
     const assignedTypes: ts.Type[] = []
-    for (const written of invariantTypes ?? writtenTypes) {
-      if (!written || isUnusableEvidence(written)) return { refused: 'parameter-reassigned' }
-      assignedTypes.push(written)
+    // Each list walked on its own: `invariantTypes ?? writtenTypes` merges two
+    // arrays whose element carriers differ, which no native conversion joins.
+    if (invariantTypes !== null) {
+      for (const written of invariantTypes) {
+        if (!written || isUnusableEvidence(written)) return { refused: 'parameter-reassigned' }
+        assignedTypes.push(written)
+      }
+    } else {
+      for (const written of writtenTypes) {
+        if (!written || isUnusableEvidence(written)) return { refused: 'parameter-reassigned' }
+        assignedTypes.push(written)
+      }
     }
     const passed = [...directPassed, ...contractTypes, ...assignedTypes]
     if (passed.length === 0) return { refused: skipSilentSites ? 'every-call-site-silent' : 'no-call-site' }
@@ -3109,6 +3197,11 @@ export const censusParameterBindings = (
       if (!result) result = new Set()
       for (const declaration of declarations) result.add(declaration)
     }
+    const addBodies = (bodies: readonly (ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction)[]): void => {
+      if (bodies.length === 0) return
+      if (!result) result = new Set()
+      for (const body of bodies) result.add(body)
+    }
     const heldOperands = invocationOperands.get(call)!
     const heldCallee = heldOperands.callee
     // Once a `.call`/`.apply` reading is settled -- statically, by
@@ -3156,7 +3249,7 @@ export const censusParameterBindings = (
       // that already worked can change.
       if (!memberSymbol && ts.isElementAccessExpression(heldCallee)) {
         const targets = arrayCalleeAuthority().arrayElementTargetsOf?.(heldCallee)
-        if (targets) add(new Set(targets))
+        if (targets) addBodies(targets)
       }
       // The actual `array[ i ].call( this, event )` spelling: `heldCallee` is
       // the WRAPPER property access (`.call`/`.apply` itself), not the array
@@ -3183,7 +3276,7 @@ export const censusParameterBindings = (
         const element = heldCallee.expression
         const targets = arrayCalleeAuthority().arrayElementTargetsOf?.(element)
         if (targets) {
-          add(new Set(targets))
+          addBodies(targets)
           if (key === 'call') {
             pendingExplicitThisReadings.set(call, { callee: element, receiver: call.arguments[0] ?? null, args: call.arguments.slice(1) })
           } else if (call.arguments.length === 2) {
@@ -3499,7 +3592,7 @@ export const censusParameterBindings = (
         }
         return true
       }
-      const captured = protocolLedger?.capture(inferCandidate) ?? { value: inferCandidate(), requirements: [] }
+      const captured = capturedBy(protocolLedger, inferCandidate)
       if (captured.value) {
         protocolRequirements.set(candidate.parameter, captured.requirements)
         added += 1
@@ -3787,7 +3880,7 @@ export const censusParameterBindings = (
     // the census DOES see provably passes. Refusing an open caller set left
     // the bare statement standing, which is the one answer known to be wrong.
     const closure = (): string | null => ((contractsFor(site.declaration)?.length ?? 0) > 0 ? 'stated-omission-callback-contract' : null)
-    const captured = protocolLedger?.capture(closure) ?? { value: closure(), requirements: [] }
+    const captured = capturedBy(protocolLedger, closure)
     if (captured.value !== null) {
       lastRefusal.set(site.parameter, captured.value)
       continue
@@ -3936,7 +4029,7 @@ export const censusParameterBindings = (
           if (!narrowsStatement(checker, parameter, stated, answer.type)) return null
           return withDeclaredAbsence(parameter, answer.type)
         }
-        const captured = protocolLedger?.capture(bindCopy) ?? { value: bindCopy(), requirements: [] }
+        const captured = capturedBy(protocolLedger, bindCopy)
         if (captured.value === null) continue
         perCopy.set(ordinal, captured.value)
         requirements.push(...captured.requirements)
@@ -4013,8 +4106,7 @@ export const censusParameterBindings = (
     )
     if (kept.length === bound.types.length || kept.length === 0) return bound
     if (kept.length === 1 && kept[0] !== undefined) return kept[0]
-    const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
-    return typeof constructing.getUnionType === 'function' ? constructing.getUnionType(kept) : bound
+    return checkerUnionOf(checker, kept) ?? bound
   }
 
   // Publication reads a settled binding set, so its memo is built once, after
@@ -4186,7 +4278,7 @@ export const censusParameterBindings = (
         })
       })
     }
-    const captured = protocolLedger?.capture(infer) ?? { value: infer(), requirements: [] }
+    const captured = capturedBy(protocolLedger, infer)
     const answer = captured.value
     if ('tuple' in answer) {
       implicitTuples.set(owner, answer.tuple)
@@ -4378,11 +4470,9 @@ export const censusParameterBindings = (
   }
 
   // The sweeps above were the last to attribute calls.
-  ;({ callsByDeclaration, callTargets, resolvedCallDeclarations } = shareCallTables(checker, {
-    callsByDeclaration,
-    callTargets,
-    resolvedCallDeclarations
-  }))
+  callsByDeclaration = shareCallsByDeclaration(checker, callsByDeclaration)
+  callTargets = shareCallTargets(checker, callTargets)
+  resolvedCallDeclarations = shareResolvedCallDeclarations(checker, resolvedCallDeclarations)
   // Later composed censuses can retain earlier inferred facts. Their protocol
   // dependencies remain required while any dependent parameter facts survive.
   protocolLedger?.replace('parameter-bindings', [...upstreamProtocolRequirements, ...[...protocolRequirements.values()].flat()])

@@ -26,7 +26,7 @@ const prototypeTypeOf = (
   intact: (constructor: DeclarationId, prototype: DeclarationId) => boolean
 ): ts.Type | null => {
   const { checker, identities, globalHostMutationTaint: mutations, isStandardLibraryDeclaration } = context
-  if (mutations.has('*') || !isStandardLibraryDeclaration) return null
+  if (mutations.hasEntry('*') || !isStandardLibraryDeclaration) return null
   const symbol = checker.resolveName(intrinsic, location, ts.SymbolFlags.Value, false)
   if (!symbol?.valueDeclaration || !isStandardLibraryDeclaration(symbol.valueDeclaration)) return null
   const declaration = identities.symbolValueDeclarationId(symbol, location)
@@ -53,7 +53,7 @@ export const intactIntrinsicPrototypeType = (context: IntrinsicContext, intrinsi
     intrinsic,
     location,
     (constructor, prototype) =>
-      !context.globalHostMutationTaint.has(constructor) && intrinsicObjectKeysIntact(context.globalHostMutationTaint, prototype, 'all')
+      !context.globalHostMutationTaint.hasEntry(constructor) && intrinsicObjectKeysIntact(context.globalHostMutationTaint, prototype, 'all')
   )
 
 /**
@@ -103,7 +103,7 @@ export const explainIntrinsicProtocolFailure = (
   keys: PrototypeKeyQuery | 'all'
 ): string => {
   const { checker, identities, globalHostMutationTaint: taint, isStandardLibraryDeclaration } = context
-  if (taint.has('*')) return '*'
+  if (taint.hasEntry('*')) return '*'
   if (!isStandardLibraryDeclaration) return 'no-standard-library-check'
   const symbol = checker.resolveName(intrinsic, location, ts.SymbolFlags.Value, false)
   if (!symbol?.valueDeclaration || !isStandardLibraryDeclaration(symbol.valueDeclaration)) return 'unresolved-intrinsic'
@@ -122,6 +122,6 @@ export const explainIntrinsicProtocolFailure = (
   // The legacy whole-object question (`intactIntrinsicPrototypeType`) also
   // fails when ANYTHING was ever recorded against the constructor's own
   // identity, independent of key -- coarser than the per-key checks above.
-  if (taint.has(declaration) || taint.has(prototypeId)) return 'object:legacy-whole'
+  if (taint.hasEntry(declaration) || taint.hasEntry(prototypeId)) return 'object:legacy-whole'
   return 'intact'
 }

@@ -94,10 +94,10 @@ export const hasClosedFixedLayout = (
       // Parameter properties and inferred fields acquire their carrier during
       // lowering. The earlier declaration can remain unrepresented after the
       // physical census has published a complete, typed storage slot.
-      const fields =
-        layout?.nativeStorage?.fields.map((field) => ({ key: field.key, value: field.value })) ??
-        layout?.fields.map((field) => ({ key: field.key, value: field.representation })) ??
-        []
+      const fields: { readonly key: string; readonly value: Representation | null }[] = []
+      if (layout?.nativeStorage != null)
+        for (const field of layout.nativeStorage.fields) fields.push({ key: field.key, value: field.value })
+      else if (layout != null) for (const field of layout.fields) fields.push({ key: field.key, value: field.representation })
       const unprovenAncestry = (() => {
         const seen = new Set<DeclarationId>()
         let current: DeclarationId | null = representation.declaration

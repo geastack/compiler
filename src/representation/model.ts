@@ -946,6 +946,27 @@ export type Representation =
   /** The boxed carrier. Admissible only for one of the four reasons above. */
   | { readonly kind: 'dynamic'; readonly reason: DynamicReason }
 
+/**
+ * The carrier of an optional's absent lane. Spelled as two literals rather
+ * than `{ kind: absence }`: that one object has the type `{ kind: 'null' |
+ * 'undefined' }`, which TypeScript distributes over the union's two arms but a
+ * native build sees as one record that is neither.
+ */
+export const absenceCarrier = (absence: 'null' | 'undefined'): Representation =>
+  absence === 'null' ? { kind: 'null' } : { kind: 'undefined' }
+
+/** A standard buffer carrier, one literal per kind for the same reason as `absenceCarrier`. */
+export const standardBufferCarrier = (kind: 'array-buffer' | 'shared-array-buffer' | 'data-view', ownership: Ownership): Representation => {
+  switch (kind) {
+    case 'array-buffer':
+      return { kind: 'array-buffer', ownership }
+    case 'shared-array-buffer':
+      return { kind: 'shared-array-buffer', ownership }
+    case 'data-view':
+      return { kind: 'data-view', ownership }
+  }
+}
+
 /** One arm of a tagged union, with the discriminator that selects it. */
 export interface TaggedUnionArm {
   readonly tag: string
@@ -1810,7 +1831,10 @@ export const captureCapabilityOf = (representation: Representation | null): stri
  * record-with-index whose fields are the whole query -- was invisible to every
  * guard built on this walk.
  */
-export function* walkRepresentation(representation: Representation, visited: Set<Representation> = new Set()): Generator<Representation> {
+export function* walkRepresentation(
+  representation: Representation,
+  visited: Set<Representation> = new Set<Representation>()
+): Generator<Representation> {
   // With `visited`, a carrier OBJECT is yielded once across every walk that
   // shares the set. The derive memo hands every reader of one structural
   // type the same object, so a record's field carriers, a union's arms and
@@ -1819,51 +1843,53 @@ export function* walkRepresentation(representation: Representation, visited: Set
   if (visited.has(representation)) return
   visited.add(representation)
   yield representation
+  // The unnarrowed carrier, for the message of a kind the switch below misses.
+  const walked: Representation = representation
   const walk = (inner: Representation): Generator<Representation> => walkRepresentation(inner, visited)
   switch (representation.kind) {
     case 'record':
-      for (const field of representation.fields) yield* walk(field.value)
+      for (const field of representation.fields) for (const delegated of walk(field.value)) yield delegated
       return
     case 'record-with-index':
-      for (const field of representation.fields) yield* walk(field.value)
-      for (const index of representation.indexes) yield* walk(index.value)
+      for (const field of representation.fields) for (const delegated of walk(field.value)) yield delegated
+      for (const index of representation.indexes) for (const delegated of walk(index.value)) yield delegated
       return
     case 'proxy-object':
-      yield* walk(representation.target)
-      yield* walk(representation.handler)
+      for (const delegated of walk(representation.target)) yield delegated
+      for (const delegated of walk(representation.handler)) yield delegated
       return
     case 'borrowed-ref':
-      yield* walk(representation.referent)
+      for (const delegated of walk(representation.referent)) yield delegated
       return
     case 'array-object':
-      yield* walk(representation.element)
-      for (const field of representation.extension ?? []) yield* walk(field.value)
+      for (const delegated of walk(representation.element)) yield delegated
+      for (const field of representation.extension ?? []) for (const delegated of walk(field.value)) yield delegated
       return
     case 'dense-buffer':
     case 'native-sequence':
-      yield* walk(representation.element)
+      for (const delegated of walk(representation.element)) yield delegated
       return
     case 'iterator':
     case 'async-generator':
-      yield* walk(representation.element)
-      yield* walk(representation.resume)
-      yield* walk(representation.completion)
+      for (const delegated of walk(representation.element)) yield delegated
+      for (const delegated of walk(representation.resume)) yield delegated
+      for (const delegated of walk(representation.completion)) yield delegated
       return
     case 'promise':
-      yield* walk(representation.value)
+      for (const delegated of walk(representation.value)) yield delegated
       return
     case 'keyed-collection':
-      yield* walk(representation.key)
-      if (representation.value) yield* walk(representation.value)
+      for (const delegated of walk(representation.key)) yield delegated
+      if (representation.value) for (const delegated of walk(representation.value)) yield delegated
       return
     case 'dictionary':
-      yield* walk(representation.value)
+      for (const delegated of walk(representation.value)) yield delegated
       return
     case 'optional':
-      yield* walk(representation.payload)
+      for (const delegated of walk(representation.payload)) yield delegated
       return
     case 'tagged-union':
-      for (const arm of representation.arms) yield* walk(arm.value)
+      for (const arm of representation.arms) for (const delegated of walk(arm.value)) yield delegated
       return
     case 'function':
     case 'function-family':
@@ -1871,15 +1897,15 @@ export function* walkRepresentation(representation: Representation, visited: Set
     case 'constructor-value-dispatch':
     case 'function-value-family':
     case 'function-value-dispatch':
-      for (const parameter of representation.abi.parameters) yield* walk(parameter.value)
-      yield* walk(representation.abi.result)
-      if (representation.abi.receiver) yield* walk(representation.abi.receiver)
+      for (const parameter of representation.abi.parameters) for (const delegated of walk(parameter.value)) yield delegated
+      for (const delegated of walk(representation.abi.result)) yield delegated
+      if (representation.abi.receiver) for (const delegated of walk(representation.abi.receiver)) yield delegated
       return
     case 'function-and-constructor':
       for (const abi of [representation.call, representation.construct]) {
-        for (const parameter of abi.parameters) yield* walk(parameter.value)
-        yield* walk(abi.result)
-        if (abi.receiver) yield* walk(abi.receiver)
+        for (const parameter of abi.parameters) for (const delegated of walk(parameter.value)) yield delegated
+        for (const delegated of walk(abi.result)) yield delegated
+        if (abi.receiver) for (const delegated of walk(abi.receiver)) yield delegated
       }
       return
     case 'unresolved':
@@ -1903,8 +1929,10 @@ export function* walkRepresentation(representation: Representation, visited: Set
     case 'error-constructor':
       return
     default: {
-      const unhandled: never = representation
-      throw new Error(`unhandled representation in traversal: ${String(unhandled)}`)
+      // Exhaustive through the narrowed TYPE alone: reading the never-narrowed
+      // value would hand a native build a binding no carrier resolves.
+      const unhandled: [typeof representation] extends [never] ? 'unhandled' : never = 'unhandled'
+      throw new Error(`${unhandled} representation in traversal: ${String(walked)}`)
     }
   }
 }

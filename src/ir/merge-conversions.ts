@@ -1,6 +1,12 @@
 import { isMaterializable } from '../conversion/algebra.js'
 import type { ConversionCensus } from '../conversion/nodes.js'
-import { isBooleanShapedMergeTarget, partialDeadMergeArms, representationKey, type Representation } from '../representation/model.js'
+import {
+  absenceCarrier,
+  isBooleanShapedMergeTarget,
+  partialDeadMergeArms,
+  representationKey,
+  type Representation
+} from '../representation/model.js'
 import type { SemanticOperation } from '../semantics/model/operations.js'
 import { operandOf } from '../semantics/model/operands.js'
 import type { IrBody, IrOperation, MergeLiveArmRebuildOperation } from './model.js'
@@ -96,7 +102,8 @@ export const mergeConversionPlanOf = (
       arms.push({ index, mode: 'truthiness', conversion: wrapped.id })
     }
   }
-  const absent = source.kind === 'optional' && operation.sourceAbsenceLive ? conversions.nodeFor({ kind: source.absence }, target) : null
+  const absent =
+    source.kind === 'optional' && operation.sourceAbsenceLive ? conversions.nodeFor(absenceCarrier(source.absence), target) : null
   if (absent !== null && !isMaterializable(absent.capability)) return undefined
   return {
     source: representationKey(source),
@@ -134,7 +141,7 @@ export const mergeConversionPlanMatches = (
     }) &&
     (expected.absence === undefined ||
       (operation.source.representation.kind === 'optional' &&
-        conversions.nodeFor({ kind: operation.source.representation.absence }, operation.result.representation) ===
+        conversions.nodeFor(absenceCarrier(operation.source.representation.absence), operation.result.representation) ===
           conversions.nodeById(expected.absence)))
   )
 }

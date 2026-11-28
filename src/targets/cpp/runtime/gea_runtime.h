@@ -41,6 +41,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #if defined(GEA_PROFILE_ALLOCATIONS)
 // The allocation profile's backtraces (the leak probe and the allocation-site
 // census). Windows has no <execinfo.h>; its frames come from
@@ -188,10 +189,14 @@ inline void collectReferenceCycles(bool full);
  */
 class RuntimeRealm {
  public:
-  RuntimeRealm() = default;
+  RuntimeRealm() : identity_(nextIdentity().fetch_add(1, std::memory_order_relaxed)) {}
   RuntimeRealm(const RuntimeRealm&) = delete;
   RuntimeRealm& operator=(const RuntimeRealm&) = delete;
   ~RuntimeRealm() { clear(); }
+
+  // Which realm this is, for hosts that check an object is released in the
+  // realm that made it (the audio worklet bridge). Slot lookup no longer reads it.
+  std::uint64_t identity() const { return identity_; }
 
   template <typename T, typename Factory>
   T& slot(std::size_t index, Factory factory, int lifetime) {
@@ -209,6 +214,11 @@ class RuntimeRealm {
 
  private:
   struct Destructor { std::size_t index; void (*destroy)(void*); int lifetime; };
+  static std::atomic<std::uint64_t>& nextIdentity() {
+    static std::atomic<std::uint64_t> next{1};
+    return next;
+  }
+  std::uint64_t identity_;
   std::vector<void*> values_;
   std::vector<Destructor> destructors_;
 };
@@ -4045,7 +4055,17 @@ GEA_EH_NOINLINE inline void collectReferenceCycles(bool full = false) {
     }
     std::uint32_t add(const CycleReference& reference) {
       const auto weak = reference.counts->weak;
-      if ((weak & cycleBuffered) != 0) return weak & ~cycleBuffered;
+      // The bit alone does not mean "indexed here": a destructor run by the
+      // roots' filter (a self-loop reclaim) can drop a reference that buffers
+      // an object afresh, and a deferred permanent object keeps its bit until
+      // a full collection takes it. Such a word is a count plus generation
+      // bits, not an index, so an index is trusted only when its node points
+      // back at this block; otherwise the object joins the graph like any
+      // other, its buffered word saved and restored with the rest.
+      if ((weak & cycleBuffered) != 0) {
+        const auto index = weak & ~cycleBuffered;
+        if (index < nodes.size() && nodes[index].reference.counts == reference.counts) return index;
+      }
       // Kept below `cyclePermanent`'s bit (the lowest flag, not just
       // `cycleBuffered`'s), so an already-indexed node's temporary index can
       // never be misread as a generation flag by `edge`'s mature check below.
@@ -9771,6 +9791,15 @@ bool truncateArrayIndexedDescriptors(const Ref<DynamicObject>& descriptors, std:
 void freezeArrayIndexedDescriptors(const Ref<DynamicObject>& descriptors);
 template <typename Element>
 bool writeArrayUndefinedDescriptor(ArrayObject<Element>& array, std::size_t index);
+template <typename T>
+struct IsOptional;
+// A class handle carries its own `undefined` state, so an element read the
+// language answers with `undefined` (`xs[-1]`, `xs[xs.length]`) has a value to
+// answer with, as an `Optional` element does.
+template <typename T>
+struct IsRefElement : std::false_type {};
+template <typename T>
+struct IsRefElement<Ref<T>> : std::true_type {};
 
 template <typename Element>
 struct ArrayObject {
@@ -10190,6 +10219,14 @@ struct ArrayObject {
     return readElementAtChecked(key);
   }
   [[gnu::noinline]] Element readElementAtChecked(double key) const {
+    if constexpr (IsOptional<Element>::value || IsRefElement<Element>::value) {
+      const bool canonical = key >= 0 && key < 4294967295.0 && static_cast<double>(static_cast<std::size_t>(key)) == key;
+      if (!canonical || static_cast<std::size_t>(key) >= size() || !present(static_cast<std::size_t>(key)) ||
+          elementIsUndefined(static_cast<std::size_t>(key))) {
+        if constexpr (IsRefElement<Element>::value) return Element::undefined();
+        else return Element{};
+      }
+    }
     const std::size_t index = requireIndex(key);
     if (index >= size() || !present(index)) detail::failAbsentElement(key, size());
     if (elementIsUndefined(index)) detail::failUndefinedElement();
@@ -10238,6 +10275,16 @@ struct ArrayObject {
     return readElementAtIndexSlow(index);
   }
   [[gnu::noinline]] Element readElementAtIndexSlow(long long index) const {
+    // An element carrier that holds absence answers a missing index, a hole or
+    // an `undefined` element with that absence, as the language reads `xs[0]`
+    // of an empty `(string | undefined)[]`; only a carrier without one aborts.
+    if constexpr (IsOptional<Element>::value || IsRefElement<Element>::value) {
+      if (index < 0 || static_cast<unsigned long long>(index) >= size() || !present(static_cast<std::size_t>(index)) ||
+          elementIsUndefined(static_cast<std::size_t>(index))) {
+        if constexpr (IsRefElement<Element>::value) return Element::undefined();
+        else return Element{};
+      }
+    }
     if (index < 0 || static_cast<unsigned long long>(index) >= size() || !present(static_cast<std::size_t>(index)))
       detail::failAbsentElement(static_cast<double>(index), size());
     if (elementIsUndefined(static_cast<std::size_t>(index))) detail::failUndefinedElement();
@@ -15475,9 +15522,11 @@ inline const void* mapRefKeyIdentity(const Ref<T>& value) {
 /**
  * Key types `Map` may index by hash (see `Map::Index`): those whose hash below
  * is consistent with `sameValueZero` -- numbers, strings, and handles, which
- * hash the identity their equality compares (`mapRefKeyIdentity`). Any other
- * key (unions, optionals, boxed values) keeps the linear SameValueZero scan,
- * whose equality those types define in ways a hash would have to repeat.
+ * hash the identity their equality compares (`mapRefKeyIdentity`), and unions
+ * of those, whose keys of different arms are never equal so (arm, arm hash) is
+ * a consistent hash. Any other key (optionals, boxed values) keeps the linear
+ * SameValueZero scan, whose equality those types define in ways a hash would
+ * have to repeat.
  */
 template <typename K>
 struct MapKeyIndexable
@@ -15485,10 +15534,26 @@ struct MapKeyIndexable
                          || MapRefKey<K>::value
                          > {
 };
+template <typename... Arms>
+struct MapKeyIndexable<TaggedUnion<Arms...>> : std::bool_constant<(MapKeyIndexable<Arms>::value && ...)> {};
+template <typename K>
+struct MapUnionKey : std::false_type {};
+template <typename... Arms>
+struct MapUnionKey<TaggedUnion<Arms...>> : std::true_type {};
+template <typename K>
+struct MapUnionArity : std::integral_constant<std::size_t, 0> {};
+template <typename... Arms>
+struct MapUnionArity<TaggedUnion<Arms...>> : std::integral_constant<std::size_t, sizeof...(Arms)> {};
 struct MapKeyHash {
   template <typename K>
   std::size_t operator()(const K& key) const {
-    if constexpr (std::is_floating_point_v<K>) {
+    if constexpr (MapUnionKey<K>::value) {
+      std::size_t hash = 0;
+      [&]<std::size_t... Indices>(std::index_sequence<Indices...>) {
+        ((key.template is<Indices>() ? (hash = (*this)(key.template get<Indices>()), 0) : 0), ...);
+      }(std::make_index_sequence<MapUnionArity<K>::value>{});
+      return hash ^ (key.index() * 0x9e3779b97f4a7c15ull);
+    } else if constexpr (std::is_floating_point_v<K>) {
       // SameValueZero: every NaN is one key, and -0 is +0.
       if (key != key) return static_cast<std::size_t>(0x7ff8000000000000ull);
       return std::hash<K>{}(key == static_cast<K>(0) ? static_cast<K>(0) : key);
@@ -15504,6 +15569,112 @@ struct MapKeyEqual {
   bool operator()(const K& left, const K& right) const { return sameValueZero(left, right); }
 };
 struct NoMapIndex {};
+/**
+ * `Map`/`Set`'s position index: open addressing with linear probing over
+ * entry positions, the keys staying in the owner's storage (`keyAt`). A
+ * node-based `std::unordered_map<K, size_t>` cost an allocation per key and a
+ * pointer chase per lookup, and was the largest single cost of a large
+ * compile's set-heavy fixed point. Like the table it replaces it is only a
+ * position cache: storage order, serials and iteration never read it.
+ * Fibonacci hashing spreads hashes whose low bits are constant (libc++'s
+ * pointer hash is the address itself).
+ */
+struct FlatPositionIndex {
+  static constexpr std::uint32_t kEmpty = 0xffffffffu;
+  static constexpr std::size_t npos = static_cast<std::size_t>(-1);
+  std::vector<std::uint32_t> slots_;
+  unsigned shift_ = 64;
+  std::size_t count_ = 0;
+
+  bool empty() const { return slots_.empty(); }
+  void clear() {
+    std::vector<std::uint32_t>().swap(slots_);
+    shift_ = 64;
+    count_ = 0;
+  }
+  template <typename K>
+  std::size_t home(const K& key) const {
+    return static_cast<std::size_t>((static_cast<std::uint64_t>(MapKeyHash{}(key)) * 0x9e3779b97f4a7c15ull) >> shift_);
+  }
+  /** The slot holding `key`, or npos. */
+  template <typename K, typename KeyAt>
+  std::size_t slotOf(const K& key, KeyAt&& keyAt) const {
+    const std::size_t mask = slots_.size() - 1;
+    for (std::size_t slot = home(key);; slot = (slot + 1) & mask) {
+      const std::uint32_t position = slots_[slot];
+      if (position == kEmpty) return npos;
+      if (MapKeyEqual{}(keyAt(position), key)) return slot;
+    }
+  }
+  template <typename K, typename KeyAt>
+  std::size_t find(const K& key, KeyAt&& keyAt) const {
+    const std::size_t slot = slotOf(key, keyAt);
+    return slot == npos ? npos : static_cast<std::size_t>(slots_[slot]);
+  }
+  template <typename KeyAt>
+  void place(std::size_t position, KeyAt&& keyAt) {
+    const std::size_t mask = slots_.size() - 1;
+    std::size_t slot = home(keyAt(position));
+    while (slots_[slot] != kEmpty) slot = (slot + 1) & mask;
+    slots_[slot] = static_cast<std::uint32_t>(position);
+  }
+  /** Indexes positions [0, count). */
+  template <typename KeyAt>
+  void rebuild(std::size_t count, KeyAt&& keyAt) {
+    std::size_t size = 16;
+    unsigned shift = 60;
+    while (size < count * 2) {
+      size <<= 1;
+      --shift;
+    }
+    slots_.assign(size, kEmpty);
+    shift_ = shift;
+    count_ = count;
+    for (std::size_t position = 0; position < count; ++position) place(position, keyAt);
+  }
+  /** `position` was just appended (positions below it are indexed). */
+  template <typename KeyAt>
+  void append(std::size_t position, KeyAt&& keyAt) {
+    if ((count_ + 1) * 2 > slots_.size()) {
+      rebuild(position + 1, keyAt);
+      return;
+    }
+    place(position, keyAt);
+    ++count_;
+  }
+  /**
+   * Drops `key` (at `position`) while the storage is still unshifted, then
+   * renumbers every later position down one, as the erase about to happen
+   * will shift them. Backward-shift deletion keeps probe runs unbroken.
+   */
+  template <typename K, typename KeyAt>
+  void erase(const K& key, std::size_t position, KeyAt&& keyAt) {
+    std::size_t hole = slotOf(key, keyAt);
+    if (hole == npos) return;
+    const std::size_t mask = slots_.size() - 1;
+    slots_[hole] = kEmpty;
+    --count_;
+    for (std::size_t next = (hole + 1) & mask; slots_[next] != kEmpty; next = (next + 1) & mask) {
+      const std::size_t want = home(keyAt(slots_[next]));
+      // Move the entry back when its home is not cyclically inside (hole, next].
+      const bool inside = hole <= next ? (want > hole && want <= next) : (want > hole || want <= next);
+      if (!inside) {
+        slots_[hole] = slots_[next];
+        slots_[next] = kEmpty;
+        hole = next;
+      }
+    }
+    // Few later positions (a worklist popping its newest member: none) are
+    // found by key; many are cheaper to renumber in one pass over the table.
+    const std::size_t later = count_ - position;
+    if (later * 4 < slots_.size()) {
+      for (std::size_t at = position + 1; at <= count_; ++at) slots_[slotOf(keyAt(at), keyAt)] = static_cast<std::uint32_t>(at - 1);
+      return;
+    }
+    for (std::uint32_t& slot : slots_)
+      if (slot != kEmpty && slot > position) --slot;
+  }
+};
 }  // namespace detail
 
 /**
@@ -15650,9 +15821,12 @@ class Map {
     }
     const std::size_t index = positionOf(key);
     if (index == notFound) return false;
+    if constexpr (indexable) {
+      if (!index_.empty()) index_.erase(entries_[index].first, index, [this](std::size_t at) -> const K& { return entries_[at].first; });
+    }
     entries_.erase(entries_.begin() + static_cast<std::ptrdiff_t>(index));
     serials_.erase(serials_.begin() + static_cast<std::ptrdiff_t>(index));
-    indexRemoved();
+    indexRemoved(index);
     return true;
   }
 
@@ -15754,8 +15928,7 @@ class Map {
   }
   static constexpr std::size_t indexFrom = 8;
   static constexpr std::size_t notFound = static_cast<std::size_t>(-1);
-  using Index = std::conditional_t<indexable, std::unordered_map<K, std::size_t, detail::MapKeyHash, detail::MapKeyEqual>,
-                                   detail::NoMapIndex>;
+  using Index = std::conditional_t<indexable, detail::FlatPositionIndex, detail::NoMapIndex>;
 
   std::size_t positionOf(const K& key) const {
     if constexpr (directable) {
@@ -15768,10 +15941,7 @@ class Map {
       }
     }
     if constexpr (indexable) {
-      if (!index_.empty()) {
-        const auto found = index_.find(key);
-        return found == index_.end() ? notFound : found->second;
-      }
+      if (!index_.empty()) return index_.find(key, [this](std::size_t at) -> const K& { return entries_[at].first; });
     }
     for (std::size_t index = 0; index < entries_.size(); ++index) {
       if (sameValueZero(entries_[index].first, key)) return index;
@@ -15782,8 +15952,7 @@ class Map {
     if constexpr (indexable) {
       index_.clear();
       if (entries_.size() < indexFrom) return;
-      index_.reserve(entries_.size() * 2);
-      for (std::size_t index = 0; index < entries_.size(); ++index) index_.emplace(entries_[index].first, index);
+      index_.rebuild(entries_.size(), [this](std::size_t at) -> const K& { return entries_[at].first; });
     }
   }
   void indexAppended() {
@@ -15808,13 +15977,14 @@ class Map {
       }
     }
     if constexpr (indexable) {
-      if (!index_.empty()) index_.emplace(entries_.back().first, entries_.size() - 1);
+      if (!index_.empty()) index_.append(entries_.size() - 1, [this](std::size_t at) -> const K& { return entries_[at].first; });
       else if (entries_.size() >= indexFrom) rebuildIndex();
     }
   }
-  // Erasing shifted every later entry down one position (an O(n) move already),
-  // so the index is renumbered by rebuilding it, or dropped below `indexFrom`.
-  void indexRemoved() {
+  // Erasing shifted every later entry down one position. The hashed index
+  // renumbered itself when the caller dropped the removed key; only the direct
+  // table is renumbered here.
+  void indexRemoved(std::size_t from) {
     if constexpr (directable) {
       if (directOk_) {
         // Erasing shifted every later entry down one position: renumber.
@@ -15827,9 +15997,7 @@ class Map {
         return;
       }
     }
-    if constexpr (indexable) {
-      if (!index_.empty()) rebuildIndex();
-    }
+    (void)from;
   }
 
   std::vector<std::pair<K, V>> entries_;
@@ -15907,13 +16075,39 @@ inline bool operator!=(const Ref<Map<K, V>>& left, const Ref<Map<K2, V2>>& right
   return !(left == right);
 }
 
+namespace detail {
+/**
+ * What a `Set<K>` VIEW reads through: another Set's live storage, the twin of
+ * `MapViewSource` for the same reason -- a Set read back out of a box as
+ * `Set<unknown>` is the one object the program boxed, so a copy would miss
+ * every later `add` and break `===`. Writes answer `false` where the view
+ * admits none, so `Set` refuses them loudly.
+ */
+template <typename K>
+struct SetViewSource {
+  virtual ~SetViewSource() = default;
+  virtual double size() const = 0;
+  virtual bool has(const K& key) const = 0;
+  virtual const K* itemAfter(std::uint64_t& serial) const = 0;
+  virtual const std::vector<K>& items() const = 0;
+  /** The source allocation the view reads, so `===` answers for the one object both names hold. */
+  virtual const void* identity() const = 0;
+  virtual void trace(RefVisitor& visitor) const = 0;
+  virtual bool add(const K&) const { return false; }
+  virtual bool remove(const K&, bool&) const { return false; }
+  virtual bool clear() const { return false; }
+};
+}  // namespace detail
+
 /**
  * `Set<K>` -- ECMA-262 24.2. The sibling of `Map` above with no value slot:
  * a Set stores keys only, which is why the `keyed-collection` carrier's
  * `value` is `null` for it rather than some filler type.
  *
- * Insertion-ordered and linearly scanned for the identical reasons stated on
- * `Map`.
+ * Insertion-ordered for the identical reasons stated on `Map`, and hashed the
+ * same way from `indexFrom` members on: a scan per `add` makes filling a Set
+ * quadratic, which a program that collects every node of a large tree pays as
+ * a hang.
  */
 template <typename K>
 class Set {
@@ -15931,14 +16125,26 @@ class Set {
   template <typename Self>
   friend void geaTraceRefs(const Self& traced, detail::RefVisitor& visitor) requires (std::derived_from<Self, Set> && (detail::TraceEdges<K>::supported)) {
     const Set& value = traced;
+    if (value.view_) [[unlikely]] value.view_->trace(visitor);
     detail::traceRefs(value.items_, visitor);
   }
+  static constexpr bool gea_native_view_identity = true;
+
+  Set() = default;
+  /** A view over another Set's live storage -- see `detail::SetViewSource`; built only by `detail::unboxDynamicSet`. */
+  explicit Set(std::shared_ptr<const detail::SetViewSource<K>> view) : view_(std::move(view)) {}
+
+  /** The allocation this Set IS, for identity: a view answers its source's. */
+  const void* identity() const { return view_ ? view_->identity() : static_cast<const void*>(this); }
+
   /** ECMA-262 24.2.3.1 `add`: a key already present is a no-op that keeps its original insertion position. */
   void add(K key) {
-    canonicalizeKeyInPlace(key);
-    for (const K& item : items_) {
-      if (sameValueZero(item, key)) return;
+    if (view_) [[unlikely]] {
+      if (!view_->add(key)) rejectViewWrite();
+      return;
     }
+    canonicalizeKeyInPlace(key);
+    if (positionOf(key) != notFound) return;
     // A set built from a short literal (`new Set([a, b, c, d])`, which a
     // program may build per operation) grew each vector 1, 2, 4: six
     // allocations for four members. One reservation each covers the literal.
@@ -15948,35 +16154,56 @@ class Set {
     }
     items_.push_back(std::move(key));
     serials_.push_back(nextSerial_++);
+    if constexpr (indexable) {
+      if (!index_.empty()) index_.append(items_.size() - 1, [this](std::size_t at) -> const K& { return items_[at]; });
+      else if (items_.size() >= indexFrom) rebuildIndex();
+    }
   }
 
   bool has(const K& key) const {
-    for (const K& item : items_) {
-      if (sameValueZero(item, key)) return true;
-    }
-    return false;
+    if (view_) [[unlikely]] return view_->has(key);
+    return positionOf(key) != notFound;
   }
 
   bool remove(const K& key) {
-    for (std::size_t index = 0; index < items_.size(); ++index) {
-      if (!sameValueZero(items_[index], key)) continue;
-      items_.erase(items_.begin() + static_cast<std::ptrdiff_t>(index));
-      serials_.erase(serials_.begin() + static_cast<std::ptrdiff_t>(index));
-      return true;
+    if (view_) [[unlikely]] {
+      bool removed = false;
+      if (!view_->remove(key, removed)) rejectViewWrite();
+      return removed;
     }
-    return false;
+    const std::size_t index = positionOf(key);
+    if (index == notFound) return false;
+    if constexpr (indexable) {
+      // Renumbers the later members too, which the erase below shifts down one.
+      if (!index_.empty()) index_.erase(items_[index], index, [this](std::size_t at) -> const K& { return items_[at]; });
+    }
+    items_.erase(items_.begin() + static_cast<std::ptrdiff_t>(index));
+    serials_.erase(serials_.begin() + static_cast<std::ptrdiff_t>(index));
+    return true;
   }
 
   void clear() {
+    if (view_) [[unlikely]] {
+      if (!view_->clear()) rejectViewWrite();
+      return;
+    }
     items_.clear();
     serials_.clear();
+    if constexpr (indexable) index_.clear();
   }
-  double size() const { return static_cast<double>(items_.size()); }
+  double size() const {
+    if (view_) [[unlikely]] return view_->size();
+    return static_cast<double>(items_.size());
+  }
 
-  const std::vector<K>& items() const { return items_; }
+  const std::vector<K>& items() const {
+    if (view_) [[unlikely]] return view_->items();
+    return items_;
+  }
 
   /** `Map::entryAfter`'s twin for the Set Iterator (ECMA-262 24.2.5.1), for the same reason. */
   const K* itemAfter(std::uint64_t& serial) const {
+    if (view_) [[unlikely]] return view_->itemAfter(serial);
     const auto next = std::upper_bound(serials_.begin(), serials_.end(), serial);
     if (next == serials_.end()) return nullptr;
     serial = *next;
@@ -15984,9 +16211,38 @@ class Set {
   }
 
  private:
+  /** A view refuses a write its source cannot hold, rather than dropping it. */
+  [[noreturn]] static void rejectViewWrite() {
+    gea::host::throwRuntimeError("TypeError", "a Set read through a view cannot be written through that view");
+  }
+
+  static constexpr bool indexable = detail::MapKeyIndexable<K>::value;
+  static constexpr std::size_t indexFrom = 8;
+  static constexpr std::size_t notFound = static_cast<std::size_t>(-1);
+  using Index = std::conditional_t<indexable, detail::FlatPositionIndex, detail::NoMapIndex>;
+
+  std::size_t positionOf(const K& key) const {
+    if constexpr (indexable) {
+      if (!index_.empty()) return index_.find(key, [this](std::size_t at) -> const K& { return items_[at]; });
+    }
+    for (std::size_t index = 0; index < items_.size(); ++index) {
+      if (sameValueZero(items_[index], key)) return index;
+    }
+    return notFound;
+  }
+  void rebuildIndex() {
+    if constexpr (indexable) {
+      index_.clear();
+      if (items_.size() < indexFrom) return;
+      index_.rebuild(items_.size(), [this](std::size_t at) -> const K& { return items_[at]; });
+    }
+  }
+
   std::vector<K> items_;
   std::vector<std::uint64_t> serials_;
   std::uint64_t nextSerial_ = 1;
+  std::shared_ptr<const detail::SetViewSource<K>> view_;
+  Index index_;
 };
 
 /**
@@ -16152,6 +16408,16 @@ const void* weakCollectionIdentity(const Key& key) {
 }
 
 /**
+ * A function value keys by its function OBJECT: the shared
+ * `FunctionObjectIdentity` every copy of one ECMAScript function holds, never
+ * the thunk or environment pointers two distinct closures may share.
+ */
+template <typename Signature>
+const void* weakCollectionIdentity(const CallableObject<Signature>& key) {
+  return static_cast<const void*>(key.functionObjectIdentity().get());
+}
+
+/**
  * A closed union of object-reference carriers keeps the identity of whichever
  * arm is live. The compiler admits this overload only when every arm has
  * reference identity (`hasReferenceIdentity`), so the recursive generic call
@@ -16264,47 +16530,39 @@ class WeakSet {
    * anchor `records.ts` gives an emitted class hierarchy's root.
    */
   virtual void gea_ref_address_anchor() {}
+  // Indexed by the identity a member compares by, as `WeakMap` is: a linear
+  // scan per add/has made a set the program fills quadratic.
   template <typename Key>
   void add(const Key& key) {
     pruneExpired();
     const void* identity = weakCollectionIdentity(key);
-    for (const WeakCollectionKey& item : items_) {
-      if (item.identity == identity) return;
-    }
-    items_.emplace_back(key);
-    nativeKeys_ = nativeKeys_ || items_.back().nativeWeak;
+    if (items_.find(identity) != items_.end()) return;
+    const auto stored = items_.emplace(identity, WeakCollectionKey(key)).first;
+    nativeKeys_ = nativeKeys_ || stored->second.nativeWeak;
   }
 
   template <typename Key>
   bool has(const Key& key) const {
     pruneExpired();
-    const void* identity = weakCollectionIdentity(key);
-    for (const WeakCollectionKey& item : items_) {
-      if (item.identity == identity) return true;
-    }
-    return false;
+    return items_.find(weakCollectionIdentity(key)) != items_.end();
   }
 
   template <typename Key>
   bool remove(const Key& key) {
     pruneExpired();
-    const void* identity = weakCollectionIdentity(key);
-    for (std::size_t index = 0; index < items_.size(); ++index) {
-      if (items_[index].identity != identity) continue;
-      items_.erase(items_.begin() + static_cast<std::ptrdiff_t>(index));
-      return true;
-    }
-    return false;
+    return items_.erase(weakCollectionIdentity(key)) != 0;
   }
 
  private:
   bool nativeKeys_ = false;
   void pruneExpired() const {
     if (!nativeKeys_) return;
-    items_.erase(std::remove_if(items_.begin(), items_.end(),
-      [](const WeakCollectionKey& key) { return key.expired(); }), items_.end());
+    for (auto i = items_.begin(); i != items_.end();) {
+      if (i->second.expired()) i = items_.erase(i);
+      else ++i;
+    }
   }
-  mutable std::vector<WeakCollectionKey> items_;
+  mutable std::unordered_map<const void*, WeakCollectionKey> items_;
 };
 
 // The weak halves of `mapSet`/`setAdd` above, placed here because a template
@@ -19720,6 +19978,23 @@ struct MapTypes<gea::Map<Key, Element>> {
 template <typename T>
 struct IsMapPayload<gea::Ref<T>> : IsMapPayload<T> {};
 
+/**
+ * Whether a payload is a Set -- `gea::Set<K>` or a program class deriving from
+ * one, since a subclass instance is still a Set exotic to `instanceof` -- and
+ * which `K` that Set holds (`SetKeyOf`, see `boxedSetOpsFor`).
+ */
+template <typename K>
+std::true_type setBaseProbe(const gea::Set<K>*);
+std::false_type setBaseProbe(const void*);
+template <typename K>
+K setKeyProbe(const gea::Set<K>*);
+template <typename T>
+struct IsSetPayload : decltype(setBaseProbe(static_cast<const T*>(nullptr))) {};
+template <typename T>
+struct IsSetPayload<gea::Ref<T>> : IsSetPayload<T> {};
+template <typename T>
+using SetKeyOf = decltype(setKeyProbe(static_cast<const T*>(nullptr)));
+
 /** Whether a boxed payload is some `gea::Ref<T>` -- the shape every reference-counted object (record or class instance) is held through. */
 template <typename T>
 struct IsRefPayload : std::false_type {};
@@ -19940,6 +20215,33 @@ inline std::vector<BoxedMapOps>& boxedMapOps() {
 template <typename T>
 bool boxedMapOpsFor(BoxedMapOps& out);
 
+/** `BoxedMapOps`'s twin: what a boxed Set answers when it is read back as `Set<unknown>` (`unboxDynamicSet`). */
+struct BoxedSetOps {
+  const void* payloadType;
+  gea::Ref<Set<Value>> (*view)(const Value& self);
+};
+
+inline std::vector<BoxedSetOps>& boxedSetOps() {
+  GEA_REALM_LOCAL(std::vector<BoxedSetOps>, ops, {});
+  return ops;
+}
+
+template <typename T>
+bool boxedSetOpsFor(BoxedSetOps& out);
+
+/** Records `T`'s Set view once per program, for a `T` that is a `Ref` to a Set; a no-op for every other payload. */
+template <typename T>
+inline void registerSetPayloadType() {
+  if constexpr (IsSetPayload<T>::value && IsRefPayload<T>::value) {
+    GEA_REALM_LOCAL(bool, registered, ([]() {
+      BoxedSetOps ops{};
+      if (boxedSetOpsFor<T>(ops)) boxedSetOps().push_back(ops);
+      return true;
+    }()));
+    (void)registered;
+  }
+}
+
 /** Records `T`'s Map view once per program, for a `T` that is a `Ref<Map<K, V>>`; a no-op for every other payload. */
 template <typename T>
 inline void registerMapPayloadType() {
@@ -19998,13 +20300,14 @@ struct ValueMetadata {
   bool actualArguments;
   bool array;
   bool map;
+  bool set;
   bool nativeError;
   NativeConstructThunk construct;
   Ref<void> (*nativeAnchor)(const void*);
   bool (*nativeViewValue)(const void*, Value&);
   const NativeDocumentOps* document;
 };
-inline constexpr ValueMetadata emptyValueMetadata{nullptr, nullptr, nullptr, nullptr, nullptr, -1, false, false, false, false, nullptr, nullptr, nullptr, nullptr};
+inline constexpr ValueMetadata emptyValueMetadata{nullptr, nullptr, nullptr, nullptr, nullptr, -1, false, false, false, false, false, nullptr, nullptr, nullptr, nullptr};
 
 /**
  * Whether a boxed `Ref<T>` carries no dynamic protocol: no document table and
@@ -20051,7 +20354,7 @@ const ValueMetadata* valueMetadataFor() {
     }
     return ValueMetadata{nativeFieldOpsFor<T>(), nativePrototypeOpsFor<T>(), calls,
                          elements, payloadTypeTagFor<T>(), RestFrom, ActualArguments,
-                         IsArrayPayload<T>::value, IsMapPayload<T>::value, IsNativeErrorRefPayload<T>::value,
+                         IsArrayPayload<T>::value, IsMapPayload<T>::value, IsSetPayload<T>::value, IsNativeErrorRefPayload<T>::value,
                          nativeConstructFor<T>(), anchor, viewValue, document};
   }();
   return &metadata;
@@ -20184,6 +20487,7 @@ class Value {
     }
     detail::registerPromisePayloadType<std::decay_t<T>>();
     detail::registerMapPayloadType<std::decay_t<T>>();
+    detail::registerSetPayloadType<std::decay_t<T>>();
     // When the payload is a `gea::Ref<T>`, retain the allocated object itself.
     // Its authenticated allocation header remains reachable through this
     // erased handle, so class identity is derived from that header on demand
@@ -20265,6 +20569,9 @@ class Value {
 
   /** Native Map identity recorded before an explicitly dynamic payload is erased. */
   bool isMapPayload() const { return metadata_->map; }
+
+  /** Native Set identity recorded before an explicitly dynamic payload is erased. */
+  bool isSetPayload() const { return metadata_->set; }
 
   /** A JSON/dynamic object payload whose own property table remains available after boxing. */
   /**
@@ -26263,6 +26570,92 @@ inline gea::Ref<Map<Value, Value>> unboxDynamicMap(const Value& value, const cha
 }
 
 /**
+ * A `Set<K>` read as `Set<unknown>`: the same set, every member boxed as it
+ * leaves and checked as it enters -- `DynamicMapSource` without the value
+ * slot. A member the source's `K` cannot hold is absent from it, and adding
+ * one is refused by name rather than stored where the source never sees it.
+ */
+template <typename K>
+class DynamicSetSource final : public SetViewSource<Value> {
+ public:
+  explicit DynamicSetSource(gea::Ref<Set<K>> source) : source_(std::move(source)) {}
+  double size() const override { return source_->size(); }
+  bool has(const Value& key) const override {
+    return DynamicCarrier<K>::accepts(key) && source_->has(DynamicCarrier<K>::in(key, 0));
+  }
+  const Value* itemAfter(std::uint64_t& serial) const override {
+    const K* item = source_->itemAfter(serial);
+    if (item == nullptr) return nullptr;
+    current_.emplace(DynamicCarrier<K>::out(*item));
+    return &*current_;
+  }
+  const std::vector<Value>& items() const override {
+    snapshot_.clear();
+    for (const K& item : source_->items()) snapshot_.push_back(DynamicCarrier<K>::out(item));
+    return snapshot_;
+  }
+  const void* identity() const override { return source_->identity(); }
+  void trace(RefVisitor& visitor) const override {
+    traceRefs(source_, visitor);
+    traceRefs(current_, visitor);
+    traceRefs(snapshot_, visitor);
+  }
+  bool add(const Value& key) const override {
+    if (!DynamicCarrier<K>::accepts(key))
+      gea::host::throwRuntimeError("TypeError", "a Set read as Set<unknown> cannot store a member its own element type does not hold");
+    source_->add(DynamicCarrier<K>::in(key, 0));
+    return true;
+  }
+  bool remove(const Value& key, bool& removed) const override {
+    removed = DynamicCarrier<K>::accepts(key) && source_->remove(DynamicCarrier<K>::in(key, 0));
+    return true;
+  }
+  bool clear() const override {
+    source_->clear();
+    return true;
+  }
+
+ private:
+  gea::Ref<Set<K>> source_;
+  mutable std::optional<Value> current_;
+  mutable std::vector<Value> snapshot_;
+};
+
+template <typename T>
+bool boxedSetOpsFor(BoxedSetOps& out) {
+  using Source = typename T::element_type;
+  using K = SetKeyOf<Source>;
+  if constexpr (DynamicCarrier<K>::supported && !std::is_same_v<Source, Set<Value>>) {
+    out.payloadType = payloadTypeTagFor<T>();
+    out.view = [](const Value& self) -> gea::Ref<Set<Value>> {
+      // A subclass instance is read through its Set base: the view only ever
+      // calls the base's own members.
+      const gea::Ref<Set<K>> source = unboxValue<T>(self, Value::Tag::Object, "a Set read as Set<unknown>").template staticCast<Set<K>>();
+      return gea::makeRef<Set<Value>>(std::make_shared<const DynamicSetSource<K>>(source));
+    };
+    return true;
+  } else {
+    return false;
+  }
+}
+
+/**
+ * A dynamic value where `Set<unknown>` is declared: a boxed `Set<unknown>` is
+ * itself, any other boxed Set is read through a `DynamicSetSource` view of the
+ * same object, and anything else refuses -- the brand check `v instanceof Set`
+ * already performed. Never a copy, exactly as `unboxDynamicMap`.
+ */
+inline gea::Ref<Set<Value>> unboxDynamicSet(const Value& value, const char* site) {
+  using Target = gea::Ref<Set<Value>>;
+  if (value.tag() == Value::Tag::Object && value.payloadType() == payloadTypeTagFor<Target>()) return value.as<Target>();
+  if (value.tag() == Value::Tag::Object) {
+    for (const BoxedSetOps& ops : boxedSetOps())
+      if (ops.payloadType == value.payloadType()) return ops.view(value);
+  }
+  refusePayloadMismatch(site);
+}
+
+/**
  * The canonical array index a STRING property key names (ECMA-262 6.1.7
  * CanonicalNumericIndexString), or 2^32-1 -- which `ArrayObject::isIndex`
  * rejects -- when the text names none.
@@ -26315,6 +26708,18 @@ inline double arrayIndexFromDynamicKey(const Value& key) {
     default:
       refusePayloadMismatch("an array element read keyed by an object, symbol or bigint needs ToPropertyKey, which is not performed here");
   }
+}
+
+/**
+ * The array index an OPTIONAL Number key names (`number | undefined` or
+ * `number | null`). A present payload is the Number case above; an absent one
+ * is ToPropertyKey of `undefined`/`null`, the words "undefined"/"null", which
+ * are never a canonical index -- the same out-of-range answer
+ * `arrayIndexFromDynamicKey` gives those two tags.
+ */
+template <typename Payload>
+inline double arrayIndexFromOptionalKey(const Optional<Payload>& key) {
+  return key.has_value() ? static_cast<double>(*key) : 4294967295.0;
 }
 
 /** The array index a property key names, or `false` when the key is not a canonical one. */
@@ -32466,6 +32871,108 @@ bool copiesThroughNativeView(const gea::Ref<T>& source) {
 }
 }  // namespace detail
 
+namespace detail {
+/** `CallableObject<R(A...)>` narrowed to the first `K` parameters of `A...`. */
+template <typename Callable, std::size_t K>
+struct CallablePrefixOf;
+template <typename R, typename... A, std::size_t K>
+struct CallablePrefixOf<CallableObject<R(A...)>, K> {
+  template <std::size_t... I>
+  static CallableObject<R(std::tuple_element_t<I, std::tuple<A...>>...)> pick(std::index_sequence<I...>);
+  using type = decltype(pick(std::make_index_sequence<K>{}));
+};
+/**
+ * Whether a view route's stored carrier `(type, policy)` is one the declared
+ * carrier `T` under `Policy` embeds: `T` itself, an optional's absence or
+ * payload, or one union arm. A view's origin may hold a narrower carrier than
+ * the declared one (`useCaseSensitiveFileNames: true` under
+ * `boolean | (() => boolean) | undefined`); widening it is lossless.
+ */
+template <typename T, typename Policy>
+bool embedsNativeRead(const void* type, const void* policy) {
+  if (type == payloadTypeTagFor<T>() && policy == payloadTypeTagFor<Policy>()) return true;
+  if constexpr (gea::is_optional_v<T>) {
+    using Inner = std::remove_cv_t<std::remove_reference_t<decltype(*std::declval<const T&>())>>;
+    if constexpr (NativeFieldOptionalPolicyInfo<Policy>::value) {
+      if (NativeFieldOptionalPolicyInfo<Policy>::nullAbsence ? type == payloadTypeTagFor<std::nullptr_t>()
+                                                             : type == payloadTypeTagFor<Undefined>())
+        return true;
+      return embedsNativeRead<Inner, typename NativeFieldOptionalPolicyInfo<Policy>::Payload>(type, policy);
+    } else {
+      return false;
+    }
+  } else if constexpr (NativeTaggedUnion<T>::value) {
+    if constexpr (NativeFieldUnionPolicyInfo<Policy>::value && NativeFieldUnionPolicyInfo<Policy>::arity == T::arity) {
+      return [&]<std::size_t... Index>(std::index_sequence<Index...>) {
+        return (embedsNativeRead<typename T::template ArmType<Index>, typename NativeFieldUnionPolicyInfo<Policy>::template Arm<Index>>(type, policy) || ...);
+      }(std::make_index_sequence<T::arity>{});
+    } else {
+      return false;
+    }
+  } else if constexpr (IsNativeCallableObject<T>::value && std::is_same_v<Policy, NativeFieldLeafPolicy>) {
+    // A function declaring fewer parameters ignores the trailing arguments a
+    // wider call passes (the `CallableObject` prefix-dropping constructors).
+    if (policy != payloadTypeTagFor<NativeFieldLeafPolicy>()) return false;
+    return [&]<std::size_t... K>(std::index_sequence<K...>) {
+      return ((type == payloadTypeTagFor<typename CallablePrefixOf<T, K>::type>()) || ...);
+    }(std::make_index_sequence<T::physicalArgumentCount>{});
+  } else {
+    return false;
+  }
+}
+
+/** `embedsNativeRead`'s construction: the declared carrier holding `value`. */
+template <typename T, typename Policy>
+bool embedNativeRead(std::optional<T>& out, const void* type, const void* policy, const void* value) {
+  if (type == payloadTypeTagFor<T>() && policy == payloadTypeTagFor<Policy>()) {
+    out.emplace(*static_cast<const T*>(value));
+    return true;
+  }
+  if constexpr (gea::is_optional_v<T>) {
+    using Inner = std::remove_cv_t<std::remove_reference_t<decltype(*std::declval<const T&>())>>;
+    if constexpr (NativeFieldOptionalPolicyInfo<Policy>::value) {
+      if (NativeFieldOptionalPolicyInfo<Policy>::nullAbsence ? type == payloadTypeTagFor<std::nullptr_t>()
+                                                             : type == payloadTypeTagFor<Undefined>()) {
+        out.emplace(T{});
+        return true;
+      }
+      std::optional<Inner> inner;
+      if (!embedNativeRead<Inner, typename NativeFieldOptionalPolicyInfo<Policy>::Payload>(inner, type, policy, value)) return false;
+      out.emplace(T(std::move(*inner)));
+      return true;
+    } else {
+      return false;
+    }
+  } else if constexpr (NativeTaggedUnion<T>::value) {
+    if constexpr (NativeFieldUnionPolicyInfo<Policy>::value && NativeFieldUnionPolicyInfo<Policy>::arity == T::arity) {
+      return [&]<std::size_t... Index>(std::index_sequence<Index...>) {
+        return ([&]() {
+          using Arm = typename T::template ArmType<Index>;
+          std::optional<Arm> arm;
+          if (!embedNativeRead<Arm, typename NativeFieldUnionPolicyInfo<Policy>::template Arm<Index>>(arm, type, policy, value)) return false;
+          out.emplace(T::template ofArm<Index>(std::move(*arm)));
+          return true;
+        }() || ...);
+      }(std::make_index_sequence<T::arity>{});
+    } else {
+      return false;
+    }
+  } else if constexpr (IsNativeCallableObject<T>::value && std::is_same_v<Policy, NativeFieldLeafPolicy>) {
+    if (policy != payloadTypeTagFor<NativeFieldLeafPolicy>()) return false;
+    return [&]<std::size_t... K>(std::index_sequence<K...>) {
+      return ([&]() {
+        using Source = typename CallablePrefixOf<T, K>::type;
+        if (type != payloadTypeTagFor<Source>()) return false;
+        out.emplace(T(*static_cast<const Source*>(value)));
+        return true;
+      }() || ...);
+    }(std::make_index_sequence<T::physicalArgumentCount>{});
+  } else {
+    return false;
+  }
+}
+}  // namespace detail
+
 namespace record {
 /**
  * One declared field of a record handle a reader holds only as its own
@@ -32477,7 +32984,11 @@ template <typename T, typename Policy, typename Receiver, typename Slot>
 T readDeclaredField(const gea::Ref<Receiver>& receiver, const char* key, Slot&& slot) {
   if (!receiver || !detail::copiesThroughNativeView(receiver)) return std::forward<Slot>(slot)();
   std::optional<T> answer;
-  const NativeFieldRead read(answer, Policy{});
+  NativeFieldRead read(answer,
+      +[](void* slot, const void* type, const void* policy, const void* value) -> bool {
+        return detail::embedNativeRead<T, Policy>(*static_cast<std::optional<T>*>(slot), type, policy, value);
+      },
+      +[](const void* type, const void* policy) -> bool { return detail::embedsNativeRead<T, Policy>(type, policy); });
   if (!readFieldView(gea::Ref<void>(receiver), PropertyKey::string(key), read) || !answer)
     host::throwRuntimeError("TypeError", "a native view read has no certified carrier route");
   return std::move(*answer);
@@ -32526,6 +33037,45 @@ bool copyOwnPropertiesInCreationOrder(const gea::Ref<T>& source, const gea::Ref<
     return true;
   } else {
     detail::refuseUncopyableExpando(source);
+    return false;
+  }
+}
+
+/**
+ * The static spread copy of a record source that is, at run time, a live view.
+ * A view's struct slots are inert -- its keys and values live in its original
+ * -- so the member-by-member copy a site emits for a plain allocation would
+ * copy nothing and leave every declared field of the receiver absent. The
+ * view's own enumerable keys are walked here; `write` (emitted per source and
+ * receiver carrier) stores a declared source field read typed through the
+ * view's route, and a key it does not name lands on the receiver's expando,
+ * as the static copy routes one. Returns false (the caller runs its static
+ * copy) for a plain allocation, or a pair without that protocol.
+ */
+// A source carried by value (a borrowed plain struct) is never a view.
+template <typename T, typename Receiver, typename Write>
+bool spreadThroughNativeView(const T&, const Receiver&, Write&&, std::initializer_list<const char*> = {}) {
+  return false;
+}
+template <typename T, typename Receiver, typename Write>
+bool spreadThroughNativeView(const gea::Ref<T>& source, const gea::Ref<Receiver>& receiver, Write&& write,
+                             std::initializer_list<const char*> later = {}) {
+  if constexpr (detail::NativeFieldTable<T> && requires(Receiver& writer, const PropertyKey& key, const Value& value) { writer.gea_matchesOwnField(key); writer.gea_writeOwnField(key, value, true); }) {
+    if (!source || !receiver || !detail::copiesThroughNativeView(source)) return false;
+    const std::vector<PropertyKey> copied = nativeEnumerableStringKeys(source);
+    for (const PropertyKey& key : copied) {
+      if (write(key)) continue;
+      // A declared key outside the site's static field set (its type did not
+      // list it) is stored through the receiver's own boxed protocol.
+      if (receiver->gea_matchesOwnField(key)) {
+        if (receiver->gea_writeOwnField(key, nativeDynamicGet(source, key), true)) continue;
+        host::throwRuntimeError("TypeError", "a spread of a native view has no typed store for the declared key \"" + std::string(key.text()) + "\"");
+      }
+      nativeSpreadExpandoSet(receiver, key.text(), nativeDynamicGet(source, key));
+    }
+    detail::learnCopiedOwnKeys(receiver, copied, true, later);
+    return true;
+  } else {
     return false;
   }
 }
@@ -36159,6 +36709,58 @@ inline std::string replaceAll(const std::string &s, const std::string &searchVal
 }
 
 /**
+ * The callable `replaceValue` of 22.1.3.18 step 5 / 22.1.3.20 step 14 over a
+ * string `searchValue`: `Call(replaceValue, undefined, « matched, position,
+ * string »)`, its ToString'd answer spliced in with no `$` substitution.
+ * A callback written with fewer parameters is called with the prefix it
+ * declares, which is what the extra arguments mean to it in the language.
+ */
+template <typename Fn>
+inline std::string callStringReplacer(Fn &replacement, const std::string &matched, std::size_t positionBytes, const std::string &s) {
+  const auto position = [&]() { return static_cast<double>(utf16Length(s.substr(0, positionBytes))); };
+  if constexpr (std::is_invocable_v<Fn &, std::string, double, std::string>) {
+    return std::string(replacement(matched, position(), s));
+  } else if constexpr (std::is_invocable_v<Fn &, std::string, double>) {
+    return std::string(replacement(matched, position()));
+  } else if constexpr (std::is_invocable_v<Fn &, std::string>) {
+    return std::string(replacement(matched));
+  } else {
+    return std::string(replacement());
+  }
+}
+
+template <typename Fn>
+inline std::string replaceWithCallback(const std::string &s, const std::string &searchValue, Fn &&replacement) {
+  const std::size_t matchStart = s.find(searchValue);
+  if (matchStart == std::string::npos) return s;
+  std::string out = s.substr(0, matchStart);
+  out += callStringReplacer(replacement, searchValue, matchStart, s);
+  out += s.substr(matchStart + searchValue.size());
+  return out;
+}
+
+template <typename Fn>
+inline std::string replaceAllWithCallback(const std::string &s, const std::string &searchValue, Fn &&replacement) {
+  // Every match position is found before the first call, as 22.1.3.20 steps
+  // 10-12 collect them, so a callback cannot move the matches it is shown.
+  std::vector<std::size_t> matches;
+  const std::size_t advanceBy = searchValue.size() == 0 ? 1 : searchValue.size();
+  for (std::size_t at = s.find(searchValue); at != std::string::npos && at <= s.size(); at = s.find(searchValue, at + advanceBy)) {
+    matches.push_back(at);
+    if (at + advanceBy > s.size()) break;
+  }
+  std::string out;
+  std::size_t endOfLast = 0;
+  for (const std::size_t at : matches) {
+    out += s.substr(endOfLast, at - endOfLast);
+    out += callStringReplacer(replacement, searchValue, at, s);
+    endOfLast = at + searchValue.size();
+  }
+  if (endOfLast < s.size()) out += s.substr(endOfLast);
+  return out;
+}
+
+/**
  * ECMA-262 22.1.3.5 `String.prototype.concat(...strings)`.
  *
  * The receiver, then every argument, in order.
@@ -36250,6 +36852,46 @@ inline gea::Ref<gea::ArrayObject<std::string>> split(const std::string &s, const
     const std::size_t j = s.find(separator, i);
     if (j == std::string::npos) break;
     result->push(s.substr(i, j - i));
+    i = j + separator.size();
+  }
+  result->push(s.substr(i));
+  return result;
+}
+
+/**
+ * ECMA-262 22.1.3.21 `String.prototype.split(separator, limit)` with a string
+ * separator and a present Number `limit`. The emitter passes 2^32 - 1 for an
+ * absent or `undefined` limit (step 4's own value), never `+Infinity`: step 4
+ * applies ToUint32, which maps `+Infinity` to 0 and would answer `[]`.
+ *
+ * Steps in order: `lim = 0` answers the empty array before the subject is
+ * looked at (step 6); an EMPTY separator answers the first `lim` code units
+ * (step 9); an empty subject is one element (step 10); otherwise each match
+ * appends one element and the walk stops as soon as `lim` elements exist
+ * (step 14.c), so the tail is appended only when the limit was not reached.
+ */
+inline gea::Ref<gea::ArrayObject<std::string>> split(const std::string &s, const std::string &separator, double limit) {
+  const uint32_t lim = ::gea::toUint32(limit);
+  auto result = gea::makeRef<gea::ArrayObject<std::string>>();
+  if (lim == 0) return result;
+  if (separator.empty()) {
+    const std::size_t units = utf16Length(s);
+    const std::size_t outLen = units < lim ? units : static_cast<std::size_t>(lim);
+    for (std::size_t unit = 0; unit < outLen; ++unit) result->push(substringUtf16(s, unit, unit + 1));
+    return result;
+  }
+  if (s.empty()) {
+    result->push(s);
+    return result;
+  }
+  std::size_t i = 0;
+  std::size_t count = 0;
+  while (true) {
+    const std::size_t j = s.find(separator, i);
+    if (j == std::string::npos) break;
+    result->push(s.substr(i, j - i));
+    count += 1;
+    if (count == lim) return result;
     i = j + separator.size();
   }
   result->push(s.substr(i));
@@ -39914,8 +40556,78 @@ struct RegexReplacementArguments {
   }
 };
 
+/**
+ * A replacer `CallableObject` whose parameter list is read POSITIONALLY, the
+ * way ES 22.1.3.19 step 6 / 22.2.6.11 step 14 actually call it: `(matched,
+ * capture1, ..., captureN, position, input, groups)`. The enumerated shapes
+ * below cover the common spellings; this covers the rest -- a capture declared
+ * `string | undefined` beside one declared `string`, an `offset` with no
+ * trailing `input`, and so on. The declared capture count is the number of
+ * parameters before the first `number` one (as in every enumerated shape), so
+ * that parameter receives the position and the one after it the input; each
+ * capture is handed in the parameter's own carrier, `undefined` where the
+ * group did not participate and the carrier can say so.
+ */
+template <typename Fn>
+struct PositionalRegexReplacer {
+  static constexpr bool value = false;
+};
+template <typename R, typename... A>
+struct PositionalRegexReplacer<gea::CallableObject<R(A...)>> {
+  static constexpr bool value = std::is_convertible_v<R, std::string>;
+  static constexpr std::size_t arity = sizeof...(A);
+  static constexpr std::size_t offsetSlot = [] {
+    constexpr bool isNumber[] = {false, std::is_same_v<std::decay_t<A>, double>...};
+    for (std::size_t slot = 1; slot < sizeof...(A); ++slot) {
+      if (isNumber[slot + 1]) return slot;
+    }
+    return sizeof...(A);
+  }();
+};
+
+template <typename P>
+P regexReplacerText(const gea::Optional<std::string> &text) {
+  if constexpr (std::is_same_v<P, std::string>) {
+    return text.has_value() ? *text : std::string();
+  } else if constexpr (std::is_same_v<P, gea::Value>) {
+    return text.has_value() ? gea::Value::box(gea::Value::Tag::String, *text) : gea::Value();
+  } else if constexpr (std::is_constructible_v<P, gea::Optional<std::string>>) {
+    return P(text);
+  } else if constexpr (std::is_constructible_v<P, std::string>) {
+    return text.has_value() ? P(*text) : P();
+  } else {
+    return P{};
+  }
+}
+
+template <typename P, std::size_t Slot, std::size_t OffsetSlot>
+P regexReplacerSlot(const std::string &matched, const std::vector<gea::Optional<std::string>> &captures,
+                    std::size_t position, const std::string &input) {
+  if constexpr (Slot == 0) {
+    return regexReplacerText<P>(gea::Optional<std::string>(matched));
+  } else if constexpr (Slot < OffsetSlot) {
+    return regexReplacerText<P>(Slot < captures.size() ? captures[Slot] : gea::Optional<std::string>());
+  } else if constexpr (Slot == OffsetSlot) {
+    return static_cast<double>(position);
+  } else if constexpr (Slot == OffsetSlot + 1) {
+    return regexReplacerText<P>(gea::Optional<std::string>(input));
+  } else {
+    return P{};
+  }
+}
+
+template <typename R, typename... A, std::size_t... Slot>
+std::string callPositionalRegexReplacer(const gea::CallableObject<R(A...)> &replacement, std::index_sequence<Slot...>,
+                                        const std::string &matched,
+                                        const std::vector<gea::Optional<std::string>> &captures,
+                                        std::size_t position, const std::string &input) {
+  constexpr std::size_t offsetSlot = PositionalRegexReplacer<gea::CallableObject<R(A...)>>::offsetSlot;
+  return std::string(replacement(regexReplacerSlot<std::decay_t<A>, Slot, offsetSlot>(matched, captures, position, input)...));
+}
+
 template <typename Fn>
 inline constexpr bool isRegexReplacementCallback =
+  PositionalRegexReplacer<std::decay_t<Fn>>::value ||
   std::is_invocable_v<Fn &, std::string> ||
   std::is_invocable_v<Fn &, std::string, gea::Optional<std::string>> ||
   std::is_invocable_v<Fn &, std::string, gea::Optional<std::string>, gea::Optional<std::string>> ||
@@ -39989,6 +40701,9 @@ inline std::string replaceByPattern(
         out += replacement(matched, group(1), group(2));
       } else if constexpr (std::is_invocable_v<Fn &, std::string, std::string>) {
         out += replacement(matched, group(1));
+      } else if constexpr (PositionalRegexReplacer<std::decay_t<Fn>>::value && !std::is_invocable_v<Fn &, std::string>) {
+        out += callPositionalRegexReplacer(replacement, std::make_index_sequence<PositionalRegexReplacer<std::decay_t<Fn>>::arity>{},
+                                           matched, captures, position, input);
       } else {
         out += replacement(matched);
       }
@@ -42588,6 +43303,12 @@ inline void gea_json_write(std::string& out, const gea::Ref<Date>& value) {
 
 }  // namespace gea::runtime
 
+// Defined with the other ToString overloads below; `sortDefault` names it for
+// a dynamic element before that point.
+namespace gea::host::detail {
+inline std::string toString(const gea::Value &value);
+}  // namespace gea::host::detail
+
 namespace gea::runtime::array {
 
 /**
@@ -43045,6 +43766,20 @@ E reduceRight(const gea::Ref<ArrayObject<E>>& array, const Callable& fn) {
 template <typename E>
 bool strictlyEqual(const E& left, const E& right) {
   return left == right;
+}
+
+/**
+ * An optional element carrier (`(T | undefined)[]`, `(Ref | null)[]`): the
+ * absent state is the one `undefined`/`null` value, strictly equal only to
+ * itself, and two present values compare as the payload does -- so an
+ * `Optional<double>` element keeps NaN unequal to itself. `Optional` has no
+ * `==` of its own on purpose (presence is not a value); this is IsStrictlyEqual
+ * spelled over it, the counterpart of `sameValueZero`'s optional overload.
+ */
+template <typename T>
+bool strictlyEqual(const Optional<T>& left, const Optional<T>& right) {
+  if (!left.has_value() || !right.has_value()) return left.has_value() == right.has_value();
+  return strictlyEqual(*left, *right);
 }
 
 // The keyed collections' own SameValueZero, not a second copy: an element
@@ -43709,6 +44444,14 @@ gea::Ref<ArrayObject<E>> sort(const gea::Ref<ArrayObject<E>>& array, const Calla
 template <typename E>
 gea::Ref<ArrayObject<E>> sortDefault(const gea::Ref<ArrayObject<E>>& array) {
   return sortIndexedProperties(array, [](const E& left, const E& right) {
+    if constexpr (std::is_same_v<E, gea::Value>) {
+      // SortCompare (23.1.3.30.2) steps 2-4: a boxed `undefined` sorts after
+      // every other value without being ToString'd; it is "undefined" only
+      // to ToString, not to the ordering.
+      const bool leftUndefined = left.tag() == gea::Value::Tag::Undefined;
+      const bool rightUndefined = right.tag() == gea::Value::Tag::Undefined;
+      if (leftUndefined || rightUndefined) return !leftUndefined;
+    }
     return gea::host::detail::toString(left) < gea::host::detail::toString(right);
   });
 }
@@ -43846,6 +44589,83 @@ template <typename T>
 struct IsArrayObjectPointer<gea::Ref<ArrayObject<T>>> : std::true_type {
   using Element = T;
 };
+/**
+ * A recursive container wrapper (`recursive-containers.ts`: `struct W final :
+ * ArrayObject<E>` for `type X = { arms: X[] } | ...`) is an array too. Without
+ * this a callback returning one was appended as ONE element instead of being
+ * spread, which is both the wrong answer and an `ArrayObject<Ref<W>>` no
+ * caller's carrier names.
+ */
+template <typename W>
+  requires requires { typename W::Base; } && (!std::is_same_v<W, typename W::Base>) && std::derived_from<W, typename W::Base> &&
+           IsArrayObjectPointer<gea::Ref<typename W::Base>>::value
+struct IsArrayObjectPointer<gea::Ref<W>> : std::true_type {
+  using Element = typename IsArrayObjectPointer<gea::Ref<typename W::Base>>::Element;
+};
+
+/** Whether `flatMapStoredElement<R>` below accepts an `X`. */
+template <typename R, typename X>
+inline constexpr bool flatMapStores = std::is_same_v<R, X> || std::is_constructible_v<R, const X&> || [] {
+  if constexpr (gea::detail::IsTaggedUnion<R>::value) {
+    return []<typename... Arms>(std::type_identity<gea::TaggedUnion<Arms...>>) { return (std::is_same_v<X, Arms> || ...); }(std::type_identity<R>{});
+  } else {
+    return false;
+  }
+}();
+
+/**
+ * One flattened value stored into the caller's element carrier `R`: the same
+ * type as-is, an exact arm of a `TaggedUnion` `R` by injection, or whatever
+ * `R` constructs from (an `Optional` payload).
+ */
+template <typename R, typename X>
+R flatMapStoredElement(const X& value) {
+  if constexpr (std::is_same_v<R, X>) {
+    return value;
+  } else if constexpr (gea::detail::IsTaggedUnion<R>::value) {
+    return [&]<typename... Arms>(std::type_identity<gea::TaggedUnion<Arms...>>) -> R {
+      static_assert((std::is_same_v<X, Arms> || ...), "flatMap: a flattened value is no arm of the result's element union");
+      return R::template ofArm<gea::TaggedUnionArmIndex<X, Arms...>::value>(value);
+    }(std::type_identity<R>{});
+  } else {
+    static_assert(std::is_constructible_v<R, const X&>, "flatMap: a flattened value does not convert into the result's element");
+    return R(value);
+  }
+}
+
+/**
+ * FlattenIntoArray at depth 1 (ECMA-262 23.1.3.13.1) for one callback result,
+ * into an output whose element carrier the CALLER stated. A `TaggedUnion`
+ * result is dispatched on its live arm: `x => f(x) ?? []` returns "element or
+ * empty array", and which one it was is only known per call. Array arms spread
+ * their present elements (a hole is skipped: step 3.b's HasProperty is false);
+ * every other value is appended as one element.
+ */
+template <typename R, typename Container, typename P>
+void flatMapAppend(Container& out, const P& produced) {
+  if constexpr (gea::detail::IsTaggedUnion<P>::value) {
+    [&]<std::size_t... Indices>(std::index_sequence<Indices...>) {
+      ((produced.template is<Indices>() ? (flatMapAppend<R>(out, produced.template get<Indices>()), 0) : 0), ...);
+    }(std::make_index_sequence<P::arity>{});
+  } else if constexpr (IsArrayObjectPointer<P>::value) {
+    using Inner = typename IsArrayObjectPointer<P>::Element;
+    if (!produced) return;
+    if constexpr (std::is_same_v<Inner, Undefined> && !flatMapStores<R, Undefined>) {
+      // An array of `undefined` whose elements the result cannot hold is the
+      // checker's `never[]` (the `[]` of `?? []`): empty by its type, so there
+      // is nothing to spread. A non-empty one would mean the result carrier
+      // lost an `undefined` the program put there.
+      if (produced->size() != 0) gea::detail::abortAfterFlush();
+    } else {
+      const std::size_t length = produced->size();
+      for (std::size_t index = 0; index < length; ++index) {
+        if (produced->present(index)) out.push(flatMapStoredElement<R>(produced->readElement(index)));
+      }
+    }
+  } else {
+    out.push(flatMapStoredElement<R>(produced));
+  }
+}
 
 /**
  * ECMA-262 23.1.3.14 `flatMap(callbackfn)` -- `map` followed by a depth-1
@@ -43859,14 +44679,37 @@ struct IsArrayObjectPointer<gea::Ref<ArrayObject<T>>> : std::true_type {
  * carrier) is refused by name at the call site: this backend would have to
  * read a runtime tag to decide, and the two arms produce different element
  * counts.
+ *
+ * `Result` is the result carrier when the emitter states it: a callback typed
+ * as a union of an element and an array (`f(x) ?? []`), or a result carried
+ * as a recursive wrapper, has an element type only the checker knows, so the
+ * caller names the `Ref` the result is stored as and each value is flattened
+ * into its element (`flatMapAppend`). Left `void`, the result is deduced from
+ * the callback's own return type as before.
  */
-template <typename E, typename Callable>
+template <typename Result = void, typename E, typename Callable>
 auto flatMap(const gea::Ref<ArrayObject<E>>& array, const Callable& fn) {
   // `stored_element_t` for the same reason `map` above takes it: a callback
   // typed `=> void` contributes the `undefined` its call evaluates to, and an
   // `ArrayObject<void>` is not a type.
   using Produced = stored_element_t<decltype(mapCall(fn, std::declval<const E&>(), 0.0, array))>;
-  if constexpr (IsArrayObjectPointer<Produced>::value) {
+  if constexpr (!std::is_void_v<Result>) {
+    static_assert(IsArrayObjectPointer<Result>::value, "flatMap: the stated result carrier is not an array");
+    using R = typename IsArrayObjectPointer<Result>::Element;
+    Result out = gea::makeRef<typename Result::element_type>();
+    if (!array) return out;
+    const std::size_t gea_array_length = array->size();
+    for (std::size_t index = 0; index < gea_array_length; ++index) {
+      if (!array->present(index)) continue;
+      if constexpr (std::is_void_v<decltype(mapCall(fn, array->readElement(index), static_cast<double>(index), array))>) {
+        mapCall(fn, array->readElement(index), static_cast<double>(index), array);
+        flatMapAppend<R>(*out, Undefined{});
+      } else {
+        flatMapAppend<R>(*out, mapCall(fn, array->readElement(index), static_cast<double>(index), array));
+      }
+    }
+    return out;
+  } else if constexpr (IsArrayObjectPointer<Produced>::value) {
     using Inner = typename IsArrayObjectPointer<Produced>::Element;
     auto out = gea::makeRef<ArrayObject<Inner>>();
     if (!array) return out;
@@ -43890,6 +44733,24 @@ auto flatMap(const gea::Ref<ArrayObject<E>>& array, const Callable& fn) {
         out->push(mapCall(fn, array->readElement(index), static_cast<double>(index), array));
       }
     }
+    return out;
+  }
+}
+
+/**
+ * A fresh array result (`map`, `filter`, `slice`, ...) stored where a
+ * recursive alias is carried as its wrapper class (`recursive-containers.ts`).
+ * The helper built a plain `ArrayObject<E>` nobody else has seen, so its
+ * slots move into a new wrapper, holes included (`map` keeps them). A result
+ * that already is the wrapper (`flatMap<Result>`) passes through.
+ */
+template <typename Result, typename Source>
+Result adoptFresh(Source&& source) {
+  if constexpr (std::is_same_v<std::decay_t<Source>, Result>) {
+    return std::forward<Source>(source);
+  } else {
+    Result out = gea::makeRef<typename Result::element_type>();
+    if (source) out->appendRange(*source, 0);
     return out;
   }
 }
@@ -44571,6 +45432,19 @@ inline bool isSafeInteger(const gea::Value& value) {
   return value.tag() == gea::Value::Tag::Number && isSafeInteger(value.as<double>());
 }
 
+// The same four over a `number | undefined` carrier (`Number.isInteger(b)`
+// with `b` an optional tuple element or parameter): `undefined` is not a
+// Number, so step 1 answers `false`; a present payload asks the question of
+// its own carrier through the overloads above.
+template <typename T>
+inline bool isInteger(const gea::Optional<T>& value) { return value.has_value() && isInteger(*value); }
+template <typename T>
+inline bool isFinite(const gea::Optional<T>& value) { return value.has_value() && isFinite(*value); }
+template <typename T>
+inline bool isNaN(const gea::Optional<T>& value) { return value.has_value() && isNaN(*value); }
+template <typename T>
+inline bool isSafeInteger(const gea::Optional<T>& value) { return value.has_value() && isSafeInteger(*value); }
+
 // The `NumberConstructor` data properties -- 21.1.2.1 `EPSILON`, .6
 // `MAX_SAFE_INTEGER`, .7 `MAX_VALUE`, .8 `MIN_SAFE_INTEGER`, .9 `MIN_VALUE`.
 // Named through `std::numeric_limits` rather than spelled as decimal literals:
@@ -45092,6 +45966,11 @@ inline bool instanceOfMap(const gea::Value& value) {
   return value.tag() == gea::Value::Tag::Object && value.isMapPayload();
 }
 
+/** `value instanceof Set` across a dynamic boundary: the Set brand `Value::box` recorded (`IsSetPayload`). */
+inline bool instanceOfSet(const gea::Value& value) {
+  return value.tag() == gea::Value::Tag::Object && value.isSetPayload();
+}
+
 inline bool instanceOfDate(const gea::Value& value) {
   return value.tag() == gea::Value::Tag::Object &&
       value.payloadType() == gea::detail::payloadTypeTagFor<gea::Ref<gea::runtime::Date>>();
@@ -45296,6 +46175,10 @@ template <typename Derived, typename Base>
 inline gea::Ref<Derived> assertedDowncastClassRef(const gea::Ref<Base>& ref) {
   static_assert(std::is_base_of<Base, Derived>::value,
                 "a class-ref assertion must name a class that descends from the handle's own (see assertedDowncastClassRef)");
+  // An absent handle (null or undefined) holds no object to misread, and a
+  // program's `as` never fails on one: it stays absent, as in JavaScript, and a
+  // later member read throws the ordinary nullish TypeError.
+  if (!ref) return ref.template staticCast<Derived>();
   if (!gea::detail::classIdentityExtends(gea::detail::refPayloadIdentity(ref), &gea::detail::RefOperationsFor<Derived>::table)) {
     gea::host::throwRuntimeError("TypeError", "Value is not an instance of the class this assertion names");
   }
@@ -49791,6 +50674,10 @@ inline bool hasOwn(const gea::Value& target, const gea::PropertyKey& key) { retu
  * instance's chain points at.
  */
 inline gea::Value getPrototypeOf(const gea::Value& target) {
+  // A native record or class instance has no modelled prototype table, the
+  // same approximation a dynamic object's root already makes (`object()`
+  // starts with none): it answers `null` rather than aborting the program.
+  if (target.isNativeFieldPayload()) return gea::Value::box(gea::Value::Tag::Null, nullptr);
   gea::DynamicObject& table = gea::runtime::object::require(target, "Object.getPrototypeOf");
   const gea::Ref<gea::DynamicObject> proto = table.prototype();
   if (!proto) return gea::Value::box(gea::Value::Tag::Null, nullptr);
@@ -51083,6 +51970,70 @@ inline std::string indentGap(const std::string& value) { return value.substr(0, 
 
 inline void appendJsonIndent(std::string& out, const std::string& gap, std::size_t depth) {
   for (std::size_t at = 0; at < depth; ++at) out += gap;
+}
+
+/**
+ * A compact JSON document (no whitespace outside strings, as every native
+ * writer produces) laid out with `gap` exactly as ECMA-262 25.5.2.5
+ * SerializeJSONObject / 25.5.2.6 SerializeJSONArray lay it out when `gap` is
+ * not empty: a non-empty container opens, puts each member on its own line one
+ * `gap` deeper, separates members with ",\n", and closes on a line at its own
+ * depth; an empty one stays "{}" / "[]"; a key is followed by ": ". String
+ * contents are copied untouched, escapes included.
+ */
+inline std::string indentCompact(const std::string& compact, const std::string& gap) {
+  if (gap.empty()) return compact;
+  std::string out;
+  out.reserve(compact.size() * 2);
+  std::size_t depth = 0;
+  bool inString = false;
+  for (std::size_t at = 0; at < compact.size(); ++at) {
+    const char c = compact[at];
+    if (inString) {
+      out += c;
+      if (c == '\\' && at + 1 < compact.size()) out += compact[++at];
+      else if (c == '"') inString = false;
+      continue;
+    }
+    switch (c) {
+      case '"':
+        inString = true;
+        out += c;
+        break;
+      case '{':
+      case '[': {
+        const char close = c == '{' ? '}' : ']';
+        if (at + 1 < compact.size() && compact[at + 1] == close) {
+          out += c;
+          out += close;
+          ++at;
+          break;
+        }
+        out += c;
+        ++depth;
+        out += '\n';
+        appendJsonIndent(out, gap, depth);
+        break;
+      }
+      case '}':
+      case ']':
+        if (depth > 0) --depth;
+        out += '\n';
+        appendJsonIndent(out, gap, depth);
+        out += c;
+        break;
+      case ',':
+        out += ",\n";
+        appendJsonIndent(out, gap, depth);
+        break;
+      case ':':
+        out += ": ";
+        break;
+      default:
+        out += c;
+    }
+  }
+  return out;
 }
 
 /**

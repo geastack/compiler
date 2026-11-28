@@ -5,6 +5,10 @@ import type { SourceClass, ValueFlowIndex } from './flow/model.js'
 import { sourceClassFamilyOf } from './flow/owned-class-receivers.js'
 import { mentionsTypeParameter } from './return-bindings.js'
 
+/** A plain test: the narrowed `ParameterPropertyDeclaration` is an intersection the native build cannot view. */
+const declaresParameterProperty = (parameter: ts.ParameterDeclaration): boolean =>
+  ts.isParameterPropertyDeclaration(parameter, parameter.parent)
+
 /**
  * ONE ARRAY, ONE CARRIER, WHATEVER NAME READS IT.
  *
@@ -193,7 +197,10 @@ export const withSharedArrayStorage = (
     const declaration = symbol.valueDeclaration
     if (!declaration) return null
     if (ts.isPropertyDeclaration(declaration) && ts.isClassLike(declaration.parent)) return declaration.parent
-    if (ts.isParameter(declaration) && ts.isParameterPropertyDeclaration(declaration, declaration.parent)) return declaration.parent.parent
+    if (ts.isParameter(declaration) && declaresParameterProperty(declaration)) {
+      const owner = declaration.parent.parent
+      return ts.isClassLike(owner) ? owner : null
+    }
     return null
   }
   const sameGeneric = (left: ts.Type, right: ts.Type): boolean =>
@@ -304,7 +311,7 @@ export const withSharedArrayStorage = (
   }
   const joinedFields = new Map<ts.Declaration, ts.Type>()
   for (const [parameter, joined] of [...joinedParameters]) {
-    if (!ts.isParameter(parameter) || !ts.isParameterPropertyDeclaration(parameter, parameter.parent)) continue
+    if (!ts.isParameter(parameter) || !declaresParameterProperty(parameter)) continue
     const field = checker
       .getSymbolsOfParameterPropertyDeclaration(parameter, parameter.name.getText())
       .find((symbol) => (symbol.flags & ts.SymbolFlags.Property) !== 0)

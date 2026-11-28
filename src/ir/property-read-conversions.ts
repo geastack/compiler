@@ -63,9 +63,9 @@ export const propertyReadConversionInputsOf = (
   keyText: string | null,
   deriver: RepresentationDeriver,
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
-  abis: ReadonlyMap<FunctionId, CallableAbi> = new Map(),
-  virtualAbis: ReadonlyMap<string, CallableAbi> = new Map(),
-  wellKnownSymbols: ReadonlyMap<DeclarationId, string> = new Map()
+  abis: ReadonlyMap<FunctionId, CallableAbi> = new Map<FunctionId, CallableAbi>(),
+  virtualAbis: ReadonlyMap<string, CallableAbi> = new Map<string, CallableAbi>(),
+  wellKnownSymbols: ReadonlyMap<DeclarationId, string> = new Map<DeclarationId, string>()
 ): readonly OperationConversionInput[] => {
   if (operation.normalResult === 'undefined') return []
   const inputs = new Map<string, OperationConversionInput>()

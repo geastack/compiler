@@ -11,7 +11,7 @@ import { callableCompletionValuesOf, constructionYieldsCompletionOf } from './ca
 import { resolveFlowSymbolAlias } from './targets.js'
 import { originAuthorityIdentity, type OriginAuthority } from './origin-authority.js'
 import { enterHypothesisGuard, exitHypothesisGuard, noteHypothesis } from './proof-hypotheses.js'
-import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from '../deferred-intrinsic-protocols.js'
+import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement, captureAnswer } from '../deferred-intrinsic-protocols.js'
 
 export interface SourceRecordDataWritePlan {
   /** Every allocation whose descriptors and publications the caller must close. */
@@ -89,7 +89,7 @@ const nativeMapReceivers = new WeakMap<ts.TypeChecker, WeakMap<ts.Expression, bo
 
 const mayBeNativeMap = (checker: ts.TypeChecker, receiver: ts.Expression): boolean => {
   let byReceiver = nativeMapReceivers.get(checker)
-  if (!byReceiver) nativeMapReceivers.set(checker, (byReceiver = new WeakMap()))
+  if (!byReceiver) nativeMapReceivers.set(checker, (byReceiver = new WeakMap<ts.Expression, boolean>()))
   const known = byReceiver.get(receiver)
   if (known !== undefined) return known
   const check = (type: ts.Type): boolean =>
@@ -150,9 +150,9 @@ const slotRewritten = (
   key: string
 ): boolean => {
   let byEntry = slotRewrites.get(flow)
-  if (!byEntry) slotRewrites.set(flow, (byEntry = new WeakMap()))
+  if (!byEntry) slotRewrites.set(flow, (byEntry = new WeakMap<ts.ObjectLiteralElementLike, Map<string, boolean>>()))
   let byKey = byEntry.get(entry)
-  if (!byKey) byEntry.set(entry, (byKey = new Map()))
+  if (!byKey) byEntry.set(entry, (byKey = new Map<string, boolean>()))
   const known = byKey.get(key)
   if (known !== undefined) return known
   const property = checker.getTypeAtLocation(root).getProperty(key)
@@ -402,7 +402,7 @@ const through = (dependencies: readonly ts.Node[]): SeededOriginNode<ts.Node> =>
  */
 const writePlansByFlow = new WeakMap<
   ValueFlowIndex,
-  WeakMap<object, WeakMap<ts.Expression, Map<string, SourceRecordDataWritePlan | null>>>
+  WeakMap<OriginAuthority, WeakMap<ts.Expression, Map<string, SourceRecordDataWritePlan | null>>>
 >()
 
 export const sourceRecordDataWritePlanOf = (
@@ -413,11 +413,16 @@ export const sourceRecordDataWritePlanOf = (
 ): SourceRecordDataWritePlan | null => {
   const authorityIdentity = originAuthorityIdentity(authority)
   let byAuthority = writePlansByFlow.get(flow)
-  if (!byAuthority) writePlansByFlow.set(flow, (byAuthority = new WeakMap()))
+  if (!byAuthority)
+    writePlansByFlow.set(
+      flow,
+      (byAuthority = new WeakMap<OriginAuthority, WeakMap<ts.Expression, Map<string, SourceRecordDataWritePlan | null>>>())
+    )
   let byReceiver = byAuthority.get(authorityIdentity)
-  if (!byReceiver) byAuthority.set(authorityIdentity, (byReceiver = new WeakMap()))
+  if (!byReceiver)
+    byAuthority.set(authorityIdentity, (byReceiver = new WeakMap<ts.Expression, Map<string, SourceRecordDataWritePlan | null>>()))
   let byKey = byReceiver.get(receiver)
-  if (!byKey) byReceiver.set(receiver, (byKey = new Map()))
+  if (!byKey) byReceiver.set(receiver, (byKey = new Map<string, SourceRecordDataWritePlan | null>()))
   const ledger = deferredIntrinsicProtocolLedgerOf(flow)
   if (byKey.has(key)) {
     const cached = byKey.get(key)!
@@ -431,7 +436,7 @@ export const sourceRecordDataWritePlanOf = (
   const captured = authority.sharedAnswerOf
     ? authority.sharedAnswerOf(`record-plan:${key}:${nodePathToken(receiver)}`, compute)
     : ledger
-      ? ledger.capture(compute)
+      ? captureAnswer(ledger, compute)
       : { value: compute(), requirements: [] }
   const answer = captured.value ? { ...captured.value, requirements: captured.requirements } : null
   if (!answer) return recordRefusal(receiver, () => `record-plan:compute-null key=${key}`)
@@ -566,7 +571,7 @@ const sourceRecordDataWritePlanUncached = (
       // binding's own cell is the specifier, and it is never reassigned.
       const named = flow.targetOf(callee)
       const target =
-        checker && named?.symbol && (named.symbol.flags & ts.SymbolFlags.Alias) !== 0
+        checker != null && named?.symbol != null && (named.symbol.flags & ts.SymbolFlags.Alias) !== 0
           ? resolveFlowSymbolAlias(checker, named.symbol)?.valueDeclaration
           : named?.declaration
       if (!target || !ts.isFunctionDeclaration(target) || !target.body) return refuse(value, 'call:callee-not-function-declaration')
@@ -594,7 +599,7 @@ const sourceRecordDataWritePlanUncached = (
     if (!declaration || !checker || (!ts.isImportSpecifier(declaration) && !ts.isImportClause(declaration)) || !declaration.name)
       return declaration
     const resolved = resolveFlowSymbolAlias(checker, checker.getSymbolAtLocation(declaration.name))?.valueDeclaration
-    return resolved && ts.isVariableDeclaration(resolved) && !resolved.getSourceFile().isDeclarationFile ? resolved : null
+    return resolved != null && ts.isVariableDeclaration(resolved) && !resolved.getSourceFile().isDeclarationFile ? resolved : null
   }
   // `state.buffers`: whatever the holder's slot
   // holds. The holder's own plan names its allocations; each carries the key

@@ -9,11 +9,16 @@ import { cppRecordFieldKeyIsSymbol } from './types.js'
  * storage, so unsupported class/accessor keys cannot disappear from ownKeys.
  */
 export const unaddressableNativeSymbolKeyOf = (ctx: EmitContext, representation: Representation): string | null => {
-  const unsupported = (keys: readonly { readonly key: string }[]): string | null =>
-    keys.find((entry) => cppRecordFieldKeyIsSymbol(entry.key) && wellKnownSymbolMemberOfKey(ctx.wellKnownSymbols, entry.key) === null)
-      ?.key ?? null
-  const shape = (id: string): string | null =>
-    unsupported(ctx.layouts.forShape(id) ?? []) ?? unsupported(ctx.layouts.accessorsForShape?.(id) ?? [])
+  // Generic in the entry so each field/accessor array is read as itself: an
+  // array of either standing in for `{ key }[]` is a conversion native lacks.
+  const unsupported = <K extends { readonly key: string }>(keys: readonly K[] | null | undefined): string | null => {
+    if (!keys) return null
+    for (const entry of keys) {
+      if (cppRecordFieldKeyIsSymbol(entry.key) && wellKnownSymbolMemberOfKey(ctx.wellKnownSymbols, entry.key) === null) return entry.key
+    }
+    return null
+  }
+  const shape = (id: string): string | null => unsupported(ctx.layouts.forShape(id)) ?? unsupported(ctx.layouts.accessorsForShape?.(id))
   const visited = new Set<DeclarationId>()
   const classKey = (declaration: DeclarationId): string | null => {
     if (visited.has(declaration)) return null

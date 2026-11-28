@@ -2,6 +2,7 @@ import type { DeclarationId, IrValueId } from '../identity/ids.js'
 import type { Representation } from '../representation/model.js'
 import { controlFlowGraphOf, dominatorTreeOf } from './dominance.js'
 import { allOperationsOf, type IrBlock, type IrBlockId, type IrBody, type IrOperation } from './model.js'
+import { setValues } from '../collection-lists.js'
 
 /**
  * Which loads out of an `optional` carrier the program itself proves present.
@@ -332,7 +333,7 @@ const proofsOfBody = (
   const graph = controlFlowGraphOf(body)
   const dominance = dominatorTreeOf(body)
   const sharedElsewhere = (declaration: DeclarationId): boolean =>
-    [...(writers.get(declaration) ?? [])].some((owner) => owner !== body.owner)
+    [...setValues(writers.get(declaration))].some((owner) => owner !== body.owner)
 
   const soleEntry = (from: IrBlockId, to: IrBlockId): boolean => {
     const predecessors = graph.predecessors.get(to) ?? []
@@ -530,7 +531,7 @@ const proofsOfBody = (
 }
 
 /** The proof, if any, behind every present-optional load in `bodies`, keyed by the load's result. */
-export const presenceProofsOf = (bodies: Iterable<IrBody>): ReadonlyMap<IrValueId, PresenceProof> => {
+export const presenceProofsOf = (bodies: readonly IrBody[]): ReadonlyMap<IrValueId, PresenceProof> => {
   const all = [...bodies]
   const writers = writersOf(all)
   const proofs = new Map<IrValueId, PresenceProof>()
@@ -548,7 +549,7 @@ export const withPresenceChecks = <K>(
   bodies: ReadonlyMap<K, IrBody>,
   readsUnchecked: (operation: Extract<IrOperation, { kind: 'convert' }>) => boolean
 ): ReadonlyMap<K, IrBody> => {
-  const proofs = presenceProofsOf(bodies.values())
+  const proofs = presenceProofsOf([...bodies.values()])
   const checked = new Map<K, IrBody>()
   for (const [key, body] of bodies) {
     let changed = false

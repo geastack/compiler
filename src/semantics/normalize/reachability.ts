@@ -635,9 +635,11 @@ const isPrunableDeclaration = (checker: ts.TypeChecker, statement: ts.Statement)
   // machinery, in an application that imports only `node:http` -- five
   // capabilities demanded by code no call in the program can reach.
   if (ts.isExportAssignment(statement)) return true
-  if (ts.isFunctionDeclaration(statement)) {
-    return !(ts.canHaveDecorators(statement) && (ts.getDecorators(statement)?.length ?? 0) > 0)
-  }
+  // A function declaration carries no decorators: `ts.canHaveDecorators`
+  // admits only parameters, class members and classes, so the decorator test
+  // this once made never held for it (and narrowed to an intersection the
+  // native build cannot view).
+  if (ts.isFunctionDeclaration(statement)) return true
   if (ts.isClassDeclaration(statement)) return classDefinitionIsInert(checker, statement)
   if (!ts.isVariableStatement(statement)) return false
   return statement.declarationList.declarations.every((declaration) => {
@@ -708,7 +710,7 @@ const declarationsOf = (checker: ts.TypeChecker, symbol: ts.Symbol): readonly ts
   // `runtime.ts`'s `export *` and `runtime-surface.ts`'s `export *` before it
   // reaches the declaration in `runtime/host.ts`.
   const target = checker.getAliasedSymbol(symbol)
-  return target === symbol ? own : [...own, ...(target.declarations ?? [])]
+  return target === symbol ? own : [...own, ...(target.declarations == null ? [] : [...target.declarations])]
 }
 
 /**
@@ -894,7 +896,10 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
   // this program spells, and precomputing would count it. That is the same
   // fixpoint-from-below `ir/shake.ts` grows its own key set by, and it
   // terminates for the same reason -- a key is only ever added.
-  const spelledKeys = new Set<string>([...specificationInvokedKeys, ...(input.hostReachedMemberKeys ?? [])])
+  const spelledKeys = new Set<string>([
+    ...specificationInvokedKeys,
+    ...(input.hostReachedMemberKeys == null ? [] : [...input.hostReachedMemberKeys])
+  ])
   const pendingByKey = new Map<string, ts.Node[]>()
   // Member names live code has read off a CONSTRUCTOR value, and the deferred
   // statics still waiting for one. `C.m` names one declaration, but a value
@@ -993,7 +998,7 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
       if (!symbol || seen.has(symbol)) continue
       seen.add(symbol)
       if (symbol === ancestor) return true
-      const target = (current as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference ? (current as ts.TypeReference).target : current
+      const target = (current as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference ? (current as ts.TypeReference).target! : current
       if (target.isClassOrInterface()) pending.push(...input.checker.getBaseTypes(target))
     }
     return false

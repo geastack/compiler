@@ -28,6 +28,17 @@ export const mergeFalsyAbsence = (source: Representation, target: Representation
  * `never[]` arm contains no elements, whereas `void[]` and `undefined[]` may
  * contain real entries even though their element types occupy no storage.
  */
+/**
+ * The one Array arm of a tagged union -- `K | K[]`'s array half -- where an
+ * empty array literal can be built and then entered into the union through
+ * that arm's ordinary injection. `null` when the union has none or several.
+ */
+export const soleArrayArmOf = (target: Representation): Extract<Representation, { kind: 'array-object' }> | null => {
+  if (target.kind !== 'tagged-union') return null
+  const arrays = target.arms.flatMap((arm) => (arm.value.kind === 'array-object' ? [arm.value] : []))
+  return arrays.length === 1 ? arrays[0]! : null
+}
+
 export const mergeMaterialization = (
   types: ReadonlyMap<StructuralTypeId, StructuralType>,
   deriver: RepresentationDeriver,
@@ -94,4 +105,5 @@ const isEmptyArrayLiteralType = (deriver: RepresentationDeriver, shape: Structur
  */
 const holdsEmptyArray = (types: ReadonlyMap<StructuralTypeId, StructuralType>, target: Representation): boolean =>
   target.kind === 'array-object' ||
+  soleArrayArmOf(target) !== null ||
   (target.kind === 'native-record-ref' && types.get(target.shapeId as StructuralTypeId)?.shape.kind === 'array')

@@ -10,7 +10,7 @@ import type {
   IrOperation
 } from '../../ir/model.js'
 import { operandsOfIrOperation } from '../../ir/queries.js'
-import { representationKey } from '../../representation/model.js'
+import { representationKey, type Representation } from '../../representation/model.js'
 import type { EmitContext } from './emit-context.js'
 import { arrayBulkAppendMethodName } from './prototype/emit-prototype-array.js'
 
@@ -59,10 +59,8 @@ interface Site<T extends IrOperation> {
   readonly position: number
 }
 
-const isNumberArray = (representation: { readonly kind: string }): boolean => {
-  const array = representation as { readonly kind: string; readonly element?: { readonly kind: string; readonly domain?: string } }
-  return array.kind === 'array-object' && array.element?.kind === 'scalar' && array.element.domain === 'number'
-}
+const isNumberArray = (representation: Representation): boolean =>
+  representation.kind === 'array-object' && representation.element.kind === 'scalar' && representation.element.domain === 'number'
 
 export const collectCharCodeBuffers = (ctx: EmitContext, deferrable: Set<IrValueId>, body: IrBody): void => {
   // Exception and iterator-close edges are not in the graph the single-run proof below walks.

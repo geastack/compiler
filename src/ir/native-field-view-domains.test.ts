@@ -60,12 +60,12 @@ test('installed native descriptors retain their physical carriers independently 
   const source = record('actual', number)
   const target = record('public', text)
   const domain = nativeFieldViewDomainsOf([route(source, target, number)], null, () => null)
-  assert.deepEqual(domain(target)?.get('shown'), [
+  assert.deepEqual(domain.fieldsOf(target)?.get('shown'), [
     { read: text, write: text },
     { read: number, write: number }
   ])
-  assert.equal(domain(record('uninstalled', text)), null)
-  assert.equal(domain({ ...target, ownership: 'owned' }), null)
+  assert.equal(domain.fieldsOf(record('uninstalled', text)), null)
+  assert.equal(domain.fieldsOf({ ...target, ownership: 'owned' }), null)
 })
 
 test('chained native descriptors include immediate and inherited allocation routes with setter absence intact', () => {
@@ -76,7 +76,7 @@ test('chained native descriptors include immediate and inherited allocation rout
   const domain = nativeFieldViewDomainsOf([route(source, first, number, null), route(first, second, text)], null, (id) =>
     id === getter ? { receiver: source, parameters: [], restFrom: null, result: number } : null
   )
-  assert.deepEqual(domain(second)?.get('shown'), [
+  assert.deepEqual(domain.fieldsOf(second)?.get('shown'), [
     { read: text, write: text },
     { read: number, write: null }
   ])
@@ -87,7 +87,7 @@ test('an intermediate public shape preserves descriptors for source keys it does
   const first = record('first', text)
   const second = record('second', text)
   const domain = nativeFieldViewDomainsOf([route(source, first, text), route(first, second, text)], null, () => null)
-  assert.deepEqual(domain(second)?.get('hidden'), [{ read: number, write: number }])
+  assert.deepEqual(domain.fieldsOf(second)?.get('hidden'), [{ read: number, write: number }])
 })
 
 test('ordinary native union arms have physical descriptors; a dynamic arm reads through its own Value', () => {
@@ -103,7 +103,7 @@ test('ordinary native union arms have physical descriptors; a dynamic arm reads 
       value
     }))
   }
-  assert.ok(domain(union)?.get('shown'))
+  assert.ok(domain.fieldsOf(union)?.get('shown'))
   const opaque: Representation = {
     ...union,
     arms: [
@@ -118,12 +118,12 @@ test('ordinary native union arms have physical descriptors; a dynamic arm reads 
   }
   // The `dynamic` arm invents no descriptor: it is flagged as its own
   // [[Get]], beside the object arms' unchanged physical routes.
-  assert.deepEqual(domain(opaque)?.get('shown'), [
-    ...domain(union)!.get('shown')!,
+  assert.deepEqual(domain.fieldsOf(opaque)?.get('shown'), [
+    ...domain.fieldsOf(union)!.get('shown')!,
     { read: { kind: 'dynamic', reason: 'declared-any-never-narrowed' }, write: null, dynamicGet: true }
   ])
   const onlyDynamic: Representation = { ...union, arms: [opaque.arms[2]!, { ...opaque.arms[2]!, tag: 'again' }] }
-  assert.equal(domain(onlyDynamic), null, 'a union of dynamic arms has no live view to read')
+  assert.equal(domain.fieldsOf(onlyDynamic), null, 'a union of dynamic arms has no live view to read')
 })
 
 test('a key one union arm stores is a per-arm union with a certified absence for the plain arms', () => {
@@ -163,9 +163,10 @@ test('a key one union arm stores is a per-arm union with a certified absence for
   })
   const union: Representation = { kind: 'tagged-union', arms: [target, instance, convertible].map(arm) }
   const absent = { read: { kind: 'undefined' }, write: null, originalAbsent: true }
-  assert.deepEqual(domain(union)?.get('toLog'), [absent, { read: number, write: number }])
+  assert.deepEqual(domain.fieldsOf(union)?.get('toLog'), [absent, { read: number, write: number }])
   assert.equal(
-    domain(union)
+    domain
+      .fieldsOf(union)
       ?.get('shown')
       ?.some((route) => route.originalAbsent === true),
     false,
@@ -174,7 +175,12 @@ test('a key one union arm stores is a per-arm union with a certified absence for
   // A class member, an index signature, or a view source that may hold the
   // key is no proof of absence: the key is dropped exactly as before.
   const method = new Map([[declaration, { ...layout, methods: [{ key: 'toLog', callable: null } as never] }]])
-  assert.equal(nativeFieldViewDomainsOf([route(source, target, text)], null, () => null, method)(union)?.get('toLog'), undefined)
+  assert.equal(
+    nativeFieldViewDomainsOf([route(source, target, text)], null, () => null, method)
+      .fieldsOf(union)
+      ?.get('toLog'),
+    undefined
+  )
   const indexed: Representation = {
     kind: 'record-with-index',
     shapeId: 'indexed',
@@ -182,7 +188,7 @@ test('a key one union arm stores is a per-arm union with a certified absence for
     indexes: [],
     ownership: 'shared-refcount'
   }
-  assert.equal(domain({ kind: 'tagged-union', arms: [convertible, indexed].map(arm) })?.get('toLog'), undefined)
+  assert.equal(domain.fieldsOf({ kind: 'tagged-union', arms: [convertible, indexed].map(arm) })?.get('toLog'), undefined)
   const stored = nativeFieldViewDomainsOf(
     [route(source, target, text)],
     null,
@@ -190,7 +196,7 @@ test('a key one union arm stores is a per-arm union with a certified absence for
     classes,
     (shape, key) => (shape === 'public' && key === 'toLog' ? [number] : [])
   )
-  assert.equal(stored(union)?.get('toLog'), undefined, 'an expando a copy stored natively is not absent')
+  assert.equal(stored.fieldsOf(union)?.get('toLog'), undefined, 'an expando a copy stored natively is not absent')
 })
 
 test('an ordinary class arm contributes its actual native storage independently of a record view arm', () => {
@@ -226,19 +232,19 @@ test('an ordinary class arm contributes its actual native storage independently 
       value
     }))
   }
-  assert.deepEqual(domain(union)?.get('shown'), [
+  assert.deepEqual(domain.fieldsOf(union)?.get('shown'), [
     { read: text, write: text },
     { read: number, write: number }
   ])
   assert.deepEqual(
-    domain(instance)?.get('shown'),
+    domain.fieldsOf(instance)?.get('shown'),
     [{ read: number, write: number }],
     'projected native class storage remains fixed even when Function provenance is opaque'
   )
-  assert.equal(domain({ ...instance, ownership: 'owned' }), null)
-  assert.equal(nativeFieldViewDomainsOf([], null, () => null)(instance), null)
+  assert.equal(domain.fieldsOf({ ...instance, ownership: 'owned' }), null)
+  assert.equal(nativeFieldViewDomainsOf([], null, () => null).fieldsOf(instance), null)
   const { nativeStorage: _storage, ...unprojected } = layout
-  assert.equal(nativeFieldViewDomainsOf([], null, () => null, new Map([[declaration, unprojected]]))(instance), null)
+  assert.equal(nativeFieldViewDomainsOf([], null, () => null, new Map([[declaration, unprojected]])).fieldsOf(instance), null)
 
   const getter = 'NativeClass.get' as FunctionId
   const absent: Representation = { kind: 'undefined' }
@@ -251,7 +257,7 @@ test('an ordinary class arm contributes its actual native storage independently 
   const bodyAbi = { ...publicAbi, result: { kind: 'void' as const } }
   const absentDomain = nativeFieldViewDomainsOf([], null, (id) => (id === getter ? bodyAbi : null), new Map([[declaration, getterLayout]]))
   assert.deepEqual(
-    absentDomain(instance)?.get('shown'),
+    absentDomain.fieldsOf(instance)?.get('shown'),
     [{ read: absent, write: null }],
     'a void physical getter exposes its published undefined value rather than a void payload token'
   )
@@ -263,7 +269,12 @@ test('an ordinary class arm contributes its actual native storage independently 
   }
   // An accessor with no admitted route states no route for ITS key; the
   // class's other members keep theirs (a reader of `shown` is then refused).
-  assert.equal(nativeFieldViewDomainsOf([], null, () => bodyAbi, new Map([[declaration, unsupported]]))(instance)?.has('shown'), false)
+  assert.equal(
+    nativeFieldViewDomainsOf([], null, () => bodyAbi, new Map([[declaration, unsupported]]))
+      .fieldsOf(instance)
+      ?.has('shown'),
+    false
+  )
 })
 
 test('a key no live descriptor names reads each original allocation expando, never a guessed slot', () => {

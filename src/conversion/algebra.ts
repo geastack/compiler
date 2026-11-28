@@ -245,6 +245,17 @@ const guardRequiredOf = (
   const materializerNeedsGuard = (materializer: MaterializerContract): boolean =>
     materializer.requiresSourceGuard === true && (!prior || materializer.executesSourceGuard !== true)
   const child = (capability: ConversionCapability): boolean => guardRequiredOf(capability, resolve, prior, visiting)
+  // The visit mark held around the recursion in a helper of its own: a
+  // `try`/`finally` written inside a `case` after an early `return`
+  // is a shape the native lowering cannot yet order.
+  const childOfNode = (node: ConversionNode): boolean => {
+    visiting.add(node.id)
+    try {
+      return child(node.capability)
+    } finally {
+      visiting.delete(node.id)
+    }
+  }
   switch (capability.kind) {
     case 'atom':
     case 'static':
@@ -263,12 +274,7 @@ const guardRequiredOf = (
       const node = resolve?.(capability.node) ?? null
       if (node === null || node.capability.kind === 'never' || node.capability.kind === 'recursive-ref') return true
       if (visiting.has(node.id)) return false
-      visiting.add(node.id)
-      try {
-        return child(node.capability)
-      } finally {
-        visiting.delete(node.id)
-      }
+      return childOfNode(node)
     }
     default:
       return false

@@ -115,6 +115,20 @@ export const staticFieldSlotOf = (
   return owner === undefined ? null : (census.slots.get(owner)?.get(key) ?? null)
 }
 
+const writesConstructorProperty = (body: IrBody): boolean => {
+  for (const blockId of body.blockOrder) {
+    const block = body.blocks.get(blockId)
+    if (!block) continue
+    for (const operation of block.operations)
+      if (
+        (operation.kind === 'set' || operation.kind === 'define-own-property') &&
+        operation.receiver.representation.kind === 'constructor-family'
+      )
+        return true
+  }
+  return false
+}
+
 export const censusClassStaticFieldSlots = (
   bodies: readonly IrBody[],
   classes: ReadonlyMap<DeclarationId, ClassLayout>
@@ -136,6 +150,10 @@ export const censusClassStaticFieldSlots = (
     }
   }
   for (const body of bodies) {
+    // Only a body that writes a constructor's property can add a slot; the
+    // constant table every other body built first was most of this census,
+    // asked once per callable-flow solve.
+    if (!writesConstructorProperty(body)) continue
     // Whole-body first pass: a `constant` operation feeding a later block's
     // key is exactly as legitimate as one in the same block, and a single
     // forward-only scan would miss it across a back edge.
